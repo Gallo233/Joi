@@ -1,0 +1,165 @@
+:root {
+  color: #1f2430;
+  background: #eef1f6;
+  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(520px, 1fr) 360px;
+  min-height: 100vh;
+}
+
+.workspace {
+  padding: 22px;
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.brand {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.status {
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #d9dee8;
+  color: #4c5361;
+}
+
+.status.online {
+  background: #daf5e5;
+  color: #1d7a48;
+}
+
+.task-card {
+  min-height: 180px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(108, 118, 139, 0.2);
+  padding: 16px;
+}
+
+.task-card header {
+  display: flex;
+  justify-content: space-between;
+  color: #d76f8f;
+  font-weight: 700;
+}
+
+.task-card pre {
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow: auto;
+  color: #3f4654;
+}
+
+.timeline {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.event-row {
+  display: grid;
+  gap: 4px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.66);
+  padding: 12px;
+}
+
+.stage {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(160deg, #24304a 0%, #7e8fd2 52%, #f1aac9 100%);
+}
+
+.background {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(255, 255, 255, 0.55), transparent 24%),
+    linear-gradient(120deg, transparent 0 44%, rgba(255,255,255,.35) 45% 47%, transparent 48%);
+}
+
+.character {
+  position: absolute;
+  left: 50%;
+  bottom: 178px;
+  width: 210px;
+  height: 360px;
+  transform: translateX(-50%);
+  border-radius: 100px 100px 30px 30px;
+  background: linear-gradient(#f5c6d8 0 30%, #fff 30% 54%, #283444 54%);
+  box-shadow: 0 24px 80px rgba(20, 20, 50, 0.35);
+}
+
+.face {
+  width: 92px;
+  height: 92px;
+  margin: 38px auto 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #fff0f5;
+  color: #d76f8f;
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.speech {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  bottom: 88px;
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 8px;
+  background: rgba(30, 32, 40, 0.72);
+  color: white;
+}
+
+.speech strong {
+  color: #ffabc3;
+}
+
+.composer {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  bottom: 24px;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.composer input {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  outline: none;
+}
+
+.composer button {
+  border: 0;
+  border-radius: 16px;
+  padding: 7px 16px;
+  background: #d76f8f;
+  color: white;
+  font-weight: 700;
+}
+

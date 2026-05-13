@@ -1,0 +1,26 @@
+defaults:
+  require_confirmation_for:
+    - medium
+    - high
+  block_without_confirmation:
+    - high
+rules:
+  low:
+    - observe.screen
+    - browser.search
+    - browser.observe
+    - files.read
+    - mcp.list_tools
+  medium:
+    - codex.run
+    - browser.click
+    - browser.type
+    - game.ok_ww.run
+    - files.write_workspace
+  high:
+    - shell.run
+    - files.delete
+    - package.install
+    - git.push
+    - external.launch_admin
+
