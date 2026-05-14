@@ -10,6 +10,7 @@
 - Moved config parsing, GPT-SoVITS, and browser executor support into `agent_companion/` so Joi no longer depends on removed prototype modules.
 - Replaced the embedded placeholder character PNG with local character sprite loading from Core `config.yaml`.
 - Improved browser/watch task cards with product-oriented summaries, metadata chips, and non-raw artifact labels.
+- Updated the Windows launcher to restart the project Core by default so the shell does not reuse stale protocol state.
 
 ## 2026-05-14
 

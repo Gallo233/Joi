@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [int]$Port = 8765
+  [int]$Port = 8765,
+  [switch]$ReuseCore
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,6 +35,32 @@ function Test-LocalPort {
   }
 }
 
+function Stop-CoreOnPort {
+  param([int]$PortToStop)
+  try {
+    $connections = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $PortToStop -State Listen -ErrorAction SilentlyContinue
+  } catch {
+    $connections = @()
+  }
+  foreach ($connection in $connections) {
+    try {
+      $process = Get-Process -Id $connection.OwningProcess -ErrorAction Stop
+      if ($process.ProcessName -notmatch '^(python|pythonw)$') {
+        continue
+      }
+      Stop-Process -Id $process.Id -Force -ErrorAction Stop
+    } catch {
+      continue
+    }
+  }
+  for ($index = 0; $index -lt 25; $index += 1) {
+    if (-not (Test-LocalPort -PortToCheck $PortToStop)) {
+      return
+    }
+    Start-Sleep -Milliseconds 200
+  }
+}
+
 Set-Location $ProjectRoot
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -41,6 +68,10 @@ if (-not (Test-Path $Python)) {
   Write-Host "Missing .venv\Scripts\python.exe. Run dependency setup first."
   Read-Host "Press Enter to exit"
   exit 1
+}
+
+if (-not $ReuseCore) {
+  Stop-CoreOnPort -PortToStop $Port
 }
 
 if (-not (Test-LocalPort -PortToCheck $Port)) {
