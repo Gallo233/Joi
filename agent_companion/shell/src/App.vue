@@ -2,6 +2,7 @@
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
+import joiMioSprite from './assets/joi_mio_stand.png'
 import type { AgentEvent } from './protocol'
 
 const input = ref('')
@@ -69,6 +70,8 @@ const taskRows = computed(() => {
     .sort((a, b) => b.latest.created_at - a.latest.created_at)
 })
 
+const activeTask = computed(() => taskRows.value[0])
+
 const latestSpeech = computed(() => {
   const latest = [...events.value]
     .reverse()
@@ -114,6 +117,44 @@ function isSpeakableEvent(event: AgentEvent) {
 
 function taskGoal(taskId: string, fallback: string) {
   return userTextByTask.value.get(taskId) || fallback
+}
+
+function taskMeta(event: AgentEvent, detail?: AgentEvent) {
+  const source = detail || event
+  const state = source.agent_state || {}
+  const meta: string[] = []
+  const tool = toolName(source)
+  if (tool.startsWith('browser.')) {
+    const data = asRecord(state.data)
+    const title = stringValue(data.title)
+    const elements = Array.isArray(data.elements) ? data.elements.length : 0
+    if (title) meta.push(`页面：${trimText(title, 18)}`)
+    if (elements) meta.push(`可见元素：${elements}`)
+    if (source.display_card.artifacts?.length) meta.push(`截图：${source.display_card.artifacts.length}`)
+  }
+  if (tool === 'codex.run') meta.push(event.display_card.status === 'success' ? '代码任务完成' : '代码任务')
+  if (tool === 'game.ok_ww.run') meta.push('游戏技能')
+  return meta
+}
+
+function artifactLabel(artifact: string, index: number) {
+  const value = artifact.toLowerCase()
+  if (/\.(png|jpg|jpeg|webp)$/.test(value)) return `截图 ${index + 1}`
+  if (/\.(jsonl|json)$/.test(value)) return `事件记录 ${index + 1}`
+  if (/\.(log|txt)$/.test(value)) return `日志 ${index + 1}`
+  return `附件 ${index + 1}`
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function trimText(value: string, max: number) {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value
 }
 
 function eventTime(event: AgentEvent) {
@@ -188,11 +229,20 @@ onBeforeUnmount(() => client.close())
           </header>
           <p class="task-goal">{{ taskGoal(task.taskId, task.latest.display_card.summary) }}</p>
           <p>{{ task.latest.display_card.summary }}</p>
+          <div class="task-meta" v-if="taskMeta(task.latest, task.detail).length">
+            <span v-for="item in taskMeta(task.latest, task.detail)" :key="item">{{ item }}</span>
+          </div>
           <details v-if="task.detail?.display_card.body || task.detail?.display_card.artifacts?.length">
             <summary>结果详情</summary>
             <pre v-if="task.detail?.display_card.body">{{ task.detail.display_card.body }}</pre>
             <div class="artifacts" v-if="task.detail?.display_card.artifacts?.length">
-              <span v-for="artifact in task.detail.display_card.artifacts" :key="artifact">{{ artifact }}</span>
+              <span
+                v-for="(artifact, index) in task.detail.display_card.artifacts"
+                :key="artifact"
+                :title="artifact"
+              >
+                {{ artifactLabel(artifact, index) }}
+              </span>
             </div>
           </details>
           <div class="approval-actions" v-if="task.latest.type === 'approval_required' && pendingApproval?.task_id === task.taskId">
@@ -239,13 +289,11 @@ onBeforeUnmount(() => client.close())
     <aside class="stage">
       <div class="stage-top">
         <span>Joi Companion</span>
-        <strong>{{ currentMode }}</strong>
+        <strong>{{ activeTask?.latest.display_card.status || currentMode }}</strong>
       </div>
       <div class="scene-line"></div>
       <div class="character">
-        <div class="hair"></div>
-        <div class="face">澪</div>
-        <div class="body"></div>
+        <img class="character-art" :src="joiMioSprite" alt="" />
       </div>
       <div class="speech">
         <strong>Joi</strong>

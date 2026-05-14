@@ -44,8 +44,14 @@ class BrowserTool(ToolAdapter):
         return ToolResult(
             ok=True,
             agent_state={"tool": request.name, "queued": True, "query": query, "queue": self._rel(self.queue_path)},
-            display_card=DisplayCard("浏览器/陪看", f"已记录观察请求：{query}", f"队列：{self._rel(self.queue_path)}", artifacts=[self._rel(self.queue_path)]),
-            voice_line=safe_voice_line("我先看一下当前画面。", sprite="3"),
+            display_card=DisplayCard(
+                "陪看准备",
+                f"观察请求已排队：{query}",
+                "本地浏览器执行器启动后会回写观察结果。",
+                status="info",
+                artifacts=[self._rel(self.queue_path)],
+            ),
+            voice_line=safe_voice_line("我先准备观察当前画面。", sprite="3"),
         )
 
     def _run_bridge(self, request: ToolRequest) -> ToolResult:
@@ -84,8 +90,8 @@ class BrowserTool(ToolAdapter):
             detail = detail or "浏览器执行器当前是空白页，没有可用于陪看的内容。"
             summary = "当前没有可观察的网页内容。"
         else:
-            summary = str(response.get("summary") or ("浏览器观察完成。" if ok else "浏览器观察失败。"))
-        title = "浏览器观察" if tool_name != "browser.search" else "浏览器搜索"
+            summary = self._page_summary(response, data, ok)
+        title = "页面观察" if tool_name != "browser.search" else "网页搜索"
         return ToolResult(
             ok=ok,
             agent_state={
@@ -104,6 +110,20 @@ class BrowserTool(ToolAdapter):
             ),
             voice_line=safe_voice_line("我看到页面内容了。" if ok else "我没能看清这个页面。", sprite="5" if ok else "4"),
         )
+
+    @staticmethod
+    def _page_summary(response: dict, data: dict, ok: bool) -> str:
+        if not ok:
+            return str(response.get("summary") or "浏览器观察失败。")
+        title = str(data.get("title") or "").strip()
+        elements = data.get("elements") if isinstance(data.get("elements"), list) else []
+        if title and elements:
+            return f"已观察到页面《{title[:28]}》，识别出 {len(elements)} 个可见元素。"
+        if title:
+            return f"已观察到页面《{title[:28]}》。"
+        if elements:
+            return f"已观察当前页面，识别出 {len(elements)} 个可见元素。"
+        return str(response.get("summary") or "浏览器观察完成。")
 
     @staticmethod
     def _is_blank_observation(data: dict) -> bool:

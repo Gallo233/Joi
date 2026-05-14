@@ -19,13 +19,13 @@ Status: in progress
 - Show tool work as task cards with concise status.
 - Add a developer mode for raw event inspection.
 - Add one-click Windows launch.
-- Replace placeholder stage with character assets.
+- Replace placeholder stage with character assets. First original PNG asset is in place; expression/state variants are next.
 
 ## P2 Vision Layer
 
 Status: planned
 
-- Add screenshot capture for browser, active window, and full screen.
+- Add screenshot capture for browser, active window, and full screen. Browser executor capture is connected; active-window and full-screen capture are next.
 - Add `VisionSummarizer` with configurable vision model.
 - Separate text model, vision model, and expression model.
 - Do not mark blank pages or failed captures as success.
