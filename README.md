@@ -10,6 +10,19 @@
 - 工具适配器：Codex、浏览器观察队列、OK-WW game skill、MCP 配置发现、工作区文件读取。
 - Tauri/Vue Shell 骨架：现代桌面 UI、角色舞台、任务卡和事件协议。
 
+项目推进记录：
+
+- [Roadmap](docs/ROADMAP.md)
+- [Changelog](docs/CHANGELOG.md)
+- [Known Issues](docs/KNOWN_ISSUES.md)
+- [Feedback Log](docs/FEEDBACK_LOG.md)
+
+Joi 一键启动：
+
+```powershell
+.\start_joi.bat
+```
+
 核心 smoke test：
 
 ```powershell
