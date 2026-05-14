@@ -2,7 +2,7 @@
 
 Joi is a character-fronted multimodal agent companion.
 
-This directory is the new main line. The old `mvp/` and `app2/` directories are retained as references and asset sources only.
+This directory is the product main line.
 
 ## Current Slice
 
@@ -13,7 +13,7 @@ This directory is the new main line. The old `mvp/` and `app2/` directories are 
 ## Run Core Smoke Test
 
 ```powershell
-cd D:\codex游戏\shinsekai_mvp
+cd path\to\Joi
 .\.venv\Scripts\python.exe run_agent_companion_tests.py
 ```
 
@@ -29,4 +29,4 @@ Use `--approve` only when you intentionally allow medium-risk tool execution.
 
 ## Shell
 
-`shell/` contains the planned Tauri/Vue UI. This machine currently has Node but no `npm`/Rust toolchain, so the shell is scaffolded but not installed.
+`shell/` contains the Tauri/Vue desktop UI. It connects to the Python Core through the local WebSocket JSON-RPC bridge.

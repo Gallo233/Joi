@@ -31,7 +31,7 @@ class LocalBrowserExecutor(QMainWindow):
         self.view = QWebEngineView()
         self.setCentralWidget(self.view)
         self.resize(1200, 820)
-        self.setWindowTitle("Shinsekai Local Browser Executor")
+        self.setWindowTitle("Joi Local Browser Executor")
 
         self.event_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -220,7 +220,7 @@ class LocalBrowserExecutor(QMainWindow):
 
         self.view.page().runJavaScript(script, done)
 
-    def _legacy_extract_text_script(self) -> str:
+    def _fallback_extract_text_script(self) -> str:
         return """
 (() => {
   const text = (document.body && document.body.innerText || '').replace(/\\n{3,}/g, '\\n\\n').trim();
@@ -493,7 +493,7 @@ class LocalBrowserExecutor(QMainWindow):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the Shinsekai local browser executor.")
+    parser = argparse.ArgumentParser(description="Run the Joi local browser executor.")
     parser.add_argument("--workspace", default=".", help="Project workspace")
     args = parser.parse_args()
 

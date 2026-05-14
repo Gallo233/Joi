@@ -62,14 +62,11 @@ class BrowserBridge:
         self.event_dir.mkdir(parents=True, exist_ok=True)
         if self._executor_ready():
             return
-        script = self.workspace / "run_browser_executor.py"
-        if not script.is_file():
-            raise RuntimeError(f"浏览器执行器脚本不存在: {script}")
         log_path = self.event_dir / "browser_executor.log"
         log = log_path.open("a", encoding="utf-8")
         try:
             subprocess.Popen(
-                [sys.executable, str(script), "--workspace", str(self.workspace)],
+                [sys.executable, "-m", "agent_companion.core.tools.local_browser_executor", "--workspace", str(self.workspace)],
                 cwd=str(self.workspace),
                 stdout=log,
                 stderr=log,

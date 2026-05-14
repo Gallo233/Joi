@@ -1,0 +1,46 @@
+app:
+  title: Joi
+
+llm:
+  provider: openai_compatible
+  use_mock: true
+  base_url: https://api.openai.com/v1
+  model: gpt-4.1-mini
+  api_key: ${JOI_LLM_API_KEY}
+  temperature: 0.7
+  mock_when_unconfigured: true
+  vision_enabled: false
+  vision_base_url: ""
+  vision_model: ""
+  vision_api_key: ${JOI_VISION_API_KEY}
+
+tts:
+  enabled: false
+  provider: gpt-sovits
+  server_url: http://127.0.0.1:9880/
+  gpt_sovits_work_path: ""
+  text_lang: zh
+  prompt_lang: zh
+  speed_factor: 1.2
+  fallback_to_system: false
+
+characters:
+  - name: 星野澪
+    color: "#d76f8f"
+    sprite_color: "#224e66"
+    setting: |
+      星野澪是 Joi 的原创默认角色。她熟悉代码、游戏和屏幕内容，会用简短自然的方式说明计划、提醒风险和汇报结果。
+      她不会朗读 JSON、路径、命令、token、日志或工具 id。
+    active_voice_profile: zh
+    prompt_lang: zh
+    speech_speed: 1.2
+    speech_volume: 1.0
+    voice_profiles:
+      - id: zh
+        label: 中文
+        text_lang: zh
+        prompt_lang: zh
+        gpt_model_path: ""
+        sovits_model_path: ""
+        refer_audio_path: ""
+        prompt_text: ""

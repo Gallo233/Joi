@@ -166,7 +166,7 @@ onBeforeUnmount(() => client.close())
       <p class="error" v-if="errorText">{{ errorText }}</p>
 
       <section class="hero-panel" v-if="!taskRows.length && !chatRows.length">
-        <p class="eyebrow">Agent Companion</p>
+        <p class="eyebrow">Joi Agent</p>
         <h1>把任务直接交给角色。</h1>
         <p>当前优先打通写码、陪看和游戏三条闭环。你说目标，Joi 会用任务卡展示执行结果，语音只播报自然短句。</p>
       </section>

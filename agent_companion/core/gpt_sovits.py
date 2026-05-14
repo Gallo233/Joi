@@ -8,11 +8,11 @@ import urllib.request
 import wave
 from pathlib import Path
 
-from mvp.config import AppConfig, CharacterConfig
+from agent_companion.core.config import AppConfig, CharacterConfig
 
 
 class GptSoVitsClient:
-    """Small GPT-SoVITS HTTP client compatible with Shinsekai's adapter shape."""
+    """Small GPT-SoVITS HTTP client used by Joi voice output."""
 
     def __init__(self, config: AppConfig) -> None:
         self._config = config
@@ -41,8 +41,7 @@ class GptSoVitsClient:
 
         output_dir = self._config.base_dir / "data" / "cache" / "audio"
         output_dir.mkdir(parents=True, exist_ok=True)
-        existing = list(output_dir.glob("tts_*.wav"))
-        index = len(existing) % 1000
+        index = len(list(output_dir.glob("tts_*.wav"))) % 1000
         output_path = output_dir / f"tts_{index:03d}.wav"
 
         payload = {
@@ -80,14 +79,14 @@ class GptSoVitsClient:
             return
         work_path = (self._config.tts.gpt_sovits_work_path or "").strip()
         if not work_path:
-            raise RuntimeError("GPT-SoVITS 服务未启动，且未配置 gpt_sovits_work_path")
+            raise RuntimeError("GPT-SoVITS service is not running and gpt_sovits_work_path is empty")
         base = Path(work_path)
         if base.suffix.lower() == ".py":
             base = base.parent
         runtime_python = base / "runtime" / "python.exe"
         api_script = base / "api_v2.py"
         if not runtime_python.is_file() or not api_script.is_file():
-            raise RuntimeError(f"GPT-SoVITS 路径无效: {base}")
+            raise RuntimeError(f"Invalid GPT-SoVITS path: {base}")
         self._server_process = subprocess.Popen([str(runtime_python), str(api_script)], cwd=str(base))
 
     def _server_alive(self) -> bool:
@@ -127,10 +126,9 @@ class GptSoVitsClient:
             return response.read()
 
     def _post_bytes(self, endpoint: str, payload: dict, timeout: int) -> bytes:
-        url = self._server_url + endpoint
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
-            url,
+            self._server_url + endpoint,
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",

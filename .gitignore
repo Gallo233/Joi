@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+config.yaml
 secrets.yaml
 *.local.yaml
 assets/preview_window.png

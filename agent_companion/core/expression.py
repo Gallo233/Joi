@@ -17,7 +17,7 @@ class ExpressionEngine:
     def __init__(self, workspace: Path, character: CharacterHarness) -> None:
         self.workspace = workspace
         self.character = character
-        self._config = self._load_legacy_config()
+        self._config = self._load_config()
         self._client: Any | None = None
 
     def express(self, event: AgentEvent, user_text: str = "") -> AgentEvent:
@@ -100,12 +100,12 @@ class ExpressionEngine:
         except Exception:
             return None
 
-    def _load_legacy_config(self) -> Any | None:
+    def _load_config(self) -> Any | None:
         config_path = self.workspace / "config.yaml"
         if not config_path.is_file():
             return None
         try:
-            from mvp.config import load_app_config
+            from agent_companion.core.config import load_app_config
 
             return load_app_config(config_path)
         except Exception:

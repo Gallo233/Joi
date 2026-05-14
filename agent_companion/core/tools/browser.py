@@ -49,7 +49,7 @@ class BrowserTool(ToolAdapter):
         )
 
     def _run_bridge(self, request: ToolRequest) -> ToolResult:
-        from mvp.browser_bridge import BrowserBridge
+        from agent_companion.core.tools.browser_bridge import BrowserBridge
 
         bridge = BrowserBridge(self.workspace)
         action = "observe"

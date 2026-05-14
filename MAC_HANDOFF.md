@@ -2,12 +2,10 @@
 
 Joi now has a new main line in `agent_companion/`.
 
-The old `mvp/` and `app2/` folders are retained as references and asset sources. New work should target `agent_companion/`.
-
 ## Current State
 
 - Python Agent Core is implemented.
-- Tauri/Vue shell is scaffolded but not wired to the Python core yet.
+- Tauri/Vue shell is wired to the Python core through the local WebSocket bridge.
 - Core routes the three launch scenarios:
   - game assist: `帮我刷鸣潮日常`
   - watch together: `陪我看当前网页`
@@ -61,13 +59,12 @@ npm install
 npm run tauri dev
 ```
 
-The shell currently renders the product frame and protocol types. The next implementation step is the local WebSocket JSON-RPC bridge between `agent_companion.core` and the Tauri shell.
+The shell renders the product frame, task cards, dialogue stream, approval actions, and developer event view.
 
 ## Next Work
 
-1. Add Python WebSocket JSON-RPC server for `AgentCompanionApp`.
-2. Connect `agent_companion/shell/src/App.vue` to the core event stream.
-3. Replace placeholder stage art with original character assets.
-4. Connect the browser observer to real screenshots/OCR.
-5. Connect OK-WW launch flow with approval UI.
-6. Add Codex execution cards and log drill-down in the shell.
+1. Replace placeholder stage art with original Joi character assets.
+2. Connect the browser observer to real screenshots/OCR.
+3. Improve OK-WW status callbacks beyond process launch.
+4. Add Codex permission requests back into the Joi approval UI.
+5. Split model routing for text, vision, and expression.

@@ -6,6 +6,8 @@
 - Started product-shell cleanup: default UI separates chat, task cards, and developer events.
 - Added one-click Windows launch script target for Joi.
 - Verified Python core tests, Vue build, and Tauri debug packaging after the shell cleanup.
+- Cleaned the public repository down to the Joi main line: removed old prototype entrypoints, third-party character assets, and local personal configuration from Git.
+- Moved config parsing, GPT-SoVITS, and browser executor support into `agent_companion/` so Joi no longer depends on removed prototype modules.
 
 ## 2026-05-14
 

@@ -33,7 +33,7 @@ class TtsBridge:
             return {}
         try:
             if self._client is None:
-                from mvp.tts import GptSoVitsClient
+                from agent_companion.core.gpt_sovits import GptSoVitsClient
 
                 self._client = GptSoVitsClient(self._config)
             output = self._client.synthesize(text, self._config.primary_character, sprite_id)
@@ -60,7 +60,7 @@ class TtsBridge:
         if not config_path.is_file():
             return
         try:
-            from mvp.config import load_app_config
+            from agent_companion.core.config import load_app_config
 
             self._config = load_app_config(config_path)
         except Exception:

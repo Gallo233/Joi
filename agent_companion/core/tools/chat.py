@@ -70,7 +70,7 @@ class CompanionChatTool(ToolAdapter):
         if not config_path.is_file():
             return None
         try:
-            from mvp.config import load_app_config
+            from agent_companion.core.config import load_app_config
 
             return load_app_config(config_path)
         except Exception:
