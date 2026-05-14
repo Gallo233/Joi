@@ -1,4 +1,4 @@
-import type { AgentEvent } from './protocol'
+import type { AgentEvent, CoreReadyPayload } from './protocol'
 
 export type CoreStatus = 'offline' | 'connecting' | 'online'
 
@@ -6,6 +6,7 @@ export interface CoreClientOptions {
   url: string
   onStatus: (status: CoreStatus) => void
   onEvent: (event: AgentEvent) => void
+  onReady?: (payload: CoreReadyPayload) => void
   onVoiceAudio?: (payload: { voice_audio_path?: string; voice_audio_rel?: string }) => void
   onError?: (message: string) => void
 }
@@ -68,6 +69,10 @@ export class CoreClient {
       const payload = JSON.parse(raw)
       if (payload?.method === 'agent.event' && payload.params) {
         this.options.onEvent(payload.params as AgentEvent)
+        return
+      }
+      if (payload?.method === 'core.ready' && payload.params) {
+        this.options.onReady?.(payload.params as CoreReadyPayload)
         return
       }
       if (payload?.method === 'agent.voice_audio' && payload.params) {

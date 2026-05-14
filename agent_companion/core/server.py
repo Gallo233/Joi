@@ -60,7 +60,7 @@ class JsonRpcBridge:
     async def _client_handler(self, websocket: Any) -> None:
         self.clients.add(websocket)
         try:
-            await websocket.send(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": {"workspace": str(self.workspace)}}, ensure_ascii=False))
+            await websocket.send(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
             async for raw in websocket:
                 await self._handle_message(websocket, raw)
         finally:
@@ -127,6 +127,42 @@ class JsonRpcBridge:
                 stale.append(client)
         for client in stale:
             self.clients.discard(client)
+
+    def _ready_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "workspace": str(self.workspace),
+            "character": {
+                "name": self.app.character.name,
+                "sprites": [],
+            },
+        }
+        config_path = self.workspace / "config.yaml"
+        if not config_path.is_file():
+            return payload
+        try:
+            from agent_companion.core.config import load_app_config
+
+            config = load_app_config(config_path)
+            character = config.primary_character
+            sprites: list[dict[str, str]] = []
+            for sprite in character.sprites:
+                image_path = (sprite.image_path or "").strip()
+                if not image_path:
+                    continue
+                resolved = config.resolve_path(image_path).resolve()
+                if not resolved.is_file():
+                    continue
+                sprites.append(
+                    {
+                        "id": sprite.id,
+                        "label": sprite.label,
+                        "image_path": str(resolved),
+                    }
+                )
+            payload["character"] = {"name": character.name, "sprites": sprites}
+        except Exception:
+            return payload
+        return payload
 
     @staticmethod
     def _result(request_id: Any, result: dict[str, Any]) -> str:

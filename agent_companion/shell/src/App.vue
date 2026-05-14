@@ -2,20 +2,23 @@
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import joiMioSprite from './assets/joi_mio_stand.png'
-import type { AgentEvent } from './protocol'
+import type { AgentEvent, CoreReadyPayload } from './protocol'
 
 const input = ref('')
 const status = ref<CoreStatus>('offline')
 const errorText = ref('')
 const events = ref<AgentEvent[]>([])
 const developerMode = ref(false)
+const ready = ref<CoreReadyPayload | null>(null)
 
 const client = new CoreClient({
   url: 'ws://127.0.0.1:8765',
   onStatus: (value) => (status.value = value),
   onEvent: (event) => {
     events.value.push(event)
+  },
+  onReady: (payload) => {
+    ready.value = payload
   },
   onVoiceAudio: (payload) => void playAudioPath(payload.voice_audio_path),
   onError: (message) => (errorText.value = message),
@@ -77,6 +80,21 @@ const latestSpeech = computed(() => {
     .reverse()
     .find((event) => event.voice_line?.text && isSpeakableEvent(event))
   return latest?.voice_line.text || '我在。要看、要玩、要写代码，都可以直接告诉我。'
+})
+
+const activeSpriteId = computed(() => {
+  const latest = [...events.value]
+    .reverse()
+    .find((event) => event.voice_line?.sprite && isSpeakableEvent(event))
+  return latest?.voice_line.sprite || '1'
+})
+
+const characterName = computed(() => ready.value?.character?.name || 'Joi')
+
+const characterImageSrc = computed(() => {
+  const sprites = ready.value?.character?.sprites || []
+  const active = sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
+  return active?.image_path ? convertFileSrc(active.image_path) : ''
 })
 
 const currentMode = computed(() => {
@@ -293,10 +311,11 @@ onBeforeUnmount(() => client.close())
       </div>
       <div class="scene-line"></div>
       <div class="character">
-        <img class="character-art" :src="joiMioSprite" alt="" />
+        <img v-if="characterImageSrc" class="character-art" :src="characterImageSrc" alt="" />
+        <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
       </div>
       <div class="speech">
-        <strong>Joi</strong>
+        <strong>{{ characterName }}</strong>
         <span>{{ latestSpeech }}</span>
       </div>
       <form class="composer" @submit.prevent="submit">

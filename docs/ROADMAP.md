@@ -19,7 +19,7 @@ Status: in progress
 - Show tool work as task cards with concise status.
 - Add a developer mode for raw event inspection.
 - Add one-click Windows launch.
-- Replace placeholder stage with character assets. First original PNG asset is in place; expression/state variants are next.
+- Replace placeholder stage with character assets. Local configured sprites are supported; bundled original expression/state variants are next.
 
 ## P2 Vision Layer
 

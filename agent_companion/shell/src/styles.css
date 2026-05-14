@@ -364,9 +364,9 @@ input {
 .character {
   position: absolute;
   left: 50%;
-  bottom: 142px;
-  width: min(330px, 86%);
-  height: 510px;
+  bottom: 118px;
+  width: min(360px, 94%);
+  height: min(650px, calc(100vh - 190px));
   transform: translateX(-50%);
   display: grid;
   place-items: end center;
@@ -378,6 +378,19 @@ input {
   max-height: 100%;
   object-fit: contain;
   filter: drop-shadow(0 28px 42px rgba(20, 24, 38, 0.36));
+}
+
+.character-fallback {
+  display: grid;
+  place-items: center;
+  width: 220px;
+  height: 360px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  font-size: 42px;
+  font-weight: 800;
 }
 
 .speech {

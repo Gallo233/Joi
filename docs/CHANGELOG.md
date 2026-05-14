@@ -8,7 +8,7 @@
 - Verified Python core tests, Vue build, and Tauri debug packaging after the shell cleanup.
 - Cleaned the public repository down to the Joi main line: removed old prototype entrypoints, third-party character assets, and local personal configuration from Git.
 - Moved config parsing, GPT-SoVITS, and browser executor support into `agent_companion/` so Joi no longer depends on removed prototype modules.
-- Added a first original Joi character PNG asset and wired it into the Tauri shell stage.
+- Replaced the embedded placeholder character PNG with local character sprite loading from Core `config.yaml`.
 - Improved browser/watch task cards with product-oriented summaries, metadata chips, and non-raw artifact labels.
 
 ## 2026-05-14

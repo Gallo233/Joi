@@ -46,3 +46,15 @@ export interface UserCommand {
   text: string
   approved?: boolean
 }
+
+export interface CoreReadyPayload {
+  workspace: string
+  character?: {
+    name?: string
+    sprites?: Array<{
+      id: string
+      label?: string
+      image_path: string
+    }>
+  }
+}
