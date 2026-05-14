@@ -1,7 +1,7 @@
 [package]
-name = "agent-companion-shell"
+name = "joi-shell"
 version = "0.1.0"
-description = "Agent Companion desktop shell"
+description = "Joi desktop shell"
 edition = "2021"
 
 [build-dependencies]
@@ -11,4 +11,3 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-

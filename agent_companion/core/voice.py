@@ -11,6 +11,7 @@ BLOCK_PATTERNS = (
     r"\bdata/[^\s]+",
     r"\b[\w.-]+\.(jsonl|log|txt|yaml|yml|py|bat|ps1)\b",
     r"\b(task|codex|browser|tool)[-_]?[0-9a-f]{6,}\b",
+    r"\b(?:codex|game|browser|observe|companion|mcp|files)\.[a-z0-9_.]+\b",
     r"--[a-zA-Z0-9-]+",
     r"sk-[a-zA-Z0-9]+",
 )
@@ -25,4 +26,3 @@ def safe_voice_line(text: str, fallback: str = "我整理好了，结果在卡�
             cleaned = fallback
             break
     return VoiceLine(text=cleaned[:140], emotion=emotion, sprite=sprite)
-

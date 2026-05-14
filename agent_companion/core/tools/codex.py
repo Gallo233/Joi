@@ -86,7 +86,14 @@ class CodexTool(ToolAdapter):
         override = os.environ.get("AGENT_COMPANION_CODEX_BIN", "").strip()
         if override:
             return override if Path(override).is_file() else ""
-        return shutil.which("codex") or ""
+        try:
+            probe = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=5)
+            if probe.returncode == 0:
+                return "codex"
+        except Exception:
+            pass
+        candidate = shutil.which("codex") or ""
+        return candidate
 
     def _rel(self, path: Path) -> str:
         try:

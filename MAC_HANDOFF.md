@@ -1,6 +1,6 @@
-# Mac Handoff: Agent Companion
+# Mac Handoff: Joi
 
-This repo now has a new main line in `agent_companion/`.
+Joi now has a new main line in `agent_companion/`.
 
 The old `mvp/` and `app2/` folders are retained as references and asset sources. New work should target `agent_companion/`.
 
@@ -71,4 +71,3 @@ The shell currently renders the product frame and protocol types. The next imple
 4. Connect the browser observer to real screenshots/OCR.
 5. Connect OK-WW launch flow with approval UI.
 6. Add Codex execution cards and log drill-down in the shell.
-

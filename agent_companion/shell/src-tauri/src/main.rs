@@ -3,6 +3,5 @@
 fn main() {
     tauri::Builder::default()
         .run(tauri::generate_context!())
-        .expect("error while running Agent Companion shell");
+        .expect("error while running Joi shell");
 }
-

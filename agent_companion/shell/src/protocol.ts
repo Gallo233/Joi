@@ -27,7 +27,17 @@ export interface AgentEvent {
   task_id: string
   display_card: DisplayCard
   voice_line: VoiceLine
-  agent_state?: Record<string, unknown>
+  agent_state?: {
+    voice_audio_path?: string
+    voice_audio_rel?: string
+    voice_audio_error?: string
+    policy?: {
+      tool?: string
+      reason?: string
+      arguments_preview?: Record<string, string>
+    }
+    [key: string]: unknown
+  }
   created_at: number
 }
 
@@ -36,4 +46,3 @@ export interface UserCommand {
   text: string
   approved?: boolean
 }
-

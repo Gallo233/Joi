@@ -1,2 +1,1 @@
-"""Python Agent Core for Agent Companion."""
-
+"""Python Core for Joi."""

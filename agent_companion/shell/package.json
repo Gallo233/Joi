@@ -1,5 +1,5 @@
 {
-  "name": "agent-companion-shell",
+  "name": "joi-shell",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -13,10 +13,10 @@
     "vue": "^3.5.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
     "@vitejs/plugin-vue": "^5.2.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
     "vue-tsc": "^2.2.0"
   }
 }
-

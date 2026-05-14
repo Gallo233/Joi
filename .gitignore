@@ -16,4 +16,5 @@ logs/
 agent_companion/shell/node_modules/
 agent_companion/shell/dist/
 agent_companion/shell/src-tauri/target/
+agent_companion/shell/src-tauri/gen/
 *.log

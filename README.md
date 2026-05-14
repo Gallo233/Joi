@@ -1,12 +1,12 @@
-# Shinsekai MVP
+# Joi
 
-## 新主线：Agent Companion
+## 新主线：Joi
 
 全量 Agent 伴侣路线已切到 `agent_companion/`。旧 `mvp/` 和 `app2/` 保留为参考与素材库，不再作为主线扩写。
 
 当前新主线包含：
 
-- Python Agent Core：planner、policy gate、event bus、memory、character harness、tool registry。
+- Joi Python Core：planner、policy gate、event bus、memory、character harness、tool registry。
 - 工具适配器：Codex、浏览器观察队列、OK-WW game skill、MCP 配置发现、工作区文件读取。
 - Tauri/Vue Shell 骨架：现代桌面 UI、角色舞台、任务卡和事件协议。
 
@@ -26,7 +26,7 @@
 
 ---
 
-这是一个按 Shinsekai 源项目结构收敛的最小复刻版。目标不是单纯做 VN，而是先跑通“桌面 AI 角色助手”的核心闭环：
+早期原型按 Shinsekai 源项目结构收敛；当前主线已经切到 Joi。目标不是单纯做 VN，而是跑通“角色前台 + 高能力 Agent”的核心闭环：
 
 1. `app.py` 打开设置中心，集中配置 API、角色 Prompt、系统选项。
 2. 设置中心同步生成源项目风格的 `data/config/*` 和 `data/character_templates/default.txt`。
@@ -64,7 +64,7 @@ py -m venv .venv
 - `启动MVP2.bat` / `start_chat2.bat`：打开 MVP2 Codex 助手。这个入口只做“角色前台 + Codex 执行器”的精简闭环。
 - `启动聊天.bat` / `start_chat.bat`：直接打开聊天主窗。
 - `启动设置中心.bat` / `start_settings.bat`：打开设置中心。
-- `创建桌面快捷方式.bat`：双击一次后，会在桌面生成 `Shinsekai 启动器`、`Shinsekai MVP2`、`Shinsekai 聊天`、`Shinsekai 设置中心` 快捷方式。
+- `创建桌面快捷方式.bat`：旧版 MVP 桌面快捷方式生成器，仅保留为参考。
 
 默认 `config.yaml` 已配置 DeepSeek 的 OpenAI-compatible 接口，真实调用失败时会自动回退本地 mock。聊天主窗输入 `开始` 即可看到对话。
 
@@ -137,7 +137,7 @@ llm:
 列出 MCP 配置
 查看事件源
 打开 https://example.com
-打开浏览器并搜索 Shinsekai
+打开浏览器并搜索 Joi
 自搜一下自己有什么评论
 观察当前页面
 给当前网页截图

@@ -16,7 +16,10 @@ def build_plan(user_text: str) -> AgentPlan:
             task_id=task_id,
             user_text=text,
             intent="game_assist",
-            steps=[ToolRequest("game.ok_ww.run", {"intent": text, "dry_run": True}, "游戏自动化需要先 dry-run 并确认。")],
+            steps=[
+                ToolRequest("game.ok_ww.run", {"intent": text, "dry_run": True}, "先检查 OK-WW 技能是否可启动。"),
+                ToolRequest("game.ok_ww.run", {"intent": text, "dry_run": False}, "游戏自动化会启动外部技能，需要确认。"),
+            ],
         )
     if _is_watch_task(text):
         return AgentPlan(
@@ -32,6 +35,13 @@ def build_plan(user_text: str) -> AgentPlan:
             intent="coding",
             steps=[ToolRequest("codex.run", {"goal": text}, "交给 Codex 执行工程任务。")],
         )
+    if "搜索" in text or "搜一下" in text or "查找" in text:
+        return AgentPlan(
+            task_id=task_id,
+            user_text=text,
+            intent="browser",
+            steps=[ToolRequest("browser.search", {"query": text}, "使用本地浏览器搜索并观察结果。")],
+        )
     if "网页" in text or "浏览器" in text or re.search(r"https?://", text):
         return AgentPlan(
             task_id=task_id,
@@ -43,7 +53,7 @@ def build_plan(user_text: str) -> AgentPlan:
         task_id=task_id,
         user_text=text,
         intent="companion_chat",
-        steps=[ToolRequest("observe.screen", {"query": text, "passive": True}, "陪伴闲聊时只做低风险上下文观察。")],
+        steps=[ToolRequest("companion.chat", {"text": text}, "普通对话只调用角色表达，不启动外部执行器。")],
     )
 
 
@@ -59,4 +69,3 @@ def _is_code_task(text: str, lowered: str) -> bool:
     code_markers = ("代码", "项目", "仓库", "bug", "BUG", "测试", "编译", "构建", "文件", "README", "报错")
     action_markers = ("修复", "实现", "新增", "修改", "重构", "检查", "跑", "生成", "更新")
     return "codex" in lowered or (any(x in text for x in code_markers) and any(x in text for x in action_markers))
-

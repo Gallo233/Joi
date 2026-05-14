@@ -1,12 +1,12 @@
-# Agent Companion
+# Joi
 
-Full-line rebuild for a character-fronted multimodal agent companion.
+Joi is a character-fronted multimodal agent companion.
 
 This directory is the new main line. The old `mvp/` and `app2/` directories are retained as references and asset sources only.
 
 ## Current Slice
 
-- Python Agent Core with event bus, planner, policy gate, memory store, character harness, and tool registry.
+- Python Core with event bus, planner, policy gate, memory store, character harness, and tool registry.
 - Tool adapters for Codex, browser observation/search queue, OK-WW dry-run/launch boundary, MCP listing, and safe file reads.
 - Tauri/Vue shell scaffold for the modern desktop front-end.
 
@@ -30,4 +30,3 @@ Use `--approve` only when you intentionally allow medium-risk tool execution.
 ## Shell
 
 `shell/` contains the planned Tauri/Vue UI. This machine currently has Node but no `npm`/Rust toolchain, so the shell is scaffolded but not installed.
-

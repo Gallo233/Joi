@@ -1,2 +1,1 @@
-"""Tool adapters for Agent Companion."""
-
+"""Tool adapters for Joi."""

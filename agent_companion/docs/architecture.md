@@ -1,8 +1,8 @@
-# Agent Companion Architecture
+# Joi Architecture
 
 ## Product Shape
 
-Agent Companion is a character-fronted multimodal agent. The character is not a skin for chat only; it is the policy and expression layer around high-capability tools.
+Joi is a character-fronted multimodal agent. The character is not a skin for chat only; it is the policy and expression layer around high-capability tools.
 
 ## Runtime Layers
 
@@ -39,4 +39,3 @@ The Tauri/Vue shell consumes `AgentEvent` objects and renders:
 - approval prompts
 
 The shell should not parse raw tool output. It receives already-separated display and voice fields from core.
-
