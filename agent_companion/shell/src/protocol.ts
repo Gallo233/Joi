@@ -55,6 +55,7 @@ export interface CoreReadyPayload {
       id: string
       label?: string
       image_path: string
+      image_data_url?: string
     }>
   }
 }

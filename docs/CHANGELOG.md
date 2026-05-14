@@ -11,6 +11,7 @@
 - Replaced the embedded placeholder character PNG with local character sprite loading from Core `config.yaml`.
 - Improved browser/watch task cards with product-oriented summaries, metadata chips, and non-raw artifact labels.
 - Updated the Windows launcher to restart the project Core by default so the shell does not reuse stale protocol state.
+- Embedded configured local sprites as data URLs in `core.ready` so Tauri can render them without local file protocol permissions.
 
 ## 2026-05-14
 

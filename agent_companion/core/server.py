@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
+import mimetypes
 import uuid
 from pathlib import Path
 from typing import Any
@@ -157,12 +159,23 @@ class JsonRpcBridge:
                         "id": sprite.id,
                         "label": sprite.label,
                         "image_path": str(resolved),
+                        "image_data_url": self._image_data_url(resolved),
                     }
                 )
             payload["character"] = {"name": character.name, "sprites": sprites}
         except Exception:
             return payload
         return payload
+
+    @staticmethod
+    def _image_data_url(path: Path) -> str:
+        try:
+            data = path.read_bytes()
+        except Exception:
+            return ""
+        mime = "image/webp" if path.suffix.lower() == ".webp" else mimetypes.guess_type(path.name)[0] or "image/png"
+        encoded = base64.b64encode(data).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
 
     @staticmethod
     def _result(request_id: Any, result: dict[str, Any]) -> str:

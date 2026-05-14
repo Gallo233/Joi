@@ -10,6 +10,7 @@ const errorText = ref('')
 const events = ref<AgentEvent[]>([])
 const developerMode = ref(false)
 const ready = ref<CoreReadyPayload | null>(null)
+const failedImageSrc = ref('')
 
 const client = new CoreClient({
   url: 'ws://127.0.0.1:8765',
@@ -94,6 +95,7 @@ const characterName = computed(() => ready.value?.character?.name || 'Joi')
 const characterImageSrc = computed(() => {
   const sprites = ready.value?.character?.sprites || []
   const active = sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
+  if (active?.image_data_url) return active.image_data_url
   return active?.image_path ? convertFileSrc(active.image_path) : ''
 })
 
@@ -311,7 +313,14 @@ onBeforeUnmount(() => client.close())
       </div>
       <div class="scene-line"></div>
       <div class="character">
-        <img v-if="characterImageSrc" class="character-art" :src="characterImageSrc" alt="" />
+        <img
+          v-if="characterImageSrc && failedImageSrc !== characterImageSrc"
+          class="character-art"
+          :src="characterImageSrc"
+          alt=""
+          @load="failedImageSrc = ''"
+          @error="failedImageSrc = characterImageSrc"
+        />
         <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
       </div>
       <div class="speech">
