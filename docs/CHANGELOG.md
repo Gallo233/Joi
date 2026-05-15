@@ -13,6 +13,7 @@
 - Updated the Windows launcher to restart the project Core by default so the shell does not reuse stale protocol state.
 - Embedded configured local sprites as data URLs in `core.ready` so Tauri can render them without local file protocol permissions.
 - Added `agent_companion.core.vision` with `VisionObservation`, `VisionObserver`, Windows active-window/fullscreen screenshot capture, and an `observe.screen` tool adapter.
+- Added `docs/CLAUDE_TASKS.md` as a local Claude Code handoff contract for Joi collaboration.
 
 ## 2026-05-14
 
