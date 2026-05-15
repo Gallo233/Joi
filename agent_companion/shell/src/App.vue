@@ -152,6 +152,15 @@ function taskMeta(event: AgentEvent, detail?: AgentEvent) {
     if (elements) meta.push(`可见元素：${elements}`)
     if (source.display_card.artifacts?.length) meta.push(`截图：${source.display_card.artifacts.length}`)
   }
+  if (tool === 'observe.screen') {
+    const observation = asRecord(state.observation)
+    const title = stringValue(observation.title)
+    const width = Number(observation.width || 0)
+    const height = Number(observation.height || 0)
+    if (title) meta.push(`窗口：${trimText(title, 18)}`)
+    if (width && height) meta.push(`尺寸：${width}x${height}`)
+    if (source.display_card.artifacts?.length) meta.push(`截图：${source.display_card.artifacts.length}`)
+  }
   if (tool === 'codex.run') meta.push(event.display_card.status === 'success' ? '代码任务完成' : '代码任务')
   if (tool === 'game.ok_ww.run') meta.push('游戏技能')
   return meta

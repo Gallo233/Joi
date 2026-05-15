@@ -25,7 +25,7 @@ Status: in progress
 
 Status: planned
 
-- Add screenshot capture for browser, active window, and full screen. Browser executor capture is connected; active-window and full-screen capture are next.
+- Add screenshot capture for browser, active window, and full screen. Windows active-window/fullscreen capture is connected through `observe.screen`.
 - Add `VisionSummarizer` with configurable vision model.
 - Separate text model, vision model, and expression model.
 - Do not mark blank pages or failed captures as success.
@@ -34,7 +34,7 @@ Status: planned
 
 Status: planned
 
-- Watch together: observe visible content, summarize, and discuss.
+- Watch together: observe visible content, summarize, and discuss. First screen-capture tool is connected; visual model summarization is next.
 - Game: OK-WW dry-run, approval, launch, status callback.
 - Coding: Codex approval, execution, task card, result summary.
 

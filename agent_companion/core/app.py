@@ -17,6 +17,7 @@ from agent_companion.core.tools.files import FileReadTool
 from agent_companion.core.tools.game_ok_ww import OkWwTool
 from agent_companion.core.tools.mcp import McpListTool
 from agent_companion.core.tools.registry import ToolRegistry
+from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.voice import safe_voice_line
 
 
@@ -212,7 +213,7 @@ class AgentCompanionApp:
         self.tools.register(CodexTool(self.workspace))
         self.tools.register(BrowserTool(self.workspace, "browser.search"))
         self.tools.register(BrowserTool(self.workspace, "browser.observe"))
-        self.tools.register(BrowserTool(self.workspace, "observe.screen"))
+        self.tools.register(ScreenObserveTool(self.workspace))
         self.tools.register(OkWwTool(self.workspace))
         self.tools.register(McpListTool(self.workspace))
         self.tools.register(FileReadTool(self.workspace))
