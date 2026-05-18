@@ -13,7 +13,9 @@ $ShellDir = Join-Path $ProjectRoot "agent_companion\shell"
 $LogDir = Join-Path $ProjectRoot "logs"
 $NodeBin = "D:\codex游戏\toolchains\node"
 $Npm = Join-Path $NodeBin "npm.cmd"
-$CargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+$LocalCargoBin = Join-Path $ProjectRoot "..\toolchains\rust\cargo\bin"
+$UserCargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+$CargoBin = if (Test-Path (Join-Path $LocalCargoBin "cargo.exe")) { $LocalCargoBin } else { $UserCargoBin }
 
 function Test-LocalPort {
   param([int]$PortToCheck)

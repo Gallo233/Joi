@@ -127,6 +127,10 @@ class LlmConfig:
     vision_base_url: str = ""
     vision_model: str = ""
     vision_api_key: str = ""
+    expression_enabled: bool = False
+    expression_base_url: str = ""
+    expression_model: str = ""
+    expression_api_key: str = ""
 
     @property
     def is_configured(self) -> bool:
@@ -140,6 +144,45 @@ class LlmConfig:
         key = (self.vision_api_key or self.api_key or "").strip()
         model = (self.vision_model or self.model or "").strip()
         return bool(key and model and not key.startswith("${") and not key.startswith("%"))
+
+    @property
+    def is_expression_configured(self) -> bool:
+        if not self.expression_enabled:
+            return False
+        key = (self.expression_api_key or self.api_key or "").strip()
+        model = (self.expression_model or self.model or "").strip()
+        return bool(key and model and not key.startswith("${") and not key.startswith("%"))
+
+
+@dataclass(frozen=True)
+class ModelEndpoint:
+    base_url: str
+    model: str
+    api_key: str
+
+
+class ModelRouter:
+    def __init__(self, llm: LlmConfig) -> None:
+        self._llm = llm
+
+    def resolve(self, use: str = "text") -> ModelEndpoint:
+        if use == "vision" and self._llm.is_vision_configured:
+            return ModelEndpoint(
+                base_url=self._llm.vision_base_url or self._llm.base_url,
+                model=self._llm.vision_model or self._llm.model,
+                api_key=self._llm.vision_api_key or self._llm.api_key,
+            )
+        if use == "expression" and self._llm.is_expression_configured:
+            return ModelEndpoint(
+                base_url=self._llm.expression_base_url or self._llm.base_url,
+                model=self._llm.expression_model or self._llm.model,
+                api_key=self._llm.expression_api_key or self._llm.api_key,
+            )
+        return ModelEndpoint(
+            base_url=self._llm.base_url,
+            model=self._llm.model,
+            api_key=self._llm.api_key,
+        )
 
 
 @dataclass(frozen=True)
@@ -201,6 +244,10 @@ def load_app_config(path: Path) -> AppConfig:
             vision_base_url=str(llm_raw.get("vision_base_url", "") or ""),
             vision_model=str(llm_raw.get("vision_model", "") or ""),
             vision_api_key=str(llm_raw.get("vision_api_key", "") or ""),
+            expression_enabled=bool(llm_raw.get("expression_enabled", False)),
+            expression_base_url=str(llm_raw.get("expression_base_url", "") or ""),
+            expression_model=str(llm_raw.get("expression_model", "") or ""),
+            expression_api_key=str(llm_raw.get("expression_api_key", "") or ""),
         ),
         tts=TtsConfig(
             enabled=bool(tts_raw.get("enabled", False)),

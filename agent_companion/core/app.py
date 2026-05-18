@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_companion.core.character import CharacterHarness, load_character
+from agent_companion.core.config import ModelRouter, load_app_config
 from agent_companion.core.event_bus import EventBus
 from agent_companion.core.expression import ExpressionEngine
 from agent_companion.core.memory import MemoryStore
@@ -18,6 +19,7 @@ from agent_companion.core.tools.game_ok_ww import OkWwTool
 from agent_companion.core.tools.mcp import McpListTool
 from agent_companion.core.tools.registry import ToolRegistry
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
+from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
 
 
@@ -213,7 +215,25 @@ class AgentCompanionApp:
         self.tools.register(CodexTool(self.workspace))
         self.tools.register(BrowserTool(self.workspace, "browser.search"))
         self.tools.register(BrowserTool(self.workspace, "browser.observe"))
-        self.tools.register(ScreenObserveTool(self.workspace))
+        self.tools.register(ScreenObserveTool(self.workspace, summarizer=self._build_vision_summarizer()))
         self.tools.register(OkWwTool(self.workspace))
         self.tools.register(McpListTool(self.workspace))
         self.tools.register(FileReadTool(self.workspace))
+
+    def _build_vision_summarizer(self) -> OpenAIVisionSummarizer | None:
+        config_path = self.workspace / "config.yaml"
+        if not config_path.is_file():
+            return None
+        try:
+            config = load_app_config(config_path)
+        except Exception:
+            return None
+        if not config.llm.is_vision_configured:
+            return None
+        router = ModelRouter(config.llm)
+        endpoint = router.resolve("vision")
+        return OpenAIVisionSummarizer(
+            base_url=endpoint.base_url,
+            model=endpoint.model,
+            api_key=endpoint.api_key,
+        )

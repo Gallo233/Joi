@@ -4,15 +4,22 @@ app:
 llm:
   provider: openai_compatible
   use_mock: true
+  # --- text model (default, used for chat and fallback) ---
   base_url: https://api.openai.com/v1
   model: gpt-4.1-mini
   api_key: ${JOI_LLM_API_KEY}
   temperature: 0.7
   mock_when_unconfigured: true
+  # --- vision model (optional, for screen observation summarizer) ---
   vision_enabled: false
   vision_base_url: ""
   vision_model: ""
   vision_api_key: ${JOI_VISION_API_KEY}
+  # --- expression model (optional, for character voice rewriting) ---
+  expression_enabled: false
+  expression_base_url: ""
+  expression_model: ""
+  expression_api_key: ${JOI_EXPRESSION_API_KEY}
 
 tts:
   enabled: false

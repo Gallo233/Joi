@@ -60,8 +60,12 @@ class ExpressionEngine:
             return None
 
         try:
-            if self._client is None:
-                self._client = OpenAI(api_key=config.llm.api_key, base_url=config.llm.base_url)
+            from agent_companion.core.config import ModelRouter
+
+            router = ModelRouter(config.llm)
+            endpoint = router.resolve("expression")
+            if self._client is None or self._client.base_url != endpoint.base_url:
+                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             character = config.primary_character if config.characters else None
             character_name = character.name if character else self.character.name
             persona = character.setting if character else self.character.persona
@@ -76,7 +80,7 @@ class ExpressionEngine:
                 "fallback_voice": event.voice_line.text,
             }
             response = self._client.chat.completions.create(
-                model=config.llm.model,
+                model=endpoint.model,
                 messages=[
                     {
                         "role": "system",

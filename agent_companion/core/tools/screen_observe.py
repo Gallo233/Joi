@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult
+from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.tools.base import ToolAdapter
-from agent_companion.core.vision import VisionObserver, WindowsScreenObserver
+from agent_companion.core.vision import VisionObserver, VisionSummarizer, WindowsScreenObserver
 from agent_companion.core.vision.schemas import VisionObservation
 from agent_companion.core.voice import safe_voice_line
 
@@ -12,9 +12,15 @@ from agent_companion.core.voice import safe_voice_line
 class ScreenObserveTool(ToolAdapter):
     name = "observe.screen"
 
-    def __init__(self, workspace: Path, observer: VisionObserver | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        observer: VisionObserver | None = None,
+        summarizer: VisionSummarizer | None = None,
+    ) -> None:
         self.workspace = workspace
         self.observer = observer or WindowsScreenObserver(workspace)
+        self.summarizer = summarizer
 
     def run(self, request: ToolRequest) -> ToolResult:
         query = str(request.arguments.get("query") or "").strip()
@@ -29,21 +35,45 @@ class ScreenObserveTool(ToolAdapter):
                 voice_line=safe_voice_line("我没能截到当前画面，细节在卡片里。", sprite="4"),
             )
 
+        summary_text = ""
+        summary_error = ""
+        if self.summarizer is not None:
+            try:
+                vs = self.summarizer.summarize(observation, query)
+                summary_text = vs.text
+                summary_error = vs.error
+            except Exception as exc:
+                summary_error = f"{type(exc).__name__}: {exc}"
+
+        body = observation.detail_text()
+        card_summary = self._summary(observation)
+        if summary_text:
+            body = f"{body}\n\n视觉摘要：{summary_text}"
+            card_summary = summary_text
+
+        agent_state: dict = {
+            "tool": self.name,
+            "observation": observation.to_agent_state(),
+            "artifacts": [observation.screenshot_rel],
+        }
+        if summary_text:
+            agent_state["vision_summary"] = summary_text
+        if summary_error:
+            agent_state["vision_summary_error"] = summary_error
+
+        voice = self._voice_for(observation, summary_text, summary_error)
+
         return ToolResult(
             ok=True,
-            agent_state={
-                "tool": self.name,
-                "observation": observation.to_agent_state(),
-                "artifacts": [observation.screenshot_rel],
-            },
+            agent_state=agent_state,
             display_card=DisplayCard(
                 "画面观察",
-                self._summary(observation),
-                observation.detail_text(),
+                card_summary,
+                body,
                 status="success",
                 artifacts=[observation.screenshot_rel],
             ),
-            voice_line=safe_voice_line("我截到当前画面了。", sprite="5"),
+            voice_line=voice,
         )
 
     @staticmethod
@@ -61,3 +91,11 @@ class ScreenObserveTool(ToolAdapter):
         if any(token in query for token in ("全屏", "整个屏幕", "全桌面", "fullscreen")):
             return "fullscreen"
         return "active_window"
+
+    @staticmethod
+    def _voice_for(observation: VisionObservation, summary_text: str, summary_error: str = "") -> VoiceLine:
+        if summary_text:
+            return safe_voice_line("我看到了主要内容，摘要已经放进卡片里。", sprite="5")
+        if summary_error:
+            return safe_voice_line("我截到画面了，摘要暂时没生成出来。", sprite="4")
+        return safe_voice_line("我截到当前画面了。", sprite="5")
