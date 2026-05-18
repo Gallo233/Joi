@@ -47,12 +47,12 @@ export class CoreClient {
     }
   }
 
-  sendUserText(text: string, approved = false) {
-    this.send('user.message', { text, approved })
+  sendUserText(text: string) {
+    this.send('user.message', { text })
   }
 
-  resolveApproval(taskId: string, approved: boolean) {
-    this.send('approval.resolve', { task_id: taskId, approved })
+  resolveApproval(approvalId: string, approved: boolean) {
+    this.send('approval.resolve', { approval_id: approvalId, approved })
   }
 
   private send(method: string, params: Record<string, unknown>) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,8 @@ class ComputerActionTool(ToolAdapter):
             )
 
         result = self.backend.perform(action)
+        if result.ok:
+            result = self._attach_after_observation(result)
         return self._to_tool_result(result)
 
     def _action_from_request(self, request: ToolRequest) -> ComputerAction | None:
@@ -62,13 +65,23 @@ class ComputerActionTool(ToolAdapter):
         status = "success" if result.ok else "failed"
         summary = result.summary if result.ok and result.summary else f"{action_label}没有完成。"
         body = self._friendly_detail(result.error if result.error else "")
+        artifacts = [result.observation.screenshot_rel] if result.observation else []
+        if result.observation:
+            body = f"{body}\n结果：已自动观察执行后的画面。"
         return ToolResult(
             ok=result.ok,
             agent_state={"tool": self.name, "computer_use": result.to_agent_state()},
-            display_card=DisplayCard("电脑操作", summary, body, status=status),
+            display_card=DisplayCard("电脑操作", summary, body, status=status, artifacts=artifacts),
             voice_line=safe_voice_line("电脑操作已经执行。" if result.ok else "电脑操作没有完成，细节在卡片里。", sprite="5" if result.ok else "4"),
             risk=RiskLevel.MEDIUM,
         )
+
+    def _attach_after_observation(self, result: ComputerUseResult) -> ComputerUseResult:
+        try:
+            observation = self.backend.observe(target="active_window", query="after computer action")
+        except Exception as exc:
+            return replace(result, detail=f"after observation failed: {type(exc).__name__}")
+        return replace(result, observation=observation)
 
     def _friendly_detail(self, error: str = "") -> str:
         label = _action_label(self.action_type)

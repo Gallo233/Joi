@@ -12,7 +12,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run Joi core once.")
     parser.add_argument("text", nargs="*", help="User request")
     parser.add_argument("--workspace", default=".", help="Workspace root")
-    parser.add_argument("--approve", action="store_true", help="Approve medium/high risk actions for this run")
     parser.add_argument("--serve", action="store_true", help="Run the WebSocket JSON-RPC bridge")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -26,7 +25,7 @@ def main() -> int:
         parser.print_help()
         return 2
     app = AgentCompanionApp(Path(args.workspace))
-    events = app.handle_user_text(" ".join(args.text), approved=args.approve)
+    events = app.handle_user_text(" ".join(args.text))
     print(json.dumps([event.to_dict() for event in events], ensure_ascii=False, indent=2))
     return 0
 

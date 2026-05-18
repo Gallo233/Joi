@@ -1,6 +1,6 @@
-# Claude Code Handoff: Joi
+# Hermes Handoff: Joi
 
-This file is the handoff contract for local Claude Code collaboration on Joi.
+This file is the handoff contract for local Hermes collaboration on Joi.
 
 ## Current Product Direction
 
@@ -31,9 +31,9 @@ Keep `config.yaml` local only. Public examples should go in `config.example.yaml
 
 ## Current Priority
 
-Continue P3 Computer Use Adapter.
+Continue P3.1 Policy + Computer Use Hardening.
 
-The current observation and first action layer is implemented:
+The current observation, first action layer, and approval hardening are implemented:
 
 - `agent_companion/core/vision/` captures Windows active-window/fullscreen screenshots.
 - `agent_companion/core/vision/summarizer.py` can call an OpenAI-compatible vision model.
@@ -41,12 +41,15 @@ The current observation and first action layer is implemented:
 - `agent_companion/core/tools/screen_observe.py` routes `observe.screen` through the Computer Use observation chain.
 - `agent_companion/core/tools/computer.py` exposes `computer.click`, `computer.type_text`, `computer.scroll`, and `computer.hotkey`.
 - `agent_companion/core/policy.py` treats Computer Use actions as medium risk, requiring confirmation.
+- Approval now uses one-time `approval_id` values bound to task id, step index, tool name, and arguments hash.
+- Computer Use actions automatically observe the active window after execution and attach the after screenshot to the task card.
+- `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
 
 Next task options, in priority order:
 
 1. Add visual target grounding so natural language like "click the search box" can resolve to screen coordinates through screenshots/OCR/vision.
-2. Add post-action observation for Computer Use actions so task cards can show before/after state.
-3. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+2. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+3. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
 4. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 5. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
 

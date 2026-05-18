@@ -38,6 +38,9 @@ Status: in progress
 - Route `observe.screen` through the computer-use observation chain.
 - Add `computer.click`, `computer.type_text`, `computer.scroll`, and `computer.hotkey` adapters.
 - Keep all computer actions at medium risk by default and require user confirmation.
+- Bind confirmations to one-time `approval_id`, task id, step index, tool, and arguments hash.
+- Observe the active window after each successful computer action and attach the after screenshot to the task card.
+- Use clipboard paste for reliable Windows text input, including Chinese.
 - Show friendly action summaries in task cards while keeping coordinates, text payloads, command-like details, and raw ids out of voice lines.
 
 ## P4 First Demo Loops

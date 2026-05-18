@@ -36,6 +36,13 @@ export interface AgentEvent {
       reason?: string
       arguments_preview?: Record<string, string>
     }
+    approval?: {
+      approval_id?: string
+      task_id?: string
+      step_index?: number
+      tool?: string
+      arguments_hash?: string
+    }
     [key: string]: unknown
   }
   created_at: number
@@ -44,7 +51,6 @@ export interface AgentEvent {
 export interface UserCommand {
   id: string
   text: string
-  approved?: boolean
 }
 
 export interface CoreReadyPayload {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 import tempfile
 from pathlib import Path
 
@@ -62,10 +63,20 @@ def _fake_action_summary(action_type: str) -> str:
     }.get(action_type, "完成了电脑操作。")
 
 
+def _approval_payload(events) -> dict:
+    for event in events:
+        if event.type == EventType.APPROVAL_REQUIRED:
+            approval = event.agent_state.get("approval")
+            if isinstance(approval, dict):
+                return approval
+    return {}
+
+
 def main() -> int:
     workspace = Path(__file__).resolve().parent
     os.environ["AGENT_COMPANION_DISABLE_LLM"] = "1"
     os.environ["AGENT_COMPANION_BROWSER_STUB"] = "1"
+    assert_true("approved" not in inspect.signature(AgentCompanionApp.handle_user_text).parameters, "user message should not accept approval bypass")
     assert_true(build_plan("修复这个项目 bug 并跑测试").intent == "coding", "coding route failed")
     watch_plan = build_plan("陪我看这个视频")
     assert_true(watch_plan.intent == "watch_together", "watch route failed")
@@ -74,7 +85,9 @@ def main() -> int:
     assert_true(click_plan.intent == "computer_use", "computer click route failed")
     assert_true(click_plan.steps[0].name == "computer.click", "click should use computer.click")
     assert_true(click_plan.steps[0].arguments.get("x") == 100, "click x coordinate not parsed")
-    assert_true(build_plan("输入文字：hello").steps[0].name == "computer.type_text", "type route failed")
+    type_plan = build_plan("输入文字：你好世界")
+    assert_true(type_plan.steps[0].name == "computer.type_text", "type route failed")
+    assert_true(type_plan.steps[0].arguments.get("text") == "你好世界", "Chinese type text should be preserved")
     assert_true(build_plan("向下滚动").steps[0].name == "computer.scroll", "scroll route failed")
     assert_true(build_plan("按下 Ctrl+L 快捷键").steps[0].name == "computer.hotkey", "hotkey route failed")
     assert_true(build_plan("帮我刷鸣潮日常").intent == "game_assist", "game route failed")
@@ -105,6 +118,8 @@ def main() -> int:
     click_result = click_tool.run(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true(click_result.ok, "computer.click tool should succeed with fake backend")
     assert_true(click_result.agent_state["computer_use"]["action"]["x"] == 100, "computer action state should keep x for planner")
+    assert_true("observation" in click_result.agent_state["computer_use"], "computer action should include after observation")
+    assert_true(click_result.display_card.artifacts == ["data/agent_companion/vision/sample.png"], "computer action should expose after screenshot artifact")
     assert_true("100" not in click_result.display_card.summary, "computer card summary should be friendly")
     assert_true("100" not in click_result.voice_line.text, "computer voice should not read coordinates")
 
@@ -236,7 +251,10 @@ def main() -> int:
     os.environ["AGENT_COMPANION_CODEX_BIN"] = str(workspace / "missing-codex.exe")
     try:
         app = AgentCompanionApp(workspace)
-        events = app.handle_user_text("修复这个项目 bug 并跑测试", approved=True)
+        approval_events = app.handle_user_text("修复这个项目 bug 并跑测试")
+        approval = _approval_payload(approval_events)
+        assert_true(bool(approval.get("approval_id")), "coding approval should include approval_id")
+        events = app.resolve_approval(str(approval["approval_id"]), approved=True)
         assert_true(any(event.type == EventType.TOOL_FAILED for event in events), "missing Codex should fail")
         assert_true(all("codex2-" not in event.voice_line.text for event in events), "voice leaked task id")
     finally:
@@ -246,16 +264,28 @@ def main() -> int:
             os.environ["AGENT_COMPANION_CODEX_BIN"] = previous
 
     app = AgentCompanionApp(workspace)
-    computer_events = app.handle_user_text("点击 100,200", approved=False)
+    computer_events = app.handle_user_text("点击 100,200")
     assert_true(any(event.type == EventType.APPROVAL_REQUIRED for event in computer_events), "computer action should require approval")
+    computer_approval = _approval_payload(computer_events)
+    assert_true(str(computer_approval.get("approval_id", "")).startswith("approval-"), "computer approval should include approval_id")
+    assert_true(computer_approval.get("tool") == "computer.click", "computer approval should bind tool")
+    assert_true(computer_approval.get("task_id") in {event.task_id for event in computer_events}, "computer approval should bind task_id")
+    assert_true(computer_approval.get("step_index") == 0, "computer approval should bind step index")
+    assert_true(len(str(computer_approval.get("arguments_hash", ""))) == 16, "computer approval should bind arguments hash")
+    bypass = app.resolve_approval(str(computer_approval.get("task_id")), approved=True)
+    assert_true(not bypass, "task_id must not work as approval id")
+    refused = app.resolve_approval(str(computer_approval["approval_id"]), approved=False)
+    assert_true(any(event.type == EventType.TASK_FAILED for event in refused), "approval refusal should cancel computer action")
+    reused = app.resolve_approval(str(computer_approval["approval_id"]), approved=True)
+    assert_true(not reused, "approval id should be single-use")
 
     app = AgentCompanionApp(workspace)
-    approval_events = app.handle_user_text("帮我刷鸣潮日常", approved=False)
+    approval_events = app.handle_user_text("帮我刷鸣潮日常")
     assert_true(any(event.type == EventType.APPROVAL_REQUIRED for event in approval_events), "game task should require approval")
-    pending = [event for event in approval_events if event.type == EventType.APPROVAL_REQUIRED]
-    cancelled = app.resolve_approval(pending[-1].task_id, approved=False)
+    game_approval = _approval_payload(approval_events)
+    cancelled = app.resolve_approval(str(game_approval["approval_id"]), approved=False)
     assert_true(any(event.type == EventType.TASK_FAILED for event in cancelled), "approval refusal should cancel task")
-    duplicate = app.resolve_approval(pending[-1].task_id, approved=False)
+    duplicate = app.resolve_approval(str(game_approval["approval_id"]), approved=False)
     assert_true(not duplicate, "duplicate approval responses should be ignored")
     print("agent_companion tests passed")
     return 0

@@ -211,7 +211,14 @@ function submit() {
 
 function resolveApproval(approved: boolean) {
   if (!pendingApproval.value) return
-  client.resolveApproval(pendingApproval.value.task_id, approved)
+  const approvalId = approvalIdFor(pendingApproval.value)
+  if (!approvalId) return
+  client.resolveApproval(approvalId, approved)
+}
+
+function approvalIdFor(event: AgentEvent) {
+  const approval = asRecord(event.agent_state?.approval)
+  return stringValue(approval.approval_id)
 }
 
 async function playAudioPath(path?: string) {
@@ -286,7 +293,7 @@ onBeforeUnmount(() => client.close())
               </span>
             </div>
           </details>
-          <div class="approval-actions" v-if="task.latest.type === 'approval_required' && pendingApproval?.task_id === task.taskId">
+          <div class="approval-actions" v-if="task.latest.type === 'approval_required' && pendingApproval?.task_id === task.taskId && approvalIdFor(task.latest)">
             <button type="button" @click="resolveApproval(true)">允许执行</button>
             <button type="button" class="secondary" @click="resolveApproval(false)">停在这里</button>
           </div>

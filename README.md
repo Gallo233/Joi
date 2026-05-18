@@ -17,7 +17,7 @@ The current repository is intentionally focused on the Joi main line.
 - [Changelog](docs/CHANGELOG.md)
 - [Known Issues](docs/KNOWN_ISSUES.md)
 - [Feedback Log](docs/FEEDBACK_LOG.md)
-- [Claude Code Handoff](docs/CLAUDE_TASKS.md)
+- [Hermes Handoff](docs/HERMES_TASKS.md)
 - [Architecture](agent_companion/docs/architecture.md)
 - [Windows Toolchain and Bridge](agent_companion/docs/windows_toolchain_and_bridge.md)
 

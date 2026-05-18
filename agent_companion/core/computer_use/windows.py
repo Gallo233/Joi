@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 from pathlib import Path
 import sys
+import time
 
 from agent_companion.core.computer_use.schemas import ComputerAction, ComputerObservation, ComputerUseResult
 from agent_companion.core.vision import VisionObserver, WindowsScreenObserver
@@ -45,11 +46,12 @@ class WindowsComputerUseBackend:
     def _type_text(self, action: ComputerAction) -> ComputerUseResult:
         if not action.text:
             return ComputerUseResult(False, action=action, error="type_text requires text")
-        user32 = ctypes.windll.user32
-        for char in action.text:
-            code = ord(char)
-            user32.keybd_event(0, code, 0x0004, 0)
-            user32.keybd_event(0, code, 0x0004 | 0x0002, 0)
+        previous = self._clipboard_text()
+        self._set_clipboard_text(action.text)
+        self._hotkey(ComputerAction("hotkey", keys=("ctrl", "v")))
+        time.sleep(0.05)
+        if previous is not None:
+            self._set_clipboard_text(previous)
         return ComputerUseResult(True, action=action, summary="输入了一段文字。")
 
     def _scroll(self, action: ComputerAction) -> ComputerUseResult:
@@ -118,3 +120,22 @@ class WindowsComputerUseBackend:
             if 1 <= number <= 24:
                 return 0x70 + number - 1
         return None
+
+    @staticmethod
+    def _clipboard_text() -> str | None:
+        try:
+            from PySide6.QtGui import QGuiApplication
+            from PySide6.QtWidgets import QApplication
+
+            app = QGuiApplication.instance() or QApplication([])
+            return QGuiApplication.clipboard().text()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _set_clipboard_text(text: str) -> None:
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QApplication
+
+        app = QGuiApplication.instance() or QApplication([])
+        QGuiApplication.clipboard().setText(text)

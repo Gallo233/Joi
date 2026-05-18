@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
+import uuid
 
 from agent_companion.core.character import CharacterHarness, load_character
 from agent_companion.core.config import ModelRouter, load_app_config
@@ -28,6 +31,9 @@ from agent_companion.core.voice import safe_voice_line
 class PendingStep:
     plan: AgentPlan
     index: int
+    approval_id: str
+    tool: str
+    arguments_hash: str
 
 
 class AgentCompanionApp:
@@ -41,10 +47,10 @@ class AgentCompanionApp:
         self.policy = PolicyGate()
         self.tools = ToolRegistry()
         self.pending_steps: dict[str, PendingStep] = {}
-        self.resolved_approval_tasks: set[str] = set()
+        self.resolved_approval_ids: set[str] = set()
         self._register_tools()
 
-    def handle_user_text(self, text: str, approved: bool = False) -> list[AgentEvent]:
+    def handle_user_text(self, text: str) -> list[AgentEvent]:
         plan = build_plan(text)
         self._emit(
             AgentEvent(
@@ -67,44 +73,69 @@ class AgentCompanionApp:
                 ),
                 plan.user_text,
             )
-        self._run_plan(plan, 0, approved=approved)
+        self._run_plan(plan, 0)
         return self.bus.drain()
 
-    def resolve_approval(self, task_id: str, approved: bool) -> list[AgentEvent]:
-        pending = self.pending_steps.pop(task_id, None)
+    def resolve_approval(self, approval_id: str, approved: bool) -> list[AgentEvent]:
+        if not approval_id or approval_id in self.resolved_approval_ids:
+            return self.bus.drain()
+        pending = self.pending_steps.pop(approval_id, None)
         if pending is None:
             return self.bus.drain()
+        self.resolved_approval_ids.add(approval_id)
         if not approved:
-            self.resolved_approval_tasks.add(task_id)
             self._emit(
                 AgentEvent(
                     EventType.TASK_FAILED,
-                    task_id,
+                    pending.plan.task_id,
                     DisplayCard("任务已取消", "你拒绝了这一步，我没有继续执行。", status="failed"),
                     safe_voice_line("好，我先停在这里。", sprite="1"),
-                    {"intent": pending.plan.intent, "cancelled": True},
+                    {"intent": pending.plan.intent, "cancelled": True, "approval_id": approval_id},
                 ),
                 pending.plan.user_text,
             )
             return self.bus.drain()
-        self.resolved_approval_tasks.add(task_id)
-        self._run_plan(pending.plan, pending.index, approved=True)
+        if not self._pending_step_matches(pending):
+            self._emit(
+                AgentEvent(
+                    EventType.TASK_FAILED,
+                    pending.plan.task_id,
+                    DisplayCard("审批已失效", "这次确认和待执行步骤不匹配，我没有继续执行。", status="failed"),
+                    safe_voice_line("这次确认已经失效，我没有继续执行。", sprite="4"),
+                    {"intent": pending.plan.intent, "approval_id": approval_id, "approval_mismatch": True},
+                ),
+                pending.plan.user_text,
+            )
+            return self.bus.drain()
+        self._run_plan(pending.plan, pending.index, approved_step=pending)
         return self.bus.drain()
 
-    def _run_plan(self, plan: AgentPlan, start_index: int, approved: bool) -> None:
+    def _run_plan(self, plan: AgentPlan, start_index: int, approved_step: PendingStep | None = None) -> None:
         final_ok = True
         pending_approval = False
         for index, step in enumerate(plan.steps[start_index:], start=start_index):
-            decision = self.policy.classify(step, approved=approved)
+            is_approved_step = self._is_approved_step(plan, index, step, approved_step)
+            decision = self.policy.classify(step, approved=is_approved_step)
             if decision.requires_approval:
-                self.pending_steps[plan.task_id] = PendingStep(plan, index)
+                pending = self._make_pending_step(plan, index, step)
+                self.pending_steps[pending.approval_id] = pending
                 self._emit(
                     AgentEvent(
                         EventType.APPROVAL_REQUIRED,
                         plan.task_id,
                         DisplayCard("需要确认", self._approval_summary(step), step.reason, status="approval"),
                         safe_voice_line("这一步需要你确认后我再执行。", sprite="4"),
-                        {"policy": self.policy.public_payload(step), "risk": decision.risk.value},
+                        {
+                            "policy": self.policy.public_payload(step),
+                            "risk": decision.risk.value,
+                            "approval": {
+                                "approval_id": pending.approval_id,
+                                "task_id": plan.task_id,
+                                "step_index": index,
+                                "tool": step.name,
+                                "arguments_hash": pending.arguments_hash,
+                            },
+                        },
                     ),
                     plan.user_text,
                 )
@@ -249,3 +280,33 @@ class AgentCompanionApp:
             model=endpoint.model,
             api_key=endpoint.api_key,
         )
+
+    def _make_pending_step(self, plan: AgentPlan, index: int, step: ToolRequest) -> PendingStep:
+        return PendingStep(
+            plan=plan,
+            index=index,
+            approval_id=f"approval-{uuid.uuid4().hex[:12]}",
+            tool=step.name,
+            arguments_hash=_arguments_hash(step.arguments),
+        )
+
+    def _pending_step_matches(self, pending: PendingStep) -> bool:
+        if pending.index < 0 or pending.index >= len(pending.plan.steps):
+            return False
+        step = pending.plan.steps[pending.index]
+        return step.name == pending.tool and _arguments_hash(step.arguments) == pending.arguments_hash
+
+    def _is_approved_step(self, plan: AgentPlan, index: int, step: ToolRequest, pending: PendingStep | None) -> bool:
+        if pending is None:
+            return False
+        return (
+            pending.plan.task_id == plan.task_id
+            and pending.index == index
+            and pending.tool == step.name
+            and pending.arguments_hash == _arguments_hash(step.arguments)
+        )
+
+
+def _arguments_hash(arguments: dict) -> str:
+    serialized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]

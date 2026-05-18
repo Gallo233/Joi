@@ -77,17 +77,19 @@ class JsonRpcBridge:
             params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
             if method == "user.message":
                 text = str(params.get("text") or "").strip()
-                approved = bool(params.get("approved", False))
                 if not text:
                     await websocket.send(self._result(request_id, {"ok": False, "error": "empty_text"}))
                     return
-                asyncio.create_task(asyncio.to_thread(self.app.handle_user_text, text, approved))
+                asyncio.create_task(asyncio.to_thread(self.app.handle_user_text, text))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
                 return
             if method == "approval.resolve":
-                task_id = str(params.get("task_id") or "")
+                approval_id = str(params.get("approval_id") or "")
                 approved = bool(params.get("approved", False))
-                asyncio.create_task(asyncio.to_thread(self.app.resolve_approval, task_id, approved))
+                if not approval_id:
+                    await websocket.send(self._result(request_id, {"ok": False, "error": "missing_approval_id"}))
+                    return
+                asyncio.create_task(asyncio.to_thread(self.app.resolve_approval, approval_id, approved))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
                 return
             if method == "core.ping":
