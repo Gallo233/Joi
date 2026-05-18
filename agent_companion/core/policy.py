@@ -7,7 +7,17 @@ from agent_companion.core.schemas import RiskLevel, ToolRequest
 
 
 LOW_RISK = {"companion.chat", "observe.screen", "browser.search", "browser.observe", "files.read", "mcp.list_tools"}
-MEDIUM_RISK = {"codex.run", "browser.click", "browser.type", "game.ok_ww.run", "files.write_workspace"}
+MEDIUM_RISK = {
+    "codex.run",
+    "browser.click",
+    "browser.type",
+    "computer.click",
+    "computer.type_text",
+    "computer.scroll",
+    "computer.hotkey",
+    "game.ok_ww.run",
+    "files.write_workspace",
+}
 HIGH_RISK = {"shell.run", "files.delete", "package.install", "git.push", "external.launch_admin"}
 
 
@@ -40,8 +50,24 @@ class PolicyGate:
 
     @staticmethod
     def public_payload(request: ToolRequest) -> dict[str, Any]:
+        preview = {key: str(value)[:160] for key, value in request.arguments.items()}
+        if request.name.startswith("computer."):
+            preview = _computer_preview(request.arguments)
         return {
             "tool": request.name,
             "reason": request.reason,
-            "arguments_preview": {key: str(value)[:160] for key, value in request.arguments.items()},
+            "arguments_preview": preview,
         }
+
+
+def _computer_preview(arguments: dict[str, Any]) -> dict[str, str]:
+    preview: dict[str, str] = {}
+    if "x" in arguments and "y" in arguments:
+        preview["target"] = "指定屏幕位置"
+    if "text" in arguments:
+        preview["text"] = f"{len(str(arguments.get('text') or ''))} characters"
+    if "direction" in arguments:
+        preview["direction"] = str(arguments.get("direction"))
+    if "keys" in arguments:
+        preview["keys"] = " + ".join(str(key) for key in arguments.get("keys") or [])
+    return preview

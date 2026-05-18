@@ -28,6 +28,14 @@ def build_plan(user_text: str) -> AgentPlan:
             intent="watch_together",
             steps=[ToolRequest("observe.screen", {"query": text}, "观察当前窗口或屏幕内容并生成陪看摘要。")],
         )
+    computer_action = _build_computer_action(text, lowered)
+    if computer_action is not None:
+        return AgentPlan(
+            task_id=task_id,
+            user_text=text,
+            intent="computer_use",
+            steps=[computer_action],
+        )
     if _is_code_task(text, lowered):
         return AgentPlan(
             task_id=task_id,
@@ -69,3 +77,60 @@ def _is_code_task(text: str, lowered: str) -> bool:
     code_markers = ("代码", "项目", "仓库", "bug", "BUG", "测试", "编译", "构建", "文件", "README", "报错")
     action_markers = ("修复", "实现", "新增", "修改", "重构", "检查", "跑", "生成", "更新")
     return "codex" in lowered or (any(x in text for x in code_markers) and any(x in text for x in action_markers))
+
+
+def _build_computer_action(text: str, lowered: str) -> ToolRequest | None:
+    if _looks_like_hotkey(text, lowered):
+        keys = _parse_hotkey(text)
+        return ToolRequest("computer.hotkey", {"keys": keys}, "按下系统快捷键会影响当前前台应用，需要确认。")
+    if _looks_like_type_text(text, lowered):
+        return ToolRequest("computer.type_text", {"text": _parse_text_payload(text)}, "向当前前台应用输入文字，需要确认。")
+    if _looks_like_scroll(text, lowered):
+        direction = "up" if any(token in text for token in ("向上", "往上", "上滚", "上滑")) else "down"
+        return ToolRequest("computer.scroll", {"direction": direction, "amount": 3}, "滚动当前前台应用，需要确认。")
+    if _looks_like_click(text, lowered):
+        x, y = _parse_coordinates(text)
+        args: dict[str, int | str] = {}
+        if x is not None and y is not None:
+            args.update({"x": x, "y": y})
+        return ToolRequest("computer.click", args, "点击当前屏幕会影响前台应用，需要确认。")
+    return None
+
+
+def _looks_like_click(text: str, lowered: str) -> bool:
+    return any(token in text for token in ("点击", "点一下", "鼠标点", "单击")) or "click" in lowered
+
+
+def _looks_like_type_text(text: str, lowered: str) -> bool:
+    return any(token in text for token in ("输入文字", "键入", "打字", "输入：", "输入:")) or "type " in lowered
+
+
+def _looks_like_scroll(text: str, lowered: str) -> bool:
+    return any(token in text for token in ("滚动", "下滑", "上滑", "往下", "往上")) or "scroll" in lowered
+
+
+def _looks_like_hotkey(text: str, lowered: str) -> bool:
+    return any(token in text for token in ("快捷键", "按下", "组合键")) or "hotkey" in lowered or "ctrl+" in lowered
+
+
+def _parse_coordinates(text: str) -> tuple[int | None, int | None]:
+    match = re.search(r"(?:x\s*[=:]\s*)?(\d{1,5})\s*[,， ]+\s*(?:y\s*[=:]\s*)?(\d{1,5})", text, re.IGNORECASE)
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _parse_text_payload(text: str) -> str:
+    match = re.search(r"[\"“'「](.+?)[\"”'」]", text)
+    if match:
+        return match.group(1).strip()
+    marker_match = re.search(r"输入(?:文字)?[:：]?\s*(.+)$", text)
+    return marker_match.group(1).strip() if marker_match else text
+
+
+def _parse_hotkey(text: str) -> list[str]:
+    match = re.search(r"((?:ctrl|control|alt|shift|win|meta|cmd|command)[+\s,，-]+[a-zA-Z0-9]+(?:[+\s,，-]+[a-zA-Z0-9]+)*)", text, re.IGNORECASE)
+    if match:
+        raw = match.group(1)
+        return [part for part in re.split(r"[+\s,，-]+", raw) if part]
+    return []

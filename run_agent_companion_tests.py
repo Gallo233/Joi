@@ -5,9 +5,12 @@ import tempfile
 from pathlib import Path
 
 from agent_companion.core.app import AgentCompanionApp
+from agent_companion.core.computer_use import ComputerAction, ComputerObservation, ComputerUseResult
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouter, load_app_config
 from agent_companion.core.planner import build_plan
+from agent_companion.core.policy import PolicyGate
 from agent_companion.core.schemas import EventType, ToolRequest
+from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.vision.schemas import VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummary
@@ -37,6 +40,28 @@ class FakeVisionObserver:
         )
 
 
+class FakeComputerBackend:
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+        self.actions: list[ComputerAction] = []
+
+    def observe(self, target: str = "active_window", query: str = "") -> ComputerObservation:
+        return ComputerObservation.from_vision(FakeVisionObserver(self.workspace).observe(target=target, query=query))
+
+    def perform(self, action: ComputerAction) -> ComputerUseResult:
+        self.actions.append(action)
+        return ComputerUseResult(ok=True, action=action, summary=_fake_action_summary(action.action_type))
+
+
+def _fake_action_summary(action_type: str) -> str:
+    return {
+        "click": "点击了指定位置。",
+        "type_text": "输入了一段文字。",
+        "scroll": "滚动了当前画面。",
+        "hotkey": "按下了快捷键。",
+    }.get(action_type, "完成了电脑操作。")
+
+
 def main() -> int:
     workspace = Path(__file__).resolve().parent
     os.environ["AGENT_COMPANION_DISABLE_LLM"] = "1"
@@ -45,18 +70,53 @@ def main() -> int:
     watch_plan = build_plan("陪我看这个视频")
     assert_true(watch_plan.intent == "watch_together", "watch route failed")
     assert_true(watch_plan.steps[0].name == "observe.screen", "watch route should use screen observation")
+    click_plan = build_plan("点击 100,200")
+    assert_true(click_plan.intent == "computer_use", "computer click route failed")
+    assert_true(click_plan.steps[0].name == "computer.click", "click should use computer.click")
+    assert_true(click_plan.steps[0].arguments.get("x") == 100, "click x coordinate not parsed")
+    assert_true(build_plan("输入文字：hello").steps[0].name == "computer.type_text", "type route failed")
+    assert_true(build_plan("向下滚动").steps[0].name == "computer.scroll", "scroll route failed")
+    assert_true(build_plan("按下 Ctrl+L 快捷键").steps[0].name == "computer.hotkey", "hotkey route failed")
     assert_true(build_plan("帮我刷鸣潮日常").intent == "game_assist", "game route failed")
     blocked = safe_voice_line('{"task_id":"codex2-abcdef1234","path":"data/app.log"}')
     assert_true("codex2-" not in blocked.text and "{" not in blocked.text, "voice sanitizer failed")
     blocked_tool_name = safe_voice_line("codex.run 需要确认")
     assert_true("codex.run" not in blocked_tool_name.text, "voice leaked raw tool name")
+    blocked_coordinate = safe_voice_line("我点击了 100,200")
+    assert_true("100,200" not in blocked_coordinate.text, "voice leaked coordinates")
 
     screen_tool = ScreenObserveTool(workspace, FakeVisionObserver(workspace))
     screen_result = screen_tool.run(ToolRequest("observe.screen", {"query": "陪我看当前画面", "target": "fullscreen"}))
     assert_true(screen_result.ok, "screen observation should succeed with fake observer")
+    assert_true("computer_observation" in screen_result.agent_state, "screen observation should use computer observation chain")
     assert_true(screen_result.agent_state["observation"]["target"] == "fullscreen", "screen target not preserved")
     assert_true(screen_result.display_card.artifacts == ["data/agent_companion/vision/sample.png"], "screenshot artifact missing")
     assert_true("sample.png" not in screen_result.voice_line.text, "voice should not read screenshot path")
+
+    policy = PolicyGate()
+    click_decision = policy.classify(ToolRequest("computer.click", {"x": 100, "y": 200}))
+    assert_true(click_decision.requires_approval, "computer.click should require approval")
+    assert_true(policy.classify(ToolRequest("computer.click", {"x": 100, "y": 200}), approved=True).allowed, "approved computer.click should be allowed")
+    public_payload = policy.public_payload(ToolRequest("computer.click", {"x": 100, "y": 200}))
+    assert_true("100" not in str(public_payload), "policy preview should not expose raw click coordinates")
+
+    fake_backend = FakeComputerBackend(workspace)
+    click_tool = ComputerActionTool(workspace, "computer.click", "click", fake_backend)
+    click_result = click_tool.run(ToolRequest("computer.click", {"x": 100, "y": 200}))
+    assert_true(click_result.ok, "computer.click tool should succeed with fake backend")
+    assert_true(click_result.agent_state["computer_use"]["action"]["x"] == 100, "computer action state should keep x for planner")
+    assert_true("100" not in click_result.display_card.summary, "computer card summary should be friendly")
+    assert_true("100" not in click_result.voice_line.text, "computer voice should not read coordinates")
+
+    type_tool = ComputerActionTool(workspace, "computer.type_text", "type_text", fake_backend)
+    type_result = type_tool.run(ToolRequest("computer.type_text", {"text": "hello world"}))
+    assert_true(type_result.ok, "computer.type_text tool should succeed with fake backend")
+    assert_true("hello" not in type_result.display_card.summary, "type summary should not echo raw text")
+
+    hotkey_tool = ComputerActionTool(workspace, "computer.hotkey", "hotkey", fake_backend)
+    hotkey_result = hotkey_tool.run(ToolRequest("computer.hotkey", {"keys": ["Ctrl", "L"]}))
+    assert_true(hotkey_result.ok, "computer.hotkey tool should succeed with fake backend")
+    assert_true("Ctrl" not in hotkey_result.voice_line.text, "hotkey voice should not read key names")
 
     # VisionSummarizer: MockSummarizer
     mock_summarizer = MockSummarizer()
@@ -184,6 +244,10 @@ def main() -> int:
             os.environ.pop("AGENT_COMPANION_CODEX_BIN", None)
         else:
             os.environ["AGENT_COMPANION_CODEX_BIN"] = previous
+
+    app = AgentCompanionApp(workspace)
+    computer_events = app.handle_user_text("点击 100,200", approved=False)
+    assert_true(any(event.type == EventType.APPROVAL_REQUIRED for event in computer_events), "computer action should require approval")
 
     app = AgentCompanionApp(workspace)
     approval_events = app.handle_user_text("帮我刷鸣潮日常", approved=False)

@@ -23,30 +23,40 @@ Status: in progress
 
 ## P2 Vision Layer
 
-Status: planned
+Status: in progress
 
 - Add screenshot capture for browser, active window, and full screen. Windows active-window/fullscreen capture is connected through `observe.screen`.
-- Add `VisionSummarizer` with configurable vision model.
-- Separate text model, vision model, and expression model.
+- Add `VisionSummarizer` with configurable vision model. OpenAI-compatible vision summaries are connected.
+- Separate text model, vision model, and expression model. Model routing is connected for text, vision, and expression.
 - Do not mark blank pages or failed captures as success.
 
-## P3 First Demo Loops
+## P3 Computer Use Adapter
+
+Status: in progress
+
+- Add `agent_companion.core.computer_use` with observation, action, backend, and result schemas.
+- Route `observe.screen` through the computer-use observation chain.
+- Add `computer.click`, `computer.type_text`, `computer.scroll`, and `computer.hotkey` adapters.
+- Keep all computer actions at medium risk by default and require user confirmation.
+- Show friendly action summaries in task cards while keeping coordinates, text payloads, command-like details, and raw ids out of voice lines.
+
+## P4 First Demo Loops
 
 Status: planned
 
-- Watch together: observe visible content, summarize, and discuss. First screen-capture tool is connected; visual model summarization is next.
+- Watch together: observe visible content, summarize, and discuss. Screen capture and optional visual model summarization are connected; richer multi-turn discussion is next.
 - Game: OK-WW dry-run, approval, launch, status callback.
 - Coding: Codex approval, execution, task card, result summary.
 
-## P4 Model Router
+## P5 Model Router
 
-Status: planned
+Status: in progress
 
 - Route chat, coding, vision, and expression to different models.
 - Record provider, model, latency, and fallback reason.
 - Show current model usage in settings.
 
-## P5 Voice and Expression
+## P6 Voice and Expression
 
 Status: planned
 
@@ -54,16 +64,16 @@ Status: planned
 - Interrupt stale voice when new user input arrives.
 - Avoid speaking logs, JSON, paths, commands, tool ids, and inflated results.
 
-## P6 Policy and Audit
+## P7 Policy and Audit
 
-Status: planned
+Status: in progress
 
 - Low risk actions run directly.
 - Medium risk actions require task-level confirmation.
 - High risk actions require step-by-step confirmation.
 - Persist audit records for tool actions and approvals.
 
-## P7 Memory
+## P8 Memory
 
 Status: planned
 
@@ -71,7 +81,7 @@ Status: planned
 - Add UI controls to view, delete, and disable memory.
 - Keep sensitive content out of long-term memory unless explicitly saved.
 
-## P8 Packaging
+## P9 Packaging
 
 Status: planned
 

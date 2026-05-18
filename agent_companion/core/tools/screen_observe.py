@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_companion.core.computer_use import ComputerUseBackend, WindowsComputerUseBackend
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.vision import VisionObserver, VisionSummarizer, WindowsScreenObserver
@@ -16,17 +17,20 @@ class ScreenObserveTool(ToolAdapter):
         self,
         workspace: Path,
         observer: VisionObserver | None = None,
+        computer_backend: ComputerUseBackend | None = None,
         summarizer: VisionSummarizer | None = None,
     ) -> None:
         self.workspace = workspace
         self.observer = observer or WindowsScreenObserver(workspace)
+        self.computer_backend = computer_backend or WindowsComputerUseBackend(workspace, self.observer)
         self.summarizer = summarizer
 
     def run(self, request: ToolRequest) -> ToolResult:
         query = str(request.arguments.get("query") or "").strip()
         target = self._target_from_request(request)
         try:
-            observation = self.observer.observe(target=target, query=query)
+            computer_observation = self.computer_backend.observe(target=target, query=query)
+            observation = computer_observation.to_vision()
         except Exception as exc:
             return ToolResult(
                 ok=False,
@@ -53,6 +57,7 @@ class ScreenObserveTool(ToolAdapter):
 
         agent_state: dict = {
             "tool": self.name,
+            "computer_observation": computer_observation.to_agent_state(),
             "observation": observation.to_agent_state(),
             "artifacts": [observation.screenshot_rel],
         }

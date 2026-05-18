@@ -14,6 +14,7 @@ from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, Eve
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.codex import CodexTool
+from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.files import FileReadTool
 from agent_companion.core.tools.game_ok_ww import OkWwTool
 from agent_companion.core.tools.mcp import McpListTool
@@ -184,6 +185,10 @@ class AgentCompanionApp:
             "browser.search": "浏览器搜索",
             "browser.observe": "网页观察",
             "observe.screen": "画面观察",
+            "computer.click": "电脑点击",
+            "computer.type_text": "电脑输入",
+            "computer.scroll": "电脑滚动",
+            "computer.hotkey": "快捷键",
             "mcp.list_tools": "工具清单",
             "files.read": "文件读取",
         }
@@ -197,6 +202,7 @@ class AgentCompanionApp:
             "game_assist": "游戏",
             "watch_together": "陪看",
             "browser": "浏览器",
+            "computer_use": "电脑操作",
         }
         return labels.get(intent, intent)
 
@@ -208,6 +214,8 @@ class AgentCompanionApp:
             return "启动游戏自动化前需要你确认。"
         if step.name == "codex.run":
             return "交给 Codex 执行前需要你确认。"
+        if step.name.startswith("computer."):
+            return "操作当前电脑前需要你确认。"
         return f"{self._tool_label(step.name)}需要你确认。"
 
     def _register_tools(self) -> None:
@@ -216,6 +224,10 @@ class AgentCompanionApp:
         self.tools.register(BrowserTool(self.workspace, "browser.search"))
         self.tools.register(BrowserTool(self.workspace, "browser.observe"))
         self.tools.register(ScreenObserveTool(self.workspace, summarizer=self._build_vision_summarizer()))
+        self.tools.register(ComputerActionTool(self.workspace, "computer.click", "click"))
+        self.tools.register(ComputerActionTool(self.workspace, "computer.type_text", "type_text"))
+        self.tools.register(ComputerActionTool(self.workspace, "computer.scroll", "scroll"))
+        self.tools.register(ComputerActionTool(self.workspace, "computer.hotkey", "hotkey"))
         self.tools.register(OkWwTool(self.workspace))
         self.tools.register(McpListTool(self.workspace))
         self.tools.register(FileReadTool(self.workspace))

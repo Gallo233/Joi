@@ -106,6 +106,7 @@ const currentMode = computed(() => {
   const tool = latest ? toolName(latest) : ''
   if (intent === 'game_assist' || tool === 'game.ok_ww.run') return '游戏'
   if (intent === 'coding' || tool === 'codex.run') return '写码'
+  if (intent === 'computer_use' || tool.startsWith('computer.')) return '电脑操作'
   if (intent === 'watch_together' || intent === 'browser' || tool.startsWith('browser.')) return '陪看'
   return '闲聊'
 })
@@ -163,7 +164,18 @@ function taskMeta(event: AgentEvent, detail?: AgentEvent) {
   }
   if (tool === 'codex.run') meta.push(event.display_card.status === 'success' ? '代码任务完成' : '代码任务')
   if (tool === 'game.ok_ww.run') meta.push('游戏技能')
+  if (tool.startsWith('computer.')) meta.push(computerActionLabel(tool))
   return meta
+}
+
+function computerActionLabel(tool: string) {
+  const labels: Record<string, string> = {
+    'computer.click': '点击',
+    'computer.type_text': '输入',
+    'computer.scroll': '滚动',
+    'computer.hotkey': '快捷键',
+  }
+  return labels[tool] || '电脑操作'
 }
 
 function artifactLabel(artifact: string, index: number) {

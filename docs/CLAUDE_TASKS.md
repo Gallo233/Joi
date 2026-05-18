@@ -31,47 +31,45 @@ Keep `config.yaml` local only. Public examples should go in `config.example.yaml
 
 ## Current Priority
 
-Continue P2 Vision Layer.
+Continue P3 Computer Use Adapter.
 
-The first screen observation layer is already implemented:
+The current observation and first action layer is implemented:
 
-- `agent_companion/core/vision/schemas.py`
-- `agent_companion/core/vision/observer.py`
-- `agent_companion/core/vision/windows.py`
-- `agent_companion/core/tools/screen_observe.py`
-- route: watch requests -> `observe.screen`
+- `agent_companion/core/vision/` captures Windows active-window/fullscreen screenshots.
+- `agent_companion/core/vision/summarizer.py` can call an OpenAI-compatible vision model.
+- `agent_companion/core/computer_use/` defines observation, action, backend, and result contracts.
+- `agent_companion/core/tools/screen_observe.py` routes `observe.screen` through the Computer Use observation chain.
+- `agent_companion/core/tools/computer.py` exposes `computer.click`, `computer.type_text`, `computer.scroll`, and `computer.hotkey`.
+- `agent_companion/core/policy.py` treats Computer Use actions as medium risk, requiring confirmation.
 
 Next task options, in priority order:
 
-1. Add `VisionSummarizer` interface and first implementation for OpenAI-compatible vision models.
-2. Add model routing config for separate text, vision, and expression models.
-3. Feed `VisionObservation` screenshot plus user query into summarizer and return a user-facing summary in `observe.screen`.
-4. Keep tool result split into `agent_state`, `display_card`, and `voice_line`.
-5. Ensure `voice_line` never speaks screenshot paths, JSON, command lines, model names, tokens, or logs.
+1. Add visual target grounding so natural language like "click the search box" can resolve to screen coordinates through screenshots/OCR/vision.
+2. Add post-action observation for Computer Use actions so task cards can show before/after state.
+3. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+4. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
+5. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
 
 ## Suggested First Task
 
-Implement `agent_companion/core/vision/summarizer.py`:
+Implement grounded click planning:
 
-- Define `VisionSummary` dataclass.
-- Define `VisionSummarizer` protocol/interface.
-- Add a mock summarizer for tests.
-- Add an OpenAI-compatible summarizer that can call a configured vision model.
-- Keep failures non-fatal: if vision summarization fails, `observe.screen` should still return the screenshot observation card.
-
-Then update `ScreenObserveTool` so successful observations can include:
-
-- screenshot artifact
-- target/window metadata
-- optional visual summary
-- concise natural `voice_line`
+- Add a `computer.locate` or planner helper that accepts a natural-language target and current screenshot.
+- Use vision/OCR to return a candidate bounding box plus confidence.
+- Keep target resolution low risk; keep the actual click as a medium-risk confirmed action.
+- Show "target candidate" in the task card using friendly wording, not raw coordinates.
+- If confidence is low, ask for confirmation or request a clearer instruction instead of clicking.
 
 ## Allowed Edit Areas
 
 Preferred:
 
 - `agent_companion/core/vision/`
+- `agent_companion/core/computer_use/`
+- `agent_companion/core/tools/computer.py`
 - `agent_companion/core/tools/screen_observe.py`
+- `agent_companion/core/policy.py`
+- `agent_companion/core/planner.py`
 - `agent_companion/core/config.py`
 - `agent_companion/core/app.py`
 - `run_agent_companion_tests.py`
