@@ -107,7 +107,7 @@ const currentMode = computed(() => {
   if (intent === 'game_assist' || tool === 'game.ok_ww.run') return '游戏'
   if (intent === 'coding' || tool === 'codex.run') return '写码'
   if (intent === 'computer_use' || tool.startsWith('computer.')) return '电脑操作'
-  if (intent === 'watch_together' || intent === 'browser' || tool.startsWith('browser.')) return '陪看'
+  if (intent === 'watch_together' || intent === 'watch_followup' || intent === 'browser' || tool === 'watch.recall' || tool.startsWith('browser.')) return '陪看'
   return '闲聊'
 })
 
@@ -160,6 +160,13 @@ function taskMeta(event: AgentEvent, detail?: AgentEvent) {
     const height = Number(observation.height || 0)
     if (title) meta.push(`窗口：${trimText(title, 18)}`)
     if (width && height) meta.push(`尺寸：${width}x${height}`)
+    const modelStatus = stringValue(state.model_status)
+    if (modelStatus) meta.push(visionStatusLabel(modelStatus))
+    if (source.display_card.artifacts?.length) meta.push(`截图：${source.display_card.artifacts.length}`)
+  }
+  if (tool === 'watch.recall') {
+    const modelStatus = stringValue(state.model_status)
+    if (modelStatus) meta.push(visionStatusLabel(modelStatus))
     if (source.display_card.artifacts?.length) meta.push(`截图：${source.display_card.artifacts.length}`)
   }
   if (tool === 'codex.run') meta.push(event.display_card.status === 'success' ? '代码任务完成' : '代码任务')
@@ -176,6 +183,19 @@ function computerActionLabel(tool: string) {
     'computer.hotkey': '快捷键',
   }
   return labels[tool] || '电脑操作'
+}
+
+function visionStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    ok: '视觉模型：已启用',
+    vision_context: '视觉上下文',
+    unconfigured: '视觉模型：未配置',
+    vision_unconfigured: '视觉模型：未配置',
+    error: '视觉模型：失败',
+    vision_error: '视觉模型：失败',
+    no_context: '暂无视觉上下文',
+  }
+  return labels[status] || '视觉状态'
 }
 
 function artifactLabel(artifact: string, index: number) {
@@ -287,7 +307,7 @@ onBeforeUnmount(() => client.close())
               <span
                 v-for="(artifact, index) in task.detail.display_card.artifacts"
                 :key="artifact"
-                :title="artifact"
+                :title="artifactLabel(artifact, index)"
               >
                 {{ artifactLabel(artifact, index) }}
               </span>

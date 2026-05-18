@@ -18,6 +18,7 @@
 - Added `agent_companion.core.computer_use` with Windows-backed observation plus click, type, scroll, and hotkey action adapters behind policy confirmation.
 - Hardened approvals with one-time `approval_id` bindings and removed direct user-message approval bypass.
 - Computer Use actions now attach an after screenshot, and Windows text input uses clipboard paste for reliable Chinese input.
+- Added Watch Together session context and follow-up recall using recent visual summaries, titles, questions, and screenshot artifacts.
 
 ## 2026-05-14
 

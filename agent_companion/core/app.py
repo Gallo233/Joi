@@ -23,8 +23,10 @@ from agent_companion.core.tools.game_ok_ww import OkWwTool
 from agent_companion.core.tools.mcp import McpListTool
 from agent_companion.core.tools.registry import ToolRegistry
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
+from agent_companion.core.tools.watch import WatchRecallTool
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
+from agent_companion.core.watch import WatchFrame, WatchSession
 
 
 @dataclass
@@ -46,6 +48,7 @@ class AgentCompanionApp:
         self.memory = MemoryStore(self.workspace / "data" / "agent_companion" / "memory.sqlite3")
         self.policy = PolicyGate()
         self.tools = ToolRegistry()
+        self.watch_session = WatchSession()
         self.pending_steps: dict[str, PendingStep] = {}
         self.resolved_approval_ids: set[str] = set()
         self._register_tools()
@@ -163,12 +166,13 @@ class AgentCompanionApp:
                     voice_line=safe_voice_line("这个工具没有跑通，细节在卡片里。", sprite="4"),
                 )
             self._emit_result(plan.task_id, result, plan.user_text)
+            self._record_watch_context(plan, step, result)
             final_ok = final_ok and result.ok
             self.memory.remember("task_result", f"{plan.intent}: {result.display_card.summary}")
             if not result.ok:
                 break
         if final_ok:
-            if plan.intent != "companion_chat":
+            if self._should_emit_task_completion(plan.intent):
                 self._emit(
                     AgentEvent(
                         EventType.TASK_COMPLETED,
@@ -216,6 +220,7 @@ class AgentCompanionApp:
             "browser.search": "浏览器搜索",
             "browser.observe": "网页观察",
             "observe.screen": "画面观察",
+            "watch.recall": "陪看追问",
             "computer.click": "电脑点击",
             "computer.type_text": "电脑输入",
             "computer.scroll": "电脑滚动",
@@ -232,10 +237,15 @@ class AgentCompanionApp:
             "coding": "写码",
             "game_assist": "游戏",
             "watch_together": "陪看",
+            "watch_followup": "陪看追问",
             "browser": "浏览器",
             "computer_use": "电脑操作",
         }
         return labels.get(intent, intent)
+
+    @staticmethod
+    def _should_emit_task_completion(intent: str) -> bool:
+        return intent not in {"companion_chat", "watch_together", "watch_followup"}
 
     def _plan_body(self, plan: AgentPlan) -> str:
         return "\n".join(self._tool_label(step.name) for step in plan.steps)
@@ -255,6 +265,7 @@ class AgentCompanionApp:
         self.tools.register(BrowserTool(self.workspace, "browser.search"))
         self.tools.register(BrowserTool(self.workspace, "browser.observe"))
         self.tools.register(ScreenObserveTool(self.workspace, summarizer=self._build_vision_summarizer()))
+        self.tools.register(WatchRecallTool(self.workspace, self.watch_session.recent))
         self.tools.register(ComputerActionTool(self.workspace, "computer.click", "click"))
         self.tools.register(ComputerActionTool(self.workspace, "computer.type_text", "type_text"))
         self.tools.register(ComputerActionTool(self.workspace, "computer.scroll", "scroll"))
@@ -305,6 +316,23 @@ class AgentCompanionApp:
             and pending.tool == step.name
             and pending.arguments_hash == _arguments_hash(step.arguments)
         )
+
+    def _record_watch_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
+        if plan.intent != "watch_together" or step.name != "observe.screen" or not result.ok:
+            return
+        state = result.agent_state
+        observation = state.get("observation") if isinstance(state.get("observation"), dict) else {}
+        artifacts = result.display_card.artifacts or []
+        summary = str(state.get("vision_summary") or result.display_card.summary or "").strip()
+        model_status = str(state.get("model_status") or "unknown")
+        frame = WatchFrame(
+            user_question=plan.user_text,
+            summary=summary,
+            title=str(observation.get("title") or ""),
+            artifact=artifacts[0] if artifacts else "",
+            model_status=model_status,
+        )
+        self.watch_session.add(frame)
 
 
 def _arguments_hash(arguments: dict) -> str:

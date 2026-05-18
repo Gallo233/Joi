@@ -81,6 +81,9 @@ def main() -> int:
     watch_plan = build_plan("陪我看这个视频")
     assert_true(watch_plan.intent == "watch_together", "watch route failed")
     assert_true(watch_plan.steps[0].name == "observe.screen", "watch route should use screen observation")
+    watch_followup_plan = build_plan("你看到了什么")
+    assert_true(watch_followup_plan.intent == "watch_followup", "watch follow-up route failed")
+    assert_true(watch_followup_plan.steps[0].name == "watch.recall", "watch follow-up should reuse context")
     click_plan = build_plan("点击 100,200")
     assert_true(click_plan.intent == "computer_use", "computer click route failed")
     assert_true(click_plan.steps[0].name == "computer.click", "click should use computer.click")
@@ -143,6 +146,7 @@ def main() -> int:
     tool_with_summarizer = ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=MockSummarizer())
     result_with_summary = tool_with_summarizer.run(ToolRequest("observe.screen", {"query": "看看画面", "target": "fullscreen"}))
     assert_true(result_with_summary.ok, "screen observation with summarizer should succeed")
+    assert_true(result_with_summary.agent_state["model_status"] == "ok", "screen observation should mark vision model ok")
     assert_true("vision_summary" in result_with_summary.agent_state, "agent_state should include vision_summary")
     assert_true("画面摘要" in result_with_summary.agent_state["vision_summary"], "vision_summary should contain summary text")
     assert_true("画面摘要" in result_with_summary.display_card.summary, "card summary should use vision summary")
@@ -160,6 +164,13 @@ def main() -> int:
     assert_true("vision_summary" not in result_failing.agent_state, "agent_state should not include vision_summary on failure")
     assert_true("摘要" in result_failing.voice_line.text, "failure voice should mention summary unavailable")
     assert_true("sample.png" not in result_failing.voice_line.text, "failure voice should not read screenshot path")
+
+    tool_without_summarizer = ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=None)
+    result_without_summary = tool_without_summarizer.run(ToolRequest("observe.screen", {"query": "看看画面", "target": "fullscreen"}))
+    assert_true(result_without_summary.ok, "screen observation should succeed without vision model")
+    assert_true(result_without_summary.agent_state["model_status"] == "unconfigured", "screen observation should mark missing vision model")
+    assert_true("配置视觉模型" in result_without_summary.display_card.summary, "missing vision model should be visible in card")
+    assert_true("sample.png" not in result_without_summary.voice_line.text, "missing vision voice should not read screenshot path")
 
     # ModelRouter: text fallback
     base_llm = LlmConfig(
@@ -246,6 +257,32 @@ def main() -> int:
     assert_true(any(event.display_card.title == "对话" for event in chat_events), "chat should produce a dialogue card")
     assert_true(not any(event.type == EventType.PLAN_CREATED for event in chat_events), "chat should not show plan events")
     assert_true(not any(event.type == EventType.TASK_COMPLETED for event in chat_events), "chat should not show task completion")
+
+    empty_watch_events = AgentCompanionApp(workspace).handle_user_text("你看到了什么")
+    assert_true(any(event.agent_state.get("tool") == "watch.recall" for event in empty_watch_events), "empty watch follow-up should use recall")
+    assert_true(not any(event.type == EventType.TASK_FAILED for event in empty_watch_events), "empty watch follow-up should answer naturally, not fail")
+    assert_true(not any(event.type == EventType.TASK_COMPLETED for event in empty_watch_events), "watch follow-up should not add generic task completion voice")
+
+    watch_app = AgentCompanionApp(workspace)
+    watch_app.tools.register(ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=MockSummarizer()))
+    watch_events = watch_app.handle_user_text("陪我看当前画面")
+    assert_true(any(event.agent_state.get("tool") == "observe.screen" for event in watch_events), "watch should observe screen first")
+    assert_true(watch_app.watch_session.has_context(), "watch session should remember visual context")
+    recall_events = watch_app.handle_user_text("你看到了什么")
+    assert_true(any(event.agent_state.get("tool") == "watch.recall" for event in recall_events), "watch follow-up should use recall tool")
+    assert_true(not any(event.agent_state.get("tool") == "observe.screen" for event in recall_events), "watch follow-up should not repeat screen capture")
+    recall_cards = [event for event in recall_events if event.agent_state.get("tool") == "watch.recall"]
+    assert_true("画面摘要" in recall_cards[-1].display_card.summary, "watch recall should answer from visual summary")
+    assert_true(recall_cards[-1].display_card.artifacts == ["data/agent_companion/vision/sample.png"], "watch recall should show recent screenshot artifact")
+    assert_true(all("sample.png" not in event.voice_line.text for event in recall_events), "watch recall voice should not read artifact path")
+
+    fallback_watch_app = AgentCompanionApp(workspace)
+    fallback_watch_app.tools.register(ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=None))
+    fallback_watch_app.handle_user_text("陪我看当前窗口")
+    fallback_recall = fallback_watch_app.handle_user_text("这个页面讲什么")
+    fallback_cards = [event for event in fallback_recall if event.agent_state.get("tool") == "watch.recall"]
+    assert_true(fallback_cards, "watch fallback should still create recall card")
+    assert_true("视觉模型" in fallback_cards[-1].display_card.summary, "watch fallback should mention vision model config")
 
     previous = os.environ.get("AGENT_COMPANION_CODEX_BIN")
     os.environ["AGENT_COMPANION_CODEX_BIN"] = str(workspace / "missing-codex.exe")

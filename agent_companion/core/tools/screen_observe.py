@@ -41,24 +41,36 @@ class ScreenObserveTool(ToolAdapter):
 
         summary_text = ""
         summary_error = ""
+        model_status = "unconfigured"
         if self.summarizer is not None:
             try:
                 vs = self.summarizer.summarize(observation, query)
-                summary_text = vs.text
+                summary_text = (vs.text or "").strip()
                 summary_error = vs.error
+                model_status = "ok" if summary_text else "error"
+                if not summary_text and not summary_error:
+                    summary_error = "empty vision summary"
             except Exception as exc:
                 summary_error = f"{type(exc).__name__}: {exc}"
+                model_status = "error"
 
         body = observation.detail_text()
         card_summary = self._summary(observation)
         if summary_text:
             body = f"{body}\n\n视觉摘要：{summary_text}"
             card_summary = summary_text
+        elif self.summarizer is None:
+            body = f"{body}\n\n视觉摘要：未配置视觉模型，截图已保存。"
+            card_summary = "截图已保存；配置视觉模型后可以生成画面摘要。"
+        elif summary_error:
+            body = f"{body}\n\n视觉摘要：生成失败，截图已保存。"
+            card_summary = "截图已保存；视觉摘要暂时没有生成出来。"
 
         agent_state: dict = {
             "tool": self.name,
             "computer_observation": computer_observation.to_agent_state(),
             "observation": observation.to_agent_state(),
+            "model_status": model_status,
             "artifacts": [observation.screenshot_rel],
         }
         if summary_text:
@@ -103,4 +115,4 @@ class ScreenObserveTool(ToolAdapter):
             return safe_voice_line("我看到了主要内容，摘要已经放进卡片里。", sprite="5")
         if summary_error:
             return safe_voice_line("我截到画面了，摘要暂时没生成出来。", sprite="4")
-        return safe_voice_line("我截到当前画面了。", sprite="5")
+        return safe_voice_line("我截到画面了，需要配置视觉模型才能总结内容。", sprite="4")

@@ -6,7 +6,15 @@ from typing import Any
 from agent_companion.core.schemas import RiskLevel, ToolRequest
 
 
-LOW_RISK = {"companion.chat", "observe.screen", "browser.search", "browser.observe", "files.read", "mcp.list_tools"}
+LOW_RISK = {
+    "companion.chat",
+    "observe.screen",
+    "watch.recall",
+    "browser.search",
+    "browser.observe",
+    "files.read",
+    "mcp.list_tools",
+}
 MEDIUM_RISK = {
     "codex.run",
     "browser.click",

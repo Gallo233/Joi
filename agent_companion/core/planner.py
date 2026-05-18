@@ -21,6 +21,13 @@ def build_plan(user_text: str) -> AgentPlan:
                 ToolRequest("game.ok_ww.run", {"intent": text, "dry_run": False}, "游戏自动化会启动外部技能，需要确认。"),
             ],
         )
+    if _is_watch_followup(text):
+        return AgentPlan(
+            task_id=task_id,
+            user_text=text,
+            intent="watch_followup",
+            steps=[ToolRequest("watch.recall", {"query": text}, "优先使用最近的陪看视觉上下文回答，不重复截图。")],
+        )
     if _is_watch_task(text):
         return AgentPlan(
             task_id=task_id,
@@ -70,7 +77,11 @@ def _is_game_task(text: str) -> bool:
 
 
 def _is_watch_task(text: str) -> bool:
-    return any(token in text for token in ("陪我看", "看电影", "看视频", "一起看", "当前画面", "刚刚发生了什么", "这段剧情"))
+    return any(token in text for token in ("陪我看", "看电影", "看视频", "一起看", "当前画面", "当前窗口", "这段剧情"))
+
+
+def _is_watch_followup(text: str) -> bool:
+    return any(token in text for token in ("刚刚发生了什么", "你看到了什么", "你刚才看到了什么", "这个页面讲什么", "刚才的画面", "刚才看到的"))
 
 
 def _is_code_task(text: str, lowered: str) -> bool:

@@ -31,9 +31,9 @@ Keep `config.yaml` local only. Public examples should go in `config.example.yaml
 
 ## Current Priority
 
-Continue P3.1 Policy + Computer Use Hardening.
+Continue P4.1 Watch Together Loop.
 
-The current observation, first action layer, and approval hardening are implemented:
+The current observation, first action layer, approval hardening, and watch loop are implemented:
 
 - `agent_companion/core/vision/` captures Windows active-window/fullscreen screenshots.
 - `agent_companion/core/vision/summarizer.py` can call an OpenAI-compatible vision model.
@@ -44,31 +44,37 @@ The current observation, first action layer, and approval hardening are implemen
 - Approval now uses one-time `approval_id` values bound to task id, step index, tool name, and arguments hash.
 - Computer Use actions automatically observe the active window after execution and attach the after screenshot to the task card.
 - `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
+- `agent_companion/core/watch.py` keeps recent watch context in the current app session.
+- `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.
+- Follow-up prompts like "你看到了什么" reuse recent summaries and screenshot artifacts instead of repeating screenshots.
 
 Next task options, in priority order:
 
-1. Add visual target grounding so natural language like "click the search box" can resolve to screen coordinates through screenshots/OCR/vision.
-2. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+1. Persist Watch Together context across app restarts with a local retention policy.
+2. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
 3. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
-4. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
-5. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
+4. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+5. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
+6. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
 
 ## Suggested First Task
 
-Implement grounded click planning:
+Implement persistent Watch Together context:
 
-- Add a `computer.locate` or planner helper that accepts a natural-language target and current screenshot.
-- Use vision/OCR to return a candidate bounding box plus confidence.
-- Keep target resolution low risk; keep the actual click as a medium-risk confirmed action.
-- Show "target candidate" in the task card using friendly wording, not raw coordinates.
-- If confidence is low, ask for confirmation or request a clearer instruction instead of clicking.
+- Store recent watch frames in local SQLite through `MemoryStore` or a dedicated table.
+- Persist user question, title, summary, artifact label/path, model status, and timestamp.
+- Keep screenshot files under ignored runtime data; do not commit generated screenshots.
+- Make recall prefer in-memory context first, then recent persisted context after restart.
+- Keep all voice output short and natural; never read screenshot paths, JSON, model names, or tool ids.
 
 ## Allowed Edit Areas
 
 Preferred:
 
 - `agent_companion/core/vision/`
+- `agent_companion/core/watch.py`
 - `agent_companion/core/computer_use/`
+- `agent_companion/core/tools/watch.py`
 - `agent_companion/core/tools/computer.py`
 - `agent_companion/core/tools/screen_observe.py`
 - `agent_companion/core/policy.py`

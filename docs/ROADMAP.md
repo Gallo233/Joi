@@ -43,11 +43,14 @@ Status: in progress
 - Use clipboard paste for reliable Windows text input, including Chinese.
 - Show friendly action summaries in task cards while keeping coordinates, text payloads, command-like details, and raw ids out of voice lines.
 
-## P4 First Demo Loops
+## P4 Watch Together Loop
 
-Status: planned
+Status: in progress
 
-- Watch together: observe visible content, summarize, and discuss. Screen capture and optional visual model summarization are connected; richer multi-turn discussion is next.
+- Watch together: observe visible content, summarize, and discuss. Screen capture and optional visual model summarization are connected.
+- Keep recent watch context in the session: user question, window title, summary, screenshot artifact, and model status.
+- Route follow-up questions like "what did you see" through recent visual context instead of repeating screenshots.
+- If the vision model is unavailable, save the screenshot and clearly tell the user that vision configuration is needed for summaries.
 - Game: OK-WW dry-run, approval, launch, status callback.
 - Coding: Codex approval, execution, task card, result summary.
 
