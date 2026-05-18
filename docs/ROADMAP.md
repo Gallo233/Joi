@@ -50,6 +50,9 @@ Status: in progress
 - Watch together: observe visible content, summarize, and discuss. Screen capture and optional visual model summarization are connected.
 - Keep recent watch context in the session: user question, window title, summary, screenshot artifact, and model status.
 - Route follow-up questions like "what did you see" through recent visual context instead of repeating screenshots.
+- Generate watch follow-up answers through the role-aware text/expression model when available, with template fallback when not configured.
+- Keep screen observations out of long-term memory by default; only session watch context is retained unless the user explicitly asks to save it.
+- Show screenshot artifacts as clickable task-card thumbnails instead of plain labels.
 - If the vision model is unavailable, save the screenshot and clearly tell the user that vision configuration is needed for summaries.
 - Game: OK-WW dry-run, approval, launch, status callback.
 - Coding: Codex approval, execution, task card, result summary.
@@ -64,8 +67,9 @@ Status: in progress
 
 ## P6 Voice and Expression
 
-Status: planned
+Status: in progress
 
+- Add click-to-record voice input. Shell recording and mock ASR JSON-RPC routing are connected; real ASR provider selection is next.
 - Queue voice separately from text display.
 - Interrupt stale voice when new user input arrives.
 - Avoid speaking logs, JSON, paths, commands, tool ids, and inflated results.
@@ -85,6 +89,7 @@ Status: planned
 
 - Store local user preferences, project context, game habits, and task summaries.
 - Add UI controls to view, delete, and disable memory.
+- Mark memory entries as ephemeral/sensitive so screen observations do not become long-term memory by default.
 - Keep sensitive content out of long-term memory unless explicitly saved.
 
 ## P9 Packaging

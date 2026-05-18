@@ -8,14 +8,19 @@ from pathlib import Path
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.computer_use import ComputerAction, ComputerObservation, ComputerUseResult
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouter, load_app_config
+from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.schemas import EventType, ToolRequest
+from agent_companion.core.server import JsonRpcBridge
+from agent_companion.core.speech_input import MockAsrProvider
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
+from agent_companion.core.tools.watch import WatchRecallTool
 from agent_companion.core.vision.schemas import VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummary
 from agent_companion.core.voice import safe_voice_line
+from agent_companion.core.watch import WatchFrame
 
 
 def assert_true(value: bool, message: str) -> None:
@@ -63,6 +68,14 @@ def _fake_action_summary(action_type: str) -> str:
     }.get(action_type, "完成了电脑操作。")
 
 
+class FakeWatchAnswerer:
+    last_used_model = True
+
+    def answer(self, question: str, frames: list[WatchFrame]) -> tuple[str, str]:
+        summary = frames[0].summary if frames else "没有画面"
+        return f"自然回答会针对“{question}”：{summary}", "llm_answer"
+
+
 def _approval_payload(events) -> dict:
     for event in events:
         if event.type == EventType.APPROVAL_REQUIRED:
@@ -100,6 +113,18 @@ def main() -> int:
     assert_true("codex.run" not in blocked_tool_name.text, "voice leaked raw tool name")
     blocked_coordinate = safe_voice_line("我点击了 100,200")
     assert_true("100,200" not in blocked_coordinate.text, "voice leaked coordinates")
+
+    memory_dir = Path(tempfile.mkdtemp())
+    try:
+        memory = MemoryStore(memory_dir / "memory.sqlite3")
+        memory.remember("normal", "可长期保存")
+        memory.remember("ephemeral", "临时画面摘要", ephemeral=True)
+        memory.remember("sensitive", "敏感屏幕内容", sensitive=True)
+        recent_memory = memory.recent(10)
+        assert_true(len(recent_memory) == 1 and recent_memory[0]["text"] == "可长期保存", "ephemeral/sensitive memories should not be long-term by default")
+    finally:
+        import shutil
+        shutil.rmtree(memory_dir, ignore_errors=True)
 
     screen_tool = ScreenObserveTool(workspace, FakeVisionObserver(workspace))
     screen_result = screen_tool.run(ToolRequest("observe.screen", {"query": "陪我看当前画面", "target": "fullscreen"}))
@@ -263,7 +288,23 @@ def main() -> int:
     assert_true(not any(event.type == EventType.TASK_FAILED for event in empty_watch_events), "empty watch follow-up should answer naturally, not fail")
     assert_true(not any(event.type == EventType.TASK_COMPLETED for event in empty_watch_events), "watch follow-up should not add generic task completion voice")
 
+    answer_frames = [
+        WatchFrame(
+            user_question="陪我看当前页面",
+            summary="画面摘要：页面正在展示项目路线图。",
+            title="Joi Roadmap",
+            artifact="data/agent_companion/vision/sample.png",
+            model_status="ok",
+        )
+    ]
+    answer_tool = WatchRecallTool(workspace, lambda limit: answer_frames[:limit], FakeWatchAnswerer())
+    answer_result = answer_tool.run(ToolRequest("watch.recall", {"query": "这个页面讲什么"}))
+    assert_true("这个页面讲什么" in answer_result.display_card.summary, "watch answerer should use the follow-up question")
+    assert_true(answer_result.agent_state["answer_source"] == "model", "watch answerer should report model source when used")
+    assert_true(answer_result.display_card.artifacts == ["data/agent_companion/vision/sample.png"], "watch answer should keep screenshot artifact for preview")
+
     watch_app = AgentCompanionApp(workspace)
+    before_watch_memory = watch_app.memory.recent(200)
     watch_app.tools.register(ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=MockSummarizer()))
     watch_events = watch_app.handle_user_text("陪我看当前画面")
     assert_true(any(event.agent_state.get("tool") == "observe.screen" for event in watch_events), "watch should observe screen first")
@@ -274,7 +315,9 @@ def main() -> int:
     recall_cards = [event for event in recall_events if event.agent_state.get("tool") == "watch.recall"]
     assert_true("画面摘要" in recall_cards[-1].display_card.summary, "watch recall should answer from visual summary")
     assert_true(recall_cards[-1].display_card.artifacts == ["data/agent_companion/vision/sample.png"], "watch recall should show recent screenshot artifact")
+    assert_true(recall_cards[-1].agent_state["artifacts"] == ["data/agent_companion/vision/sample.png"], "watch recall should expose artifact preview data")
     assert_true(all("sample.png" not in event.voice_line.text for event in recall_events), "watch recall voice should not read artifact path")
+    assert_true(watch_app.memory.recent(200) == before_watch_memory, "watch observations should not enter long-term memory by default")
 
     fallback_watch_app = AgentCompanionApp(workspace)
     fallback_watch_app.tools.register(ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=None))
@@ -324,6 +367,17 @@ def main() -> int:
     assert_true(any(event.type == EventType.TASK_FAILED for event in cancelled), "approval refusal should cancel task")
     duplicate = app.resolve_approval(str(game_approval["approval_id"]), approved=False)
     assert_true(not duplicate, "duplicate approval responses should be ignored")
+
+    voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
+    voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")
+    assert_true(voice_payload["ok"] and voice_payload["transcript"] == "你好", "mock ASR should return transcript")
+    assert_true(any(event["type"] == "user_message" for event in voice_payload["events"]), "ASR transcript should enter user.message route")
+
+    approval_voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("点击 100,200"))
+    approval_voice_payload = approval_voice_bridge.transcribe_and_submit("", "audio/webm")
+    voice_events = approval_voice_payload["events"]
+    assert_true(any(event["type"] == "approval_required" for event in voice_events), "voice computer command should still require approval")
+    assert_true(not any(event["type"] == "tool_completed" and event.get("agent_state", {}).get("tool") == "computer.click" for event in voice_events), "voice command should not bypass approval")
     print("agent_companion tests passed")
     return 0
 

@@ -19,6 +19,8 @@
 - Hardened approvals with one-time `approval_id` bindings and removed direct user-message approval bypass.
 - Computer Use actions now attach an after screenshot, and Windows text input uses clipboard paste for reliable Chinese input.
 - Added Watch Together session context and follow-up recall using recent visual summaries, titles, questions, and screenshot artifacts.
+- Polished Watch Together: role-aware follow-up answers, session-only screen memory by default, and clickable screenshot thumbnails.
+- Added voice input foundation with click-to-record shell state, mock ASR, and `voice.transcribe` JSON-RPC routing into normal user-message handling.
 
 ## 2026-05-14
 

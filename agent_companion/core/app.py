@@ -26,7 +26,7 @@ from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.watch import WatchRecallTool
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
-from agent_companion.core.watch import WatchFrame, WatchSession
+from agent_companion.core.watch import WatchAnswerer, WatchFrame, WatchSession
 
 
 @dataclass
@@ -168,7 +168,12 @@ class AgentCompanionApp:
             self._emit_result(plan.task_id, result, plan.user_text)
             self._record_watch_context(plan, step, result)
             final_ok = final_ok and result.ok
-            self.memory.remember("task_result", f"{plan.intent}: {result.display_card.summary}")
+            self.memory.remember(
+                "task_result",
+                f"{plan.intent}: {result.display_card.summary}",
+                ephemeral=self._is_ephemeral_result(plan, step, result),
+                sensitive=self._is_sensitive_result(plan, step, result),
+            )
             if not result.ok:
                 break
         if final_ok:
@@ -247,6 +252,16 @@ class AgentCompanionApp:
     def _should_emit_task_completion(intent: str) -> bool:
         return intent not in {"companion_chat", "watch_together", "watch_followup"}
 
+    @staticmethod
+    def _is_ephemeral_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
+        if plan.intent in {"watch_together", "watch_followup"}:
+            return True
+        return step.name in {"observe.screen", "watch.recall"}
+
+    @staticmethod
+    def _is_sensitive_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
+        return step.name.startswith("computer.") and bool(result.display_card.artifacts)
+
     def _plan_body(self, plan: AgentPlan) -> str:
         return "\n".join(self._tool_label(step.name) for step in plan.steps)
 
@@ -265,7 +280,13 @@ class AgentCompanionApp:
         self.tools.register(BrowserTool(self.workspace, "browser.search"))
         self.tools.register(BrowserTool(self.workspace, "browser.observe"))
         self.tools.register(ScreenObserveTool(self.workspace, summarizer=self._build_vision_summarizer()))
-        self.tools.register(WatchRecallTool(self.workspace, self.watch_session.recent))
+        self.tools.register(
+            WatchRecallTool(
+                self.workspace,
+                self.watch_session.recent,
+                WatchAnswerer(self.workspace, self.character.name, self.character.persona),
+            )
+        )
         self.tools.register(ComputerActionTool(self.workspace, "computer.click", "click"))
         self.tools.register(ComputerActionTool(self.workspace, "computer.type_text", "type_text"))
         self.tools.register(ComputerActionTool(self.workspace, "computer.scroll", "scroll"))

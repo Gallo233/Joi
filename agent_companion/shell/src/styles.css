@@ -260,12 +260,40 @@ input {
   margin-top: 12px;
 }
 
-.artifacts span {
+.artifacts span,
+.artifact-thumb {
   border-radius: 8px;
   background: #edf1f6;
-  padding: 6px 8px;
   color: #596579;
   font-size: 12px;
+}
+
+.artifacts span {
+  padding: 6px 8px;
+}
+
+.artifact-thumb {
+  display: grid;
+  gap: 6px;
+  width: 146px;
+  border: 1px solid #d7dee9;
+  padding: 7px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.artifact-thumb img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  object-fit: cover;
+  background: #dfe5ee;
+}
+
+.artifact-thumb span {
+  padding: 0;
+  background: transparent;
+  font-weight: 700;
 }
 
 .chat-section,
@@ -436,10 +464,62 @@ input {
   padding: 8px 14px;
 }
 
+.composer .mic-button {
+  min-width: 58px;
+  background: #e6ebf2;
+  color: #4f5d70;
+}
+
+.composer .mic-button.recording {
+  background: #fff0d9;
+  color: #9a5d16;
+}
+
 .composer input:disabled,
 .composer button:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.artifact-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(12, 16, 28, 0.68);
+}
+
+.artifact-modal-body {
+  position: relative;
+  max-width: min(1100px, 94vw);
+  max-height: 90vh;
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+}
+
+.artifact-modal-body img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(90vh - 58px);
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+.modal-close {
+  position: absolute;
+  right: 18px;
+  top: 18px;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: rgba(39, 42, 52, 0.82);
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 800;
 }
 
 @media (max-width: 920px) {

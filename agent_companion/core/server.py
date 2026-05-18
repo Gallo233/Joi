@@ -12,6 +12,7 @@ from typing import Any
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.schemas import AgentEvent
 from agent_companion.core.schemas import EventType
+from agent_companion.core.speech_input import MockAsrProvider, SpeechInputProvider
 from agent_companion.core.tts_bridge import TtsBridge
 
 
@@ -26,12 +27,13 @@ SPEAKABLE_EVENTS = {
 
 
 class JsonRpcBridge:
-    def __init__(self, workspace: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
+    def __init__(self, workspace: Path, host: str = "127.0.0.1", port: int = 8765, asr_provider: SpeechInputProvider | None = None) -> None:
         self.workspace = workspace.resolve()
         self.host = host
         self.port = port
         self.app = AgentCompanionApp(self.workspace)
         self.tts = TtsBridge(self.workspace)
+        self.asr = asr_provider or MockAsrProvider()
         self.clients: set[Any] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.queue: asyncio.Queue[AgentEvent] | None = None
@@ -92,6 +94,12 @@ class JsonRpcBridge:
                 asyncio.create_task(asyncio.to_thread(self.app.resolve_approval, approval_id, approved))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
                 return
+            if method in {"voice.transcribe", "audio.transcribe"}:
+                audio_base64 = str(params.get("audio_base64") or "")
+                mime_type = str(params.get("mime_type") or "")
+                result = await asyncio.to_thread(self.transcribe_and_submit, audio_base64, mime_type)
+                await websocket.send(self._result(request_id, result))
+                return
             if method == "core.ping":
                 await websocket.send(self._result(request_id, {"ok": True}))
                 return
@@ -121,6 +129,24 @@ class JsonRpcBridge:
         }
         message = json.dumps({"jsonrpc": "2.0", "method": "agent.voice_audio", "params": payload}, ensure_ascii=False)
         await self._broadcast(message)
+
+    def transcribe_and_submit(self, audio_base64: str, mime_type: str = "") -> dict[str, Any]:
+        audio = _decode_audio_base64(audio_base64)
+        result = self.asr.transcribe(audio, mime_type)
+        payload: dict[str, Any] = {
+            "ok": result.ok,
+            "transcript": result.transcript,
+            "confidence": result.confidence,
+            "provider": result.provider,
+            "submitted": False,
+        }
+        if result.error:
+            payload["error"] = result.error
+        if result.ok:
+            events = self.app.handle_user_text(result.transcript)
+            payload["submitted"] = True
+            payload["events"] = [event.to_dict() for event in events]
+        return payload
 
     async def _broadcast(self, message: str) -> None:
         stale: list[Any] = []
@@ -186,6 +212,16 @@ class JsonRpcBridge:
     @staticmethod
     def _error(request_id: Any, code: int, message: str) -> str:
         return json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}, ensure_ascii=False)
+
+
+def _decode_audio_base64(audio_base64: str) -> bytes:
+    if not audio_base64:
+        return b""
+    payload = audio_base64.split(",", 1)[1] if "," in audio_base64[:80] else audio_base64
+    try:
+        return base64.b64decode(payload, validate=False)
+    except Exception:
+        return b""
 
 
 def main(argv: list[str] | None = None) -> int:

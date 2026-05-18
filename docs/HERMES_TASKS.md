@@ -31,9 +31,9 @@ Keep `config.yaml` local only. Public examples should go in `config.example.yaml
 
 ## Current Priority
 
-Continue P4.1 Watch Together Loop.
+Continue P4.2 Voice Input Foundation and prepare real ASR provider wiring.
 
-The current observation, first action layer, approval hardening, and watch loop are implemented:
+The current observation, first action layer, approval hardening, watch loop, and first voice input foundation are implemented:
 
 - `agent_companion/core/vision/` captures Windows active-window/fullscreen screenshots.
 - `agent_companion/core/vision/summarizer.py` can call an OpenAI-compatible vision model.
@@ -47,25 +47,32 @@ The current observation, first action layer, approval hardening, and watch loop 
 - `agent_companion/core/watch.py` keeps recent watch context in the current app session.
 - `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.
 - Follow-up prompts like "你看到了什么" reuse recent summaries and screenshot artifacts instead of repeating screenshots.
+- Watch follow-up answers use the role-aware text/expression model when configured, then fall back to deterministic templates.
+- Watch observations are ephemeral by default and do not enter long-term memory unless an explicit save flow is added later.
+- The Vue shell renders screenshot artifacts as clickable thumbnails with a preview modal.
+- `agent_companion/core/speech_input.py` defines `SpeechInputProvider`, `MockAsrProvider`, and `AsrResult`.
+- The WebSocket bridge exposes `voice.transcribe` / `audio.transcribe`, then routes transcripts through normal `user.message`.
+- The shell has a click-to-record microphone button; first version does not save raw audio and does not run always-on listening.
 
 Next task options, in priority order:
 
-1. Persist Watch Together context across app restarts with a local retention policy.
-2. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
-3. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
-4. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
-5. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
-6. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
+1. Replace `MockAsrProvider` with a configurable real ASR provider while preserving no-audio-retention defaults.
+2. Add voice interrupt/cancel behavior so a new command can stop stale TTS playback.
+3. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
+4. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
+5. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+6. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
+7. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
 
 ## Suggested First Task
 
-Implement persistent Watch Together context:
+Implement real ASR provider selection:
 
-- Store recent watch frames in local SQLite through `MemoryStore` or a dedicated table.
-- Persist user question, title, summary, artifact label/path, model status, and timestamp.
-- Keep screenshot files under ignored runtime data; do not commit generated screenshots.
-- Make recall prefer in-memory context first, then recent persisted context after restart.
-- Keep all voice output short and natural; never read screenshot paths, JSON, model names, or tool ids.
+- Add ASR config fields to `config.example.yaml` and parser types.
+- Implement an OpenAI-compatible or local Whisper provider behind `SpeechInputProvider`.
+- Keep raw audio in memory only; do not write uploaded audio to disk by default.
+- Return transcript confidence/provider metadata to the shell without exposing model names in voice lines.
+- Verify voice-created medium-risk tasks still require `approval_id`.
 
 ## Allowed Edit Areas
 
@@ -73,6 +80,7 @@ Preferred:
 
 - `agent_companion/core/vision/`
 - `agent_companion/core/watch.py`
+- `agent_companion/core/speech_input.py`
 - `agent_companion/core/computer_use/`
 - `agent_companion/core/tools/watch.py`
 - `agent_companion/core/tools/computer.py`
@@ -91,6 +99,7 @@ Use caution:
 
 - `agent_companion/shell/src/App.vue`
 - `agent_companion/shell/src/styles.css`
+- `agent_companion/shell/src/api.ts`
 - `agent_companion/shell/src/protocol.ts`
 
 Avoid unless necessary:

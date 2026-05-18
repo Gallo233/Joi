@@ -11,6 +11,11 @@ const events = ref<AgentEvent[]>([])
 const developerMode = ref(false)
 const ready = ref<CoreReadyPayload | null>(null)
 const failedImageSrc = ref('')
+const previewArtifact = ref('')
+const voiceState = ref<'idle' | 'recording' | 'transcribing'>('idle')
+let mediaRecorder: MediaRecorder | null = null
+let mediaStream: MediaStream | null = null
+let audioChunks: Blob[] = []
 
 const client = new CoreClient({
   url: 'ws://127.0.0.1:8765',
@@ -110,6 +115,12 @@ const currentMode = computed(() => {
   if (intent === 'watch_together' || intent === 'watch_followup' || intent === 'browser' || tool === 'watch.recall' || tool.startsWith('browser.')) return '陪看'
   return '闲聊'
 })
+const voiceButtonLabel = computed(() => {
+  if (voiceState.value === 'recording') return '停止'
+  if (voiceState.value === 'transcribing') return '转写中'
+  return '语音'
+})
+const previewArtifactSrc = computed(() => (previewArtifact.value ? artifactSrc(previewArtifact.value) : ''))
 
 function toolName(event: AgentEvent) {
   const tool = event.agent_state?.tool
@@ -206,6 +217,22 @@ function artifactLabel(artifact: string, index: number) {
   return `附件 ${index + 1}`
 }
 
+function isImageArtifact(artifact: string) {
+  return /\.(png|jpg|jpeg|webp)$/i.test(artifact)
+}
+
+function artifactPath(artifact: string) {
+  if (/^[a-zA-Z]:[\\/]/.test(artifact) || artifact.startsWith('/')) return artifact
+  const workspace = ready.value?.workspace || ''
+  if (!workspace) return artifact
+  const separator = workspace.includes('\\') ? '\\' : '/'
+  return `${workspace.replace(/[\\/]$/, '')}${separator}${artifact.replace(/[\\/]/g, separator)}`
+}
+
+function artifactSrc(artifact: string) {
+  return convertFileSrc(artifactPath(artifact))
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
 }
@@ -225,7 +252,9 @@ function eventTime(event: AgentEvent) {
 function submit() {
   const text = input.value.trim()
   if (!text) return
-  client.sendUserText(text)
+  void client.sendUserText(text).catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '发送失败'
+  })
   input.value = ''
 }
 
@@ -233,7 +262,9 @@ function resolveApproval(approved: boolean) {
   if (!pendingApproval.value) return
   const approvalId = approvalIdFor(pendingApproval.value)
   if (!approvalId) return
-  client.resolveApproval(approvalId, approved)
+  void client.resolveApproval(approvalId, approved).catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '审批提交失败'
+  })
 }
 
 function approvalIdFor(event: AgentEvent) {
@@ -252,8 +283,85 @@ async function playAudioPath(path?: string) {
   }
 }
 
+async function toggleVoiceInput() {
+  if (voiceState.value === 'recording') {
+    stopVoiceRecording()
+    return
+  }
+  if (voiceState.value !== 'idle' || !connected.value) return
+  await startVoiceRecording()
+}
+
+async function startVoiceRecording() {
+  try {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      errorText.value = '当前 WebView 不支持麦克风录音'
+      return
+    }
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    audioChunks = []
+    mediaRecorder = new MediaRecorder(mediaStream)
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) audioChunks.push(event.data)
+    }
+    mediaRecorder.onstop = () => {
+      const mimeType = mediaRecorder?.mimeType || 'audio/webm'
+      const blob = new Blob(audioChunks, { type: mimeType })
+      audioChunks = []
+      cleanupVoiceStream()
+      void transcribeVoiceBlob(blob, mimeType)
+    }
+    mediaRecorder.start()
+    voiceState.value = 'recording'
+  } catch {
+    cleanupVoiceStream()
+    voiceState.value = 'idle'
+    errorText.value = '麦克风启动失败'
+  }
+}
+
+function stopVoiceRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    voiceState.value = 'transcribing'
+    mediaRecorder.stop()
+    return
+  }
+  cleanupVoiceStream()
+  voiceState.value = 'idle'
+}
+
+function cleanupVoiceStream() {
+  mediaStream?.getTracks().forEach((track) => track.stop())
+  mediaStream = null
+  mediaRecorder = null
+}
+
+async function transcribeVoiceBlob(blob: Blob, mimeType: string) {
+  try {
+    const audioBase64 = await blobToBase64(blob)
+    const result = (await client.transcribeVoice(audioBase64, mimeType)) as { ok?: boolean; transcript?: string; error?: string }
+    if (!result.ok) errorText.value = result.error || '没有识别到语音'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '语音转写失败'
+  } finally {
+    voiceState.value = 'idle'
+  }
+}
+
+function blobToBase64(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || '').split(',', 2)[1] || '')
+    reader.onerror = () => reject(new Error('音频读取失败'))
+    reader.readAsDataURL(blob)
+  })
+}
+
 onMounted(() => client.connect())
-onBeforeUnmount(() => client.close())
+onBeforeUnmount(() => {
+  cleanupVoiceStream()
+  client.close()
+})
 </script>
 
 <template>
@@ -304,9 +412,21 @@ onBeforeUnmount(() => client.close())
             <summary>结果详情</summary>
             <pre v-if="task.detail?.display_card.body">{{ task.detail.display_card.body }}</pre>
             <div class="artifacts" v-if="task.detail?.display_card.artifacts?.length">
+              <button
+                v-for="(artifact, index) in task.detail.display_card.artifacts.filter(isImageArtifact)"
+                :key="`image-${artifact}`"
+                class="artifact-thumb"
+                type="button"
+                :title="artifactLabel(artifact, index)"
+                @click="previewArtifact = artifact"
+              >
+                <img :src="artifactSrc(artifact)" alt="" />
+                <span>{{ artifactLabel(artifact, index) }}</span>
+              </button>
               <span
                 v-for="(artifact, index) in task.detail.display_card.artifacts"
-                :key="artifact"
+                v-show="!isImageArtifact(artifact)"
+                :key="`file-${artifact}`"
                 :title="artifactLabel(artifact, index)"
               >
                 {{ artifactLabel(artifact, index) }}
@@ -376,9 +496,25 @@ onBeforeUnmount(() => client.close())
         <span>{{ latestSpeech }}</span>
       </div>
       <form class="composer" @submit.prevent="submit">
+        <button
+          type="button"
+          class="mic-button"
+          :class="{ recording: voiceState === 'recording' }"
+          :disabled="!connected || voiceState === 'transcribing'"
+          @click="toggleVoiceInput"
+        >
+          {{ voiceButtonLabel }}
+        </button>
         <input v-model="input" :disabled="!connected" placeholder="输入：帮我刷鸣潮日常 / 陪我看当前视频 / 修复项目 bug" />
         <button :disabled="!connected">发送</button>
       </form>
     </aside>
+
+    <div class="artifact-modal" v-if="previewArtifact" @click.self="previewArtifact = ''">
+      <div class="artifact-modal-body">
+        <button type="button" class="modal-close" @click="previewArtifact = ''">关闭</button>
+        <img :src="previewArtifactSrc" alt="" />
+      </div>
+    </div>
   </main>
 </template>

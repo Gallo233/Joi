@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+import os
+from pathlib import Path
 import time
 from typing import Any
 
@@ -56,3 +59,85 @@ def answer_from_recent_frames(question: str, frames: list[WatchFrame]) -> tuple[
         return f"刚才我看到的是：{latest.summary}", "vision_context"
     prior = "；".join(frame.summary for frame in frames[:3] if frame.summary)
     return f"结合最近几次画面，我看到的重点是：{prior}", "vision_context"
+
+
+class WatchAnswerer:
+    def __init__(self, workspace: Path, character_name: str = "Joi", character_persona: str = "") -> None:
+        self.workspace = workspace.resolve()
+        self.character_name = character_name
+        self.character_persona = character_persona
+        self._config: Any | None = self._load_config()
+        self._client: Any | None = None
+        self.last_used_model = False
+
+    def answer(self, question: str, frames: list[WatchFrame]) -> tuple[str, str]:
+        fallback, status = answer_from_recent_frames(question, frames)
+        self.last_used_model = False
+        if not frames or os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
+            return fallback, status
+        config = self._config
+        if config is None or config.llm.use_mock or not (config.llm.is_expression_configured or config.llm.is_configured):
+            return fallback, status
+        try:
+            from openai import OpenAI
+
+            from agent_companion.core.config import ModelRouter
+
+            router = ModelRouter(config.llm)
+            endpoint = router.resolve("expression" if config.llm.is_expression_configured else "text")
+            if self._client is None or self._client.base_url != endpoint.base_url:
+                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
+            character = config.primary_character if config.characters else None
+            character_name = character.name if character else self.character_name
+            persona = character.setting if character else self.character_persona
+            context = [
+                {
+                    "title": frame.title,
+                    "summary": frame.summary,
+                    "user_question": frame.user_question,
+                    "model_status": frame.model_status,
+                    "age_seconds": int(time.time() - frame.created_at),
+                }
+                for frame in frames[:3]
+            ]
+            response = self._client.chat.completions.create(
+                model=endpoint.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"你是{character_name}，正在陪用户看当前窗口、网页或视频。\n"
+                            f"角色设定：{persona[:1800]}\n"
+                            "根据最近视觉上下文回答用户追问。要自然、具体，不要像工具日志。"
+                            "只输出 JSON：{\"answer\":\"给 UI 显示的自然回答\"}。"
+                            "禁止输出 JSON 以外文本，禁止包含截图路径、模型名、工具名、task id、命令、token 或日志。"
+                            "如果视觉上下文不足，要坦率说明需要再看一次。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps({"question": question, "recent_frames": context}, ensure_ascii=False),
+                    },
+                ],
+                temperature=min(max(config.llm.temperature, 0.2), 0.9),
+                response_format={"type": "json_object"},
+            )
+            payload = json.loads(response.choices[0].message.content or "{}")
+            answer = str(payload.get("answer") or "").strip()
+            if not answer:
+                return fallback, status
+            self.last_used_model = True
+            return answer[:900], "llm_answer"
+        except Exception:
+            return fallback, status
+
+    def _load_config(self) -> Any | None:
+        config_path = self.workspace / "config.yaml"
+        if not config_path.is_file():
+            return None
+        try:
+            from agent_companion.core.config import load_app_config
+
+            return load_app_config(config_path)
+        except Exception:
+            return None
