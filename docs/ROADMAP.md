@@ -27,6 +27,7 @@ Status: in progress
 
 - Add screenshot capture for browser, active window, and full screen. Windows active-window/fullscreen capture is connected through `observe.screen`.
 - Add `VisionSummarizer` with configurable vision model. OpenAI-compatible vision summaries are connected.
+- Add OCR grounding for visible text and rough screen regions. Optional `pytesseract`/Pillow OCR is best-effort; unavailable OCR does not fail screenshots or Watch Together.
 - Separate text model, vision model, and expression model. Model routing is connected for text, vision, and expression.
 - Do not mark blank pages or failed captures as success.
 
@@ -49,6 +50,7 @@ Status: in progress
 
 - Watch together: observe visible content, summarize, and discuss. Screen capture and optional visual model summarization are connected.
 - Keep recent watch context in the session: user question, window title, summary, screenshot artifact, and model status.
+- Keep recent OCR snippets in the watch session so follow-up questions can cite visible text, titles, labels, and button-like strings.
 - Route follow-up questions like "what did you see" through recent visual context instead of repeating screenshots.
 - Generate watch follow-up answers through the role-aware text/expression model when available, with template fallback when not configured.
 - Keep screen observations out of long-term memory by default; only session watch context is retained unless the user explicitly asks to save it.

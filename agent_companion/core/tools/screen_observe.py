@@ -5,7 +5,8 @@ from pathlib import Path
 from agent_companion.core.computer_use import ComputerUseBackend, WindowsComputerUseBackend
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.tools.base import ToolAdapter
-from agent_companion.core.vision import VisionObserver, VisionSummarizer, WindowsScreenObserver
+from agent_companion.core.vision import OcrExtractor, PytesseractOcrExtractor, VisionObserver, VisionSummarizer, WindowsScreenObserver
+from agent_companion.core.vision.ocr import OcrResult
 from agent_companion.core.vision.schemas import VisionObservation
 from agent_companion.core.voice import safe_voice_line
 
@@ -19,11 +20,13 @@ class ScreenObserveTool(ToolAdapter):
         observer: VisionObserver | None = None,
         computer_backend: ComputerUseBackend | None = None,
         summarizer: VisionSummarizer | None = None,
+        ocr: OcrExtractor | None = None,
     ) -> None:
         self.workspace = workspace
         self.observer = observer or WindowsScreenObserver(workspace)
         self.computer_backend = computer_backend or WindowsComputerUseBackend(workspace, self.observer)
         self.summarizer = summarizer
+        self.ocr = ocr or PytesseractOcrExtractor()
 
     def run(self, request: ToolRequest) -> ToolResult:
         query = str(request.arguments.get("query") or "").strip()
@@ -39,6 +42,7 @@ class ScreenObserveTool(ToolAdapter):
                 voice_line=safe_voice_line("我没能截到当前画面，细节在卡片里。", sprite="4"),
             )
 
+        ocr_result = self._run_ocr(observation)
         summary_text = ""
         summary_error = ""
         model_status = "unconfigured"
@@ -55,6 +59,7 @@ class ScreenObserveTool(ToolAdapter):
                 model_status = "error"
 
         body = observation.detail_text()
+        body = f"{body}\n\n{ocr_result.detail_text()}"
         card_summary = self._summary(observation)
         if summary_text:
             body = f"{body}\n\n视觉摘要：{summary_text}"
@@ -69,7 +74,7 @@ class ScreenObserveTool(ToolAdapter):
         agent_state: dict = {
             "tool": self.name,
             "computer_observation": computer_observation.to_agent_state(),
-            "observation": observation.to_agent_state(),
+            "observation": {**observation.to_agent_state(), "ocr": ocr_result.to_agent_state()},
             "model_status": model_status,
             "artifacts": [observation.screenshot_rel],
         }
@@ -92,6 +97,12 @@ class ScreenObserveTool(ToolAdapter):
             ),
             voice_line=voice,
         )
+
+    def _run_ocr(self, observation: VisionObservation) -> OcrResult:
+        try:
+            return self.ocr.extract(observation.screenshot_path)
+        except Exception:
+            return OcrResult("failed", "OCR 没有跑通，截图仍然可查看。", error="ocr_failed")
 
     @staticmethod
     def _summary(observation: VisionObservation) -> str:

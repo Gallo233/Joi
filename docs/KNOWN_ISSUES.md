@@ -2,7 +2,7 @@
 
 ## Active
 
-- Vision now supports Windows active-window/fullscreen screenshots and optional visual model summaries, but OCR is not implemented yet.
+- Vision now supports Windows active-window/fullscreen screenshots, optional visual model summaries, and best-effort OCR grounding; OCR quality depends on optional local dependencies and the captured image clarity.
 - Watch Together can reuse recent visual summaries in the current app session, but context is not persisted across restarts yet.
 - Voice input has OpenAI-compatible ASR wiring and explicit disabled state when unconfigured; local Whisper is not wired yet.
 - Computer Use actions are intentionally minimal: click/type/scroll/hotkey are Windows-only and do not yet include visual target grounding or before/after verification.
@@ -30,5 +30,6 @@
 - Stale spoken audio is stopped when a new typed or voice command starts.
 - Late TTS audio from older user intents is suppressed by a client-side voice epoch.
 - Voice transcription uses the configured ASR timeout plus grace time instead of the generic Core request timeout.
+- Watch Together can cite recent OCR snippets for visible text and labels, but region grouping is still coarse bbox data rather than semantic UI targets.
 - Voice audio identity now includes event timestamps so repeated lines in the same task do not collide.
 - Developer mode shows ASR/TTS runtime status, but there is not yet a full settings panel for changing providers.

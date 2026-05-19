@@ -346,12 +346,16 @@ class AgentCompanionApp:
         artifacts = result.display_card.artifacts or []
         summary = str(state.get("vision_summary") or result.display_card.summary or "").strip()
         model_status = str(state.get("model_status") or "unknown")
+        ocr = observation.get("ocr") if isinstance(observation.get("ocr"), dict) else {}
+        ocr_text = _ocr_text_from_state(ocr)
         frame = WatchFrame(
             user_question=plan.user_text,
             summary=summary,
             title=str(observation.get("title") or ""),
             artifact=artifacts[0] if artifacts else "",
             model_status=model_status,
+            ocr_summary=str(ocr.get("summary") or ""),
+            ocr_text=ocr_text,
         )
         self.watch_session.add(frame)
 
@@ -359,3 +363,17 @@ class AgentCompanionApp:
 def _arguments_hash(arguments: dict) -> str:
     serialized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+
+
+def _ocr_text_from_state(ocr: dict) -> list[str]:
+    blocks = ocr.get("text_blocks") if isinstance(ocr, dict) else []
+    if not isinstance(blocks, list):
+        return []
+    rows: list[str] = []
+    for block in blocks[:12]:
+        if not isinstance(block, dict):
+            continue
+        text = str(block.get("text") or "").strip()
+        if text:
+            rows.append(text[:160])
+    return rows

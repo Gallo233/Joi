@@ -26,6 +26,7 @@
 - Added voice queue epochs so late TTS from older intents is suppressed, and aligned `voice.transcribe` RPC timeout with configured ASR timeout.
 - Hardened voice audio matching with event timestamps so repeated voice lines in the same task cannot revive stale audio.
 - Added developer-mode ASR/TTS runtime status with sanitized TTS error reporting.
+- Added best-effort OCR grounding for screen observations, including visible text blocks, task-card OCR details, and Watch Together recall over recent OCR snippets.
 
 ## 2026-05-14
 

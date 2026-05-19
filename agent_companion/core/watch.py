@@ -15,6 +15,8 @@ class WatchFrame:
     title: str = ""
     artifact: str = ""
     model_status: str = "unknown"
+    ocr_summary: str = ""
+    ocr_text: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
     def to_agent_state(self) -> dict[str, Any]:
@@ -24,6 +26,8 @@ class WatchFrame:
             "title": self.title,
             "artifact": self.artifact,
             "model_status": self.model_status,
+            "ocr_summary": self.ocr_summary,
+            "ocr_text": list(self.ocr_text[:12]),
             "created_at": self.created_at,
         }
 
@@ -55,9 +59,14 @@ def answer_from_recent_frames(question: str, frames: list[WatchFrame]) -> tuple[
         return f"{title}的截图已经保存了，但还没有配置视觉模型，所以我现在只能确认画面已记录。", "vision_unconfigured"
     if latest.model_status == "error":
         return f"{title}的截图已经保存了，不过视觉摘要暂时没生成出来。", "vision_error"
+    ocr_line = _ocr_line(latest)
+    question_hint = question or ""
+    if any(token in question_hint for token in ("写了什么", "文字", "按钮", "页面里", "标题", "label", "button")) and ocr_line:
+        return f"{title}里我能读到这些可见文字：{ocr_line}", "vision_context"
     if len(frames) == 1:
-        return f"刚才我看到的是：{latest.summary}", "vision_context"
-    prior = "；".join(frame.summary for frame in frames[:3] if frame.summary)
+        suffix = f" 可见文字包括：{ocr_line}" if ocr_line else ""
+        return f"刚才我看到的是：{latest.summary}{suffix}", "vision_context"
+    prior = "；".join(_frame_context(frame) for frame in frames[:3] if frame.summary or frame.ocr_text)
     return f"结合最近几次画面，我看到的重点是：{prior}", "vision_context"
 
 
@@ -94,6 +103,8 @@ class WatchAnswerer:
                 {
                     "title": frame.title,
                     "summary": frame.summary,
+                    "ocr_summary": frame.ocr_summary,
+                    "ocr_text": frame.ocr_text[:10],
                     "user_question": frame.user_question,
                     "model_status": frame.model_status,
                     "age_seconds": int(time.time() - frame.created_at),
@@ -141,3 +152,18 @@ class WatchAnswerer:
             return load_app_config(config_path)
         except Exception:
             return None
+
+
+def _ocr_line(frame: WatchFrame) -> str:
+    snippets = [text.strip() for text in frame.ocr_text[:8] if text.strip()]
+    if snippets:
+        return "、".join(snippets)
+    return frame.ocr_summary.strip()
+
+
+def _frame_context(frame: WatchFrame) -> str:
+    base = frame.summary.strip()
+    ocr = _ocr_line(frame)
+    if base and ocr:
+        return f"{base}；可见文字：{ocr}"
+    return base or f"可见文字：{ocr}"

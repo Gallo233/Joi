@@ -31,12 +31,13 @@ Keep `config.yaml` local only. Public examples should go in `config.example.yaml
 
 ## Current Priority
 
-Continue P4.2 Voice Input hardening and prepare ASR/TTS status visibility.
+Continue P4.3 OCR/vision target grounding and prepare post-action verification.
 
 The current observation, first action layer, approval hardening, watch loop, and production ASR path are implemented:
 
 - `agent_companion/core/vision/` captures Windows active-window/fullscreen screenshots.
 - `agent_companion/core/vision/summarizer.py` can call an OpenAI-compatible vision model.
+- `agent_companion/core/vision/ocr.py` defines a stable OCR result schema and optional `pytesseract`/Pillow extraction with safe unavailable fallback.
 - `agent_companion/core/computer_use/` defines observation, action, backend, and result contracts.
 - `agent_companion/core/tools/screen_observe.py` routes `observe.screen` through the Computer Use observation chain.
 - `agent_companion/core/tools/computer.py` exposes `computer.click`, `computer.type_text`, `computer.scroll`, and `computer.hotkey`.
@@ -48,6 +49,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.
 - Follow-up prompts like "你看到了什么" reuse recent summaries and screenshot artifacts instead of repeating screenshots.
 - Watch follow-up answers use the role-aware text/expression model when configured, then fall back to deterministic templates.
+- Watch follow-up answers can reuse recent OCR snippets for questions about visible text, page labels, and buttons.
 - Watch observations are ephemeral by default and do not enter long-term memory unless an explicit save flow is added later.
 - The Vue shell renders screenshot artifacts as clickable thumbnails with a preview modal.
 - `agent_companion/core/speech_input.py` defines `SpeechInputProvider`, `MockAsrProvider`, and `AsrResult`.
@@ -70,21 +72,21 @@ The current observation, first action layer, approval hardening, watch loop, and
 
 Next task options, in priority order:
 
-1. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
+1. Improve OCR target grounding by grouping text blocks into rough regions such as top bar, center content, and bottom controls.
 2. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
 3. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
-4. Add a settings panel for changing ASR/TTS providers once runtime status is stable.
+4. Add a settings panel for changing ASR/TTS/OCR providers once runtime status is stable.
 5. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 6. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
 
 ## Suggested First Task
 
-Implement OCR/vision target grounding:
+Implement post-action verification:
 
-- Add OCR extraction to `observe.screen` outputs when available.
-- Merge OCR text with vision summaries so watch answers can cite visible labels/text.
-- Keep screenshots and OCR session-local by default unless explicit save is added later.
-- Add tests for blank/noisy OCR fallback and for voice lines not reading raw OCR dumps.
+- Compare before/after screenshots or OCR summaries for confirmed Computer Use actions.
+- Flag likely no-op actions in task cards without overclaiming success.
+- Keep screenshot paths and coordinates out of voice.
+- Add tests for successful change, likely no-op, and unavailable comparison fallback.
 
 ## Allowed Edit Areas
 

@@ -28,6 +28,10 @@ class WatchRecallTool(ToolAdapter):
             for index, frame in enumerate(frames, start=1):
                 title = frame.title or "未知窗口"
                 body_lines.append(f"{index}. {title} - {frame.summary}")
+                if frame.ocr_text:
+                    body_lines.append(f"   可见文字：{' / '.join(frame.ocr_text[:6])}")
+                elif frame.ocr_summary:
+                    body_lines.append(f"   OCR：{frame.ocr_summary}")
         else:
             body_lines.append("最近视觉上下文：暂无")
         has_context = bool(frames)

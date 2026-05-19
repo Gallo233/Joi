@@ -17,6 +17,7 @@ from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAs
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.watch import WatchRecallTool
+from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock, UnavailableOcrExtractor
 from agent_companion.core.vision.schemas import VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummary
 from agent_companion.core.voice import safe_voice_line
@@ -57,6 +58,14 @@ class FakeComputerBackend:
     def perform(self, action: ComputerAction) -> ComputerUseResult:
         self.actions.append(action)
         return ComputerUseResult(ok=True, action=action, summary=_fake_action_summary(action.action_type))
+
+
+class FakeOcrExtractor:
+    def __init__(self, result: OcrResult) -> None:
+        self.result = result
+
+    def extract(self, image_path: Path) -> OcrResult:
+        return self.result
 
 
 def _fake_action_summary(action_type: str) -> str:
@@ -136,13 +145,39 @@ def main() -> int:
         import shutil
         shutil.rmtree(memory_dir, ignore_errors=True)
 
-    screen_tool = ScreenObserveTool(workspace, FakeVisionObserver(workspace))
+    screen_tool = ScreenObserveTool(workspace, FakeVisionObserver(workspace), ocr=UnavailableOcrExtractor())
     screen_result = screen_tool.run(ToolRequest("observe.screen", {"query": "陪我看当前画面", "target": "fullscreen"}))
     assert_true(screen_result.ok, "screen observation should succeed with fake observer")
     assert_true("computer_observation" in screen_result.agent_state, "screen observation should use computer observation chain")
     assert_true(screen_result.agent_state["observation"]["target"] == "fullscreen", "screen target not preserved")
     assert_true(screen_result.display_card.artifacts == ["data/agent_companion/vision/sample.png"], "screenshot artifact missing")
     assert_true("sample.png" not in screen_result.voice_line.text, "voice should not read screenshot path")
+    assert_true(screen_result.agent_state["observation"]["ocr"]["status"] == "unavailable", "OCR should have safe unavailable fallback")
+    assert_true("OCR：" in screen_result.display_card.body, "screen card should include OCR status")
+
+    unavailable_ocr = UnavailableOcrExtractor("OCR 依赖未安装，暂时只能保存截图。")
+    unavailable_result = unavailable_ocr.extract(workspace / "missing.png")
+    assert_true(unavailable_result.status == "unavailable", "Unavailable OCR should report unavailable")
+    assert_true("OCR" in unavailable_result.detail_text(), "Unavailable OCR should have friendly detail")
+
+    mock_ocr = OcrResult(
+        "success",
+        "识别到 3 段可见文字，包含：登录、设置、开始任务。",
+        [
+            OcrTextBlock("登录", (10, 20, 48, 20), 0.98),
+            OcrTextBlock("设置", (90, 20, 48, 20), 0.96),
+            OcrTextBlock("开始任务", (180, 240, 96, 32), 0.93),
+        ],
+    )
+    ocr_tool = ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=MockSummarizer(), ocr=FakeOcrExtractor(mock_ocr))
+    ocr_result = ocr_tool.run(ToolRequest("observe.screen", {"query": "看看按钮", "target": "fullscreen"}))
+    ocr_state = ocr_result.agent_state["observation"]["ocr"]
+    assert_true(ocr_state["status"] == "success", "mock OCR should be included in observation state")
+    assert_true(ocr_state["text_blocks"][0]["text"] == "登录", "OCR text block should preserve visible text")
+    assert_true(ocr_state["text_blocks"][0]["bbox"] == [10, 20, 48, 20], "OCR text block should include bbox for planner")
+    assert_true("开始任务" in ocr_result.display_card.body, "OCR snippets should be visible in task details")
+    forbidden_ocr_voice = ["10", "20", "开始任务", "sample.png", "{"]
+    assert_true(not any(fragment in ocr_result.voice_line.text for fragment in forbidden_ocr_voice), "OCR voice should not read raw OCR details")
 
     policy = PolicyGate()
     click_decision = policy.classify(ToolRequest("computer.click", {"x": 100, "y": 200}))
@@ -323,6 +358,8 @@ def main() -> int:
             title="Joi Roadmap",
             artifact="data/agent_companion/vision/sample.png",
             model_status="ok",
+            ocr_summary="识别到 2 段可见文字。",
+            ocr_text=["P4 Watch Together", "P5 Model Router"],
         )
     ]
     answer_tool = WatchRecallTool(workspace, lambda limit: answer_frames[:limit], FakeWatchAnswerer())
@@ -330,10 +367,15 @@ def main() -> int:
     assert_true("这个页面讲什么" in answer_result.display_card.summary, "watch answerer should use the follow-up question")
     assert_true(answer_result.agent_state["answer_source"] == "model", "watch answerer should report model source when used")
     assert_true(answer_result.display_card.artifacts == ["data/agent_companion/vision/sample.png"], "watch answer should keep screenshot artifact for preview")
+    ocr_question_tool = WatchRecallTool(workspace, lambda limit: answer_frames[:limit])
+    ocr_question_result = ocr_question_tool.run(ToolRequest("watch.recall", {"query": "页面里写了什么"}))
+    assert_true("P4 Watch Together" in ocr_question_result.display_card.summary, "watch recall should answer from OCR text")
+    assert_true("P5 Model Router" in ocr_question_result.agent_state["watch_context"][0]["ocr_text"], "watch context should expose OCR text for planner")
+    assert_true("sample.png" not in ocr_question_result.voice_line.text, "watch OCR voice should not read artifact path")
 
     watch_app = AgentCompanionApp(workspace)
     before_watch_memory = watch_app.memory.recent(200)
-    watch_app.tools.register(ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=MockSummarizer()))
+    watch_app.tools.register(ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=MockSummarizer(), ocr=FakeOcrExtractor(mock_ocr)))
     watch_events = watch_app.handle_user_text("陪我看当前画面")
     assert_true(any(event.agent_state.get("tool") == "observe.screen" for event in watch_events), "watch should observe screen first")
     assert_true(watch_app.watch_session.has_context(), "watch session should remember visual context")
@@ -342,6 +384,7 @@ def main() -> int:
     assert_true(not any(event.agent_state.get("tool") == "observe.screen" for event in recall_events), "watch follow-up should not repeat screen capture")
     recall_cards = [event for event in recall_events if event.agent_state.get("tool") == "watch.recall"]
     assert_true("画面摘要" in recall_cards[-1].display_card.summary, "watch recall should answer from visual summary")
+    assert_true("登录" in recall_cards[-1].display_card.body, "watch recall detail should reuse OCR context")
     assert_true(recall_cards[-1].display_card.artifacts == ["data/agent_companion/vision/sample.png"], "watch recall should show recent screenshot artifact")
     assert_true(recall_cards[-1].agent_state["artifacts"] == ["data/agent_companion/vision/sample.png"], "watch recall should expose artifact preview data")
     assert_true(all("sample.png" not in event.voice_line.text for event in recall_events), "watch recall voice should not read artifact path")
