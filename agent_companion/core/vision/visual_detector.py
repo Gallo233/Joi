@@ -257,7 +257,7 @@ def _rgb_to_gray(red: int, green: int, blue: int, max_value: int) -> int:
 def _dedupe_candidates(candidates: list[VisualCandidate]) -> list[VisualCandidate]:
     rows: list[VisualCandidate] = []
     for candidate in candidates:
-        if any(_iou(candidate.bbox, existing.bbox) >= 0.22 or _center_distance(candidate.bbox, existing.bbox) < 0.9 for existing in rows):
+        if any(_iou(candidate.bbox, existing.bbox) >= 0.22 or _center_distance(candidate.bbox, existing.bbox) < 1.0 for existing in rows):
             continue
         rows.append(candidate)
     return rows
@@ -315,7 +315,7 @@ def _region_from_bbox(bbox: tuple[int, int, int, int], width: int, height: int) 
     center_y = top + box_height / 2
     if height and center_y / height < 0.2:
         return "top_bar"
-    if height and center_y / height > 0.72:
+    if height and center_y / height > 0.78:
         return "bottom_controls"
     if width and center_x / width > 0.68:
         return "sidebar"

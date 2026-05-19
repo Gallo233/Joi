@@ -20,10 +20,13 @@ from agent_companion.core.vision.visual_detector import HeuristicVisualDetector,
 
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "visual_detector"
 CASE_FILE = FIXTURE_DIR / "visual_cases.json"
+LOCAL_FIXTURE_DIR = ROOT / "data" / "local_visual_eval"
+LOCAL_CASE_FILE = LOCAL_FIXTURE_DIR / "visual_cases.local.json"
 
 
 @dataclass
 class CaseResult:
+    suite: str
     case_id: str
     passed: bool
     failures: list[str]
@@ -57,25 +60,42 @@ class _StaticVisualDetector:
 
 
 def run_eval(root: Path = ROOT, verbose: bool = True) -> int:
-    cases = json.loads(CASE_FILE.read_text(encoding="utf-8"))
-    results = [_run_case(root, case) for case in cases]
-    passed = sum(1 for result in results if result.passed)
+    synthetic_results = _run_suite(root, "synthetic", CASE_FILE, FIXTURE_DIR)
+    local_results: list[CaseResult] = []
+    local_skipped = not LOCAL_CASE_FILE.exists()
+    if not local_skipped:
+        local_results = _run_suite(root, "local_private", LOCAL_CASE_FILE, LOCAL_FIXTURE_DIR)
     if verbose:
-        print(f"visual detector eval: {passed}/{len(results)} passed")
-        for result in results:
-            status = "PASS" if result.passed else "FAIL"
-            print(f"[{status}] {result.case_id}")
-            for candidate in result.top_candidates:
-                print(f"  candidate: {candidate}")
-            for failure in result.failures:
-                print(f"  failure: {failure}")
-    return 0 if passed == len(results) else 1
+        _print_results("committed synthetic visual detector eval", synthetic_results)
+        if local_skipped:
+            print(f"local private visual detector eval: skipped ({_rel(root, LOCAL_CASE_FILE)} not found)")
+        else:
+            _print_results("local private visual detector eval", local_results)
+    all_results = [*synthetic_results, *local_results]
+    return 0 if all(result.passed for result in all_results) else 1
 
 
-def _run_case(root: Path, case: dict[str, Any]) -> CaseResult:
+def _run_suite(root: Path, suite: str, case_file: Path, base_dir: Path) -> list[CaseResult]:
+    cases = json.loads(case_file.read_text(encoding="utf-8"))
+    return [_run_case(root, suite, base_dir, case) for case in cases]
+
+
+def _print_results(label: str, results: list[CaseResult]) -> None:
+    passed = sum(1 for result in results if result.passed)
+    print(f"{label}: {passed}/{len(results)} passed")
+    for result in results:
+        status = "PASS" if result.passed else "FAIL"
+        print(f"[{status}] {result.case_id}")
+        for candidate in result.top_candidates:
+            print(f"  candidate: {candidate}")
+        for failure in result.failures:
+            print(f"  failure: {failure}")
+
+
+def _run_case(root: Path, suite: str, base_dir: Path, case: dict[str, Any]) -> CaseResult:
     case_id = str(case.get("id") or "unknown")
     failures: list[str] = []
-    image_path = FIXTURE_DIR / str(case["image"])
+    image_path = _resolve_image_path(base_dir, str(case["image"]))
     width, height = _image_size(case)
     observation = ComputerObservation(
         target="active_window",
@@ -136,7 +156,7 @@ def _run_case(root: Path, case: dict[str, Any]) -> CaseResult:
     if any(fragment and fragment in tool_result.voice_line.text for fragment in forbidden):
         failures.append("voice_line leaked technical visual detector details")
 
-    return CaseResult(case_id, not failures, failures, [_candidate_summary(candidate) for candidate in candidates[:3]])
+    return CaseResult(suite, case_id, not failures, failures, [_candidate_summary(candidate) for candidate in candidates[:3]])
 
 
 def _image_size(case: dict[str, Any]) -> tuple[int, int]:
@@ -180,6 +200,13 @@ def _rel(root: Path, path: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return str(path)
+
+
+def _resolve_image_path(base_dir: Path, image: str) -> Path:
+    path = Path(image)
+    if path.is_absolute():
+        return path
+    return base_dir / path
 
 
 if __name__ == "__main__":

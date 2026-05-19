@@ -49,6 +49,15 @@ OCR also needs the Tesseract executable installed on the system. Joi does not bu
 
 The lightweight visual detector uses Pillow for real PNG/JPEG screenshots. If you only install the base requirements, this detector safely reports unavailable instead of blocking OCR/UIA grounding. The checked-in fixture eval uses synthetic PPM images so the regression suite can run without private screenshots.
 
+Visual detector fixture workflow:
+
+```powershell
+.\.venv\Scripts\python.exe tools\generate_visual_fixtures.py
+.\.venv\Scripts\python.exe tools\eval_visual_detector.py
+```
+
+Local private visual evals can live in `data/local_visual_eval/visual_cases.local.json` with images next to that file. This directory is ignored by Git and should be used for real game/browser screenshots that may contain private account or browsing data.
+
 Optional Windows accessibility-tree support for UI control grounding:
 
 ```powershell

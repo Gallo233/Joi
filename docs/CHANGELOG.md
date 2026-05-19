@@ -41,6 +41,7 @@
 - Blocked click approvals for explicitly disabled UI Automation candidates, including fused OCR/UIA candidates and candidate-selection continuation.
 - Added a lightweight visual detector fallback for sparse canvas/game UI screens, with visual candidates shown in selection cards and kept behind explicit click approval.
 - Added synthetic fixture evals for the visual detector, including deterministic HUD/canvas cases, candidate-count checks, preview validation, and sanitized voice-line regression checks.
+- Expanded visual detector fixture evals with generated game HUD, modal, radial menu, button-cluster, and video-control layouts plus a skipped-by-default local private screenshot eval path.
 
 ## 2026-05-14
 
