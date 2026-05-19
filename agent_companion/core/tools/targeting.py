@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import time
 from typing import Any
+import uuid
 
 from agent_companion.core.computer_use import ComputerUseBackend, WindowsComputerUseBackend
 from agent_companion.core.computer_use.schemas import ComputerObservation
@@ -24,34 +25,69 @@ class PendingSemanticTargetSelection:
     observation: dict[str, Any]
     artifacts: list[str]
     created_at: float = field(default_factory=time.time)
+    selection_id: str = field(default_factory=lambda: f"selection-{uuid.uuid4().hex[:12]}")
 
 
 class SemanticTargetSelectionStore:
     def __init__(self, ttl_seconds: float = 120.0) -> None:
         self.ttl_seconds = ttl_seconds
-        self._selection: PendingSemanticTargetSelection | None = None
+        self._selections: dict[str, PendingSemanticTargetSelection] = {}
+        self._latest_selection_id: str | None = None
 
     def save(self, selection: PendingSemanticTargetSelection) -> None:
-        self._selection = selection
+        self._selections[selection.selection_id] = selection
+        self._latest_selection_id = selection.selection_id
 
     def current(self) -> PendingSemanticTargetSelection | None:
-        if self._selection is None:
+        if self._latest_selection_id is None:
             return None
-        if self.is_expired():
-            self.clear()
+        return self.get(self._latest_selection_id, require_current=False)
+
+    def get(self, selection_id: str, require_current: bool = True) -> PendingSemanticTargetSelection | None:
+        status = self.status(selection_id)
+        if status != "ready":
             return None
-        return self._selection
+        if require_current and selection_id != self._latest_selection_id:
+            return None
+        return self._selections.get(selection_id)
 
-    def clear(self) -> None:
-        self._selection = None
+    def clear(self, selection_id: str | None = None) -> None:
+        if selection_id is None:
+            self._selections.clear()
+            self._latest_selection_id = None
+            return
+        self._selections.pop(selection_id, None)
+        if self._latest_selection_id == selection_id:
+            self._latest_selection_id = None
 
-    def is_expired(self) -> bool:
-        if self._selection is None:
+    def is_expired(self, selection_id: str | None = None) -> bool:
+        selection = self._selection_for_status(selection_id)
+        if selection is None:
             return False
-        return time.time() - self._selection.created_at > self.ttl_seconds
+        return time.time() - selection.created_at > self.ttl_seconds
+
+    def status(self, selection_id: str | None = None) -> str:
+        if selection_id is None:
+            selection_id = self._latest_selection_id
+        if not selection_id:
+            return "missing"
+        selection = self._selections.get(selection_id)
+        if selection is None:
+            return "missing"
+        if time.time() - selection.created_at > self.ttl_seconds:
+            self.clear(selection_id)
+            return "expired"
+        if selection_id != self._latest_selection_id:
+            return "not_current"
+        return "ready"
 
     def has_pending(self) -> bool:
-        return self._selection is not None
+        return self._latest_selection_id in self._selections if self._latest_selection_id else False
+
+    def _selection_for_status(self, selection_id: str | None = None) -> PendingSemanticTargetSelection | None:
+        if selection_id is None:
+            selection_id = self._latest_selection_id
+        return self._selections.get(selection_id) if selection_id else None
 
 
 class SemanticTargetTool(ToolAdapter):
@@ -199,14 +235,21 @@ class SemanticTargetSelectionTool(ToolAdapter):
         self.store = store
 
     def run(self, request: ToolRequest) -> ToolResult:
-        selection = self.store.current()
+        selection_id = str(request.arguments.get("selection_id") or "").strip()
+        status = self.store.status(selection_id or None)
+        selection = self.store.get(selection_id, require_current=True) if selection_id else self.store.current()
         if selection is None:
-            summary = "候选目标已经失效，请重新观察当前窗口。"
+            summary = _selection_status_summary(status)
+            state_key = {
+                "expired": "selection_expired",
+                "not_current": "selection_not_current",
+                "missing": "selection_missing",
+            }.get(status, "selection_missing")
             return ToolResult(
                 ok=True,
-                agent_state={"tool": self.name, "needs_clarification": True, "selection_expired": True},
+                agent_state={"tool": self.name, "needs_clarification": True, state_key: True, "selection_id": selection_id},
                 display_card=DisplayCard("目标定位", summary, status="info"),
-                voice_line=safe_voice_line("之前的候选已经过期了，请重新说一下目标。", sprite="4"),
+                voice_line=safe_voice_line("之前的候选不能继续用了，请重新说一下目标。", sprite="4"),
             )
         index = _selection_index(request.arguments.get("selection") or request.arguments.get("index"))
         if index is None or index < 1 or index > len(selection.target_candidates):
@@ -216,6 +259,7 @@ class SemanticTargetSelectionTool(ToolAdapter):
                     "tool": self.name,
                     "needs_clarification": True,
                     "selection_invalid": True,
+                    "selection_id": selection.selection_id,
                     "target_candidates": selection.target_candidates,
                     "artifacts": selection.artifacts,
                 },
@@ -232,6 +276,7 @@ class SemanticTargetSelectionTool(ToolAdapter):
                     "tool": self.name,
                     "needs_clarification": True,
                     "coordinate_untrusted": True,
+                    "selection_id": selection.selection_id,
                     "selected_rank": index,
                     "target_candidate": candidate,
                     "target_candidates": selection.target_candidates,
@@ -250,11 +295,12 @@ class SemanticTargetSelectionTool(ToolAdapter):
                 "下一步：确认后才会点击这个候选区域。",
             ]
         )
-        self.store.clear()
+        self.store.clear(selection.selection_id)
         return ToolResult(
             ok=True,
             agent_state={
                 "tool": self.name,
+                "selection_id": selection.selection_id,
                 "selected_rank": index,
                 "target_candidate": candidate,
                 "target_candidates": selection.target_candidates,
@@ -403,6 +449,14 @@ def _friendly_ambiguity(value: str) -> str:
         "close_score": "分数接近",
         "low_confidence": "置信偏低",
     }.get(value, "需要确认")
+
+
+def _selection_status_summary(status: str) -> str:
+    return {
+        "expired": "候选目标已经失效，请重新观察当前窗口。",
+        "not_current": "这个候选卡已经不是当前选择，请使用最新的候选卡。",
+        "missing": "没有找到可继续的候选目标，请重新观察当前窗口。",
+    }.get(status, "候选目标不能继续使用，请重新观察当前窗口。")
 
 
 def _selection_index(value: Any) -> int | None:

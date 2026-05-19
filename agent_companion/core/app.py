@@ -92,6 +92,44 @@ class AgentCompanionApp:
         self._run_plan(plan, 0)
         return self.bus.drain()
 
+    def select_semantic_target(self, selection_id: str, rank: int) -> list[AgentEvent]:
+        selection_id = (selection_id or "").strip()
+        rank = _safe_rank(rank)
+        plan = AgentPlan(
+            task_id=f"task-{uuid.uuid4().hex[:10]}",
+            user_text=f"选择候选 {rank}" if rank else "选择候选",
+            intent="semantic_target_selection",
+            steps=[
+                ToolRequest(
+                    "vision.select_target",
+                    {"selection_id": selection_id, "selection": rank},
+                    "根据指定候选上下文选择目标，继续进入点击确认。",
+                )
+            ],
+        )
+        self._emit(
+            AgentEvent(
+                EventType.USER_MESSAGE,
+                plan.task_id,
+                DisplayCard("用户请求", plan.user_text),
+                safe_voice_line("我收到了。", sprite="1"),
+                {"intent": plan.intent},
+            ),
+            plan.user_text,
+        )
+        self._emit(
+            AgentEvent(
+                EventType.PLAN_CREATED,
+                plan.task_id,
+                DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
+                safe_voice_line("我整理了一下步骤。", sprite="3"),
+                {"steps": [step.name for step in plan.steps]},
+            ),
+            plan.user_text,
+        )
+        self._run_plan(plan, 0)
+        return self.bus.drain()
+
     def resolve_approval(self, approval_id: str, approved: bool) -> list[AgentEvent]:
         if not approval_id or approval_id in self.resolved_approval_ids:
             return self.bus.drain()
@@ -192,6 +230,7 @@ class AgentCompanionApp:
                             result.voice_line,
                             {
                                 "tool": result.agent_state.get("tool"),
+                                "selection_id": result.agent_state.get("selection_id"),
                                 "policy": self.policy.public_payload(pending_request),
                                 "risk": result.risk.value,
                                 "approval": {
@@ -211,8 +250,8 @@ class AgentCompanionApp:
                     final_ok = False
                     pending_approval = True
                     break
-            self._emit_result(plan.task_id, result, plan.user_text)
             self._record_semantic_selection(plan, result)
+            self._emit_result(plan.task_id, result, plan.user_text)
             self._record_watch_context(plan, step, result)
             final_ok = final_ok and result.ok
             self.memory.remember(
@@ -477,15 +516,26 @@ class AgentCompanionApp:
         artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), list) else result.display_card.artifacts
         if not candidates or not observation:
             return
-        self.semantic_selection.save(
-            PendingSemanticTargetSelection(
-                task_id=plan.task_id,
-                query=plan.user_text,
-                target_candidates=[candidate for candidate in candidates if isinstance(candidate, dict)],
-                observation=observation,
-                artifacts=[str(artifact) for artifact in artifacts or []],
-            )
+        selection = PendingSemanticTargetSelection(
+            task_id=plan.task_id,
+            query=plan.user_text,
+            target_candidates=[candidate for candidate in candidates if isinstance(candidate, dict)],
+            observation=observation,
+            artifacts=[str(artifact) for artifact in artifacts or []],
         )
+        self.semantic_selection.save(selection)
+        state["selection_id"] = selection.selection_id
+        state["selection_context"] = {
+            "selection_id": selection.selection_id,
+            "task_id": selection.task_id,
+            "expires_in_seconds": self.semantic_selection.ttl_seconds,
+        }
+        for candidate in selection.target_candidates:
+            candidate["selection_id"] = selection.selection_id
+        target_candidate = state.get("target_candidate")
+        if isinstance(target_candidate, dict):
+            target_candidate["selection_id"] = selection.selection_id
+        state["target_candidates"] = selection.target_candidates
 
 
 def _arguments_hash(arguments: dict) -> str:
@@ -530,3 +580,11 @@ def _parse_candidate_selection(text: str) -> int | None:
         if f"第{token}个" in value or f"选{token}" in value or f"点第{token}" in value:
             return number
     return None
+
+
+def _safe_rank(value: object) -> int:
+    try:
+        rank = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return rank if rank > 0 else 0

@@ -49,7 +49,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - OCR text is grouped into coarse regions and `vision.resolve_target` can propose semantic click candidates that still require Computer Use approval.
 - Semantic target approvals now use active-window capture rectangles to convert OCR bbox centers into screen coordinates, and the shell draws candidate boxes on approval screenshots.
 - Semantic target candidates now expose rank, confidence, reason, and ambiguity; close or low-confidence OCR targets ask for clarification instead of synthesizing click approvals.
-- Pending semantic target selections are session-only with a short TTL; "选 2" or a candidate-card selection resumes the saved candidates and still creates a one-time `computer.click` approval.
+- Pending semantic target selections are session-only with a short TTL; "选 2" resumes the latest saved candidates as a fallback, while candidate-card buttons use explicit `semantic_target.select` with `selection_id` and rank before creating a one-time `computer.click` approval.
 - `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
 - `agent_companion/core/watch.py` keeps recent watch context in the current app session.
 - `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.
@@ -88,12 +88,12 @@ Next task options, in priority order:
 
 ## Suggested First Task
 
-Improve semantic target confidence:
+Improve semantic target grounding beyond OCR:
 
-- Rank multiple OCR candidates with better confidence and proximity heuristics.
-- Make the approval preview show a friendlier target explanation and screenshot focus.
+- Add accessibility-tree candidates where Windows exposes names/roles/bounds.
+- Fuse OCR candidates with accessibility candidates before click approval.
 - Keep Computer Use approval previews friendly and sanitized.
-- Add tests for ambiguous candidates, no candidate, and voice-line sanitization.
+- Add tests for accessibility/OCR disagreement, ambiguous candidates, no candidate, and voice-line sanitization.
 
 ## Allowed Edit Areas
 

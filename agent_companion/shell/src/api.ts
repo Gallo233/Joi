@@ -56,6 +56,10 @@ export class CoreClient {
     return this.send('approval.resolve', { approval_id: approvalId, approved })
   }
 
+  selectSemanticTarget(selectionId: string, rank: number) {
+    return this.send('semantic_target.select', { selection_id: selectionId, rank })
+  }
+
   transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number) {
     return this.send(
       'voice.transcribe',

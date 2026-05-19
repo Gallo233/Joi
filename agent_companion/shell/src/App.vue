@@ -17,10 +17,12 @@ const previewArtifactEvent = ref<AgentEvent | null>(null)
 const voiceState = ref<'idle' | 'recording' | 'transcribing'>('idle')
 const lastTranscript = ref('')
 const lastTtsError = ref('')
+const nowSeconds = ref(Date.now() / 1000)
 let mediaRecorder: MediaRecorder | null = null
 let mediaStream: MediaStream | null = null
 let audioChunks: Blob[] = []
 let voiceStopTimer: number | null = null
+let clockTimer: number | null = null
 let currentAudio: HTMLAudioElement | null = null
 let voiceEpoch = 0
 const taskVoiceEpochs = new Map<string, number>()
@@ -125,6 +127,23 @@ const currentMode = computed(() => {
   if (intent === 'semantic_target' || tool === 'vision.resolve_target') return '目标定位'
   if (intent === 'watch_together' || intent === 'watch_followup' || intent === 'browser' || tool === 'watch.recall' || tool.startsWith('browser.')) return '陪看'
   return '闲聊'
+})
+const currentSemanticSelectionId = computed(() => {
+  const inactiveIds = new Set<string>()
+  for (let index = events.value.length - 1; index >= 0; index -= 1) {
+    const event = events.value[index]
+    const state = event.agent_state || {}
+    const selectionId = stringValue(state.selection_id)
+    if (selectionId && (state.selected_rank || event.type === 'approval_required' || state.selection_expired || state.selection_missing || state.selection_not_current)) {
+      inactiveIds.add(selectionId)
+      continue
+    }
+    if (selectionId && state.candidate_selection_required) {
+      if (selectionExpired(event)) inactiveIds.add(selectionId)
+      else if (!inactiveIds.has(selectionId)) return selectionId
+    }
+  }
+  return ''
 })
 const asrConfigured = computed(() => Boolean(ready.value?.asr?.configured))
 const voiceMaxSeconds = computed(() => Math.max(1, Number(ready.value?.asr?.max_seconds || 30)))
@@ -279,6 +298,14 @@ function targetCandidates(event?: AgentEvent): Record<string, unknown>[] {
   return rows.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
 }
 
+function eventSelectionId(event?: AgentEvent) {
+  return stringValue(event?.agent_state?.selection_id)
+}
+
+function targetSelectionId(event: AgentEvent | undefined, candidate: Record<string, unknown>) {
+  return stringValue(candidate.selection_id) || eventSelectionId(event)
+}
+
 function targetPreviews(event: AgentEvent | undefined, artifact: string) {
   return targetCandidates(event).filter((candidate) => {
     const preview = asRecord(candidate.preview)
@@ -346,6 +373,18 @@ function targetAmbiguity(candidate: Record<string, unknown>) {
   return labels[value] || '需要确认'
 }
 
+function canSelectTargetCandidate(event: AgentEvent | undefined, candidate: Record<string, unknown>) {
+  const selectionId = targetSelectionId(event, candidate)
+  return Boolean(connected.value && event && !selectionExpired(event) && selectionId && selectionId === currentSemanticSelectionId.value)
+}
+
+function selectionExpired(event: AgentEvent) {
+  const context = asRecord(event.agent_state?.selection_context)
+  const ttl = Number(context.expires_in_seconds || 0)
+  if (!Number.isFinite(ttl) || ttl <= 0) return false
+  return nowSeconds.value > event.created_at + ttl
+}
+
 function targetPreviewSummary(event: AgentEvent | undefined, artifact: string) {
   const previews = targetPreviews(event, artifact)
   if (!previews.length) return ''
@@ -398,11 +437,12 @@ function resolveApproval(approved: boolean) {
   })
 }
 
-function selectTargetCandidate(candidate: Record<string, unknown>, index: number) {
-  if (!connected.value) return
+function selectTargetCandidate(event: AgentEvent | undefined, candidate: Record<string, unknown>, index: number) {
+  if (!canSelectTargetCandidate(event, candidate)) return
   const rank = targetRank(candidate, index)
+  const selectionId = targetSelectionId(event, candidate)
   beginNewVoiceIntent()
-  void client.sendUserText(`选 ${rank}`).catch((error) => {
+  void client.selectSemanticTarget(selectionId, rank).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '候选选择失败'
   })
 }
@@ -609,8 +649,17 @@ function blobToBase64(blob: Blob) {
   })
 }
 
-onMounted(() => client.connect())
+onMounted(() => {
+  client.connect()
+  clockTimer = window.setInterval(() => {
+    nowSeconds.value = Date.now() / 1000
+  }, 5000)
+})
 onBeforeUnmount(() => {
+  if (clockTimer !== null) {
+    window.clearInterval(clockTimer)
+    clockTimer = null
+  }
   cleanupVoiceStream()
   stopSpokenAudio()
   client.close()
@@ -710,7 +759,7 @@ onBeforeUnmount(() => {
                 <span>{{ targetConfidence(candidate) }}</span>
                 <span>{{ targetAmbiguity(candidate) }}</span>
                 <p>{{ targetReason(candidate) }}</p>
-                <button type="button" :disabled="!connected" @click="selectTargetCandidate(candidate, candidateIndex)">选择</button>
+                <button type="button" :disabled="!canSelectTargetCandidate(task.latest, candidate)" @click="selectTargetCandidate(task.latest, candidate, candidateIndex)">选择</button>
               </div>
             </div>
           </details>

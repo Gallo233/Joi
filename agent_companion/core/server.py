@@ -110,6 +110,18 @@ class JsonRpcBridge:
                 asyncio.create_task(asyncio.to_thread(self.resolve_approval_command, approval_id, approved))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
                 return
+            if method == "semantic_target.select":
+                selection_id = str(params.get("selection_id") or "").strip()
+                rank = _safe_int(params.get("rank"))
+                if not selection_id:
+                    await websocket.send(self._result(request_id, {"ok": False, "error": "missing_selection_id"}))
+                    return
+                if rank is None or rank < 1:
+                    await websocket.send(self._result(request_id, {"ok": False, "error": "invalid_rank"}))
+                    return
+                asyncio.create_task(asyncio.to_thread(self.select_semantic_target_command, selection_id, rank))
+                await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
+                return
             if method in {"voice.transcribe", "audio.transcribe"}:
                 audio_base64 = str(params.get("audio_base64") or "")
                 mime_type = str(params.get("mime_type") or "")
@@ -183,6 +195,10 @@ class JsonRpcBridge:
 
     def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
         sequence, events = self._run_serial("approval.resolve", lambda: self.app.resolve_approval(approval_id, approved))
+        return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+
+    def select_semantic_target_command(self, selection_id: str, rank: int) -> dict[str, Any]:
+        sequence, events = self._run_serial("semantic_target.select", lambda: self.app.select_semantic_target(selection_id, rank))
         return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
 
     def _run_serial(self, label: str, callback: Callable[[], list[AgentEvent]]) -> tuple[int, list[AgentEvent]]:
@@ -340,6 +356,13 @@ def _safe_asr_error_code(error: str) -> str:
     if "timeout" in raw:
         return "asr_timeout"
     return "asr_failed"
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _friendly_asr_message(error: str) -> str:

@@ -32,6 +32,7 @@ Status: in progress
 - Attach active-window capture rectangles and preview boxes so semantic targets can be reviewed visually before approval.
 - Rank semantic target candidates with explainable confidence and hold ambiguous matches for user clarification.
 - Continue pending semantic target selection from user phrases such as "选 2" or from candidate-card buttons, while preserving click approval.
+- Bind candidate-card selection to explicit session-only `selection_id` values so old cards cannot accidentally reuse the newest pending target context.
 - Separate text model, vision model, and expression model. Model routing is connected for text, vision, and expression.
 - Do not mark blank pages or failed captures as success.
 
@@ -50,6 +51,7 @@ Status: in progress
 - Resolve semantic click requests into candidate OCR regions first, then ask for approval before executing the synthesized click.
 - Convert approved semantic target centers from screenshot-relative OCR bbox to Windows screen coordinates only when capture rect and scale are available.
 - Continue ambiguous semantic target selections from the saved session context and require a fresh approval before clicking.
+- Candidate-card selection now uses explicit `selection_id`/rank RPC; text and voice phrases such as "选 2" remain a latest-context fallback.
 - Use clipboard paste for reliable Windows text input, including Chinese.
 - Show friendly action summaries in task cards while keeping coordinates, text payloads, command-like details, and raw ids out of voice lines.
 

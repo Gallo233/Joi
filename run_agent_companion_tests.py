@@ -172,6 +172,14 @@ def _approval_payload(events) -> dict:
     return {}
 
 
+def _selection_id(events) -> str:
+    for event in events:
+        selection_id = event.agent_state.get("selection_id")
+        if isinstance(selection_id, str) and selection_id:
+            return selection_id
+    return ""
+
+
 def main() -> int:
     workspace = Path(__file__).resolve().parent
     os.environ["AGENT_COMPANION_DISABLE_LLM"] = "1"
@@ -357,16 +365,103 @@ def main() -> int:
     )
     selection_events = selection_app.handle_user_text("点登录按钮")
     assert_true(any(event.agent_state.get("candidate_selection_required") for event in selection_events), "ambiguous app target should store candidate selection context")
-    selected_events = selection_app.handle_user_text("选 2")
+    selection_id = _selection_id(selection_events)
+    assert_true(selection_id.startswith("selection-"), "ambiguous selection context should expose a selection_id")
+    selected_events = selection_app.select_semantic_target(selection_id, 2)
     selected_approval = _approval_payload(selected_events)
-    assert_true(selected_approval.get("tool") == "computer.click", "candidate selection should synthesize computer click approval")
+    assert_true(selected_approval.get("tool") == "computer.click", "JSON-RPC candidate selection should synthesize computer click approval")
     selected_card = [event for event in selected_events if event.type == EventType.APPROVAL_REQUIRED][-1]
     assert_true(selected_card.agent_state.get("selected_rank") == 2 or selected_card.agent_state.get("target_candidate", {}).get("rank") == 2, "candidate selection should preserve selected rank")
+    assert_true(selected_card.agent_state.get("selection_id") == selection_id, "candidate selection approval should stay bound to selection_id")
     assert_true("已选择候选 2" in selected_card.display_card.summary, "candidate selection card should show selected candidate")
-    assert_true(all(not any(fragment in event.voice_line.text for fragment in forbidden_target_voice) for event in selected_events), "candidate selection voice leaked technical details")
+    forbidden_selection_voice = forbidden_target_voice + ["selection-", "100", "200"]
+    assert_true(all(not any(fragment in event.voice_line.text for fragment in forbidden_selection_voice) for event in selected_events), "candidate selection voice leaked technical details")
     selected_refused = selection_app.resolve_approval(str(selected_approval["approval_id"]), approved=False)
     assert_true(any(event.type == EventType.TASK_FAILED for event in selected_refused), "candidate selection refusal should cancel action")
     assert_true(not any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("tool") == "computer.click" for event in selected_refused), "refused candidate selection must not execute click")
+
+    fallback_app = AgentCompanionApp(workspace)
+    fallback_app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(
+                        workspace,
+                        rel="data/agent_companion/vision/selection-fallback.png",
+                        width=1000,
+                        height=1000,
+                        capture_rect=CaptureRect(100, 200, 1000, 1000),
+                    )
+                ],
+            ),
+            ocr=FakeOcrExtractor(duplicate_login_ocr),
+        )
+    )
+    fallback_app.handle_user_text("点登录按钮")
+    fallback_events = fallback_app.handle_user_text("选 2")
+    assert_true(_approval_payload(fallback_events).get("tool") == "computer.click", "text fallback candidate selection should still work")
+
+    multi_app = AgentCompanionApp(workspace)
+    multi_app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(
+                        workspace,
+                        rel="data/agent_companion/vision/selection-first.png",
+                        width=1000,
+                        height=1000,
+                        capture_rect=CaptureRect(100, 200, 1000, 1000),
+                    ),
+                    _fake_computer_observation(
+                        workspace,
+                        rel="data/agent_companion/vision/selection-second.png",
+                        width=1000,
+                        height=1000,
+                        capture_rect=CaptureRect(300, 400, 1000, 1000),
+                    ),
+                ],
+            ),
+            ocr=FakeOcrExtractor(duplicate_login_ocr),
+        )
+    )
+    first_selection_id = _selection_id(multi_app.handle_user_text("点登录按钮"))
+    second_selection_id = _selection_id(multi_app.handle_user_text("点登录按钮"))
+    assert_true(first_selection_id and second_selection_id and first_selection_id != second_selection_id, "multiple semantic selections should keep distinct ids")
+    old_selection_events = multi_app.select_semantic_target(first_selection_id, 2)
+    assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in old_selection_events), "old candidate card must not select latest context")
+    assert_true(any(event.agent_state.get("selection_not_current") for event in old_selection_events), "old candidate card should explain stale context")
+    latest_selection_events = multi_app.select_semantic_target(second_selection_id, 2)
+    assert_true(_approval_payload(latest_selection_events).get("tool") == "computer.click", "current selection_id should create click approval")
+
+    bridge = JsonRpcBridge(workspace)
+    bridge.app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(
+                        workspace,
+                        rel="data/agent_companion/vision/selection-rpc.png",
+                        width=1000,
+                        height=1000,
+                        capture_rect=CaptureRect(100, 200, 1000, 1000),
+                    )
+                ],
+            ),
+            ocr=FakeOcrExtractor(duplicate_login_ocr),
+        )
+    )
+    rpc_selection_id = _selection_id(bridge.app.handle_user_text("点登录按钮"))
+    rpc_result = bridge.select_semantic_target_command(rpc_selection_id, 2)
+    rpc_events = rpc_result.get("events", [])
+    assert_true(rpc_result.get("ok") is True and rpc_result.get("submitted") is True, "semantic_target.select command should return submitted result")
+    assert_true(any(event.get("type") == "approval_required" and event.get("agent_state", {}).get("approval", {}).get("tool") == "computer.click" for event in rpc_events), "semantic_target.select should create approval_required")
 
     expired_app = AgentCompanionApp(workspace)
     expired_app.tools.register(
@@ -379,11 +474,14 @@ def main() -> int:
             ocr=FakeOcrExtractor(duplicate_login_ocr),
         )
     )
-    expired_app.handle_user_text("点登录按钮")
+    expired_selection_id = _selection_id(expired_app.handle_user_text("点登录按钮"))
     expired_app.semantic_selection.ttl_seconds = -1
-    expired_events = expired_app.handle_user_text("选 2")
+    expired_events = expired_app.select_semantic_target(expired_selection_id, 2)
     assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in expired_events), "expired candidate selection should not create click approval")
     assert_true(any(event.agent_state.get("selection_expired") for event in expired_events), "expired candidate selection should explain stale context")
+    missing_selection_events = expired_app.select_semantic_target("selection-missing", 2)
+    assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in missing_selection_events), "missing selection_id should not create click approval")
+    assert_true(any(event.agent_state.get("selection_missing") for event in missing_selection_events), "missing selection_id should explain missing context")
 
     no_pending_selection = AgentCompanionApp(workspace).handle_user_text("选 2")
     assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in no_pending_selection), "selection without pending context should not click")
@@ -940,7 +1038,9 @@ def main() -> int:
     assert_true("runtimeStatusRows" in app_vue_source and "lastTtsError" in app_vue_source, "Shell developer mode should expose voice runtime status")
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
-    assert_true("selectTargetCandidate" in app_vue_source and "选 ${rank}" in app_vue_source, "Shell should continue semantic target selection from candidate cards")
+    assert_true("selectTargetCandidate" in app_vue_source and "selectSemanticTarget" in app_vue_source, "Shell candidate cards should continue semantic target selection through explicit RPC")
+    assert_true("currentSemanticSelectionId" in app_vue_source and "selectionExpired" in app_vue_source, "Shell should disable stale or expired semantic target candidates")
+    assert_true("选 ${rank}" not in app_vue_source, "Shell candidate buttons should not send natural-language selection text")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
