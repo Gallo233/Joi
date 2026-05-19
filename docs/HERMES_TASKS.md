@@ -46,6 +46,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Computer Use actions automatically observe the active window after execution and attach the after screenshot to the task card.
 - Computer Use actions compare before/after observations and report changed, likely no-op, or unavailable verification without reading technical details aloud.
 - Computer Use verification reuses the same OCR extractor/config as `observe.screen` and waits `computer_use.post_action_settle_ms` before after-observation.
+- OCR text is grouped into coarse regions and `vision.resolve_target` can propose semantic click candidates that still require Computer Use approval.
 - `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
 - `agent_companion/core/watch.py` keeps recent watch context in the current app session.
 - `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.
@@ -75,21 +76,21 @@ The current observation, first action layer, approval hardening, watch loop, and
 
 Next task options, in priority order:
 
-1. Improve OCR target grounding by grouping text blocks into rough regions such as top bar, center content, and bottom controls.
-2. Add semantic visual target grounding so natural phrases like "点那个登录按钮" can map to OCR/UI regions before approval.
-3. Add an audit view for confirmed Computer Use actions, approvals, verification status, and sanitized arguments.
+1. Improve semantic target confidence by ranking overlapping OCR candidates and exposing a clearer preview UI before approval.
+2. Add an audit view for confirmed Computer Use actions, approvals, verification status, and sanitized arguments.
+3. Add pixel or image-hash diff as an additional verification signal for actions where OCR/title do not change.
 4. Add a settings panel for changing ASR/TTS/OCR providers once runtime status is stable.
 5. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 6. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
 
 ## Suggested First Task
 
-Implement OCR region grouping for target grounding:
+Improve semantic target confidence:
 
-- Group OCR text blocks into coarse screen regions such as top bar, main content, sidebar, and bottom controls.
-- Expose those regions to Watch Together and Computer Use planners without putting raw coordinates in voice lines.
+- Rank multiple OCR candidates with better confidence and proximity heuristics.
+- Make the approval preview show a friendlier target explanation and screenshot focus.
 - Keep Computer Use approval previews friendly and sanitized.
-- Add tests for grouped OCR regions, missing OCR fallback, and voice-line sanitization.
+- Add tests for ambiguous candidates, no candidate, and voice-line sanitization.
 
 ## Allowed Edit Areas
 

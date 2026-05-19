@@ -28,6 +28,7 @@ Status: in progress
 - Add screenshot capture for browser, active window, and full screen. Windows active-window/fullscreen capture is connected through `observe.screen`.
 - Add `VisionSummarizer` with configurable vision model. OpenAI-compatible vision summaries are connected.
 - Add OCR grounding for visible text and rough screen regions. Optional `pytesseract`/Pillow OCR is best-effort; unavailable or timed-out OCR does not fail screenshots or Watch Together.
+- Group OCR text into coarse regions and expose semantic target candidates for phrases such as "登录按钮" or "右上角".
 - Separate text model, vision model, and expression model. Model routing is connected for text, vision, and expression.
 - Do not mark blank pages or failed captures as success.
 
@@ -43,6 +44,7 @@ Status: in progress
 - Observe the active window after each successful computer action and attach the after screenshot to the task card.
 - Compare before/after observations for confirmed actions and label the task card as changed, likely no-op, or unavailable without overclaiming success.
 - Run configured OCR on Computer Use before/after observations and wait briefly after actions so real Windows UI updates can settle before verification.
+- Resolve semantic click requests into candidate OCR regions first, then ask for approval before executing the synthesized click.
 - Use clipboard paste for reliable Windows text input, including Chinese.
 - Show friendly action summaries in task cards while keeping coordinates, text payloads, command-like details, and raw ids out of voice lines.
 

@@ -23,6 +23,7 @@ from agent_companion.core.tools.game_ok_ww import OkWwTool
 from agent_companion.core.tools.mcp import McpListTool
 from agent_companion.core.tools.registry import ToolRegistry
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
+from agent_companion.core.tools.targeting import SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
@@ -37,6 +38,7 @@ class PendingStep:
     approval_id: str
     tool: str
     arguments_hash: str
+    request_override: ToolRequest | None = None
 
 
 class AgentCompanionApp:
@@ -117,7 +119,8 @@ class AgentCompanionApp:
     def _run_plan(self, plan: AgentPlan, start_index: int, approved_step: PendingStep | None = None) -> None:
         final_ok = True
         pending_approval = False
-        for index, step in enumerate(plan.steps[start_index:], start=start_index):
+        for index, plan_step in enumerate(plan.steps[start_index:], start=start_index):
+            step = self._step_for_execution(plan, index, plan_step, approved_step)
             is_approved_step = self._is_approved_step(plan, index, step, approved_step)
             decision = self.policy.classify(step, approved=is_approved_step)
             if decision.requires_approval:
@@ -166,6 +169,35 @@ class AgentCompanionApp:
                     display_card=DisplayCard("工具失败", f"{step.name} 没有跑通。", str(exc)[:1800], status="failed"),
                     voice_line=safe_voice_line("这个工具没有跑通，细节在卡片里。", sprite="4"),
                 )
+            if result.requires_approval:
+                pending_request = self._approval_request_from_result(result)
+                if pending_request is not None:
+                    pending = self._make_pending_step(plan, index, pending_request, request_override=pending_request)
+                    self.pending_steps[pending.approval_id] = pending
+                    self._emit(
+                        AgentEvent(
+                            EventType.APPROVAL_REQUIRED,
+                            plan.task_id,
+                            DisplayCard("需要确认", result.display_card.summary, result.display_card.body, status="approval", artifacts=result.display_card.artifacts),
+                            result.voice_line,
+                            {
+                                "policy": self.policy.public_payload(pending_request),
+                                "risk": result.risk.value,
+                                "approval": {
+                                    "approval_id": pending.approval_id,
+                                    "task_id": plan.task_id,
+                                    "step_index": index,
+                                    "tool": pending_request.name,
+                                    "arguments_hash": pending.arguments_hash,
+                                },
+                                "target_candidate": result.agent_state.get("target_candidate"),
+                            },
+                        ),
+                        plan.user_text,
+                    )
+                    final_ok = False
+                    pending_approval = True
+                    break
             self._emit_result(plan.task_id, result, plan.user_text)
             self._record_watch_context(plan, step, result)
             final_ok = final_ok and result.ok
@@ -246,12 +278,13 @@ class AgentCompanionApp:
             "watch_followup": "陪看追问",
             "browser": "浏览器",
             "computer_use": "电脑操作",
+            "semantic_target": "目标定位",
         }
         return labels.get(intent, intent)
 
     @staticmethod
     def _should_emit_task_completion(intent: str) -> bool:
-        return intent not in {"companion_chat", "watch_together", "watch_followup"}
+        return intent not in {"companion_chat", "watch_together", "watch_followup", "semantic_target"}
 
     @staticmethod
     def _is_ephemeral_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
@@ -297,6 +330,7 @@ class AgentCompanionApp:
                 WatchAnswerer(self.workspace, self.character.name, self.character.persona),
             )
         )
+        self.tools.register(SemanticTargetTool(self.workspace, ocr=ocr))
         for name, action_type in (
             ("computer.click", "click"),
             ("computer.type_text", "type_text"),
@@ -345,19 +379,20 @@ class AgentCompanionApp:
             return PytesseractOcrExtractor()
         return PytesseractOcrExtractor(timeout_seconds=config.ocr.timeout_seconds)
 
-    def _make_pending_step(self, plan: AgentPlan, index: int, step: ToolRequest) -> PendingStep:
+    def _make_pending_step(self, plan: AgentPlan, index: int, step: ToolRequest, request_override: ToolRequest | None = None) -> PendingStep:
         return PendingStep(
             plan=plan,
             index=index,
             approval_id=f"approval-{uuid.uuid4().hex[:12]}",
             tool=step.name,
             arguments_hash=_arguments_hash(step.arguments),
+            request_override=request_override,
         )
 
     def _pending_step_matches(self, pending: PendingStep) -> bool:
         if pending.index < 0 or pending.index >= len(pending.plan.steps):
             return False
-        step = pending.plan.steps[pending.index]
+        step = pending.request_override or pending.plan.steps[pending.index]
         return step.name == pending.tool and _arguments_hash(step.arguments) == pending.arguments_hash
 
     def _is_approved_step(self, plan: AgentPlan, index: int, step: ToolRequest, pending: PendingStep | None) -> bool:
@@ -370,6 +405,26 @@ class AgentCompanionApp:
             and pending.arguments_hash == _arguments_hash(step.arguments)
         )
 
+    @staticmethod
+    def _step_for_execution(plan: AgentPlan, index: int, step: ToolRequest, pending: PendingStep | None) -> ToolRequest:
+        if pending is None or pending.request_override is None:
+            return step
+        if pending.plan.task_id == plan.task_id and pending.index == index:
+            return pending.request_override
+        return step
+
+    @staticmethod
+    def _approval_request_from_result(result: ToolResult) -> ToolRequest | None:
+        payload = result.agent_state.get("approval_request")
+        if not isinstance(payload, dict):
+            return None
+        tool = str(payload.get("tool") or "").strip()
+        arguments = payload.get("arguments")
+        if not tool or not isinstance(arguments, dict):
+            return None
+        reason = str(payload.get("reason") or result.display_card.summary or "")
+        return ToolRequest(tool, arguments, reason)
+
     def _record_watch_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
         if plan.intent != "watch_together" or step.name != "observe.screen" or not result.ok:
             return
@@ -379,6 +434,7 @@ class AgentCompanionApp:
         summary = str(state.get("vision_summary") or result.display_card.summary or "").strip()
         model_status = str(state.get("model_status") or "unknown")
         ocr = observation.get("ocr") if isinstance(observation.get("ocr"), dict) else {}
+        ocr_regions = observation.get("ocr_regions") if isinstance(observation.get("ocr_regions"), list) else []
         ocr_text = _ocr_text_from_state(ocr)
         frame = WatchFrame(
             user_question=plan.user_text,
@@ -388,6 +444,7 @@ class AgentCompanionApp:
             model_status=model_status,
             ocr_summary=str(ocr.get("summary") or ""),
             ocr_text=ocr_text,
+            ocr_regions=ocr_regions,
         )
         self.watch_session.add(frame)
 

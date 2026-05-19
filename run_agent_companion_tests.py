@@ -16,10 +16,13 @@ from agent_companion.core.server import JsonRpcBridge
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
+from agent_companion.core.tools.targeting import SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
 from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock, PytesseractOcrExtractor, UnavailableOcrExtractor
+from agent_companion.core.vision.regions import group_ocr_regions
 from agent_companion.core.vision.schemas import VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummary
+from agent_companion.core.vision.targeting import resolve_target_candidates
 from agent_companion.core.voice import safe_voice_line
 from agent_companion.core.watch import WatchFrame
 
@@ -182,6 +185,9 @@ def main() -> int:
     assert_true(click_plan.intent == "computer_use", "computer click route failed")
     assert_true(click_plan.steps[0].name == "computer.click", "click should use computer.click")
     assert_true(click_plan.steps[0].arguments.get("x") == 100, "click x coordinate not parsed")
+    semantic_click_plan = build_plan("点登录按钮")
+    assert_true(semantic_click_plan.intent == "semantic_target", "semantic click should use target grounding route")
+    assert_true(semantic_click_plan.steps[0].name == "vision.resolve_target", "semantic click should resolve target before clicking")
     type_plan = build_plan("输入文字：你好世界")
     assert_true(type_plan.steps[0].name == "computer.type_text", "type route failed")
     assert_true(type_plan.steps[0].arguments.get("text") == "你好世界", "Chinese type text should be preserved")
@@ -238,8 +244,49 @@ def main() -> int:
     assert_true(ocr_state["text_blocks"][0]["text"] == "登录", "OCR text block should preserve visible text")
     assert_true(ocr_state["text_blocks"][0]["bbox"] == [10, 20, 48, 20], "OCR text block should include bbox for planner")
     assert_true("开始任务" in ocr_result.display_card.body, "OCR snippets should be visible in task details")
+    assert_true("ocr_regions" in ocr_result.agent_state["observation"], "screen observation should include OCR regions")
     forbidden_ocr_voice = ["10", "20", "开始任务", "sample.png", "{"]
     assert_true(not any(fragment in ocr_result.voice_line.text for fragment in forbidden_ocr_voice), "OCR voice should not read raw OCR details")
+
+    region_ocr = OcrResult(
+        "success",
+        "mock regions",
+        [
+            OcrTextBlock("登录", (860, 30, 60, 24), 0.96),
+            OcrTextBlock("菜单", (20, 420, 50, 24), 0.91),
+            OcrTextBlock("开始任务", (430, 450, 100, 32), 0.94),
+            OcrTextBlock("发送", (450, 900, 80, 30), 0.9),
+        ],
+    )
+    grouped_regions = group_ocr_regions(region_ocr, 1000, 1000)
+    grouped_labels = {region.label for region in grouped_regions}
+    assert_true({"top_bar", "sidebar", "main_content", "bottom_controls"}.issubset(grouped_labels), "OCR blocks should group into coarse regions")
+    grouped_state = [region.to_agent_state() for region in grouped_regions]
+    login_candidates = resolve_target_candidates("点登录按钮", grouped_state)
+    assert_true(login_candidates and login_candidates[0].label == "登录", "semantic phrase should resolve to matching OCR candidate")
+    corner_candidates = resolve_target_candidates("右上角", grouped_state)
+    assert_true(corner_candidates and corner_candidates[0].text == "登录", "right-top phrase should resolve to a top/right OCR candidate")
+    noisy_candidates = resolve_target_candidates("点登录按钮", group_ocr_regions(OcrResult("success", "noise", [OcrTextBlock("天气", (200, 200, 60, 20), 0.9)]), 1000, 1000))
+    assert_true(not noisy_candidates, "missing/noisy OCR should not create confident target candidate")
+
+    target_tool = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(workspace, observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/target.png")]),
+        ocr=FakeOcrExtractor(region_ocr),
+    )
+    target_result = target_tool.run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(target_result.requires_approval, "semantic target should ask for approval before click")
+    assert_true(target_result.agent_state["approval_request"]["tool"] == "computer.click", "semantic target approval should resolve to computer.click")
+    assert_true("登录" in target_result.display_card.summary, "semantic target card should name the friendly target")
+    forbidden_target_voice = ["登录", "860", "30", "data/", ".png", "{", "vision.resolve_target", "computer.click"]
+    assert_true(not any(fragment in target_result.voice_line.text for fragment in forbidden_target_voice), "semantic target voice leaked technical details")
+
+    unclear_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(workspace, observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/target-missing.png")]),
+        ocr=FakeOcrExtractor(OcrResult("success", "noise", [OcrTextBlock("天气", (200, 200, 60, 20), 0.9)])),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(not unclear_target.requires_approval and unclear_target.agent_state["needs_clarification"], "unclear semantic target should ask for clarification")
 
     timeout_tool = ScreenObserveTool(
         workspace,
@@ -576,6 +623,7 @@ def main() -> int:
             model_status="ok",
             ocr_summary="识别到 2 段可见文字。",
             ocr_text=["P4 Watch Together", "P5 Model Router"],
+            ocr_regions=grouped_state,
         )
     ]
     answer_tool = WatchRecallTool(workspace, lambda limit: answer_frames[:limit], FakeWatchAnswerer())
@@ -588,6 +636,9 @@ def main() -> int:
     assert_true("P4 Watch Together" in ocr_question_result.display_card.summary, "watch recall should answer from OCR text")
     assert_true("P5 Model Router" in ocr_question_result.agent_state["watch_context"][0]["ocr_text"], "watch context should expose OCR text for planner")
     assert_true("sample.png" not in ocr_question_result.voice_line.text, "watch OCR voice should not read artifact path")
+    region_question_result = WatchRecallTool(workspace, lambda limit: answer_frames[:limit]).run(ToolRequest("watch.recall", {"query": "页面右上角是什么"}))
+    assert_true("登录" in region_question_result.display_card.summary, "watch recall should answer top-right region questions from OCR regions")
+    assert_true("ocr_regions" in region_question_result.agent_state["watch_context"][0], "watch context should expose OCR regions for planner")
 
     watch_app = AgentCompanionApp(workspace)
     before_watch_memory = watch_app.memory.recent(200)
@@ -629,6 +680,23 @@ def main() -> int:
             os.environ.pop("AGENT_COMPANION_CODEX_BIN", None)
         else:
             os.environ["AGENT_COMPANION_CODEX_BIN"] = previous
+
+    app = AgentCompanionApp(workspace)
+    app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=FakeComputerBackend(workspace, observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/semantic-app.png")]),
+            ocr=FakeOcrExtractor(region_ocr),
+        )
+    )
+    semantic_events = app.handle_user_text("点登录按钮")
+    assert_true(any(event.type == EventType.APPROVAL_REQUIRED for event in semantic_events), "semantic target click should request approval")
+    semantic_approval = _approval_payload(semantic_events)
+    assert_true(semantic_approval.get("tool") == "computer.click", "semantic target approval should bind synthesized computer.click")
+    assert_true(any("登录" in event.display_card.summary for event in semantic_events if event.type == EventType.APPROVAL_REQUIRED), "semantic approval card should name target")
+    assert_true(all("登录" not in event.voice_line.text and "semantic-app.png" not in event.voice_line.text for event in semantic_events), "semantic approval voice should stay immersive")
+    semantic_refused = app.resolve_approval(str(semantic_approval["approval_id"]), approved=False)
+    assert_true(any(event.type == EventType.TASK_FAILED for event in semantic_refused), "semantic target refusal should cancel action")
 
     app = AgentCompanionApp(workspace)
     computer_events = app.handle_user_text("点击 100,200")

@@ -14,6 +14,7 @@ LOW_RISK = {
     "browser.observe",
     "files.read",
     "mcp.list_tools",
+    "vision.resolve_target",
 }
 MEDIUM_RISK = {
     "codex.run",

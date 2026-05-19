@@ -37,10 +37,11 @@ def build_plan(user_text: str) -> AgentPlan:
         )
     computer_action = _build_computer_action(text, lowered)
     if computer_action is not None:
+        intent = "semantic_target" if computer_action.name == "vision.resolve_target" else "computer_use"
         return AgentPlan(
             task_id=task_id,
             user_text=text,
-            intent="computer_use",
+            intent=intent,
             steps=[computer_action],
         )
     if _is_code_task(text, lowered):
@@ -104,12 +105,13 @@ def _build_computer_action(text: str, lowered: str) -> ToolRequest | None:
         args: dict[str, int | str] = {}
         if x is not None and y is not None:
             args.update({"x": x, "y": y})
-        return ToolRequest("computer.click", args, "点击当前屏幕会影响前台应用，需要确认。")
+            return ToolRequest("computer.click", args, "点击当前屏幕会影响前台应用，需要确认。")
+        return ToolRequest("vision.resolve_target", {"query": text, "action": "click"}, "先从当前画面中寻找候选区域。")
     return None
 
 
 def _looks_like_click(text: str, lowered: str) -> bool:
-    return any(token in text for token in ("点击", "点一下", "鼠标点", "单击")) or "click" in lowered
+    return any(token in text for token in ("点击", "点一下", "鼠标点", "单击")) or ("点" in text and "按钮" in text) or "click" in lowered
 
 
 def _looks_like_type_text(text: str, lowered: str) -> bool:

@@ -17,6 +17,7 @@ class WatchFrame:
     model_status: str = "unknown"
     ocr_summary: str = ""
     ocr_text: list[str] = field(default_factory=list)
+    ocr_regions: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
     def to_agent_state(self) -> dict[str, Any]:
@@ -28,6 +29,7 @@ class WatchFrame:
             "model_status": self.model_status,
             "ocr_summary": self.ocr_summary,
             "ocr_text": list(self.ocr_text[:12]),
+            "ocr_regions": list(self.ocr_regions[:8]),
             "created_at": self.created_at,
         }
 
@@ -61,6 +63,9 @@ def answer_from_recent_frames(question: str, frames: list[WatchFrame]) -> tuple[
         return f"{title}的截图已经保存了，不过视觉摘要暂时没生成出来。", "vision_error"
     ocr_line = _ocr_line(latest)
     question_hint = question or ""
+    region_answer = _region_answer(question_hint, latest)
+    if region_answer:
+        return region_answer, "vision_context"
     if any(token in question_hint for token in ("写了什么", "文字", "按钮", "页面里", "标题", "label", "button")) and ocr_line:
         return f"{title}里我能读到这些可见文字：{ocr_line}", "vision_context"
     if len(frames) == 1:
@@ -105,6 +110,7 @@ class WatchAnswerer:
                     "summary": frame.summary,
                     "ocr_summary": frame.ocr_summary,
                     "ocr_text": frame.ocr_text[:10],
+                    "ocr_regions": frame.ocr_regions[:5],
                     "user_question": frame.user_question,
                     "model_status": frame.model_status,
                     "age_seconds": int(time.time() - frame.created_at),
@@ -159,6 +165,44 @@ def _ocr_line(frame: WatchFrame) -> str:
     if snippets:
         return "、".join(snippets)
     return frame.ocr_summary.strip()
+
+
+def _region_answer(question: str, frame: WatchFrame) -> str:
+    if not frame.ocr_regions:
+        return ""
+    if any(token in question for token in ("右上角", "右上", "页面右上", "右侧上方")):
+        text = _region_item_text(frame, horizontal="right", vertical="top")
+        if text:
+            return f"右上角附近我能看到：{text}"
+    if any(token in question for token in ("左上角", "左上", "页面左上", "左侧上方")):
+        text = _region_item_text(frame, horizontal="left", vertical="top")
+        if text:
+            return f"左上角附近我能看到：{text}"
+    if any(token in question for token in ("有哪些按钮", "按钮", "控件")):
+        text = _region_item_text(frame)
+        if text:
+            return f"我能看到这些可能的按钮或标签：{text}"
+    return ""
+
+
+def _region_item_text(frame: WatchFrame, horizontal: str = "", vertical: str = "") -> str:
+    snippets: list[str] = []
+    for region in frame.ocr_regions:
+        if not isinstance(region, dict):
+            continue
+        for item in region.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if horizontal and item.get("horizontal") != horizontal:
+                continue
+            if vertical and item.get("vertical") != vertical:
+                continue
+            text = str(item.get("text") or "").strip()
+            if text and text not in snippets:
+                snippets.append(text[:48])
+            if len(snippets) >= 8:
+                break
+    return "、".join(snippets[:8])
 
 
 def _frame_context(frame: WatchFrame) -> str:

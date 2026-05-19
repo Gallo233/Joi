@@ -32,6 +32,10 @@ class WatchRecallTool(ToolAdapter):
                     body_lines.append(f"   可见文字：{' / '.join(frame.ocr_text[:6])}")
                 elif frame.ocr_summary:
                     body_lines.append(f"   OCR：{frame.ocr_summary}")
+                if frame.ocr_regions:
+                    labels = [str(region.get("label_name") or region.get("label") or "区域") for region in frame.ocr_regions[:4] if isinstance(region, dict)]
+                    if labels:
+                        body_lines.append(f"   区域：{' / '.join(labels)}")
         else:
             body_lines.append("最近视觉上下文：暂无")
         has_context = bool(frames)

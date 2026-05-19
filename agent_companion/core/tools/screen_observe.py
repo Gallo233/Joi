@@ -7,6 +7,7 @@ from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult, V
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.vision import OcrExtractor, PytesseractOcrExtractor, VisionObserver, VisionSummarizer, WindowsScreenObserver
 from agent_companion.core.vision.ocr import OcrResult, run_ocr_safely
+from agent_companion.core.vision.regions import group_ocr_regions, regions_to_agent_state, summarize_ocr_regions
 from agent_companion.core.vision.schemas import VisionObservation
 from agent_companion.core.voice import safe_voice_line
 
@@ -43,6 +44,8 @@ class ScreenObserveTool(ToolAdapter):
             )
 
         ocr_result = self._run_ocr(observation)
+        ocr_regions = group_ocr_regions(ocr_result, observation.width, observation.height)
+        region_summary = summarize_ocr_regions(ocr_regions)
         summary_text = ""
         summary_error = ""
         model_status = "unconfigured"
@@ -60,6 +63,7 @@ class ScreenObserveTool(ToolAdapter):
 
         body = observation.detail_text()
         body = f"{body}\n\n{ocr_result.detail_text()}"
+        body = f"{body}\n{region_summary}"
         card_summary = self._summary(observation)
         if summary_text:
             body = f"{body}\n\n视觉摘要：{summary_text}"
@@ -71,10 +75,15 @@ class ScreenObserveTool(ToolAdapter):
             body = f"{body}\n\n视觉摘要：生成失败，截图已保存。"
             card_summary = "截图已保存；视觉摘要暂时没有生成出来。"
 
+        observation_state = {
+            **observation.to_agent_state(),
+            "ocr": ocr_result.to_agent_state(),
+            "ocr_regions": regions_to_agent_state(ocr_regions),
+        }
         agent_state: dict = {
             "tool": self.name,
             "computer_observation": computer_observation.to_agent_state(),
-            "observation": {**observation.to_agent_state(), "ocr": ocr_result.to_agent_state()},
+            "observation": observation_state,
             "model_status": model_status,
             "artifacts": [observation.screenshot_rel],
         }
