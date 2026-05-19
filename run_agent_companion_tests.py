@@ -24,6 +24,7 @@ from agent_companion.core.vision.regions import group_ocr_regions
 from agent_companion.core.vision.schemas import CaptureRect, VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummary
 from agent_companion.core.vision.targeting import resolve_target_candidates
+from agent_companion.core.vision.visual_detector import UnavailableVisualDetector, VisualCandidate, VisualDetectionResult
 from agent_companion.core.voice import safe_voice_line
 from agent_companion.core.watch import WatchFrame
 
@@ -131,6 +132,16 @@ def _no_accessibility() -> FakeAccessibilityObserver:
     return FakeAccessibilityObserver(AccessibilitySnapshot("unavailable", error="test_unavailable"))
 
 
+class FakeVisualDetector:
+    def __init__(self, result: VisualDetectionResult) -> None:
+        self.result = result
+        self.calls: list[tuple[str, str]] = []
+
+    def detect(self, observation: ComputerObservation, query: str = "") -> VisualDetectionResult:
+        self.calls.append((observation.screenshot_rel, query))
+        return self.result
+
+
 class SequenceOcrExtractor:
     def __init__(self, results: list[OcrResult]) -> None:
         self.results = list(results)
@@ -224,6 +235,8 @@ def main() -> int:
     semantic_click_plan = build_plan("点登录按钮")
     assert_true(semantic_click_plan.intent == "semantic_target", "semantic click should use target grounding route")
     assert_true(semantic_click_plan.steps[0].name == "vision.resolve_target", "semantic click should resolve target before clicking")
+    contextual_click_plan = build_plan("点那个开始任务")
+    assert_true(contextual_click_plan.intent == "semantic_target", "contextual click should use target grounding route")
     type_plan = build_plan("输入文字：你好世界")
     assert_true(type_plan.steps[0].name == "computer.type_text", "type route failed")
     assert_true(type_plan.steps[0].arguments.get("text") == "你好世界", "Chinese type text should be preserved")
@@ -543,8 +556,90 @@ def main() -> int:
     ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(ocr_fallback_target.requires_approval, "accessibility unavailable should keep OCR fallback working")
     assert_true(ocr_fallback_target.agent_state["target_candidate"]["source"] == "ocr", "OCR fallback should preserve source")
+    ocr_with_unavailable_detector = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-visual-unavailable.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(region_ocr),
+        accessibility=_no_accessibility(),
+        visual_detector=UnavailableVisualDetector(),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(ocr_with_unavailable_detector.requires_approval, "unavailable visual detector should not break OCR approval path")
+    assert_true(ocr_with_unavailable_detector.agent_state["target_candidate"]["source"] == "ocr", "OCR target should remain source when visual detector is unavailable")
     forbidden_uia_voice = forbidden_target_voice + ["990", "245", "selection-", "uiautomation", "TextControl", "ButtonControl", "enabled", "role"]
     assert_true(all(not any(fragment in event_text for fragment in forbidden_uia_voice) for event_text in [accessibility_target.voice_line.text, disabled_button_target.voice_line.text, static_text_target.voice_line.text, fused_target.voice_line.text, disabled_fused_target.voice_line.text, conflict_target.voice_line.text]), "accessibility voice leaked technical details")
+
+    visual_result = VisualDetectionResult(
+        "success",
+        "mock visual candidates",
+        [VisualCandidate("开始任务", (420, 760, 160, 70), 0.66, "底部高对比操作块", region="bottom_controls")],
+        artifacts=["data/agent_companion/vision/target-visual.png"],
+    )
+    visual_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-visual.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+        accessibility=_no_accessibility(),
+        visual_detector=FakeVisualDetector(visual_result),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点开始任务"}))
+    assert_true(not visual_target.requires_approval, "visual-only target must not directly create click approval")
+    assert_true(visual_target.agent_state["candidate_selection_required"], "visual-only target should ask for candidate selection")
+    assert_true(visual_target.agent_state["target_candidate"]["source"] == "visual", "visual fallback should expose visual source")
+    assert_true(visual_target.agent_state["visual_detection"]["status"] == "success", "visual detection state should be attached")
+    assert_true(visual_target.agent_state["target_candidate"]["preview"]["bbox"] == [420, 760, 160, 70], "visual candidate should keep preview bbox")
+    forbidden_visual_voice = forbidden_target_voice + ["visual", "420", "760", "source", "bbox", "data/"]
+    assert_true(not any(fragment in visual_target.voice_line.text for fragment in forbidden_visual_voice), "visual target voice leaked technical details")
+
+    visual_selection_app = AgentCompanionApp(workspace)
+    visual_selection_app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(
+                        workspace,
+                        rel="data/agent_companion/vision/selection-visual.png",
+                        width=1000,
+                        height=1000,
+                        capture_rect=CaptureRect(100, 200, 1000, 1000),
+                    )
+                ],
+            ),
+            ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+            accessibility=_no_accessibility(),
+            visual_detector=FakeVisualDetector(visual_result),
+        )
+    )
+    visual_selection_events = visual_selection_app.handle_user_text("点开始任务")
+    visual_selection_id = _selection_id(visual_selection_events)
+    assert_true(visual_selection_id.startswith("selection-"), "visual fallback should create pending candidate selection context")
+    visual_selected_events = visual_selection_app.select_semantic_target(visual_selection_id, 1)
+    visual_approval = _approval_payload(visual_selected_events)
+    assert_true(visual_approval.get("tool") == "computer.click", "selected visual candidate should create approval-gated click")
+    assert_true(any(event.type == EventType.APPROVAL_REQUIRED and event.agent_state.get("risk") == "medium" for event in visual_selected_events), "visual candidate click should remain medium-risk approval")
+    assert_true(all(not any(fragment in event.voice_line.text for fragment in forbidden_visual_voice) for event in visual_selected_events), "visual selection voice leaked technical details")
 
     disabled_selection_app = AgentCompanionApp(workspace)
     disabled_selection_app.tools.register(
@@ -1276,7 +1371,7 @@ def main() -> int:
     assert_true("runtimeStatusRows" in app_vue_source and "lastTtsError" in app_vue_source, "Shell developer mode should expose voice runtime status")
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
-    assert_true("targetSource" in app_vue_source and "UI控件" in app_vue_source and "融合" in app_vue_source, "Shell should show semantic target candidate source")
+    assert_true("targetSource" in app_vue_source and "UI控件" in app_vue_source and "融合" in app_vue_source and "视觉" in app_vue_source, "Shell should show semantic target candidate source")
     assert_true("selectTargetCandidate" in app_vue_source and "selectSemanticTarget" in app_vue_source, "Shell candidate cards should continue semantic target selection through explicit RPC")
     assert_true("currentSemanticSelectionId" in app_vue_source and "selectionExpired" in app_vue_source, "Shell should disable stale or expired semantic target candidates")
     assert_true("选 ${rank}" not in app_vue_source, "Shell candidate buttons should not send natural-language selection text")

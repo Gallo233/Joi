@@ -11,6 +11,7 @@ from agent_companion.core.vision.regions import OcrRegion, group_ocr_regions, re
 from agent_companion.core.vision.schemas import CaptureRect, VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummarizer, VisionSummary
 from agent_companion.core.vision.targeting import TargetCandidate, resolve_target_candidates
+from agent_companion.core.vision.visual_detector import HeuristicVisualDetector, UnavailableVisualDetector, VisualCandidate, VisualDetectionResult, VisualDetector
 from agent_companion.core.vision.windows import WindowsScreenObserver
 
 __all__ = [
@@ -32,6 +33,11 @@ __all__ = [
     "VisionObserver",
     "VisionSummarizer",
     "VisionSummary",
+    "VisualCandidate",
+    "VisualDetectionResult",
+    "VisualDetector",
+    "HeuristicVisualDetector",
+    "UnavailableVisualDetector",
     "WindowsScreenObserver",
     "WindowsAccessibilityObserver",
     "group_ocr_regions",

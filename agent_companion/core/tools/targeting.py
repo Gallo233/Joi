@@ -10,7 +10,18 @@ from agent_companion.core.computer_use import ComputerUseBackend, WindowsCompute
 from agent_companion.core.computer_use.schemas import ComputerObservation
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
-from agent_companion.core.vision import AccessibilityObserver, AccessibilitySnapshot, OcrExtractor, PytesseractOcrExtractor, VisionObserver, WindowsAccessibilityObserver, WindowsScreenObserver
+from agent_companion.core.vision import (
+    AccessibilityObserver,
+    AccessibilitySnapshot,
+    HeuristicVisualDetector,
+    OcrExtractor,
+    PytesseractOcrExtractor,
+    VisionObserver,
+    VisualDetectionResult,
+    VisualDetector,
+    WindowsAccessibilityObserver,
+    WindowsScreenObserver,
+)
 from agent_companion.core.vision.ocr import run_ocr_safely
 from agent_companion.core.vision.regions import group_ocr_regions, regions_to_agent_state, summarize_ocr_regions
 from agent_companion.core.vision.targeting import TargetCandidate, resolve_target_candidates
@@ -100,12 +111,14 @@ class SemanticTargetTool(ToolAdapter):
         computer_backend: ComputerUseBackend | None = None,
         ocr: OcrExtractor | None = None,
         accessibility: AccessibilityObserver | None = None,
+        visual_detector: VisualDetector | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.observer = observer or WindowsScreenObserver(workspace)
         self.computer_backend = computer_backend or WindowsComputerUseBackend(workspace, self.observer)
         self.ocr = ocr or PytesseractOcrExtractor()
         self.accessibility = accessibility or WindowsAccessibilityObserver()
+        self.visual_detector = visual_detector or HeuristicVisualDetector()
 
     def run(self, request: ToolRequest) -> ToolResult:
         query = str(request.arguments.get("query") or request.arguments.get("target") or "").strip()
@@ -125,6 +138,8 @@ class SemanticTargetTool(ToolAdapter):
         accessibility_snapshot = self.accessibility.observe(observation.window_handle, observation.title)
         accessibility_state = _accessibility_target_state(accessibility_snapshot, observation)
         candidates = resolve_target_candidates(query, region_state, accessibility_state)
+        visual_result = _maybe_detect_visual_targets(self.visual_detector, observation, query, candidates)
+        candidates = _merge_visual_candidates(candidates, visual_result)
         artifacts = [observation.screenshot_rel] if observation.screenshot_rel else []
         candidate_states = [_candidate_state(row, observation) for row in candidates]
         if not candidates:
@@ -133,6 +148,7 @@ class SemanticTargetTool(ToolAdapter):
                     f"目标描述：{query or '未提供'}",
                     summarize_ocr_regions(regions),
                     accessibility_snapshot.detail_text(),
+                    visual_result.detail_text(),
                     "结果：没有找到足够明确的候选区域，请换一种更具体的说法。",
                 ]
             )
@@ -144,6 +160,7 @@ class SemanticTargetTool(ToolAdapter):
                     "ocr": ocr_result.to_agent_state(),
                     "ocr_regions": region_state,
                     "accessibility": accessibility_state,
+                    "visual_detection": visual_result.to_agent_state(),
                     "target_candidates": [],
                     "needs_clarification": True,
                     "artifacts": artifacts,
@@ -160,6 +177,7 @@ class SemanticTargetTool(ToolAdapter):
                     f"目标描述：{query or '未提供'}",
                     _candidate_list_body(candidates),
                     accessibility_snapshot.detail_text(),
+                    visual_result.detail_text(),
                     f"提示：{blocking_hint}" if blocking_hint else "",
                     "结果：候选还不够唯一，请补充位置或从候选里指定编号。",
                 ]
@@ -174,6 +192,7 @@ class SemanticTargetTool(ToolAdapter):
                     "ocr": ocr_result.to_agent_state(),
                     "ocr_regions": region_state,
                     "accessibility": accessibility_state,
+                    "visual_detection": visual_result.to_agent_state(),
                     "target_candidate": _candidate_state(candidate, observation),
                     "target_candidates": candidate_states,
                     "needs_clarification": True,
@@ -194,6 +213,7 @@ class SemanticTargetTool(ToolAdapter):
                     "ocr": ocr_result.to_agent_state(),
                     "ocr_regions": region_state,
                     "accessibility": accessibility_state,
+                    "visual_detection": visual_result.to_agent_state(),
                     "target_candidate": _candidate_state(candidate, observation),
                     "target_candidates": candidate_states,
                     "needs_clarification": True,
@@ -216,6 +236,7 @@ class SemanticTargetTool(ToolAdapter):
                 _candidate_list_body(candidates),
                 summarize_ocr_regions(regions),
                 accessibility_snapshot.detail_text(),
+                visual_result.detail_text(),
                 "下一步：确认后才会点击这个候选区域。",
             ]
         )
@@ -227,6 +248,7 @@ class SemanticTargetTool(ToolAdapter):
                 "ocr": ocr_result.to_agent_state(),
                 "ocr_regions": region_state,
                 "accessibility": accessibility_state,
+                "visual_detection": visual_result.to_agent_state(),
                 "target_candidate": _candidate_state(candidate, observation, click_args),
                 "target_candidates": candidate_states,
                 "approval_request": {
@@ -486,6 +508,76 @@ def _accessibility_target_state(snapshot: AccessibilitySnapshot, observation: Co
     return state
 
 
+def _maybe_detect_visual_targets(
+    detector: VisualDetector,
+    observation: ComputerObservation,
+    query: str,
+    candidates: list[TargetCandidate],
+) -> VisualDetectionResult:
+    should_detect = not candidates or bool(candidates and candidates[0].confidence < 0.7)
+    if not should_detect:
+        return VisualDetectionResult("unavailable", "视觉启发式检测未运行。", error="not_needed")
+    try:
+        return detector.detect(observation, query)
+    except Exception:
+        return VisualDetectionResult("failed", "视觉启发式检测失败。", artifacts=[observation.screenshot_rel] if observation.screenshot_rel else [], error="visual_detector_failed")
+
+
+def _merge_visual_candidates(
+    candidates: list[TargetCandidate],
+    visual_result: VisualDetectionResult,
+) -> list[TargetCandidate]:
+    visual_candidates = [
+        TargetCandidate(
+            label=row.label,
+            text=row.label,
+            region_label=row.region,
+            bbox=row.bbox,
+            confidence=row.confidence,
+            source="visual",
+            reason=row.reason,
+        )
+        for row in visual_result.candidates
+        if row.bbox and row.confidence > 0
+    ]
+    if not visual_candidates:
+        return candidates
+    return _rank_merged_candidates([*candidates, *visual_candidates])
+
+
+def _rank_merged_candidates(candidates: list[TargetCandidate]) -> list[TargetCandidate]:
+    if not candidates:
+        return []
+    sorted_candidates = sorted(candidates, key=lambda candidate: candidate.confidence, reverse=True)
+    second = sorted_candidates[1] if len(sorted_candidates) > 1 else None
+    close = bool(second and abs(sorted_candidates[0].confidence - second.confidence) <= 0.08)
+    rows: list[TargetCandidate] = []
+    for index, candidate in enumerate(sorted_candidates, start=1):
+        ambiguity = "none"
+        if index <= 2 and close:
+            ambiguity = "close_score"
+        elif candidate.confidence < 0.7:
+            ambiguity = "low_confidence"
+        rows.append(
+            TargetCandidate(
+                label=candidate.label,
+                text=candidate.text,
+                region_label=candidate.region_label,
+                bbox=candidate.bbox,
+                confidence=candidate.confidence,
+                rank=index,
+                ambiguity=ambiguity,
+                source=candidate.source,
+                reason=candidate.reason,
+                screen_bbox=candidate.screen_bbox,
+                role=candidate.role,
+                enabled=candidate.enabled,
+                clickable=candidate.clickable,
+            )
+        )
+    return rows
+
+
 def _relative_bbox_from_screen_bbox(screen_bbox: tuple[int, int, int, int] | None, observation: ComputerObservation) -> tuple[int, int, int, int] | None:
     if screen_bbox is None or observation.capture_rect is None:
         return None
@@ -529,6 +621,7 @@ def _friendly_source(source: str) -> str:
         "accessibility": "UI控件",
         "ocr": "OCR",
         "fused": "融合",
+        "visual": "视觉候选",
     }.get(source, "候选")
 
 
@@ -544,6 +637,8 @@ def _should_approve_candidate(candidate: TargetCandidate) -> bool:
 
 def _candidate_can_be_clicked(candidate: TargetCandidate) -> bool:
     if candidate.enabled is False:
+        return False
+    if candidate.source == "visual":
         return False
     if candidate.source == "fused":
         return True

@@ -111,7 +111,8 @@ def _build_computer_action(text: str, lowered: str) -> ToolRequest | None:
 
 
 def _looks_like_click(text: str, lowered: str) -> bool:
-    return any(token in text for token in ("点击", "点一下", "鼠标点", "单击")) or ("点" in text and "按钮" in text) or "click" in lowered
+    contextual_click = "点" in text and any(token in text for token in ("按钮", "那个", "这个", "右上", "左上", "右下", "左下", "开始", "登录", "任务"))
+    return any(token in text for token in ("点击", "点一下", "鼠标点", "单击")) or contextual_click or "click" in lowered
 
 
 def _looks_like_type_text(text: str, lowered: str) -> bool:

@@ -366,6 +366,7 @@ function targetSource(candidate: Record<string, unknown>) {
     accessibility: 'UI控件',
     ocr: 'OCR',
     fused: '融合',
+    visual: '视觉',
   }
   return labels[source] || '候选'
 }

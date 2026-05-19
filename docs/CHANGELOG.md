@@ -39,6 +39,7 @@
 - Added optional Windows accessibility-tree grounding for semantic targets, fusing UI control names/roles/bounds with OCR candidates while keeping real clicks behind approval.
 - Hardened UI Automation actionability so static text controls do not become click approvals without actionable role/clickable evidence or OCR fusion.
 - Blocked click approvals for explicitly disabled UI Automation candidates, including fused OCR/UIA candidates and candidate-selection continuation.
+- Added a lightweight visual detector fallback for sparse canvas/game UI screens, with visual candidates shown in selection cards and kept behind explicit click approval.
 
 ## 2026-05-14
 
