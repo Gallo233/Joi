@@ -5,7 +5,7 @@
 - Vision now supports Windows active-window/fullscreen screenshots, optional visual model summaries, and best-effort OCR grounding with timeout; OCR quality depends on optional local dependencies, Tesseract language data, and captured image clarity.
 - Watch Together can reuse recent visual summaries in the current app session, but context is not persisted across restarts yet.
 - Voice input has OpenAI-compatible ASR wiring and explicit disabled state when unconfigured; local Whisper is not wired yet.
-- Computer Use actions are intentionally minimal: click/type/scroll/hotkey are Windows-only and do not yet include visual target grounding or before/after verification.
+- Computer Use actions are intentionally minimal: click/type/scroll/hotkey are Windows-only and now include conservative before/after verification, but they do not yet have semantic visual target grounding or pixel-diff confidence.
 - The stage can load local character sprites from configuration, but bundled original VN expression variants and Live2D/VRM rendering are not product grade yet.
 - OK-WW callback currently proves launch/return code, but does not yet read detailed in-game completion state.
 - Codex permission requests do not yet flow back into Joi UI step by step.
@@ -20,6 +20,7 @@
 - Raw tool names are filtered out of voice lines.
 - Computer Use voice lines avoid speaking coordinates, text payloads, JSON, command-like strings, paths, and task ids.
 - Computer Use actions attach an after screenshot to the task card.
+- Computer Use actions compare before/after observations and avoid claiming success when changes are not visible.
 - Watch Together follow-up questions reuse recent visual context instead of forcing another screenshot.
 - Watch observations are kept out of long-term memory by default.
 - Screenshot artifacts have task-card thumbnails and a click-to-preview modal.

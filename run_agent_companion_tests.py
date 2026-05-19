@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 from agent_companion.core.app import AgentCompanionApp
-from agent_companion.core.computer_use import ComputerAction, ComputerObservation, ComputerUseResult
+from agent_companion.core.computer_use import ComputerAction, ComputerObservation, ComputerUseResult, verify_post_action
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouter, load_app_config
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
@@ -47,12 +47,52 @@ class FakeVisionObserver:
         )
 
 
+def _fake_computer_observation(
+    workspace: Path,
+    rel: str = "data/agent_companion/vision/sample.png",
+    title: str = "Joi Test Window",
+    ocr_text: list[str] | None = None,
+    width: int = 1280,
+    height: int = 720,
+) -> ComputerObservation:
+    ocr = {}
+    if ocr_text:
+        ocr = {
+            "status": "success",
+            "text_blocks": [{"text": text, "bbox": [0, 0, 40, 20], "confidence": 0.9} for text in ocr_text],
+        }
+    return ComputerObservation(
+        target="active_window",
+        screenshot_path=workspace / rel,
+        screenshot_rel=rel,
+        width=width,
+        height=height,
+        title=title,
+        window_handle=1234,
+        query="test",
+        ocr=ocr,
+    )
+
+
 class FakeComputerBackend:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        observations: list[ComputerObservation] | None = None,
+        fail_on_observe_calls: set[int] | None = None,
+    ) -> None:
         self.workspace = workspace
         self.actions: list[ComputerAction] = []
+        self.observations = list(observations or [])
+        self.fail_on_observe_calls = set(fail_on_observe_calls or set())
+        self.observe_calls = 0
 
     def observe(self, target: str = "active_window", query: str = "") -> ComputerObservation:
+        self.observe_calls += 1
+        if self.observe_calls in self.fail_on_observe_calls:
+            raise RuntimeError("mock observe failed")
+        if self.observations:
+            return self.observations.pop(0)
         return ComputerObservation.from_vision(FakeVisionObserver(self.workspace).observe(target=target, query=query))
 
     def perform(self, action: ComputerAction) -> ComputerUseResult:
@@ -221,15 +261,70 @@ def main() -> int:
     public_payload = policy.public_payload(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true("100" not in str(public_payload), "policy preview should not expose raw click coordinates")
 
+    changed_verification = verify_post_action(
+        _fake_computer_observation(workspace, title="Before", ocr_text=["登录"]),
+        _fake_computer_observation(workspace, title="After", ocr_text=["仪表盘"]),
+    )
+    assert_true(changed_verification.status == "changed", "verification should detect strong visible changes")
+    assert_true(changed_verification.signals.title_changed is True, "verification should report title changes")
+
+    noop_verification = verify_post_action(
+        _fake_computer_observation(workspace, rel="data/agent_companion/vision/before.png", title="Same", ocr_text=["一样"]),
+        _fake_computer_observation(workspace, rel="data/agent_companion/vision/after.png", title="Same", ocr_text=["一样"]),
+    )
+    assert_true(noop_verification.status == "likely_noop", "artifact-only changes should not overclaim success")
+    assert_true(noop_verification.signals.artifact_changed is True, "verification should still expose artifact changes")
+
+    unavailable_verification = verify_post_action(None, _fake_computer_observation(workspace))
+    assert_true(unavailable_verification.status == "unavailable", "missing before observation should be unavailable")
+
     fake_backend = FakeComputerBackend(workspace)
     click_tool = ComputerActionTool(workspace, "computer.click", "click", fake_backend)
     click_result = click_tool.run(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true(click_result.ok, "computer.click tool should succeed with fake backend")
     assert_true(click_result.agent_state["computer_use"]["action"]["x"] == 100, "computer action state should keep x for planner")
     assert_true("observation" in click_result.agent_state["computer_use"], "computer action should include after observation")
+    assert_true(click_result.agent_state["post_action_verification"]["status"] == "likely_noop", "computer action should include verification status")
     assert_true(click_result.display_card.artifacts == ["data/agent_companion/vision/sample.png"], "computer action should expose after screenshot artifact")
     assert_true("100" not in click_result.display_card.summary, "computer card summary should be friendly")
     assert_true("100" not in click_result.voice_line.text, "computer voice should not read coordinates")
+
+    changed_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/before-click.png", title="Before", ocr_text=["开始"]),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/after-click.png", title="After", ocr_text=["完成"]),
+        ],
+    )
+    changed_click = ComputerActionTool(workspace, "computer.click", "click", changed_backend).run(ToolRequest("computer.click", {"x": 10, "y": 20}))
+    assert_true(changed_click.agent_state["post_action_verification"]["status"] == "changed", "computer action should report changed screen")
+    assert_true("操作后画面有变化" in changed_click.display_card.summary, "changed card summary should be friendly")
+    assert_true(changed_click.display_card.status == "success", "changed verification should keep success status")
+
+    artifact_only_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/before-scroll.png", title="Same", ocr_text=["相同"]),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/after-scroll.png", title="Same", ocr_text=["相同"]),
+        ],
+    )
+    artifact_only = ComputerActionTool(workspace, "computer.scroll", "scroll", artifact_only_backend).run(ToolRequest("computer.scroll", {"delta": -3}))
+    assert_true(artifact_only.agent_state["post_action_verification"]["status"] == "likely_noop", "artifact-only screen comparison should be likely_noop")
+    assert_true("变化不明显" in artifact_only.display_card.summary, "likely noop card summary should be friendly")
+    assert_true(artifact_only.display_card.status == "info", "likely noop should not look like confirmed success")
+
+    unavailable_backend = FakeComputerBackend(
+        workspace,
+        observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/after-hotkey.png")],
+        fail_on_observe_calls={1},
+    )
+    unavailable_action = ComputerActionTool(workspace, "computer.hotkey", "hotkey", unavailable_backend).run(ToolRequest("computer.hotkey", {"keys": ["Ctrl", "L"]}))
+    assert_true(unavailable_action.agent_state["post_action_verification"]["status"] == "unavailable", "missing before comparison should be unavailable")
+    assert_true(unavailable_action.display_card.artifacts == ["data/agent_companion/vision/after-hotkey.png"], "unavailable verification should still show after screenshot")
+    assert_true(unavailable_action.display_card.status == "info", "unavailable comparison should not look like confirmed success")
+    forbidden_computer_voice = ["10", "20", "Ctrl", "hello", "data/", ".png", "{", "task-", "完成", "相同"]
+    computer_voice_lines = [changed_click.voice_line.text, artifact_only.voice_line.text, unavailable_action.voice_line.text]
+    assert_true(all(not any(fragment in line for fragment in forbidden_computer_voice) for line in computer_voice_lines), "computer verification voice leaked technical details")
 
     type_tool = ComputerActionTool(workspace, "computer.type_text", "type_text", fake_backend)
     type_result = type_tool.run(ToolRequest("computer.type_text", {"text": "hello world"}))

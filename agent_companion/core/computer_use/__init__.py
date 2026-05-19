@@ -1,5 +1,6 @@
 from agent_companion.core.computer_use.backend import ComputerUseBackend
 from agent_companion.core.computer_use.schemas import ComputerAction, ComputerObservation, ComputerUseResult
+from agent_companion.core.computer_use.verification import PostActionVerification, VerificationSignals, verify_post_action
 from agent_companion.core.computer_use.windows import WindowsComputerUseBackend
 
 __all__ = [
@@ -7,5 +8,8 @@ __all__ = [
     "ComputerObservation",
     "ComputerUseBackend",
     "ComputerUseResult",
+    "PostActionVerification",
+    "VerificationSignals",
     "WindowsComputerUseBackend",
+    "verify_post_action",
 ]

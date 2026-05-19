@@ -19,6 +19,7 @@ class ComputerObservation:
     window_handle: int | None = None
     source: str = "computer"
     query: str = ""
+    ocr: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
     @classmethod
@@ -33,6 +34,7 @@ class ComputerObservation:
             window_handle=observation.window_handle,
             source=observation.source,
             query=observation.query,
+            ocr={},
             created_at=observation.created_at,
         )
 
@@ -51,7 +53,7 @@ class ComputerObservation:
         )
 
     def to_agent_state(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "target": self.target,
             "screenshot_path": str(self.screenshot_path),
             "screenshot_rel": self.screenshot_rel,
@@ -63,6 +65,9 @@ class ComputerObservation:
             "query": self.query,
             "created_at": self.created_at,
         }
+        if self.ocr:
+            payload["ocr"] = self.ocr
+        return payload
 
 
 @dataclass(frozen=True)

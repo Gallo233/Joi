@@ -31,7 +31,7 @@ Keep `config.yaml` local only. Public examples should go in `config.example.yaml
 
 ## Current Priority
 
-Continue P4.3 OCR/vision target grounding and prepare post-action verification.
+Continue P4 Computer Use/Watch grounding and prepare semantic target selection.
 
 The current observation, first action layer, approval hardening, watch loop, and production ASR path are implemented:
 
@@ -44,6 +44,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - `agent_companion/core/policy.py` treats Computer Use actions as medium risk, requiring confirmation.
 - Approval now uses one-time `approval_id` values bound to task id, step index, tool name, and arguments hash.
 - Computer Use actions automatically observe the active window after execution and attach the after screenshot to the task card.
+- Computer Use actions compare before/after observations and report changed, likely no-op, or unavailable verification without reading technical details aloud.
 - `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
 - `agent_companion/core/watch.py` keeps recent watch context in the current app session.
 - `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.
@@ -74,20 +75,20 @@ The current observation, first action layer, approval hardening, watch loop, and
 Next task options, in priority order:
 
 1. Improve OCR target grounding by grouping text blocks into rough regions such as top bar, center content, and bottom controls.
-2. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
-3. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+2. Add semantic visual target grounding so natural phrases like "点那个登录按钮" can map to OCR/UI regions before approval.
+3. Add an audit view for confirmed Computer Use actions, approvals, verification status, and sanitized arguments.
 4. Add a settings panel for changing ASR/TTS/OCR providers once runtime status is stable.
 5. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 6. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
 
 ## Suggested First Task
 
-Implement post-action verification:
+Implement OCR region grouping for target grounding:
 
-- Compare before/after screenshots or OCR summaries for confirmed Computer Use actions.
-- Flag likely no-op actions in task cards without overclaiming success.
-- Keep screenshot paths and coordinates out of voice.
-- Add tests for successful change, likely no-op, and unavailable comparison fallback.
+- Group OCR text blocks into coarse screen regions such as top bar, main content, sidebar, and bottom controls.
+- Expose those regions to Watch Together and Computer Use planners without putting raw coordinates in voice lines.
+- Keep Computer Use approval previews friendly and sanitized.
+- Add tests for grouped OCR regions, missing OCR fallback, and voice-line sanitization.
 
 ## Allowed Edit Areas
 

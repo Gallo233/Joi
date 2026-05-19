@@ -4,7 +4,15 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from agent_companion.core.computer_use import ComputerAction, ComputerUseBackend, ComputerUseResult, WindowsComputerUseBackend
+from agent_companion.core.computer_use import (
+    ComputerAction,
+    ComputerObservation,
+    ComputerUseBackend,
+    ComputerUseResult,
+    PostActionVerification,
+    WindowsComputerUseBackend,
+    verify_post_action,
+)
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.voice import safe_voice_line
@@ -28,10 +36,12 @@ class ComputerActionTool(ToolAdapter):
                 risk=RiskLevel.MEDIUM,
             )
 
+        before_observation = self._observe_for_verification("before computer action")
         result = self.backend.perform(action)
+        verification = None
         if result.ok:
-            result = self._attach_after_observation(result)
-        return self._to_tool_result(result)
+            result, verification = self._attach_after_observation(result, before_observation)
+        return self._to_tool_result(result, verification)
 
     def _action_from_request(self, request: ToolRequest) -> ComputerAction | None:
         args = request.arguments
@@ -60,28 +70,46 @@ class ComputerActionTool(ToolAdapter):
             return ComputerAction("hotkey", keys=keys)
         return None
 
-    def _to_tool_result(self, result: ComputerUseResult) -> ToolResult:
+    def _to_tool_result(self, result: ComputerUseResult, verification: PostActionVerification | None = None) -> ToolResult:
         action_label = _action_label(result.action.action_type if result.action else self.action_type)
-        status = "success" if result.ok else "failed"
-        summary = result.summary if result.ok and result.summary else f"{action_label}没有完成。"
+        status = _card_status(result.ok, verification)
+        summary = verification.summary if verification else result.summary if result.ok and result.summary else f"{action_label}没有完成。"
         body = self._friendly_detail(result.error if result.error else "")
-        artifacts = [result.observation.screenshot_rel] if result.observation else []
-        if result.observation:
+        artifacts = verification.artifacts if verification else [result.observation.screenshot_rel] if result.observation else []
+        if verification:
+            body = f"{body}\n结果：{verification.summary}"
+        elif result.observation:
             body = f"{body}\n结果：已自动观察执行后的画面。"
+        agent_state = {"tool": self.name, "computer_use": result.to_agent_state()}
+        if verification:
+            agent_state["post_action_verification"] = verification.to_agent_state()
+            agent_state["computer_use"]["verification"] = verification.to_agent_state()
         return ToolResult(
             ok=result.ok,
-            agent_state={"tool": self.name, "computer_use": result.to_agent_state()},
+            agent_state=agent_state,
             display_card=DisplayCard("电脑操作", summary, body, status=status, artifacts=artifacts),
-            voice_line=safe_voice_line("电脑操作已经执行。" if result.ok else "电脑操作没有完成，细节在卡片里。", sprite="5" if result.ok else "4"),
+            voice_line=safe_voice_line(_voice_for_verification(result.ok, verification), sprite="5" if result.ok else "4"),
             risk=RiskLevel.MEDIUM,
         )
 
-    def _attach_after_observation(self, result: ComputerUseResult) -> ComputerUseResult:
+    def _observe_for_verification(self, query: str) -> ComputerObservation | None:
+        try:
+            return self.backend.observe(target="active_window", query=query)
+        except Exception:
+            return None
+
+    def _attach_after_observation(
+        self,
+        result: ComputerUseResult,
+        before_observation: ComputerObservation | None,
+    ) -> tuple[ComputerUseResult, PostActionVerification]:
         try:
             observation = self.backend.observe(target="active_window", query="after computer action")
         except Exception as exc:
-            return replace(result, detail=f"after observation failed: {type(exc).__name__}")
-        return replace(result, observation=observation)
+            verification = verify_post_action(before_observation, None)
+            return replace(result, detail=f"after observation failed: {type(exc).__name__}"), verification
+        verification = verify_post_action(before_observation, observation)
+        return replace(result, observation=observation), verification
 
     def _friendly_detail(self, error: str = "") -> str:
         label = _action_label(self.action_type)
@@ -136,3 +164,23 @@ def _friendly_error(error: str) -> str:
     if "Windows only" in error:
         return "当前动作只支持 Windows。"
     return "动作执行失败。"
+
+
+def _voice_for_verification(ok: bool, verification: PostActionVerification | None) -> str:
+    if not ok:
+        return "电脑操作没有完成，细节在卡片里。"
+    if verification is None:
+        return "电脑操作已经执行。"
+    if verification.status == "changed":
+        return "操作后画面有变化。"
+    if verification.status == "likely_noop":
+        return "操作执行了，但画面变化不明显。"
+    return "操作执行了，暂时判断不了画面变化。"
+
+
+def _card_status(ok: bool, verification: PostActionVerification | None) -> str:
+    if not ok:
+        return "failed"
+    if verification is None or verification.status == "changed":
+        return "success"
+    return "info"
