@@ -51,6 +51,19 @@ class OcrExtractor(Protocol):
         ...
 
 
+def run_ocr_safely(extractor: OcrExtractor, image_path: Path) -> OcrResult:
+    try:
+        return extractor.extract(image_path)
+    except TimeoutError:
+        return OcrResult("failed", "OCR 等太久了，我先跳过文字识别。", error="ocr_timeout")
+    except RuntimeError as exc:
+        if "timeout" in str(exc).casefold():
+            return OcrResult("failed", "OCR 等太久了，我先跳过文字识别。", error="ocr_timeout")
+        return OcrResult("failed", "OCR 没有跑通，截图仍然可查看。", error="ocr_failed")
+    except Exception:
+        return OcrResult("failed", "OCR 没有跑通，截图仍然可查看。", error="ocr_failed")
+
+
 class UnavailableOcrExtractor:
     def __init__(self, reason: str = "未配置 OCR。") -> None:
         self.reason = reason

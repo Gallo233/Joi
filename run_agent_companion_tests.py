@@ -108,6 +108,18 @@ class FakeOcrExtractor:
         return self.result
 
 
+class SequenceOcrExtractor:
+    def __init__(self, results: list[OcrResult]) -> None:
+        self.results = list(results)
+        self.calls: list[Path] = []
+
+    def extract(self, image_path: Path) -> OcrResult:
+        self.calls.append(image_path)
+        if self.results:
+            return self.results.pop(0)
+        return OcrResult("success", "没有识别到清晰文字。", [])
+
+
 class RaisingOcrExtractor:
     def __init__(self, exc: Exception) -> None:
         self.exc = exc
@@ -279,7 +291,7 @@ def main() -> int:
     assert_true(unavailable_verification.status == "unavailable", "missing before observation should be unavailable")
 
     fake_backend = FakeComputerBackend(workspace)
-    click_tool = ComputerActionTool(workspace, "computer.click", "click", fake_backend)
+    click_tool = ComputerActionTool(workspace, "computer.click", "click", fake_backend, post_action_settle_ms=0)
     click_result = click_tool.run(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true(click_result.ok, "computer.click tool should succeed with fake backend")
     assert_true(click_result.agent_state["computer_use"]["action"]["x"] == 100, "computer action state should keep x for planner")
@@ -296,7 +308,7 @@ def main() -> int:
             _fake_computer_observation(workspace, rel="data/agent_companion/vision/after-click.png", title="After", ocr_text=["完成"]),
         ],
     )
-    changed_click = ComputerActionTool(workspace, "computer.click", "click", changed_backend).run(ToolRequest("computer.click", {"x": 10, "y": 20}))
+    changed_click = ComputerActionTool(workspace, "computer.click", "click", changed_backend, post_action_settle_ms=0).run(ToolRequest("computer.click", {"x": 10, "y": 20}))
     assert_true(changed_click.agent_state["post_action_verification"]["status"] == "changed", "computer action should report changed screen")
     assert_true("操作后画面有变化" in changed_click.display_card.summary, "changed card summary should be friendly")
     assert_true(changed_click.display_card.status == "success", "changed verification should keep success status")
@@ -308,7 +320,7 @@ def main() -> int:
             _fake_computer_observation(workspace, rel="data/agent_companion/vision/after-scroll.png", title="Same", ocr_text=["相同"]),
         ],
     )
-    artifact_only = ComputerActionTool(workspace, "computer.scroll", "scroll", artifact_only_backend).run(ToolRequest("computer.scroll", {"delta": -3}))
+    artifact_only = ComputerActionTool(workspace, "computer.scroll", "scroll", artifact_only_backend, post_action_settle_ms=0).run(ToolRequest("computer.scroll", {"delta": -3}))
     assert_true(artifact_only.agent_state["post_action_verification"]["status"] == "likely_noop", "artifact-only screen comparison should be likely_noop")
     assert_true("变化不明显" in artifact_only.display_card.summary, "likely noop card summary should be friendly")
     assert_true(artifact_only.display_card.status == "info", "likely noop should not look like confirmed success")
@@ -318,20 +330,60 @@ def main() -> int:
         observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/after-hotkey.png")],
         fail_on_observe_calls={1},
     )
-    unavailable_action = ComputerActionTool(workspace, "computer.hotkey", "hotkey", unavailable_backend).run(ToolRequest("computer.hotkey", {"keys": ["Ctrl", "L"]}))
+    unavailable_action = ComputerActionTool(workspace, "computer.hotkey", "hotkey", unavailable_backend, post_action_settle_ms=0).run(ToolRequest("computer.hotkey", {"keys": ["Ctrl", "L"]}))
     assert_true(unavailable_action.agent_state["post_action_verification"]["status"] == "unavailable", "missing before comparison should be unavailable")
     assert_true(unavailable_action.display_card.artifacts == ["data/agent_companion/vision/after-hotkey.png"], "unavailable verification should still show after screenshot")
     assert_true(unavailable_action.display_card.status == "info", "unavailable comparison should not look like confirmed success")
-    forbidden_computer_voice = ["10", "20", "Ctrl", "hello", "data/", ".png", "{", "task-", "完成", "相同"]
-    computer_voice_lines = [changed_click.voice_line.text, artifact_only.voice_line.text, unavailable_action.voice_line.text]
+
+    production_style_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/prod-before.png", title="Stable"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/prod-after.png", title="Stable"),
+        ],
+    )
+    production_ocr = SequenceOcrExtractor(
+        [
+            OcrResult("success", "识别到 1 段可见文字，包含：提交。", [OcrTextBlock("提交", (12, 20, 40, 20), 0.96)]),
+            OcrResult("success", "识别到 1 段可见文字，包含：提交成功。", [OcrTextBlock("提交成功", (12, 20, 80, 20), 0.95)]),
+        ]
+    )
+    delay_calls: list[float] = []
+    production_style = ComputerActionTool(
+        workspace,
+        "computer.click",
+        "click",
+        production_style_backend,
+        ocr=production_ocr,
+        post_action_settle_ms=250,
+        sleep_fn=lambda seconds: delay_calls.append(seconds),
+    ).run(ToolRequest("computer.click", {"x": 88, "y": 99}))
+    assert_true(delay_calls == [0.25], "computer action should wait configured settle delay before after observation")
+    assert_true(len(production_ocr.calls) == 2, "production computer path should OCR both before and after observations")
+    assert_true(production_style.agent_state["post_action_verification"]["signals"]["ocr_changed"] is True, "OCR changes should drive real verification")
+    assert_true(production_style.agent_state["post_action_verification"]["status"] == "changed", "OCR-changed production path should report changed")
+    assert_true(production_style.agent_state["computer_use"]["observation"]["ocr"]["text_blocks"][0]["text"] == "提交成功", "after observation should carry OCR state")
+
+    no_ocr_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/no-ocr-before.png", title="Stable"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/no-ocr-after.png", title="Stable"),
+        ],
+    )
+    no_ocr_result = ComputerActionTool(workspace, "computer.click", "click", no_ocr_backend, post_action_settle_ms=0).run(ToolRequest("computer.click", {"x": 88, "y": 99}))
+    assert_true(no_ocr_result.agent_state["post_action_verification"]["status"] == "likely_noop", "test-only OCR should not mask missing production OCR wiring")
+    assert_true("ocr" not in no_ocr_result.agent_state["computer_use"]["observation"], "computer observation should only include OCR when extractor is wired")
+    forbidden_computer_voice = ["10", "20", "88", "99", "Ctrl", "hello", "data/", ".png", "{", "task-", "完成", "相同", "提交"]
+    computer_voice_lines = [changed_click.voice_line.text, artifact_only.voice_line.text, unavailable_action.voice_line.text, production_style.voice_line.text, no_ocr_result.voice_line.text]
     assert_true(all(not any(fragment in line for fragment in forbidden_computer_voice) for line in computer_voice_lines), "computer verification voice leaked technical details")
 
-    type_tool = ComputerActionTool(workspace, "computer.type_text", "type_text", fake_backend)
+    type_tool = ComputerActionTool(workspace, "computer.type_text", "type_text", fake_backend, post_action_settle_ms=0)
     type_result = type_tool.run(ToolRequest("computer.type_text", {"text": "hello world"}))
     assert_true(type_result.ok, "computer.type_text tool should succeed with fake backend")
     assert_true("hello" not in type_result.display_card.summary, "type summary should not echo raw text")
 
-    hotkey_tool = ComputerActionTool(workspace, "computer.hotkey", "hotkey", fake_backend)
+    hotkey_tool = ComputerActionTool(workspace, "computer.hotkey", "hotkey", fake_backend, post_action_settle_ms=0)
     hotkey_result = hotkey_tool.run(ToolRequest("computer.hotkey", {"keys": ["Ctrl", "L"]}))
     assert_true(hotkey_result.ok, "computer.hotkey tool should succeed with fake backend")
     assert_true("Ctrl" not in hotkey_result.voice_line.text, "hotkey voice should not read key names")
@@ -441,6 +493,8 @@ def main() -> int:
             "  timeout_seconds: 9\n"
             "ocr:\n"
             "  timeout_seconds: 4\n"
+            "computer_use:\n"
+            "  post_action_settle_ms: 0\n"
             "characters:\n"
             "  - name: Test\n"
             "    color: '#fff'\n"
@@ -465,12 +519,16 @@ def main() -> int:
         assert_true(tmp_config.asr.max_seconds == 7 and tmp_config.asr.max_bytes == 4096, "ASR limits should parse")
         assert_true(tmp_config.asr.timeout_seconds == 9, "ASR timeout should parse")
         assert_true(tmp_config.ocr.timeout_seconds == 4, "OCR timeout should parse")
+        assert_true(tmp_config.computer_use.post_action_settle_ms == 0, "computer use settle delay should parse")
         asr_provider, asr_state = build_asr_provider(tmp)
         assert_true(isinstance(asr_provider, OpenAICompatibleAsrProvider), "configured ASR should use OpenAI-compatible provider")
         assert_true(asr_state.configured and asr_state.max_bytes == 4096, "ASR runtime state should expose limits")
         assert_true(asr_state.timeout_seconds == 9, "ASR runtime state should expose timeout")
         assert_true(isinstance(tmp_app._build_ocr_extractor(), PytesseractOcrExtractor), "OCR extractor should build from config")
         assert_true(tmp_app._build_ocr_extractor().timeout_seconds == 4, "OCR extractor should use configured timeout")
+        tmp_click_tool = tmp_app.tools._tools.get("computer.click")
+        assert_true(tmp_click_tool is not None and tmp_click_tool.ocr is observe_tool.ocr, "computer tool should reuse observe.screen OCR extractor")
+        assert_true(tmp_click_tool.post_action_settle_ms == 0, "computer tool should use configured settle delay")
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)

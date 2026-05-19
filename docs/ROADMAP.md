@@ -42,6 +42,7 @@ Status: in progress
 - Bind confirmations to one-time `approval_id`, task id, step index, tool, and arguments hash.
 - Observe the active window after each successful computer action and attach the after screenshot to the task card.
 - Compare before/after observations for confirmed actions and label the task card as changed, likely no-op, or unavailable without overclaiming success.
+- Run configured OCR on Computer Use before/after observations and wait briefly after actions so real Windows UI updates can settle before verification.
 - Use clipboard paste for reliable Windows text input, including Chinese.
 - Show friendly action summaries in task cards while keeping coordinates, text payloads, command-like details, and raw ids out of voice lines.
 

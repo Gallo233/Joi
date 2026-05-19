@@ -45,6 +45,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Approval now uses one-time `approval_id` values bound to task id, step index, tool name, and arguments hash.
 - Computer Use actions automatically observe the active window after execution and attach the after screenshot to the task card.
 - Computer Use actions compare before/after observations and report changed, likely no-op, or unavailable verification without reading technical details aloud.
+- Computer Use verification reuses the same OCR extractor/config as `observe.screen` and waits `computer_use.post_action_settle_ms` before after-observation.
 - `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
 - `agent_companion/core/watch.py` keeps recent watch context in the current app session.
 - `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.

@@ -7,7 +7,7 @@ from pathlib import Path
 import uuid
 
 from agent_companion.core.character import CharacterHarness, load_character
-from agent_companion.core.config import ModelRouter, load_app_config
+from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
 from agent_companion.core.event_bus import EventBus
 from agent_companion.core.expression import ExpressionEngine
 from agent_companion.core.memory import MemoryStore
@@ -276,6 +276,9 @@ class AgentCompanionApp:
         return f"{self._tool_label(step.name)}需要你确认。"
 
     def _register_tools(self) -> None:
+        app_config = self._load_runtime_config()
+        ocr = self._build_ocr_extractor(app_config)
+        post_action_settle_ms = app_config.computer_use.post_action_settle_ms if app_config else 200
         self.tools.register(CompanionChatTool(self.workspace))
         self.tools.register(CodexTool(self.workspace))
         self.tools.register(BrowserTool(self.workspace, "browser.search"))
@@ -283,8 +286,8 @@ class AgentCompanionApp:
         self.tools.register(
             ScreenObserveTool(
                 self.workspace,
-                summarizer=self._build_vision_summarizer(),
-                ocr=self._build_ocr_extractor(),
+                summarizer=self._build_vision_summarizer(app_config),
+                ocr=ocr,
             )
         )
         self.tools.register(
@@ -294,21 +297,37 @@ class AgentCompanionApp:
                 WatchAnswerer(self.workspace, self.character.name, self.character.persona),
             )
         )
-        self.tools.register(ComputerActionTool(self.workspace, "computer.click", "click"))
-        self.tools.register(ComputerActionTool(self.workspace, "computer.type_text", "type_text"))
-        self.tools.register(ComputerActionTool(self.workspace, "computer.scroll", "scroll"))
-        self.tools.register(ComputerActionTool(self.workspace, "computer.hotkey", "hotkey"))
+        for name, action_type in (
+            ("computer.click", "click"),
+            ("computer.type_text", "type_text"),
+            ("computer.scroll", "scroll"),
+            ("computer.hotkey", "hotkey"),
+        ):
+            self.tools.register(
+                ComputerActionTool(
+                    self.workspace,
+                    name,
+                    action_type,
+                    ocr=ocr,
+                    post_action_settle_ms=post_action_settle_ms,
+                )
+            )
         self.tools.register(OkWwTool(self.workspace))
         self.tools.register(McpListTool(self.workspace))
         self.tools.register(FileReadTool(self.workspace))
 
-    def _build_vision_summarizer(self) -> OpenAIVisionSummarizer | None:
+    def _load_runtime_config(self) -> AppConfig | None:
         config_path = self.workspace / "config.yaml"
         if not config_path.is_file():
             return None
         try:
-            config = load_app_config(config_path)
+            return load_app_config(config_path)
         except Exception:
+            return None
+
+    def _build_vision_summarizer(self, config: AppConfig | None = None) -> OpenAIVisionSummarizer | None:
+        config = config or self._load_runtime_config()
+        if config is None:
             return None
         if not config.llm.is_vision_configured:
             return None
@@ -320,13 +339,9 @@ class AgentCompanionApp:
             api_key=endpoint.api_key,
         )
 
-    def _build_ocr_extractor(self) -> PytesseractOcrExtractor:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
-            return PytesseractOcrExtractor()
-        try:
-            config = load_app_config(config_path)
-        except Exception:
+    def _build_ocr_extractor(self, config: AppConfig | None = None) -> PytesseractOcrExtractor:
+        config = config or self._load_runtime_config()
+        if config is None:
             return PytesseractOcrExtractor()
         return PytesseractOcrExtractor(timeout_seconds=config.ocr.timeout_seconds)
 

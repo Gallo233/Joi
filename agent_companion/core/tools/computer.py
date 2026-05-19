@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+import time
 from typing import Any
 
 from agent_companion.core.computer_use import (
@@ -15,15 +17,29 @@ from agent_companion.core.computer_use import (
 )
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
+from agent_companion.core.vision import OcrExtractor
+from agent_companion.core.vision.ocr import run_ocr_safely
 from agent_companion.core.voice import safe_voice_line
 
 
 class ComputerActionTool(ToolAdapter):
-    def __init__(self, workspace: Path, name: str, action_type: str, backend: ComputerUseBackend | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        name: str,
+        action_type: str,
+        backend: ComputerUseBackend | None = None,
+        ocr: OcrExtractor | None = None,
+        post_action_settle_ms: int = 200,
+        sleep_fn: Callable[[float], None] | None = None,
+    ) -> None:
         self.workspace = workspace.resolve()
         self.name = name
         self.action_type = action_type
         self.backend = backend or WindowsComputerUseBackend(workspace)
+        self.ocr = ocr
+        self.post_action_settle_ms = max(0, int(post_action_settle_ms or 0))
+        self._sleep = sleep_fn or time.sleep
 
     def run(self, request: ToolRequest) -> ToolResult:
         action = self._action_from_request(request)
@@ -40,6 +56,7 @@ class ComputerActionTool(ToolAdapter):
         result = self.backend.perform(action)
         verification = None
         if result.ok:
+            self._settle_after_action()
             result, verification = self._attach_after_observation(result, before_observation)
         return self._to_tool_result(result, verification)
 
@@ -94,9 +111,21 @@ class ComputerActionTool(ToolAdapter):
 
     def _observe_for_verification(self, query: str) -> ComputerObservation | None:
         try:
-            return self.backend.observe(target="active_window", query=query)
+            observation = self.backend.observe(target="active_window", query=query)
         except Exception:
             return None
+        return self._attach_ocr(observation)
+
+    def _settle_after_action(self) -> None:
+        if self.post_action_settle_ms <= 0:
+            return
+        self._sleep(self.post_action_settle_ms / 1000.0)
+
+    def _attach_ocr(self, observation: ComputerObservation) -> ComputerObservation:
+        if self.ocr is None:
+            return observation
+        ocr_result = run_ocr_safely(self.ocr, observation.screenshot_path)
+        return replace(observation, ocr=ocr_result.to_agent_state())
 
     def _attach_after_observation(
         self,
@@ -108,6 +137,7 @@ class ComputerActionTool(ToolAdapter):
         except Exception as exc:
             verification = verify_post_action(before_observation, None)
             return replace(result, detail=f"after observation failed: {type(exc).__name__}"), verification
+        observation = self._attach_ocr(observation)
         verification = verify_post_action(before_observation, observation)
         return replace(result, observation=observation), verification
 

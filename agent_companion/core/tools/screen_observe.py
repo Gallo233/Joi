@@ -6,7 +6,7 @@ from agent_companion.core.computer_use import ComputerUseBackend, WindowsCompute
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.vision import OcrExtractor, PytesseractOcrExtractor, VisionObserver, VisionSummarizer, WindowsScreenObserver
-from agent_companion.core.vision.ocr import OcrResult
+from agent_companion.core.vision.ocr import OcrResult, run_ocr_safely
 from agent_companion.core.vision.schemas import VisionObservation
 from agent_companion.core.voice import safe_voice_line
 
@@ -99,16 +99,7 @@ class ScreenObserveTool(ToolAdapter):
         )
 
     def _run_ocr(self, observation: VisionObservation) -> OcrResult:
-        try:
-            return self.ocr.extract(observation.screenshot_path)
-        except TimeoutError:
-            return OcrResult("failed", "OCR 等太久了，我先跳过文字识别。", error="ocr_timeout")
-        except RuntimeError as exc:
-            if "timeout" in str(exc).casefold():
-                return OcrResult("failed", "OCR 等太久了，我先跳过文字识别。", error="ocr_timeout")
-            return OcrResult("failed", "OCR 没有跑通，截图仍然可查看。", error="ocr_failed")
-        except Exception:
-            return OcrResult("failed", "OCR 没有跑通，截图仍然可查看。", error="ocr_failed")
+        return run_ocr_safely(self.ocr, observation.screenshot_path)
 
     @staticmethod
     def _summary(observation: VisionObservation) -> str:

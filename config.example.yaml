@@ -45,6 +45,10 @@ asr:
 ocr:
   timeout_seconds: 5
 
+computer_use:
+  # Wait briefly before the post-action screenshot so Windows/UI updates can settle.
+  post_action_settle_ms: 200
+
 characters:
   - name: 星野澪
     color: "#d76f8f"

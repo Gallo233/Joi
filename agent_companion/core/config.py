@@ -227,12 +227,18 @@ class OcrConfig:
 
 
 @dataclass(frozen=True)
+class ComputerUseConfig:
+    post_action_settle_ms: int = 200
+
+
+@dataclass(frozen=True)
 class AppConfig:
     base_dir: Path
     llm: LlmConfig
     tts: TtsConfig
     asr: AsrConfig
     ocr: OcrConfig
+    computer_use: ComputerUseConfig
     characters: list[CharacterConfig]
 
     @property
@@ -259,6 +265,7 @@ def load_app_config(path: Path) -> AppConfig:
     tts_raw = raw.get("tts") or {}
     asr_raw = raw.get("asr") or {}
     ocr_raw = raw.get("ocr") or {}
+    computer_use_raw = raw.get("computer_use") or {}
     character_rows = raw.get("characters") or []
     characters = [_parse_character(row) for row in character_rows if isinstance(row, dict)]
 
@@ -305,6 +312,9 @@ def load_app_config(path: Path) -> AppConfig:
         ),
         ocr=OcrConfig(
             timeout_seconds=max(1, int(ocr_raw.get("timeout_seconds", 5) or 5)),
+        ),
+        computer_use=ComputerUseConfig(
+            post_action_settle_ms=max(0, int(computer_use_raw.get("post_action_settle_ms", 200) or 0)),
         ),
         characters=characters,
     )
