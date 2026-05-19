@@ -398,6 +398,15 @@ function resolveApproval(approved: boolean) {
   })
 }
 
+function selectTargetCandidate(candidate: Record<string, unknown>, index: number) {
+  if (!connected.value) return
+  const rank = targetRank(candidate, index)
+  beginNewVoiceIntent()
+  void client.sendUserText(`选 ${rank}`).catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '候选选择失败'
+  })
+}
+
 function approvalIdFor(event: AgentEvent) {
   const approval = asRecord(event.agent_state?.approval)
   return stringValue(approval.approval_id)
@@ -701,6 +710,7 @@ onBeforeUnmount(() => {
                 <span>{{ targetConfidence(candidate) }}</span>
                 <span>{{ targetAmbiguity(candidate) }}</span>
                 <p>{{ targetReason(candidate) }}</p>
+                <button type="button" :disabled="!connected" @click="selectTargetCandidate(candidate, candidateIndex)">选择</button>
               </div>
             </div>
           </details>

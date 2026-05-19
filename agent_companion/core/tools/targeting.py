@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
+import time
+from typing import Any
 
 from agent_companion.core.computer_use import ComputerUseBackend, WindowsComputerUseBackend
 from agent_companion.core.computer_use.schemas import ComputerObservation
@@ -11,6 +14,44 @@ from agent_companion.core.vision.ocr import run_ocr_safely
 from agent_companion.core.vision.regions import group_ocr_regions, regions_to_agent_state, summarize_ocr_regions
 from agent_companion.core.vision.targeting import TargetCandidate, resolve_target_candidates
 from agent_companion.core.voice import safe_voice_line
+
+
+@dataclass
+class PendingSemanticTargetSelection:
+    task_id: str
+    query: str
+    target_candidates: list[dict[str, Any]]
+    observation: dict[str, Any]
+    artifacts: list[str]
+    created_at: float = field(default_factory=time.time)
+
+
+class SemanticTargetSelectionStore:
+    def __init__(self, ttl_seconds: float = 120.0) -> None:
+        self.ttl_seconds = ttl_seconds
+        self._selection: PendingSemanticTargetSelection | None = None
+
+    def save(self, selection: PendingSemanticTargetSelection) -> None:
+        self._selection = selection
+
+    def current(self) -> PendingSemanticTargetSelection | None:
+        if self._selection is None:
+            return None
+        if self.is_expired():
+            self.clear()
+            return None
+        return self._selection
+
+    def clear(self) -> None:
+        self._selection = None
+
+    def is_expired(self) -> bool:
+        if self._selection is None:
+            return False
+        return time.time() - self._selection.created_at > self.ttl_seconds
+
+    def has_pending(self) -> bool:
+        return self._selection is not None
 
 
 class SemanticTargetTool(ToolAdapter):
@@ -151,8 +192,103 @@ class SemanticTargetTool(ToolAdapter):
         )
 
 
+class SemanticTargetSelectionTool(ToolAdapter):
+    name = "vision.select_target"
+
+    def __init__(self, store: SemanticTargetSelectionStore) -> None:
+        self.store = store
+
+    def run(self, request: ToolRequest) -> ToolResult:
+        selection = self.store.current()
+        if selection is None:
+            summary = "候选目标已经失效，请重新观察当前窗口。"
+            return ToolResult(
+                ok=True,
+                agent_state={"tool": self.name, "needs_clarification": True, "selection_expired": True},
+                display_card=DisplayCard("目标定位", summary, status="info"),
+                voice_line=safe_voice_line("之前的候选已经过期了，请重新说一下目标。", sprite="4"),
+            )
+        index = _selection_index(request.arguments.get("selection") or request.arguments.get("index"))
+        if index is None or index < 1 or index > len(selection.target_candidates):
+            return ToolResult(
+                ok=True,
+                agent_state={
+                    "tool": self.name,
+                    "needs_clarification": True,
+                    "selection_invalid": True,
+                    "target_candidates": selection.target_candidates,
+                    "artifacts": selection.artifacts,
+                },
+                display_card=DisplayCard("目标定位", "没有找到这个编号的候选。", "请从候选列表里选择一个有效编号。", status="info", artifacts=selection.artifacts),
+                voice_line=safe_voice_line("我没有找到这个编号的候选。", sprite="4"),
+            )
+
+        candidate = selection.target_candidates[index - 1]
+        click_args = click_arguments_from_state(candidate, selection.observation)
+        if click_args is None:
+            return ToolResult(
+                ok=True,
+                agent_state={
+                    "tool": self.name,
+                    "needs_clarification": True,
+                    "coordinate_untrusted": True,
+                    "selected_rank": index,
+                    "target_candidate": candidate,
+                    "target_candidates": selection.target_candidates,
+                    "artifacts": selection.artifacts,
+                },
+                display_card=DisplayCard("目标定位", f"已选择候选 {index}，但屏幕位置还不可靠。", "请重新观察当前窗口，或换一种更具体的目标描述。", status="info", artifacts=selection.artifacts),
+                voice_line=safe_voice_line("我知道你选了哪个，但位置还不够可靠。", sprite="4"),
+            )
+
+        label = str(candidate.get("label") or "候选目标")
+        body = "\n".join(
+            [
+                f"已选择候选：{index}",
+                f"目标：{label}",
+                f"所在区域：{_friendly_region(str(candidate.get('region_label') or 'unknown'))}",
+                "下一步：确认后才会点击这个候选区域。",
+            ]
+        )
+        self.store.clear()
+        return ToolResult(
+            ok=True,
+            agent_state={
+                "tool": self.name,
+                "selected_rank": index,
+                "target_candidate": candidate,
+                "target_candidates": selection.target_candidates,
+                "approval_request": {
+                    "tool": "computer.click",
+                    "arguments": click_args,
+                    "reason": f"点击已选择的候选目标：{label}",
+                },
+                "artifacts": selection.artifacts,
+            },
+            display_card=DisplayCard("需要确认", f"已选择候选 {index}，等待点击确认。", body, status="approval", artifacts=selection.artifacts),
+            voice_line=safe_voice_line("我已经选好了，确认后再点击。", sprite="4"),
+            requires_approval=True,
+            risk=RiskLevel.MEDIUM,
+        )
+
+
 def _click_arguments(candidate: TargetCandidate, observation: ComputerObservation) -> dict[str, int] | None:
     screen_center = _screen_center(candidate, observation)
+    if screen_center is None:
+        return None
+    return {"x": screen_center[0], "y": screen_center[1]}
+
+
+def click_arguments_from_state(candidate_state: dict[str, Any], observation_state: dict[str, Any]) -> dict[str, int] | None:
+    bbox = _bbox_tuple(candidate_state.get("bbox"))
+    rect = _capture_rect_from_state(observation_state.get("capture_rect"))
+    if bbox is None or rect is None:
+        return None
+    width = _positive_int(observation_state.get("width"))
+    height = _positive_int(observation_state.get("height"))
+    if width is None or height is None:
+        return None
+    screen_center = _screen_center_from_values(bbox, width, height, rect)
     if screen_center is None:
         return None
     return {"x": screen_center[0], "y": screen_center[1]}
@@ -171,16 +307,36 @@ def _screen_center(candidate: TargetCandidate, observation: ComputerObservation)
     rect = observation.capture_rect
     if rect is None:
         return None
-    if observation.width <= 0 or observation.height <= 0 or rect.width <= 0 or rect.height <= 0:
+    return _screen_center_from_values(candidate.bbox, observation.width, observation.height, rect.to_agent_state())
+
+
+def _screen_center_from_values(
+    bbox: tuple[int, int, int, int],
+    observation_width: int,
+    observation_height: int,
+    rect: dict[str, Any],
+) -> tuple[int, int] | None:
+    left, top, width, height = bbox
+    if width <= 0 or height <= 0 or left < 0 or top < 0:
         return None
-    scale_x = float(rect.scale_x or 0) if rect.scale_x else observation.width / rect.width
-    scale_y = float(rect.scale_y or 0) if rect.scale_y else observation.height / rect.height
+    if left + width > observation_width + 2 or top + height > observation_height + 2:
+        return None
+    center_x = left + width / 2
+    center_y = top + height / 2
+    rect_width = _positive_int(rect.get("width"))
+    rect_height = _positive_int(rect.get("height"))
+    screen_origin_x = _int_value(rect.get("screen_x"))
+    screen_origin_y = _int_value(rect.get("screen_y"))
+    if observation_width <= 0 or observation_height <= 0 or rect_width is None or rect_height is None or screen_origin_x is None or screen_origin_y is None:
+        return None
+    scale_x = _positive_float(rect.get("scale_x")) or observation_width / rect_width
+    scale_y = _positive_float(rect.get("scale_y")) or observation_height / rect_height
     if scale_x <= 0 or scale_y <= 0:
         return None
     if not _scale_is_trusted(scale_x, scale_y):
         return None
-    screen_x = rect.screen_x + round(center_x / scale_x)
-    screen_y = rect.screen_y + round(center_y / scale_y)
+    screen_x = screen_origin_x + round(center_x / scale_x)
+    screen_y = screen_origin_y + round(center_y / scale_y)
     return (int(screen_x), int(screen_y))
 
 
@@ -247,3 +403,51 @@ def _friendly_ambiguity(value: str) -> str:
         "close_score": "分数接近",
         "low_confidence": "置信偏低",
     }.get(value, "需要确认")
+
+
+def _selection_index(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bbox_tuple(value: Any) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        return (int(value[0]), int(value[1]), int(value[2]), int(value[3]))
+    except (TypeError, ValueError):
+        return None
+
+
+def _capture_rect_from_state(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    required = ("screen_x", "screen_y", "width", "height")
+    if any(key not in value for key in required):
+        return None
+    return value
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _int_value(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

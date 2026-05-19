@@ -31,6 +31,7 @@ Status: in progress
 - Group OCR text into coarse regions and expose semantic target candidates for phrases such as "登录按钮" or "右上角".
 - Attach active-window capture rectangles and preview boxes so semantic targets can be reviewed visually before approval.
 - Rank semantic target candidates with explainable confidence and hold ambiguous matches for user clarification.
+- Continue pending semantic target selection from user phrases such as "选 2" or from candidate-card buttons, while preserving click approval.
 - Separate text model, vision model, and expression model. Model routing is connected for text, vision, and expression.
 - Do not mark blank pages or failed captures as success.
 
@@ -48,6 +49,7 @@ Status: in progress
 - Run configured OCR on Computer Use before/after observations and wait briefly after actions so real Windows UI updates can settle before verification.
 - Resolve semantic click requests into candidate OCR regions first, then ask for approval before executing the synthesized click.
 - Convert approved semantic target centers from screenshot-relative OCR bbox to Windows screen coordinates only when capture rect and scale are available.
+- Continue ambiguous semantic target selections from the saved session context and require a fresh approval before clicking.
 - Use clipboard paste for reliable Windows text input, including Chinese.
 - Show friendly action summaries in task cards while keeping coordinates, text payloads, command-like details, and raw ids out of voice lines.
 

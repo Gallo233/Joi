@@ -336,6 +336,58 @@ def main() -> int:
     assert_true(ambiguous_target.agent_state["target_candidate"]["ambiguity"] == "close_score", "ambiguous target state should explain close score")
     assert_true(not any(fragment in ambiguous_target.voice_line.text for fragment in forbidden_target_voice), "ambiguous target voice leaked technical details")
 
+    selection_app = AgentCompanionApp(workspace)
+    selection_app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(
+                        workspace,
+                        rel="data/agent_companion/vision/selection-ambiguous.png",
+                        width=1000,
+                        height=1000,
+                        capture_rect=CaptureRect(100, 200, 1000, 1000),
+                    )
+                ],
+            ),
+            ocr=FakeOcrExtractor(duplicate_login_ocr),
+        )
+    )
+    selection_events = selection_app.handle_user_text("点登录按钮")
+    assert_true(any(event.agent_state.get("candidate_selection_required") for event in selection_events), "ambiguous app target should store candidate selection context")
+    selected_events = selection_app.handle_user_text("选 2")
+    selected_approval = _approval_payload(selected_events)
+    assert_true(selected_approval.get("tool") == "computer.click", "candidate selection should synthesize computer click approval")
+    selected_card = [event for event in selected_events if event.type == EventType.APPROVAL_REQUIRED][-1]
+    assert_true(selected_card.agent_state.get("selected_rank") == 2 or selected_card.agent_state.get("target_candidate", {}).get("rank") == 2, "candidate selection should preserve selected rank")
+    assert_true("已选择候选 2" in selected_card.display_card.summary, "candidate selection card should show selected candidate")
+    assert_true(all(not any(fragment in event.voice_line.text for fragment in forbidden_target_voice) for event in selected_events), "candidate selection voice leaked technical details")
+    selected_refused = selection_app.resolve_approval(str(selected_approval["approval_id"]), approved=False)
+    assert_true(any(event.type == EventType.TASK_FAILED for event in selected_refused), "candidate selection refusal should cancel action")
+    assert_true(not any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("tool") == "computer.click" for event in selected_refused), "refused candidate selection must not execute click")
+
+    expired_app = AgentCompanionApp(workspace)
+    expired_app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/selection-expired.png", width=1000, height=1000, capture_rect=CaptureRect(100, 200, 1000, 1000))],
+            ),
+            ocr=FakeOcrExtractor(duplicate_login_ocr),
+        )
+    )
+    expired_app.handle_user_text("点登录按钮")
+    expired_app.semantic_selection.ttl_seconds = -1
+    expired_events = expired_app.handle_user_text("选 2")
+    assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in expired_events), "expired candidate selection should not create click approval")
+    assert_true(any(event.agent_state.get("selection_expired") for event in expired_events), "expired candidate selection should explain stale context")
+
+    no_pending_selection = AgentCompanionApp(workspace).handle_user_text("选 2")
+    assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in no_pending_selection), "selection without pending context should not click")
+
     missing_rect_target = SemanticTargetTool(
         workspace,
         computer_backend=FakeComputerBackend(
@@ -888,6 +940,7 @@ def main() -> int:
     assert_true("runtimeStatusRows" in app_vue_source and "lastTtsError" in app_vue_source, "Shell developer mode should expose voice runtime status")
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
+    assert_true("selectTargetCandidate" in app_vue_source and "选 ${rank}" in app_vue_source, "Shell should continue semantic target selection from candidate cards")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")

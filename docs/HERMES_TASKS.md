@@ -49,6 +49,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - OCR text is grouped into coarse regions and `vision.resolve_target` can propose semantic click candidates that still require Computer Use approval.
 - Semantic target approvals now use active-window capture rectangles to convert OCR bbox centers into screen coordinates, and the shell draws candidate boxes on approval screenshots.
 - Semantic target candidates now expose rank, confidence, reason, and ambiguity; close or low-confidence OCR targets ask for clarification instead of synthesizing click approvals.
+- Pending semantic target selections are session-only with a short TTL; "选 2" or a candidate-card selection resumes the saved candidates and still creates a one-time `computer.click` approval.
 - `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
 - `agent_companion/core/watch.py` keeps recent watch context in the current app session.
 - `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.

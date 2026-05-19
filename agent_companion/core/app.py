@@ -23,7 +23,7 @@ from agent_companion.core.tools.game_ok_ww import OkWwTool
 from agent_companion.core.tools.mcp import McpListTool
 from agent_companion.core.tools.registry import ToolRegistry
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
-from agent_companion.core.tools.targeting import SemanticTargetTool
+from agent_companion.core.tools.targeting import PendingSemanticTargetSelection, SemanticTargetSelectionStore, SemanticTargetSelectionTool, SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
@@ -52,12 +52,22 @@ class AgentCompanionApp:
         self.policy = PolicyGate()
         self.tools = ToolRegistry()
         self.watch_session = WatchSession()
+        self.semantic_selection = SemanticTargetSelectionStore()
         self.pending_steps: dict[str, PendingStep] = {}
         self.resolved_approval_ids: set[str] = set()
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
-        plan = build_plan(text)
+        selection = _parse_candidate_selection(text)
+        if selection is not None and self.semantic_selection.has_pending():
+            plan = AgentPlan(
+                task_id=f"task-{uuid.uuid4().hex[:10]}",
+                user_text=" ".join((text or "").strip().split()),
+                intent="semantic_target_selection",
+                steps=[ToolRequest("vision.select_target", {"selection": selection}, "根据上一次候选列表选择目标，继续进入点击确认。")],
+            )
+        else:
+            plan = build_plan(text)
         self._emit(
             AgentEvent(
                 EventType.USER_MESSAGE,
@@ -191,6 +201,7 @@ class AgentCompanionApp:
                                     "tool": pending_request.name,
                                     "arguments_hash": pending.arguments_hash,
                                 },
+                                "selected_rank": result.agent_state.get("selected_rank"),
                                 "target_candidate": result.agent_state.get("target_candidate"),
                                 "target_candidates": result.agent_state.get("target_candidates"),
                             },
@@ -201,6 +212,7 @@ class AgentCompanionApp:
                     pending_approval = True
                     break
             self._emit_result(plan.task_id, result, plan.user_text)
+            self._record_semantic_selection(plan, result)
             self._record_watch_context(plan, step, result)
             final_ok = final_ok and result.ok
             self.memory.remember(
@@ -261,6 +273,7 @@ class AgentCompanionApp:
             "browser.observe": "网页观察",
             "observe.screen": "画面观察",
             "vision.resolve_target": "目标定位",
+            "vision.select_target": "候选选择",
             "watch.recall": "陪看追问",
             "computer.click": "电脑点击",
             "computer.type_text": "电脑输入",
@@ -282,18 +295,21 @@ class AgentCompanionApp:
             "browser": "浏览器",
             "computer_use": "电脑操作",
             "semantic_target": "目标定位",
+            "semantic_target_selection": "候选选择",
         }
         return labels.get(intent, intent)
 
     @staticmethod
     def _should_emit_task_completion(intent: str) -> bool:
-        return intent not in {"companion_chat", "watch_together", "watch_followup", "semantic_target"}
+        return intent not in {"companion_chat", "watch_together", "watch_followup", "semantic_target", "semantic_target_selection"}
 
     @staticmethod
     def _is_ephemeral_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
         if plan.intent in {"watch_together", "watch_followup"}:
             return True
-        return step.name in {"observe.screen", "watch.recall"}
+        if plan.intent in {"semantic_target", "semantic_target_selection"}:
+            return True
+        return step.name in {"observe.screen", "watch.recall", "vision.resolve_target", "vision.select_target"}
 
     @staticmethod
     def _is_sensitive_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
@@ -334,6 +350,7 @@ class AgentCompanionApp:
             )
         )
         self.tools.register(SemanticTargetTool(self.workspace, ocr=ocr))
+        self.tools.register(SemanticTargetSelectionTool(self.semantic_selection))
         for name, action_type in (
             ("computer.click", "click"),
             ("computer.type_text", "type_text"),
@@ -451,6 +468,25 @@ class AgentCompanionApp:
         )
         self.watch_session.add(frame)
 
+    def _record_semantic_selection(self, plan: AgentPlan, result: ToolResult) -> None:
+        state = result.agent_state
+        if not state.get("candidate_selection_required"):
+            return
+        candidates = state.get("target_candidates") if isinstance(state.get("target_candidates"), list) else []
+        observation = state.get("observation") if isinstance(state.get("observation"), dict) else {}
+        artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), list) else result.display_card.artifacts
+        if not candidates or not observation:
+            return
+        self.semantic_selection.save(
+            PendingSemanticTargetSelection(
+                task_id=plan.task_id,
+                query=plan.user_text,
+                target_candidates=[candidate for candidate in candidates if isinstance(candidate, dict)],
+                observation=observation,
+                artifacts=[str(artifact) for artifact in artifacts or []],
+            )
+        )
+
 
 def _arguments_hash(arguments: dict) -> str:
     serialized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
@@ -469,3 +505,28 @@ def _ocr_text_from_state(ocr: dict) -> list[str]:
         if text:
             rows.append(text[:160])
     return rows
+
+
+def _parse_candidate_selection(text: str) -> int | None:
+    value = " ".join((text or "").strip().split())
+    if not value:
+        return None
+    if "就这个" in value or "就它" in value or "这个吧" in value:
+        return 1
+    import re
+
+    match = re.search(r"(?:选|选择|点|点击)?\s*第?\s*(\d{1,2})\s*(?:个|项|号)?", value)
+    if match and any(token in value for token in ("选", "选择", "第", "个", "项", "号", "点", "点击")):
+        return int(match.group(1))
+    chinese_digits = {
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+    }
+    for token, number in chinese_digits.items():
+        if f"第{token}个" in value or f"选{token}" in value or f"点第{token}" in value:
+            return number
+    return None

@@ -25,6 +25,7 @@
 - OCR regions now support Watch Together region questions and semantic click proposals, while final execution still goes through one-time Computer Use approval.
 - Semantic target approvals now show candidate preview boxes and refuse to synthesize clicks when the screenshot-to-screen coordinate transform is not trustworthy.
 - Close semantic OCR candidates now show as selectable candidates in the task card instead of becoming a click approval automatically.
+- Candidate-card selection and phrases like "选 2" can continue a pending semantic target, but the underlying grounding is still OCR-only and expires quickly.
 - Watch Together follow-up questions reuse recent visual context instead of forcing another screenshot.
 - Watch observations are kept out of long-term memory by default.
 - Screenshot artifacts have task-card thumbnails and a click-to-preview modal.

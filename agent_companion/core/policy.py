@@ -15,6 +15,7 @@ LOW_RISK = {
     "files.read",
     "mcp.list_tools",
     "vision.resolve_target",
+    "vision.select_target",
 }
 MEDIUM_RISK = {
     "codex.run",
