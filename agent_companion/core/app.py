@@ -181,6 +181,7 @@ class AgentCompanionApp:
                             DisplayCard("需要确认", result.display_card.summary, result.display_card.body, status="approval", artifacts=result.display_card.artifacts),
                             result.voice_line,
                             {
+                                "tool": result.agent_state.get("tool"),
                                 "policy": self.policy.public_payload(pending_request),
                                 "risk": result.risk.value,
                                 "approval": {
@@ -191,6 +192,7 @@ class AgentCompanionApp:
                                     "arguments_hash": pending.arguments_hash,
                                 },
                                 "target_candidate": result.agent_state.get("target_candidate"),
+                                "target_candidates": result.agent_state.get("target_candidates"),
                             },
                         ),
                         plan.user_text,
@@ -258,6 +260,7 @@ class AgentCompanionApp:
             "browser.search": "浏览器搜索",
             "browser.observe": "网页观察",
             "observe.screen": "画面观察",
+            "vision.resolve_target": "目标定位",
             "watch.recall": "陪看追问",
             "computer.click": "电脑点击",
             "computer.type_text": "电脑输入",

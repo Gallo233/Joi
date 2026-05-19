@@ -20,7 +20,7 @@ from agent_companion.core.tools.targeting import SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
 from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock, PytesseractOcrExtractor, UnavailableOcrExtractor
 from agent_companion.core.vision.regions import group_ocr_regions
-from agent_companion.core.vision.schemas import VisionObservation
+from agent_companion.core.vision.schemas import CaptureRect, VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummary
 from agent_companion.core.vision.targeting import resolve_target_candidates
 from agent_companion.core.voice import safe_voice_line
@@ -46,6 +46,7 @@ class FakeVisionObserver:
             height=720,
             title="Joi Test Window",
             window_handle=1234,
+            capture_rect=CaptureRect(0, 0, 1280, 720),
             query=query,
         )
 
@@ -58,6 +59,7 @@ def _fake_computer_observation(
     ocr_status: str | None = None,
     width: int = 1280,
     height: int = 720,
+    capture_rect: CaptureRect | None = None,
 ) -> ComputerObservation:
     ocr = {}
     if ocr_text is not None or ocr_status is not None:
@@ -74,6 +76,7 @@ def _fake_computer_observation(
         height=height,
         title=title,
         window_handle=1234,
+        capture_rect=capture_rect,
         query="test",
         ocr=ocr,
     )
@@ -271,15 +274,49 @@ def main() -> int:
 
     target_tool = SemanticTargetTool(
         workspace,
-        computer_backend=FakeComputerBackend(workspace, observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/target.png")]),
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
         ocr=FakeOcrExtractor(region_ocr),
     )
     target_result = target_tool.run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(target_result.requires_approval, "semantic target should ask for approval before click")
     assert_true(target_result.agent_state["approval_request"]["tool"] == "computer.click", "semantic target approval should resolve to computer.click")
+    click_args = target_result.agent_state["approval_request"]["arguments"]
+    assert_true(click_args["x"] == 990 and click_args["y"] == 242, "semantic target click should convert relative bbox to absolute screen coordinates")
+    assert_true(target_result.agent_state["target_candidate"]["preview"]["bbox"] == [860, 30, 60, 24], "semantic target card should keep relative preview bbox")
+    assert_true(len(target_result.agent_state["target_candidates"]) >= 1, "semantic target approval should preserve candidate previews")
     assert_true("登录" in target_result.display_card.summary, "semantic target card should name the friendly target")
     forbidden_target_voice = ["登录", "860", "30", "data/", ".png", "{", "vision.resolve_target", "computer.click"]
     assert_true(not any(fragment in target_result.voice_line.text for fragment in forbidden_target_voice), "semantic target voice leaked technical details")
+
+    missing_rect_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-no-rect.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=None,
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(region_ocr),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(not missing_rect_target.requires_approval, "semantic target should not approve clicks without capture rect")
+    assert_true(missing_rect_target.agent_state["needs_clarification"], "missing capture rect should ask for clarification")
 
     unclear_target = SemanticTargetTool(
         workspace,
@@ -682,10 +719,22 @@ def main() -> int:
             os.environ["AGENT_COMPANION_CODEX_BIN"] = previous
 
     app = AgentCompanionApp(workspace)
+    semantic_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(
+                workspace,
+                rel="data/agent_companion/vision/semantic-app.png",
+                width=1000,
+                height=1000,
+                capture_rect=CaptureRect(100, 200, 1000, 1000),
+            )
+        ],
+    )
     app.tools.register(
         SemanticTargetTool(
             workspace,
-            computer_backend=FakeComputerBackend(workspace, observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/semantic-app.png")]),
+            computer_backend=semantic_backend,
             ocr=FakeOcrExtractor(region_ocr),
         )
     )
@@ -694,9 +743,12 @@ def main() -> int:
     semantic_approval = _approval_payload(semantic_events)
     assert_true(semantic_approval.get("tool") == "computer.click", "semantic target approval should bind synthesized computer.click")
     assert_true(any("登录" in event.display_card.summary for event in semantic_events if event.type == EventType.APPROVAL_REQUIRED), "semantic approval card should name target")
+    semantic_approval_event = [event for event in semantic_events if event.type == EventType.APPROVAL_REQUIRED][-1]
+    assert_true("target_candidates" in semantic_approval_event.agent_state, "semantic approval event should preserve target candidates")
     assert_true(all("登录" not in event.voice_line.text and "semantic-app.png" not in event.voice_line.text for event in semantic_events), "semantic approval voice should stay immersive")
     semantic_refused = app.resolve_approval(str(semantic_approval["approval_id"]), approved=False)
     assert_true(any(event.type == EventType.TASK_FAILED for event in semantic_refused), "semantic target refusal should cancel action")
+    assert_true(not semantic_backend.actions, "semantic target refusal must not execute click")
 
     app = AgentCompanionApp(workspace)
     computer_events = app.handle_user_text("点击 100,200")
@@ -797,6 +849,7 @@ def main() -> int:
     assert_true("beginNewVoiceIntent()" in app_vue_source and "voiceEventEpochs.get" in app_vue_source, "Shell should bump and compare voice epochs")
     assert_true("event_created_at: event.created_at" in app_vue_source, "Shell should key voice audio by event timestamp")
     assert_true("runtimeStatusRows" in app_vue_source and "lastTtsError" in app_vue_source, "Shell developer mode should expose voice runtime status")
+    assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")

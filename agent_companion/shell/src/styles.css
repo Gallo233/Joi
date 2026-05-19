@@ -282,17 +282,62 @@ input {
   text-align: left;
 }
 
-.artifact-thumb img {
+.artifact-image-frame {
+  position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
+  overflow: hidden;
   border-radius: 6px;
-  object-fit: cover;
   background: #dfe5ee;
+}
+
+.artifact-image-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .artifact-thumb span {
   padding: 0;
   background: transparent;
+  font-weight: 700;
+}
+
+.target-overlays {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.target-box {
+  position: absolute;
+  min-width: 18px;
+  min-height: 14px;
+  border: 2px solid #ff477d;
+  border-radius: 5px;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.82), 0 8px 18px rgba(35, 38, 54, 0.22);
+}
+
+.target-box span {
+  position: absolute;
+  left: -2px;
+  top: -24px;
+  max-width: 120px;
+  overflow: hidden;
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: rgba(255, 71, 125, 0.92);
+  color: #ffffff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.target-caption {
+  display: block;
+  color: #4d586b;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -537,6 +582,12 @@ input {
   padding: 14px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+}
+
+.artifact-modal-image-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: 6px;
 }
 
 .artifact-modal-body img {

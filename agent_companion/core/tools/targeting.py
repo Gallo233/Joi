@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent_companion.core.computer_use import ComputerUseBackend, WindowsComputerUseBackend
+from agent_companion.core.computer_use.schemas import ComputerObservation
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.vision import OcrExtractor, PytesseractOcrExtractor, VisionObserver, WindowsScreenObserver
@@ -44,6 +45,7 @@ class SemanticTargetTool(ToolAdapter):
         region_state = regions_to_agent_state(regions)
         candidates = resolve_target_candidates(query, region_state)
         artifacts = [observation.screenshot_rel] if observation.screenshot_rel else []
+        candidate_states = [_candidate_state(row, observation) for row in candidates]
         if not candidates:
             body = "\n".join(
                 [
@@ -68,7 +70,7 @@ class SemanticTargetTool(ToolAdapter):
             )
 
         candidate = candidates[0]
-        click_args = _click_arguments(candidate)
+        click_args = _click_arguments(candidate, observation)
         if click_args is None:
             return ToolResult(
                 ok=True,
@@ -77,12 +79,19 @@ class SemanticTargetTool(ToolAdapter):
                     "observation": observation.to_agent_state(),
                     "ocr": ocr_result.to_agent_state(),
                     "ocr_regions": region_state,
-                    "target_candidates": [candidate.to_agent_state() for candidate in candidates],
+                    "target_candidate": _candidate_state(candidate, observation),
+                    "target_candidates": candidate_states,
                     "needs_clarification": True,
                     "artifacts": artifacts,
                 },
-                display_card=DisplayCard("目标定位", f"找到了可能的“{candidate.label}”，但位置不够明确。", "请换一种更具体的描述，或直接给出坐标。", status="info", artifacts=artifacts),
-                voice_line=safe_voice_line("我找到了文字，但位置还不够明确。", sprite="4"),
+                display_card=DisplayCard(
+                    "目标定位",
+                    f"找到了可能的“{candidate.label}”，但屏幕位置还不可靠。",
+                    "请换一种更具体的描述，或先把目标窗口保持在前台后重试。",
+                    status="info",
+                    artifacts=artifacts,
+                ),
+                voice_line=safe_voice_line("我找到了文字，但位置还不够可靠。", sprite="4"),
             )
 
         body = "\n".join(
@@ -100,8 +109,8 @@ class SemanticTargetTool(ToolAdapter):
                 "observation": observation.to_agent_state(),
                 "ocr": ocr_result.to_agent_state(),
                 "ocr_regions": region_state,
-                "target_candidate": candidate.to_agent_state(),
-                "target_candidates": [row.to_agent_state() for row in candidates],
+                "target_candidate": _candidate_state(candidate, observation, click_args),
+                "target_candidates": candidate_states,
                 "approval_request": {
                     "tool": "computer.click",
                     "arguments": click_args,
@@ -116,11 +125,61 @@ class SemanticTargetTool(ToolAdapter):
         )
 
 
-def _click_arguments(candidate: TargetCandidate) -> dict[str, int] | None:
+def _click_arguments(candidate: TargetCandidate, observation: ComputerObservation) -> dict[str, int] | None:
+    screen_center = _screen_center(candidate, observation)
+    if screen_center is None:
+        return None
+    return {"x": screen_center[0], "y": screen_center[1]}
+
+
+def _screen_center(candidate: TargetCandidate, observation: ComputerObservation) -> tuple[int, int] | None:
     if candidate.bbox is None:
         return None
     left, top, width, height = candidate.bbox
-    return {"x": left + width // 2, "y": top + height // 2}
+    if width <= 0 or height <= 0 or left < 0 or top < 0:
+        return None
+    if left + width > observation.width + 2 or top + height > observation.height + 2:
+        return None
+    center_x = left + width / 2
+    center_y = top + height / 2
+    rect = observation.capture_rect
+    if rect is None:
+        return None
+    if observation.width <= 0 or observation.height <= 0 or rect.width <= 0 or rect.height <= 0:
+        return None
+    scale_x = float(rect.scale_x or 0) if rect.scale_x else observation.width / rect.width
+    scale_y = float(rect.scale_y or 0) if rect.scale_y else observation.height / rect.height
+    if scale_x <= 0 or scale_y <= 0:
+        return None
+    if not _scale_is_trusted(scale_x, scale_y):
+        return None
+    screen_x = rect.screen_x + round(center_x / scale_x)
+    screen_y = rect.screen_y + round(center_y / scale_y)
+    return (int(screen_x), int(screen_y))
+
+
+def _candidate_state(
+    candidate: TargetCandidate,
+    observation: ComputerObservation,
+    click_args: dict[str, int] | None = None,
+) -> dict:
+    state = candidate.to_agent_state()
+    if candidate.bbox is not None:
+        state["preview"] = {
+            "artifact": observation.screenshot_rel,
+            "bbox": list(candidate.bbox),
+            "center": [candidate.bbox[0] + candidate.bbox[2] // 2, candidate.bbox[1] + candidate.bbox[3] // 2],
+            "image_width": observation.width,
+            "image_height": observation.height,
+            "label": candidate.label,
+            "region_label": candidate.region_label,
+            "region_name": _friendly_region(candidate.region_label),
+            "confidence": round(float(candidate.confidence), 3),
+        }
+    screen_center = click_args or _click_arguments(candidate, observation)
+    if screen_center is not None:
+        state["screen_center"] = [screen_center["x"], screen_center["y"]]
+    return state
 
 
 def _friendly_region(label: str) -> str:
@@ -130,3 +189,9 @@ def _friendly_region(label: str) -> str:
         "main_content": "主内容",
         "bottom_controls": "底部控件",
     }.get(label, "未知区域")
+
+
+def _scale_is_trusted(scale_x: float, scale_y: float) -> bool:
+    if not (0.2 <= scale_x <= 5.0 and 0.2 <= scale_y <= 5.0):
+        return False
+    return abs(scale_x - scale_y) / max(scale_x, scale_y) <= 0.25

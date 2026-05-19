@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 from typing import Any
 
-from agent_companion.core.vision.schemas import VisionObservation
+from agent_companion.core.vision.schemas import CaptureRect, VisionObservation
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class ComputerObservation:
     height: int
     title: str = ""
     window_handle: int | None = None
+    capture_rect: CaptureRect | None = None
     source: str = "computer"
     query: str = ""
     ocr: dict[str, Any] = field(default_factory=dict)
@@ -32,6 +33,7 @@ class ComputerObservation:
             height=observation.height,
             title=observation.title,
             window_handle=observation.window_handle,
+            capture_rect=observation.capture_rect,
             source=observation.source,
             query=observation.query,
             ocr={},
@@ -47,6 +49,7 @@ class ComputerObservation:
             height=self.height,
             title=self.title,
             window_handle=self.window_handle,
+            capture_rect=self.capture_rect,
             source=self.source,
             query=self.query,
             created_at=self.created_at,
@@ -61,6 +64,7 @@ class ComputerObservation:
             "height": self.height,
             "title": self.title,
             "window_handle": self.window_handle,
+            "capture_rect": self.capture_rect.to_agent_state() if self.capture_rect else None,
             "source": self.source,
             "query": self.query,
             "created_at": self.created_at,

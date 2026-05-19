@@ -13,6 +13,7 @@ const developerMode = ref(false)
 const ready = ref<CoreReadyPayload | null>(null)
 const failedImageSrc = ref('')
 const previewArtifact = ref('')
+const previewArtifactEvent = ref<AgentEvent | null>(null)
 const voiceState = ref<'idle' | 'recording' | 'transcribing'>('idle')
 const lastTranscript = ref('')
 const lastTtsError = ref('')
@@ -121,6 +122,7 @@ const currentMode = computed(() => {
   if (intent === 'game_assist' || tool === 'game.ok_ww.run') return '游戏'
   if (intent === 'coding' || tool === 'codex.run') return '写码'
   if (intent === 'computer_use' || tool.startsWith('computer.')) return '电脑操作'
+  if (intent === 'semantic_target' || tool === 'vision.resolve_target') return '目标定位'
   if (intent === 'watch_together' || intent === 'watch_followup' || intent === 'browser' || tool === 'watch.recall' || tool.startsWith('browser.')) return '陪看'
   return '闲聊'
 })
@@ -202,6 +204,11 @@ function taskMeta(event: AgentEvent, detail?: AgentEvent) {
     if (modelStatus) meta.push(visionStatusLabel(modelStatus))
     if (source.display_card.artifacts?.length) meta.push(`截图：${source.display_card.artifacts.length}`)
   }
+  if (tool === 'vision.resolve_target') {
+    const candidates = targetCandidates(source)
+    if (candidates.length) meta.push(`候选目标：${candidates.length}`)
+    if (source.display_card.artifacts?.length) meta.push(`截图：${source.display_card.artifacts.length}`)
+  }
   if (tool === 'codex.run') meta.push(event.display_card.status === 'success' ? '代码任务完成' : '代码任务')
   if (tool === 'game.ok_ww.run') meta.push('游戏技能')
   if (tool.startsWith('computer.')) meta.push(computerActionLabel(tool))
@@ -256,8 +263,87 @@ function artifactSrc(artifact: string) {
   return convertFileSrc(artifactPath(artifact))
 }
 
+function openArtifactPreview(artifact: string, event: AgentEvent) {
+  previewArtifact.value = artifact
+  previewArtifactEvent.value = event
+}
+
+function closeArtifactPreview() {
+  previewArtifact.value = ''
+  previewArtifactEvent.value = null
+}
+
+function targetCandidates(event?: AgentEvent): Record<string, unknown>[] {
+  const state = event?.agent_state || {}
+  const rows = Array.isArray(state.target_candidates) ? state.target_candidates : state.target_candidate ? [state.target_candidate] : []
+  return rows.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
+}
+
+function targetPreviews(event: AgentEvent | undefined, artifact: string) {
+  return targetCandidates(event).filter((candidate) => {
+    const preview = asRecord(candidate.preview)
+    const previewArtifact = stringValue(preview.artifact)
+    return !previewArtifact || previewArtifact === artifact
+  })
+}
+
+function artifactFrameStyle(event: AgentEvent | undefined, artifact: string) {
+  const preview = asRecord(targetPreviews(event, artifact)[0]?.preview)
+  const imageWidth = Number(preview.image_width || 0)
+  const imageHeight = Number(preview.image_height || 0)
+  if (imageWidth <= 0 || imageHeight <= 0) return {}
+  return { aspectRatio: `${imageWidth} / ${imageHeight}` }
+}
+
+function targetBoxStyle(candidate: Record<string, unknown>) {
+  const preview = asRecord(candidate.preview)
+  const bbox = numberTuple(preview.bbox)
+  const imageWidth = Number(preview.image_width || 0)
+  const imageHeight = Number(preview.image_height || 0)
+  if (!bbox || imageWidth <= 0 || imageHeight <= 0) return {}
+  const [left, top, width, height] = bbox
+  return {
+    left: `${(left / imageWidth) * 100}%`,
+    top: `${(top / imageHeight) * 100}%`,
+    width: `${(width / imageWidth) * 100}%`,
+    height: `${(height / imageHeight) * 100}%`,
+  }
+}
+
+function targetLabel(candidate: Record<string, unknown>) {
+  const preview = asRecord(candidate.preview)
+  return stringValue(preview.label) || stringValue(candidate.label) || '候选目标'
+}
+
+function targetRegion(candidate: Record<string, unknown>) {
+  const preview = asRecord(candidate.preview)
+  return stringValue(preview.region_name) || stringValue(preview.region_label) || stringValue(candidate.region_label) || '未知区域'
+}
+
+function targetConfidence(candidate: Record<string, unknown>) {
+  const preview = asRecord(candidate.preview)
+  const value = Number(preview.confidence || candidate.confidence || 0)
+  if (!Number.isFinite(value) || value <= 0) return ''
+  return `${Math.round(value * 100)}%`
+}
+
+function targetPreviewSummary(event: AgentEvent | undefined, artifact: string) {
+  const previews = targetPreviews(event, artifact)
+  if (!previews.length) return ''
+  return previews
+    .slice(0, 3)
+    .map((candidate) => [targetLabel(candidate), targetRegion(candidate), targetConfidence(candidate)].filter(Boolean).join(' · '))
+    .join(' / ')
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+}
+
+function numberTuple(value: unknown) {
+  if (!Array.isArray(value) || value.length !== 4) return undefined
+  const numbers = value.map((item) => Number(item))
+  return numbers.every((item) => Number.isFinite(item)) ? numbers : undefined
 }
 
 function stringValue(value: unknown) {
@@ -557,10 +643,25 @@ onBeforeUnmount(() => {
                 class="artifact-thumb"
                 type="button"
                 :title="artifactLabel(artifact, index)"
-                @click="previewArtifact = artifact"
+                @click="openArtifactPreview(artifact, task.latest)"
               >
-                <img :src="artifactSrc(artifact)" alt="" />
+                <div class="artifact-image-frame" :style="artifactFrameStyle(task.latest, artifact)">
+                  <img :src="artifactSrc(artifact)" alt="" />
+                  <div class="target-overlays" v-if="targetPreviews(task.latest, artifact).length">
+                    <div
+                      v-for="(candidate, candidateIndex) in targetPreviews(task.latest, artifact)"
+                      :key="`${artifact}-target-${candidateIndex}`"
+                      class="target-box"
+                      :style="targetBoxStyle(candidate)"
+                    >
+                      <span>{{ targetLabel(candidate) }}</span>
+                    </div>
+                  </div>
+                </div>
                 <span>{{ artifactLabel(artifact, index) }}</span>
+                <small v-if="targetPreviewSummary(task.latest, artifact)" class="target-caption">
+                  {{ targetPreviewSummary(task.latest, artifact) }}
+                </small>
               </button>
               <span
                 v-for="(artifact, index) in task.detail.display_card.artifacts"
@@ -656,10 +757,22 @@ onBeforeUnmount(() => {
       </form>
     </aside>
 
-    <div class="artifact-modal" v-if="previewArtifact" @click.self="previewArtifact = ''">
+    <div class="artifact-modal" v-if="previewArtifact" @click.self="closeArtifactPreview">
       <div class="artifact-modal-body">
-        <button type="button" class="modal-close" @click="previewArtifact = ''">关闭</button>
-        <img :src="previewArtifactSrc" alt="" />
+        <button type="button" class="modal-close" @click="closeArtifactPreview">关闭</button>
+        <div class="artifact-modal-image-frame">
+          <img :src="previewArtifactSrc" alt="" />
+          <div class="target-overlays" v-if="targetPreviews(previewArtifactEvent || undefined, previewArtifact).length">
+            <div
+              v-for="(candidate, candidateIndex) in targetPreviews(previewArtifactEvent || undefined, previewArtifact)"
+              :key="`modal-target-${candidateIndex}`"
+              class="target-box"
+              :style="targetBoxStyle(candidate)"
+            >
+              <span>{{ targetLabel(candidate) }}</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </main>
