@@ -21,6 +21,7 @@
 - Added Watch Together session context and follow-up recall using recent visual summaries, titles, questions, and screenshot artifacts.
 - Polished Watch Together: role-aware follow-up answers, session-only screen memory by default, and clickable screenshot thumbnails.
 - Added voice input foundation with click-to-record shell state, mock ASR, and `voice.transcribe` JSON-RPC routing into normal user-message handling.
+- Productionized voice input with ASR config parsing, OpenAI-compatible in-memory transcription, explicit unconfigured UI state, audio limits, transcript display, and serialized Core command handling.
 
 ## 2026-05-14
 

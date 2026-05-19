@@ -55,6 +55,14 @@ export interface UserCommand {
 
 export interface CoreReadyPayload {
   workspace: string
+  asr?: {
+    enabled?: boolean
+    configured?: boolean
+    provider?: string
+    max_seconds?: number
+    max_bytes?: number
+    error?: string
+  }
   character?: {
     name?: string
     sprites?: Array<{

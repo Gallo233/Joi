@@ -199,10 +199,33 @@ class TtsConfig:
 
 
 @dataclass(frozen=True)
+class AsrConfig:
+    enabled: bool = False
+    provider: str = ""
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+    language: str = "zh"
+    max_seconds: int = 30
+    max_bytes: int = 12 * 1024 * 1024
+
+    @property
+    def is_configured(self) -> bool:
+        if not self.enabled:
+            return False
+        provider = self.provider.strip().casefold()
+        if provider in {"", "mock"}:
+            return provider == "mock"
+        key = self.api_key.strip()
+        return bool(self.base_url.strip() and self.model.strip() and key and not key.startswith("${") and not key.startswith("%"))
+
+
+@dataclass(frozen=True)
 class AppConfig:
     base_dir: Path
     llm: LlmConfig
     tts: TtsConfig
+    asr: AsrConfig
     characters: list[CharacterConfig]
 
     @property
@@ -227,6 +250,7 @@ def load_app_config(path: Path) -> AppConfig:
 
     llm_raw = raw.get("llm") or {}
     tts_raw = raw.get("tts") or {}
+    asr_raw = raw.get("asr") or {}
     character_rows = raw.get("characters") or []
     characters = [_parse_character(row) for row in character_rows if isinstance(row, dict)]
 
@@ -259,6 +283,16 @@ def load_app_config(path: Path) -> AppConfig:
             prompt_lang=str(tts_raw.get("prompt_lang", "zh") or "zh"),
             speed_factor=float(tts_raw.get("speed_factor", 1.2)),
             fallback_to_system=bool(tts_raw.get("fallback_to_system", False)),
+        ),
+        asr=AsrConfig(
+            enabled=bool(asr_raw.get("enabled", False)),
+            provider=str(asr_raw.get("provider", "") or ""),
+            base_url=str(asr_raw.get("base_url", "") or ""),
+            model=str(asr_raw.get("model", "") or ""),
+            api_key=str(asr_raw.get("api_key", "") or ""),
+            language=str(asr_raw.get("language", "zh") or "zh"),
+            max_seconds=max(1, int(asr_raw.get("max_seconds", 30) or 30)),
+            max_bytes=max(1024, int(asr_raw.get("max_bytes", 12 * 1024 * 1024) or 12 * 1024 * 1024)),
         ),
         characters=characters,
     )

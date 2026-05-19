@@ -31,6 +31,16 @@ tts:
   speed_factor: 1.2
   fallback_to_system: false
 
+asr:
+  enabled: false
+  provider: openai_compatible
+  base_url: https://api.openai.com/v1
+  model: whisper-1
+  api_key: ${JOI_ASR_API_KEY}
+  language: zh
+  max_seconds: 30
+  max_bytes: 12582912
+
 characters:
   - name: 星野澪
     color: "#d76f8f"

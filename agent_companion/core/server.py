@@ -5,14 +5,15 @@ import asyncio
 import base64
 import json
 import mimetypes
+import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.schemas import AgentEvent
 from agent_companion.core.schemas import EventType
-from agent_companion.core.speech_input import MockAsrProvider, SpeechInputProvider
+from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
 
 
@@ -27,16 +28,30 @@ SPEAKABLE_EVENTS = {
 
 
 class JsonRpcBridge:
-    def __init__(self, workspace: Path, host: str = "127.0.0.1", port: int = 8765, asr_provider: SpeechInputProvider | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        asr_provider: SpeechInputProvider | None = None,
+        asr_state: AsrRuntimeState | None = None,
+        allow_mock_asr: bool = False,
+    ) -> None:
         self.workspace = workspace.resolve()
         self.host = host
         self.port = port
         self.app = AgentCompanionApp(self.workspace)
         self.tts = TtsBridge(self.workspace)
-        self.asr = asr_provider or MockAsrProvider()
+        if asr_provider is None:
+            self.asr, self.asr_state = build_asr_provider(self.workspace, allow_mock=allow_mock_asr)
+        else:
+            self.asr = asr_provider
+            self.asr_state = asr_state or AsrRuntimeState(True, True, "injected")
         self.clients: set[Any] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.queue: asyncio.Queue[AgentEvent] | None = None
+        self._command_lock = threading.Lock()
+        self._command_sequence = 0
 
     async def serve(self) -> None:
         try:
@@ -82,7 +97,7 @@ class JsonRpcBridge:
                 if not text:
                     await websocket.send(self._result(request_id, {"ok": False, "error": "empty_text"}))
                     return
-                asyncio.create_task(asyncio.to_thread(self.app.handle_user_text, text))
+                asyncio.create_task(asyncio.to_thread(self.submit_user_text, text))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
                 return
             if method == "approval.resolve":
@@ -91,7 +106,7 @@ class JsonRpcBridge:
                 if not approval_id:
                     await websocket.send(self._result(request_id, {"ok": False, "error": "missing_approval_id"}))
                     return
-                asyncio.create_task(asyncio.to_thread(self.app.resolve_approval, approval_id, approved))
+                asyncio.create_task(asyncio.to_thread(self.resolve_approval_command, approval_id, approved))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
                 return
             if method in {"voice.transcribe", "audio.transcribe"}:
@@ -132,6 +147,10 @@ class JsonRpcBridge:
 
     def transcribe_and_submit(self, audio_base64: str, mime_type: str = "") -> dict[str, Any]:
         audio = _decode_audio_base64(audio_base64)
+        if not self.asr_state.configured:
+            return self._asr_error("asr_unconfigured", "ASR 未配置，请先在 config.yaml 里配置语音识别。")
+        if len(audio) > self.asr_state.max_bytes:
+            return self._asr_error("audio_too_large", "录音太长了，请缩短后再试。")
         result = self.asr.transcribe(audio, mime_type)
         payload: dict[str, Any] = {
             "ok": result.ok,
@@ -143,10 +162,30 @@ class JsonRpcBridge:
         if result.error:
             payload["error"] = result.error
         if result.ok:
-            events = self.app.handle_user_text(result.transcript)
+            sequence, events = self._run_serial("voice.transcribe", lambda: self.app.handle_user_text(result.transcript))
             payload["submitted"] = True
+            payload["sequence"] = sequence
             payload["events"] = [event.to_dict() for event in events]
         return payload
+
+    def submit_user_text(self, text: str) -> dict[str, Any]:
+        sequence, events = self._run_serial("user.message", lambda: self.app.handle_user_text(text))
+        return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+
+    def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
+        sequence, events = self._run_serial("approval.resolve", lambda: self.app.resolve_approval(approval_id, approved))
+        return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+
+    def _run_serial(self, label: str, callback: Callable[[], list[AgentEvent]]) -> tuple[int, list[AgentEvent]]:
+        with self._command_lock:
+            self._command_sequence += 1
+            sequence = self._command_sequence
+            events = callback()
+        return sequence, events
+
+    @staticmethod
+    def _asr_error(error: str, message: str) -> dict[str, Any]:
+        return {"ok": False, "submitted": False, "transcript": "", "error": error, "message": message}
 
     async def _broadcast(self, message: str) -> None:
         stale: list[Any] = []
@@ -161,6 +200,14 @@ class JsonRpcBridge:
     def _ready_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "workspace": str(self.workspace),
+            "asr": {
+                "enabled": self.asr_state.enabled,
+                "configured": self.asr_state.configured,
+                "provider": self.asr_state.provider,
+                "max_seconds": self.asr_state.max_seconds,
+                "max_bytes": self.asr_state.max_bytes,
+                "error": self.asr_state.error,
+            },
             "character": {
                 "name": self.app.character.name,
                 "sprites": [],

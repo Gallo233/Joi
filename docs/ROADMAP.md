@@ -69,7 +69,9 @@ Status: in progress
 
 Status: in progress
 
-- Add click-to-record voice input. Shell recording and mock ASR JSON-RPC routing are connected; real ASR provider selection is next.
+- Add click-to-record voice input. Shell recording, explicit ASR readiness, transcript display, OpenAI-compatible ASR, payload limits, and JSON-RPC routing are connected.
+- Keep `MockAsrProvider` for tests/developer mode only; production microphone UI is disabled when ASR is not configured.
+- Serialize `user.message`, `voice.transcribe`, and `approval.resolve` mutations through a Core command lock.
 - Queue voice separately from text display.
 - Interrupt stale voice when new user input arrives.
 - Avoid speaking logs, JSON, paths, commands, tool ids, and inflated results.

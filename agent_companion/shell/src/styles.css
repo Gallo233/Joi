@@ -425,7 +425,7 @@ input {
   position: absolute;
   left: 22px;
   right: 22px;
-  bottom: 92px;
+  bottom: 124px;
   display: grid;
   gap: 6px;
   min-height: 74px;
@@ -437,6 +437,20 @@ input {
 
 .speech strong {
   color: #ffadc4;
+}
+
+.voice-status {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  bottom: 84px;
+  min-height: 28px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #596579;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .composer {

@@ -4,7 +4,7 @@
 
 - Vision now supports Windows active-window/fullscreen screenshots and optional visual model summaries, but OCR is not implemented yet.
 - Watch Together can reuse recent visual summaries in the current app session, but context is not persisted across restarts yet.
-- Voice input currently uses a mock ASR provider behind the JSON-RPC bridge; a real local/cloud ASR provider is not wired yet.
+- Voice input has OpenAI-compatible ASR wiring and explicit disabled state when unconfigured; local Whisper is not wired yet.
 - Computer Use actions are intentionally minimal: click/type/scroll/hotkey are Windows-only and do not yet include visual target grounding or before/after verification.
 - The stage can load local character sprites from configuration, but bundled original VN expression variants and Live2D/VRM rendering are not product grade yet.
 - OK-WW callback currently proves launch/return code, but does not yet read detailed in-game completion state.
@@ -23,3 +23,5 @@
 - Watch Together follow-up questions reuse recent visual context instead of forcing another screenshot.
 - Watch observations are kept out of long-term memory by default.
 - Screenshot artifacts have task-card thumbnails and a click-to-preview modal.
+- Mock ASR is no longer used by default in production Core startup.
+- Voice transcript routing uses the same approval path as typed commands.

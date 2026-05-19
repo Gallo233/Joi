@@ -13,9 +13,11 @@ const ready = ref<CoreReadyPayload | null>(null)
 const failedImageSrc = ref('')
 const previewArtifact = ref('')
 const voiceState = ref<'idle' | 'recording' | 'transcribing'>('idle')
+const lastTranscript = ref('')
 let mediaRecorder: MediaRecorder | null = null
 let mediaStream: MediaStream | null = null
 let audioChunks: Blob[] = []
+let voiceStopTimer: number | null = null
 
 const client = new CoreClient({
   url: 'ws://127.0.0.1:8765',
@@ -115,12 +117,22 @@ const currentMode = computed(() => {
   if (intent === 'watch_together' || intent === 'watch_followup' || intent === 'browser' || tool === 'watch.recall' || tool.startsWith('browser.')) return '陪看'
   return '闲聊'
 })
+const asrConfigured = computed(() => Boolean(ready.value?.asr?.configured))
+const voiceMaxSeconds = computed(() => Math.max(1, Number(ready.value?.asr?.max_seconds || 30)))
 const voiceButtonLabel = computed(() => {
+  if (!asrConfigured.value) return 'ASR 未配置'
   if (voiceState.value === 'recording') return '停止'
   if (voiceState.value === 'transcribing') return '转写中'
   return '语音'
 })
 const previewArtifactSrc = computed(() => (previewArtifact.value ? artifactSrc(previewArtifact.value) : ''))
+const voiceStatusText = computed(() => {
+  if (!asrConfigured.value) return 'ASR 未配置，请先在 config.yaml 中启用语音识别。'
+  if (voiceState.value === 'recording') return `录音中，最长 ${voiceMaxSeconds.value} 秒。`
+  if (voiceState.value === 'transcribing') return '转写中...'
+  if (lastTranscript.value) return `识别：${lastTranscript.value}`
+  return ''
+})
 
 function toolName(event: AgentEvent) {
   const tool = event.agent_state?.tool
@@ -205,6 +217,7 @@ function visionStatusLabel(status: string) {
     error: '视觉模型：失败',
     vision_error: '视觉模型：失败',
     no_context: '暂无视觉上下文',
+    llm_answer: '角色理解',
   }
   return labels[status] || '视觉状态'
 }
@@ -294,6 +307,10 @@ async function toggleVoiceInput() {
 
 async function startVoiceRecording() {
   try {
+    if (!asrConfigured.value) {
+      errorText.value = 'ASR 未配置'
+      return
+    }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
       errorText.value = '当前 WebView 不支持麦克风录音'
       return
@@ -312,6 +329,7 @@ async function startVoiceRecording() {
       void transcribeVoiceBlob(blob, mimeType)
     }
     mediaRecorder.start()
+    voiceStopTimer = window.setTimeout(() => stopVoiceRecording(), voiceMaxSeconds.value * 1000)
     voiceState.value = 'recording'
   } catch {
     cleanupVoiceStream()
@@ -331,6 +349,10 @@ function stopVoiceRecording() {
 }
 
 function cleanupVoiceStream() {
+  if (voiceStopTimer !== null) {
+    window.clearTimeout(voiceStopTimer)
+    voiceStopTimer = null
+  }
   mediaStream?.getTracks().forEach((track) => track.stop())
   mediaStream = null
   mediaRecorder = null
@@ -339,8 +361,9 @@ function cleanupVoiceStream() {
 async function transcribeVoiceBlob(blob: Blob, mimeType: string) {
   try {
     const audioBase64 = await blobToBase64(blob)
-    const result = (await client.transcribeVoice(audioBase64, mimeType)) as { ok?: boolean; transcript?: string; error?: string }
-    if (!result.ok) errorText.value = result.error || '没有识别到语音'
+    const result = (await client.transcribeVoice(audioBase64, mimeType)) as { ok?: boolean; transcript?: string; error?: string; message?: string }
+    if (result.ok && result.transcript) lastTranscript.value = result.transcript
+    if (!result.ok) errorText.value = result.message || result.error || '没有识别到语音'
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '语音转写失败'
   } finally {
@@ -495,12 +518,13 @@ onBeforeUnmount(() => {
         <strong>{{ characterName }}</strong>
         <span>{{ latestSpeech }}</span>
       </div>
+      <div class="voice-status" v-if="voiceStatusText">{{ voiceStatusText }}</div>
       <form class="composer" @submit.prevent="submit">
         <button
           type="button"
           class="mic-button"
           :class="{ recording: voiceState === 'recording' }"
-          :disabled="!connected || voiceState === 'transcribing'"
+          :disabled="!connected || !asrConfigured || voiceState === 'transcribing'"
           @click="toggleVoiceInput"
         >
           {{ voiceButtonLabel }}

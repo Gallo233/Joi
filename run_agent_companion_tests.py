@@ -13,7 +13,7 @@ from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.schemas import EventType, ToolRequest
 from agent_companion.core.server import JsonRpcBridge
-from agent_companion.core.speech_input import MockAsrProvider
+from agent_companion.core.speech_input import AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.watch import WatchRecallTool
@@ -254,6 +254,15 @@ def main() -> int:
             "  vision_base_url: https://api.vision.com/v1\n"
             "  vision_model: gpt-4o\n"
             "  vision_api_key: sk-vision\n"
+            "asr:\n"
+            "  enabled: true\n"
+            "  provider: openai_compatible\n"
+            "  base_url: https://api.asr.com/v1\n"
+            "  model: whisper-1\n"
+            "  api_key: sk-asr\n"
+            "  language: zh\n"
+            "  max_seconds: 7\n"
+            "  max_bytes: 4096\n"
             "characters:\n"
             "  - name: Test\n"
             "    color: '#fff'\n"
@@ -273,6 +282,12 @@ def main() -> int:
         assert_true(isinstance(observe_tool.summarizer, OpenAIVisionSummarizer), "summarizer should be OpenAIVisionSummarizer")
         assert_true(observe_tool.summarizer.model == "gpt-4o", "summarizer should use vision_model")
         assert_true(observe_tool.summarizer.base_url == "https://api.vision.com/v1", "summarizer should use vision_base_url")
+        tmp_config = load_app_config(tmp / "config.yaml")
+        assert_true(tmp_config.asr.is_configured, "ASR config should parse as configured")
+        assert_true(tmp_config.asr.max_seconds == 7 and tmp_config.asr.max_bytes == 4096, "ASR limits should parse")
+        asr_provider, asr_state = build_asr_provider(tmp)
+        assert_true(isinstance(asr_provider, OpenAICompatibleAsrProvider), "configured ASR should use OpenAI-compatible provider")
+        assert_true(asr_state.configured and asr_state.max_bytes == 4096, "ASR runtime state should expose limits")
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -368,6 +383,19 @@ def main() -> int:
     duplicate = app.resolve_approval(str(game_approval["approval_id"]), approved=False)
     assert_true(not duplicate, "duplicate approval responses should be ignored")
 
+    unconfigured_bridge = JsonRpcBridge(workspace)
+    unconfigured_payload = unconfigured_bridge.transcribe_and_submit("", "audio/webm")
+    assert_true(not unconfigured_payload["ok"] and unconfigured_payload["error"] == "asr_unconfigured", "unconfigured ASR should fail clearly")
+    assert_true("events" not in unconfigured_payload, "unconfigured ASR should not submit user.message")
+
+    too_large_bridge = JsonRpcBridge(
+        workspace,
+        asr_provider=MockAsrProvider("你好"),
+        asr_state=AsrRuntimeState(True, True, "mock", max_bytes=2),
+    )
+    too_large_payload = too_large_bridge.transcribe_and_submit("AAAAAA==", "audio/webm")
+    assert_true(not too_large_payload["ok"] and too_large_payload["error"] == "audio_too_large", "oversized audio should be rejected before ASR")
+
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")
     assert_true(voice_payload["ok"] and voice_payload["transcript"] == "你好", "mock ASR should return transcript")
@@ -378,6 +406,18 @@ def main() -> int:
     voice_events = approval_voice_payload["events"]
     assert_true(any(event["type"] == "approval_required" for event in voice_events), "voice computer command should still require approval")
     assert_true(not any(event["type"] == "tool_completed" and event.get("agent_state", {}).get("tool") == "computer.click" for event in voice_events), "voice command should not bypass approval")
+
+    serial_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(serial_bridge.submit_user_text, "你好"),
+            pool.submit(serial_bridge.transcribe_and_submit, "", "audio/webm"),
+        ]
+        serial_payloads = [future.result() for future in futures]
+    sequences = sorted(int(payload["sequence"]) for payload in serial_payloads)
+    assert_true(sequences == [1, 2], "command queue should serialize concurrent mutations")
     print("agent_companion tests passed")
     return 0
 

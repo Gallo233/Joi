@@ -31,9 +31,9 @@ Keep `config.yaml` local only. Public examples should go in `config.example.yaml
 
 ## Current Priority
 
-Continue P4.2 Voice Input Foundation and prepare real ASR provider wiring.
+Continue P4.2 Voice Input hardening and prepare voice interruption / TTS queue cleanup.
 
-The current observation, first action layer, approval hardening, watch loop, and first voice input foundation are implemented:
+The current observation, first action layer, approval hardening, watch loop, and production ASR path are implemented:
 
 - `agent_companion/core/vision/` captures Windows active-window/fullscreen screenshots.
 - `agent_companion/core/vision/summarizer.py` can call an OpenAI-compatible vision model.
@@ -53,11 +53,17 @@ The current observation, first action layer, approval hardening, watch loop, and
 - `agent_companion/core/speech_input.py` defines `SpeechInputProvider`, `MockAsrProvider`, and `AsrResult`.
 - The WebSocket bridge exposes `voice.transcribe` / `audio.transcribe`, then routes transcripts through normal `user.message`.
 - The shell has a click-to-record microphone button; first version does not save raw audio and does not run always-on listening.
+- `config.example.yaml` documents `asr.enabled`, provider, endpoint/model/key, language, max duration, and max payload size.
+- Production Core does not use `MockAsrProvider` unless explicitly injected for tests/developer mode.
+- OpenAI-compatible ASR keeps audio in memory and sends it directly to the transcription endpoint.
+- Shell disables the microphone and shows "ASR 未配置" when no real ASR is configured.
+- Voice transcripts are shown in the stage and then routed through the normal task/approval flow.
+- Core serializes `user.message`, `voice.transcribe`, and `approval.resolve` mutations with a command lock.
 
 Next task options, in priority order:
 
-1. Replace `MockAsrProvider` with a configurable real ASR provider while preserving no-audio-retention defaults.
-2. Add voice interrupt/cancel behavior so a new command can stop stale TTS playback.
+1. Add voice interrupt/cancel behavior so a new command can stop stale TTS playback.
+2. Add ASR provider health/status display in settings once settings UI exists.
 3. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
 4. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
 5. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
@@ -66,13 +72,13 @@ Next task options, in priority order:
 
 ## Suggested First Task
 
-Implement real ASR provider selection:
+Implement voice interruption and queue cleanup:
 
-- Add ASR config fields to `config.example.yaml` and parser types.
-- Implement an OpenAI-compatible or local Whisper provider behind `SpeechInputProvider`.
-- Keep raw audio in memory only; do not write uploaded audio to disk by default.
-- Return transcript confidence/provider metadata to the shell without exposing model names in voice lines.
-- Verify voice-created medium-risk tasks still require `approval_id`.
+- Track currently playing audio in the shell.
+- Stop stale TTS when the user submits text or starts a new recording.
+- Add a Core event or client-side policy for dropping old `agent.voice_audio` payloads.
+- Keep transcript and task events intact; only interrupt playback.
+- Add tests or a small browser smoke check for stale audio cancellation.
 
 ## Allowed Edit Areas
 
