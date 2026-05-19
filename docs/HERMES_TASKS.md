@@ -31,7 +31,7 @@ Keep `config.yaml` local only. Public examples should go in `config.example.yaml
 
 ## Current Priority
 
-Continue P4.2 Voice Input hardening and prepare deeper interruption / TTS queue cleanup.
+Continue P4.2 Voice Input hardening and prepare ASR/TTS status visibility.
 
 The current observation, first action layer, approval hardening, watch loop, and production ASR path are implemented:
 
@@ -63,25 +63,26 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Shell rejects recorded audio blobs over `ready.asr.max_bytes` before converting to base64.
 - ASR has a configurable `timeout_seconds`; timeout and provider failures create friendly task cards with sanitized voice lines.
 - Shell stops currently playing voice audio when the user sends text or starts a new recording.
+- Shell tracks a voice epoch per user intent and drops late `agent.voice_audio` payloads from older epochs.
+- `voice.transcribe` uses a method-specific timeout based on `ready.asr.timeout_seconds + 10s`, so ASR timeouts can return friendly Joi messages before the UI gives up.
 
 Next task options, in priority order:
 
-1. Add deeper voice queue cancellation so late `agent.voice_audio` payloads from old events can be dropped by generation id.
-2. Add ASR provider health/status display in settings once settings UI exists.
-3. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
-4. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
-5. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
-6. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
-7. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
+1. Add a small settings/status surface for ASR/TTS provider health and current timeout/limit values.
+2. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
+3. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
+4. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+5. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
+6. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
 
 ## Suggested First Task
 
-Implement voice queue generation cleanup:
+Implement ASR/TTS status surface:
 
-- Assign a client-side voice generation id when user intent changes.
-- Add a Core event or client-side policy for dropping old `agent.voice_audio` payloads.
-- Keep transcript and task events intact; only interrupt playback.
-- Add a browser smoke check for late audio cancellation.
+- Show whether ASR is configured, provider name, max seconds, max bytes, and timeout.
+- Show TTS provider state and last synthesis error in developer mode first.
+- Keep raw API keys, paths, and provider errors out of voice and normal UI.
+- Add a smoke path: set `asr.timeout_seconds` low, force provider timeout, confirm the UI shows "语音识别等太久了" and remains interactive.
 
 ## Allowed Edit Areas
 

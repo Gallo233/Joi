@@ -48,6 +48,14 @@ export interface AgentEvent {
   created_at: number
 }
 
+export interface VoiceAudioPayload {
+  task_id?: string
+  event_type?: string
+  voice_text?: string
+  voice_audio_path?: string
+  voice_audio_rel?: string
+}
+
 export interface UserCommand {
   id: string
   text: string

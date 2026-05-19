@@ -2,7 +2,8 @@
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, CoreReadyPayload } from './protocol'
+import type { AgentEvent, CoreReadyPayload, VoiceAudioPayload } from './protocol'
+import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
 const status = ref<CoreStatus>('offline')
@@ -19,17 +20,21 @@ let mediaStream: MediaStream | null = null
 let audioChunks: Blob[] = []
 let voiceStopTimer: number | null = null
 let currentAudio: HTMLAudioElement | null = null
+let voiceEpoch = 0
+const taskVoiceEpochs = new Map<string, number>()
+const voiceEventEpochs = new Map<string, number>()
 
 const client = new CoreClient({
   url: 'ws://127.0.0.1:8765',
   onStatus: (value) => (status.value = value),
   onEvent: (event) => {
+    rememberVoiceEventEpoch(event)
     events.value.push(event)
   },
   onReady: (payload) => {
     ready.value = payload
   },
-  onVoiceAudio: (payload) => void playAudioPath(payload.voice_audio_path),
+  onVoiceAudio: (payload) => void playVoiceAudio(payload),
   onError: (message) => (errorText.value = message),
 })
 
@@ -121,6 +126,8 @@ const currentMode = computed(() => {
 const asrConfigured = computed(() => Boolean(ready.value?.asr?.configured))
 const voiceMaxSeconds = computed(() => Math.max(1, Number(ready.value?.asr?.max_seconds || 30)))
 const voiceMaxBytes = computed(() => Math.max(1024, Number(ready.value?.asr?.max_bytes || 12 * 1024 * 1024)))
+const voiceAsrTimeoutSeconds = computed(() => Math.max(1, Number(ready.value?.asr?.timeout_seconds || 30)))
+const voiceTranscribeTimeoutMs = computed(() => asrRpcTimeoutMs(voiceAsrTimeoutSeconds.value))
 const voiceButtonLabel = computed(() => {
   if (!asrConfigured.value) return 'ASR 未配置'
   if (voiceState.value === 'recording') return '停止'
@@ -267,7 +274,7 @@ function eventTime(event: AgentEvent) {
 function submit() {
   const text = input.value.trim()
   if (!text) return
-  stopSpokenAudio()
+  beginNewVoiceIntent()
   void client.sendUserText(text).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '发送失败'
   })
@@ -278,6 +285,8 @@ function resolveApproval(approved: boolean) {
   if (!pendingApproval.value) return
   const approvalId = approvalIdFor(pendingApproval.value)
   if (!approvalId) return
+  const epoch = beginNewVoiceIntent()
+  taskVoiceEpochs.set(pendingApproval.value.task_id, epoch)
   void client.resolveApproval(approvalId, approved).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '审批提交失败'
   })
@@ -306,6 +315,36 @@ async function playAudioPath(path?: string) {
   }
 }
 
+function playVoiceAudio(payload: VoiceAudioPayload) {
+  const eventEpoch = voiceEventEpochs.get(voiceAudioKey(payload))
+  if (!shouldPlayVoiceAudio(eventEpoch, voiceEpoch)) return
+  void playAudioPath(payload.voice_audio_path)
+}
+
+function rememberVoiceEventEpoch(event: AgentEvent) {
+  let eventEpoch = taskVoiceEpochs.get(event.task_id)
+  if (event.type === 'user_message' || eventEpoch === undefined) {
+    eventEpoch = voiceEpoch
+    taskVoiceEpochs.set(event.task_id, eventEpoch)
+  }
+  if (event.voice_line?.text && isSpeakableEvent(event)) {
+    voiceEventEpochs.set(
+      voiceAudioKey({
+        task_id: event.task_id,
+        event_type: event.type,
+        voice_text: event.voice_line.text,
+      }),
+      eventEpoch,
+    )
+  }
+}
+
+function beginNewVoiceIntent() {
+  voiceEpoch = nextVoiceEpoch(voiceEpoch)
+  stopSpokenAudio()
+  return voiceEpoch
+}
+
 function stopSpokenAudio() {
   if (!currentAudio) return
   currentAudio.pause()
@@ -332,7 +371,7 @@ async function startVoiceRecording() {
       errorText.value = '当前 WebView 不支持麦克风录音'
       return
     }
-    stopSpokenAudio()
+    beginNewVoiceIntent()
     lastTranscript.value = ''
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
     audioChunks = []
@@ -388,7 +427,7 @@ async function transcribeVoiceBlob(blob: Blob, mimeType: string) {
       return
     }
     const audioBase64 = await blobToBase64(blob)
-    const result = (await client.transcribeVoice(audioBase64, mimeType)) as { ok?: boolean; transcript?: string; error?: string; message?: string }
+    const result = (await client.transcribeVoice(audioBase64, mimeType, voiceTranscribeTimeoutMs.value)) as { ok?: boolean; transcript?: string; error?: string; message?: string }
     if (result.ok && result.transcript) lastTranscript.value = result.transcript
     if (!result.ok) errorText.value = result.message || result.error || '没有识别到语音'
   } catch (error) {

@@ -450,6 +450,22 @@ def main() -> int:
     timeout_payload = timeout_bridge.transcribe_and_submit("AAAA", "audio/webm")
     assert_true(not timeout_payload["ok"] and timeout_payload["error"] == "asr_timeout", "ASR timeout should return friendly error code")
 
+    ready_bridge = JsonRpcBridge(
+        workspace,
+        asr_provider=MockAsrProvider("你好"),
+        asr_state=AsrRuntimeState(True, True, "mock", max_bytes=4096, timeout_seconds=5),
+    )
+    ready_payload = ready_bridge._ready_payload()
+    assert_true(ready_payload["asr"]["timeout_seconds"] == 5, "Core ready payload should expose ASR timeout")
+
+    shell_api_source = (workspace / "agent_companion" / "shell" / "src" / "api.ts").read_text(encoding="utf-8")
+    assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
+    assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
+    voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
+    assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
+    app_vue_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
+    assert_true("beginNewVoiceIntent()" in app_vue_source and "voiceEventEpochs.get" in app_vue_source, "Shell should bump and compare voice epochs")
+
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")
     assert_true(voice_payload["ok"] and voice_payload["transcript"] == "你好", "mock ASR should return transcript")

@@ -73,8 +73,8 @@ Status: in progress
 - Harden voice runtime safety: oversized base64 is rejected before decode, recorded blobs are size-checked before upload, and ASR timeout/error paths produce friendly task cards.
 - Keep `MockAsrProvider` for tests/developer mode only; production microphone UI is disabled when ASR is not configured.
 - Serialize `user.message`, `voice.transcribe`, and `approval.resolve` mutations through a Core command lock.
-- Queue voice separately from text display.
-- Interrupt stale voice when the user sends new text or starts a new voice input.
+- Queue voice separately from text display and suppress stale voice audio with a client-side epoch when user intent changes.
+- Align voice transcription RPC timeout with configured ASR timeout so ASR failures surface as friendly Joi messages.
 - Avoid speaking logs, JSON, paths, commands, tool ids, and inflated results.
 
 ## P7 Policy and Audit

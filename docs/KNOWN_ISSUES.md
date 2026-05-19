@@ -28,3 +28,5 @@
 - Voice input rejects oversized recordings in the shell and oversized base64 payloads in Core before decode.
 - Voice ASR timeout/error paths now create friendly task cards and sanitized voice lines instead of silent failures.
 - Stale spoken audio is stopped when a new typed or voice command starts.
+- Late TTS audio from older user intents is suppressed by a client-side voice epoch.
+- Voice transcription uses the configured ASR timeout plus grace time instead of the generic Core request timeout.
