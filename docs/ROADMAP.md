@@ -29,6 +29,7 @@ Status: in progress
 - Add `VisionSummarizer` with configurable vision model. OpenAI-compatible vision summaries are connected.
 - Add OCR grounding for visible text and rough screen regions. Optional `pytesseract`/Pillow OCR is best-effort; unavailable or timed-out OCR does not fail screenshots or Watch Together.
 - Group OCR text into coarse regions and expose semantic target candidates for phrases such as "登录按钮" or "右上角".
+- Add optional Windows accessibility-tree snapshots for active-window UI controls, including name, role, bounds, enabled, and clickable state.
 - Attach active-window capture rectangles and preview boxes so semantic targets can be reviewed visually before approval.
 - Rank semantic target candidates with explainable confidence and hold ambiguous matches for user clarification.
 - Continue pending semantic target selection from user phrases such as "选 2" or from candidate-card buttons, while preserving click approval.
@@ -49,6 +50,7 @@ Status: in progress
 - Compare before/after observations for confirmed actions and label the task card as changed, likely no-op, or unavailable without overclaiming success.
 - Run configured OCR on Computer Use before/after observations and wait briefly after actions so real Windows UI updates can settle before verification.
 - Resolve semantic click requests into candidate OCR regions first, then ask for approval before executing the synthesized click.
+- Fuse accessibility-tree controls with OCR boxes for semantic target grounding, preferring real UI names/roles when available and falling back to OCR when unavailable.
 - Convert approved semantic target centers from screenshot-relative OCR bbox to Windows screen coordinates only when capture rect and scale are available.
 - Continue ambiguous semantic target selections from the saved session context and require a fresh approval before clicking.
 - Candidate-card selection now uses explicit `selection_id`/rank RPC; text and voice phrases such as "选 2" remain a latest-context fallback.

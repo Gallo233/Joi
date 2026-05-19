@@ -36,6 +36,7 @@
 - Added ranked semantic target confidence with ambiguity detection, so close OCR candidates are shown for clarification instead of becoming click approvals.
 - Added session-only semantic target candidate continuation, allowing "选 2" or candidate-card selection to resume a pending target and create a fresh click approval.
 - Bound semantic target candidate buttons to explicit `selection_id`/rank JSON-RPC selection, preventing old candidate cards from selecting the newest pending context by accident.
+- Added optional Windows accessibility-tree grounding for semantic targets, fusing UI control names/roles/bounds with OCR candidates while keeping real clicks behind approval.
 
 ## 2026-05-14
 

@@ -10,7 +10,7 @@ from agent_companion.core.computer_use import ComputerUseBackend, WindowsCompute
 from agent_companion.core.computer_use.schemas import ComputerObservation
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
-from agent_companion.core.vision import OcrExtractor, PytesseractOcrExtractor, VisionObserver, WindowsScreenObserver
+from agent_companion.core.vision import AccessibilityObserver, AccessibilitySnapshot, OcrExtractor, PytesseractOcrExtractor, VisionObserver, WindowsAccessibilityObserver, WindowsScreenObserver
 from agent_companion.core.vision.ocr import run_ocr_safely
 from agent_companion.core.vision.regions import group_ocr_regions, regions_to_agent_state, summarize_ocr_regions
 from agent_companion.core.vision.targeting import TargetCandidate, resolve_target_candidates
@@ -99,11 +99,13 @@ class SemanticTargetTool(ToolAdapter):
         observer: VisionObserver | None = None,
         computer_backend: ComputerUseBackend | None = None,
         ocr: OcrExtractor | None = None,
+        accessibility: AccessibilityObserver | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.observer = observer or WindowsScreenObserver(workspace)
         self.computer_backend = computer_backend or WindowsComputerUseBackend(workspace, self.observer)
         self.ocr = ocr or PytesseractOcrExtractor()
+        self.accessibility = accessibility or WindowsAccessibilityObserver()
 
     def run(self, request: ToolRequest) -> ToolResult:
         query = str(request.arguments.get("query") or request.arguments.get("target") or "").strip()
@@ -120,7 +122,9 @@ class SemanticTargetTool(ToolAdapter):
         ocr_result = run_ocr_safely(self.ocr, observation.screenshot_path)
         regions = group_ocr_regions(ocr_result, observation.width, observation.height)
         region_state = regions_to_agent_state(regions)
-        candidates = resolve_target_candidates(query, region_state)
+        accessibility_snapshot = self.accessibility.observe(observation.window_handle, observation.title)
+        accessibility_state = _accessibility_target_state(accessibility_snapshot, observation)
+        candidates = resolve_target_candidates(query, region_state, accessibility_state)
         artifacts = [observation.screenshot_rel] if observation.screenshot_rel else []
         candidate_states = [_candidate_state(row, observation) for row in candidates]
         if not candidates:
@@ -128,6 +132,7 @@ class SemanticTargetTool(ToolAdapter):
                 [
                     f"目标描述：{query or '未提供'}",
                     summarize_ocr_regions(regions),
+                    accessibility_snapshot.detail_text(),
                     "结果：没有找到足够明确的候选区域，请换一种更具体的说法。",
                 ]
             )
@@ -138,6 +143,7 @@ class SemanticTargetTool(ToolAdapter):
                     "observation": observation.to_agent_state(),
                     "ocr": ocr_result.to_agent_state(),
                     "ocr_regions": region_state,
+                    "accessibility": accessibility_state,
                     "target_candidates": [],
                     "needs_clarification": True,
                     "artifacts": artifacts,
@@ -152,6 +158,7 @@ class SemanticTargetTool(ToolAdapter):
                 [
                     f"目标描述：{query or '未提供'}",
                     _candidate_list_body(candidates),
+                    accessibility_snapshot.detail_text(),
                     "结果：候选还不够唯一，请补充位置或从候选里指定编号。",
                 ]
             )
@@ -162,6 +169,7 @@ class SemanticTargetTool(ToolAdapter):
                     "observation": observation.to_agent_state(),
                     "ocr": ocr_result.to_agent_state(),
                     "ocr_regions": region_state,
+                    "accessibility": accessibility_state,
                     "target_candidate": _candidate_state(candidate, observation),
                     "target_candidates": candidate_states,
                     "needs_clarification": True,
@@ -181,6 +189,7 @@ class SemanticTargetTool(ToolAdapter):
                     "observation": observation.to_agent_state(),
                     "ocr": ocr_result.to_agent_state(),
                     "ocr_regions": region_state,
+                    "accessibility": accessibility_state,
                     "target_candidate": _candidate_state(candidate, observation),
                     "target_candidates": candidate_states,
                     "needs_clarification": True,
@@ -202,6 +211,7 @@ class SemanticTargetTool(ToolAdapter):
                 f"所在区域：{_friendly_region(candidate.region_label)}",
                 _candidate_list_body(candidates),
                 summarize_ocr_regions(regions),
+                accessibility_snapshot.detail_text(),
                 "下一步：确认后才会点击这个候选区域。",
             ]
         )
@@ -212,6 +222,7 @@ class SemanticTargetTool(ToolAdapter):
                 "observation": observation.to_agent_state(),
                 "ocr": ocr_result.to_agent_state(),
                 "ocr_regions": region_state,
+                "accessibility": accessibility_state,
                 "target_candidate": _candidate_state(candidate, observation, click_args),
                 "target_candidates": candidate_states,
                 "approval_request": {
@@ -319,6 +330,9 @@ class SemanticTargetSelectionTool(ToolAdapter):
 
 
 def _click_arguments(candidate: TargetCandidate, observation: ComputerObservation) -> dict[str, int] | None:
+    screen_center = _screen_center_from_screen_bbox(candidate.screen_bbox)
+    if screen_center is not None:
+        return {"x": screen_center[0], "y": screen_center[1]}
     screen_center = _screen_center(candidate, observation)
     if screen_center is None:
         return None
@@ -326,6 +340,10 @@ def _click_arguments(candidate: TargetCandidate, observation: ComputerObservatio
 
 
 def click_arguments_from_state(candidate_state: dict[str, Any], observation_state: dict[str, Any]) -> dict[str, int] | None:
+    screen_bbox = _bbox_tuple(candidate_state.get("screen_bbox") or candidate_state.get("bounds"))
+    screen_center = _screen_center_from_screen_bbox(screen_bbox)
+    if screen_center is not None:
+        return {"x": screen_center[0], "y": screen_center[1]}
     bbox = _bbox_tuple(candidate_state.get("bbox"))
     rect = _capture_rect_from_state(observation_state.get("capture_rect"))
     if bbox is None or rect is None:
@@ -386,28 +404,90 @@ def _screen_center_from_values(
     return (int(screen_x), int(screen_y))
 
 
+def _screen_center_from_screen_bbox(screen_bbox: tuple[int, int, int, int] | None) -> tuple[int, int] | None:
+    if screen_bbox is None:
+        return None
+    left, top, width, height = screen_bbox
+    if width <= 0 or height <= 0:
+        return None
+    return (int(left + width / 2), int(top + height / 2))
+
+
 def _candidate_state(
     candidate: TargetCandidate,
     observation: ComputerObservation,
     click_args: dict[str, int] | None = None,
 ) -> dict:
     state = candidate.to_agent_state()
-    if candidate.bbox is not None:
+    preview_bbox = candidate.bbox or _relative_bbox_from_screen_bbox(candidate.screen_bbox, observation)
+    if preview_bbox is not None:
         state["preview"] = {
             "artifact": observation.screenshot_rel,
-            "bbox": list(candidate.bbox),
-            "center": [candidate.bbox[0] + candidate.bbox[2] // 2, candidate.bbox[1] + candidate.bbox[3] // 2],
+            "bbox": list(preview_bbox),
+            "center": [preview_bbox[0] + preview_bbox[2] // 2, preview_bbox[1] + preview_bbox[3] // 2],
             "image_width": observation.width,
             "image_height": observation.height,
             "label": candidate.label,
             "region_label": candidate.region_label,
             "region_name": _friendly_region(candidate.region_label),
             "confidence": round(float(candidate.confidence), 3),
+            "source": candidate.source,
         }
     screen_center = click_args or _click_arguments(candidate, observation)
     if screen_center is not None:
         state["screen_center"] = [screen_center["x"], screen_center["y"]]
     return state
+
+
+def _accessibility_target_state(snapshot: AccessibilitySnapshot, observation: ComputerObservation) -> dict[str, Any]:
+    state = snapshot.to_agent_state()
+    elements: list[dict[str, Any]] = []
+    for row in state.get("elements") or []:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        bounds = _bbox_tuple(item.get("bounds"))
+        item["screen_bbox"] = list(bounds) if bounds else None
+        relative = _relative_bbox_from_screen_bbox(bounds, observation)
+        if relative is not None:
+            item["bbox"] = list(relative)
+            item["image_width"] = observation.width
+            item["image_height"] = observation.height
+            item["horizontal"] = _horizontal_bucket(relative, observation.width)
+            item["vertical"] = _vertical_bucket(relative, observation.height)
+            item["region"] = _region_from_bbox(relative, observation.width, observation.height)
+        item["source"] = "accessibility"
+        elements.append(item)
+    state["elements"] = elements
+    return state
+
+
+def _relative_bbox_from_screen_bbox(screen_bbox: tuple[int, int, int, int] | None, observation: ComputerObservation) -> tuple[int, int, int, int] | None:
+    if screen_bbox is None or observation.capture_rect is None:
+        return None
+    left, top, width, height = screen_bbox
+    if width <= 0 or height <= 0:
+        return None
+    rect = observation.capture_rect
+    scale_x = _positive_float(rect.scale_x) or 1.0
+    scale_y = _positive_float(rect.scale_y) or 1.0
+    rel_left = round((left - rect.screen_x) * scale_x)
+    rel_top = round((top - rect.screen_y) * scale_y)
+    rel_width = round(width * scale_x)
+    rel_height = round(height * scale_y)
+    if rel_width <= 0 or rel_height <= 0:
+        return None
+    if rel_left + rel_width < -2 or rel_top + rel_height < -2:
+        return None
+    if rel_left > observation.width + 2 or rel_top > observation.height + 2:
+        return None
+    clamped_left = max(0, rel_left)
+    clamped_top = max(0, rel_top)
+    clamped_right = min(observation.width, rel_left + rel_width)
+    clamped_bottom = min(observation.height, rel_top + rel_height)
+    if clamped_right <= clamped_left or clamped_bottom <= clamped_top:
+        return None
+    return (clamped_left, clamped_top, clamped_right - clamped_left, clamped_bottom - clamped_top)
 
 
 def _friendly_region(label: str) -> str:
@@ -416,7 +496,16 @@ def _friendly_region(label: str) -> str:
         "sidebar": "侧边区域",
         "main_content": "主内容",
         "bottom_controls": "底部控件",
+        "ui_control": "UI 控件",
     }.get(label, "未知区域")
+
+
+def _friendly_source(source: str) -> str:
+    return {
+        "accessibility": "UI控件",
+        "ocr": "OCR",
+        "fused": "融合",
+    }.get(source, "候选")
 
 
 def _scale_is_trusted(scale_x: float, scale_y: float) -> bool:
@@ -438,9 +527,45 @@ def _candidate_list_body(candidates: list[TargetCandidate]) -> str:
         ambiguity = _friendly_ambiguity(candidate.ambiguity)
         reason = candidate.reason or "OCR 候选"
         rows.append(
-            f"{candidate.rank or len(rows)}. {candidate.label} / {_friendly_region(candidate.region_label)} / {confidence}% / {ambiguity} / {reason}"
+            f"{candidate.rank or len(rows)}. {candidate.label} / {_friendly_source(candidate.source)} / {_friendly_region(candidate.region_label)} / {confidence}% / {ambiguity} / {reason}"
         )
     return "\n".join(rows)
+
+
+def _horizontal_bucket(bbox: tuple[int, int, int, int], image_width: int) -> str:
+    center = bbox[0] + bbox[2] / 2
+    if image_width <= 0:
+        return "center"
+    ratio = center / image_width
+    if ratio < 0.33:
+        return "left"
+    if ratio > 0.66:
+        return "right"
+    return "center"
+
+
+def _vertical_bucket(bbox: tuple[int, int, int, int], image_height: int) -> str:
+    center = bbox[1] + bbox[3] / 2
+    if image_height <= 0:
+        return "middle"
+    ratio = center / image_height
+    if ratio < 0.2:
+        return "top"
+    if ratio > 0.78:
+        return "bottom"
+    return "middle"
+
+
+def _region_from_bbox(bbox: tuple[int, int, int, int], image_width: int, image_height: int) -> str:
+    vertical = _vertical_bucket(bbox, image_height)
+    horizontal = _horizontal_bucket(bbox, image_width)
+    if vertical == "top":
+        return "top_bar"
+    if vertical == "bottom":
+        return "bottom_controls"
+    if horizontal == "left":
+        return "sidebar"
+    return "main_content"
 
 
 def _friendly_ambiguity(value: str) -> str:

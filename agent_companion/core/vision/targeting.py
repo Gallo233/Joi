@@ -14,8 +14,12 @@ class TargetCandidate:
     confidence: float
     rank: int = 0
     ambiguity: str = "none"
-    source: str = "ocr_region"
+    source: str = "ocr"
     reason: str = ""
+    screen_bbox: tuple[int, int, int, int] | None = None
+    role: str = ""
+    enabled: bool | None = None
+    clickable: bool | None = None
 
     def to_agent_state(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -28,23 +32,43 @@ class TargetCandidate:
             "source": self.source,
             "reason": self.reason,
         }
+        if self.role:
+            payload["role"] = self.role
+        if self.enabled is not None:
+            payload["enabled"] = self.enabled
+        if self.clickable is not None:
+            payload["clickable"] = self.clickable
         if self.bbox is not None:
             payload["bbox"] = list(self.bbox)
             payload["center"] = [self.bbox[0] + self.bbox[2] // 2, self.bbox[1] + self.bbox[3] // 2]
+        if self.screen_bbox is not None:
+            payload["screen_bbox"] = list(self.screen_bbox)
         return payload
 
 
-def resolve_target_candidates(query: str, regions: Iterable[Any], limit: int = 3) -> list[TargetCandidate]:
+def resolve_target_candidates(query: str, regions: Iterable[Any], accessibility: Any = None, limit: int = 3) -> list[TargetCandidate]:
+    if isinstance(accessibility, int):
+        limit = accessibility
+        accessibility = None
     intent = _target_intent(query)
     if not intent["terms"] and not intent["position"]:
         return []
-    items = list(_iter_region_items(regions))
+    ocr_items = list(_iter_region_items(regions))
+    accessibility_items = list(_iter_accessibility_items(accessibility))
+    ocr_candidates = _candidates_from_items(intent, ocr_items, ocr_items + accessibility_items)
+    accessibility_candidates = _candidates_from_items(intent, accessibility_items, ocr_items + accessibility_items)
+    candidates = _fuse_candidates(ocr_candidates, accessibility_candidates)
+    candidates.sort(key=lambda candidate: candidate.confidence, reverse=True)
+    return _rank_candidates(candidates)[: max(1, limit)]
+
+
+def _candidates_from_items(intent: dict[str, Any], items: list[dict[str, Any]], all_items: list[dict[str, Any]]) -> list[TargetCandidate]:
     candidates: list[TargetCandidate] = []
     for item in items:
         text = str(item.get("text") or "").strip()
         if not text:
             continue
-        score, reason = _candidate_score(intent, item, text, items)
+        score, reason = _candidate_score(intent, item, text, all_items)
         if score < 0.35:
             continue
         bbox = _bbox_tuple(item.get("bbox"))
@@ -55,11 +79,15 @@ def resolve_target_candidates(query: str, regions: Iterable[Any], limit: int = 3
                 region_label=str(item.get("region") or "unknown"),
                 bbox=bbox,
                 confidence=score,
+                source=str(item.get("source") or "ocr"),
                 reason=reason,
+                screen_bbox=_bbox_tuple(item.get("screen_bbox") or item.get("bounds")),
+                role=str(item.get("role") or ""),
+                enabled=_bool_or_none(item.get("enabled")),
+                clickable=_bool_or_none(item.get("clickable")),
             )
         )
-    candidates.sort(key=lambda candidate: candidate.confidence, reverse=True)
-    return _rank_candidates(candidates)[: max(1, limit)]
+    return candidates
 
 
 def _target_intent(query: str) -> dict[str, Any]:
@@ -120,6 +148,7 @@ def _iter_region_items(regions: Iterable[Any]) -> Iterable[dict[str, Any]]:
                 if isinstance(item, dict):
                     merged = dict(item)
                     merged.setdefault("region", row.get("label") or "unknown")
+                    merged.setdefault("source", "ocr")
                     yield merged
         else:
             for text in row.get("text_snippets") or []:
@@ -128,19 +157,42 @@ def _iter_region_items(regions: Iterable[Any]) -> Iterable[dict[str, Any]]:
                     "bbox": row.get("bbox"),
                     "confidence": row.get("confidence", 0.6),
                     "region": row.get("label", "unknown"),
+                    "source": "ocr",
                 }
+
+
+def _iter_accessibility_items(accessibility: Any) -> Iterable[dict[str, Any]]:
+    if accessibility is None:
+        return
+    snapshot = accessibility.to_agent_state() if hasattr(accessibility, "to_agent_state") else accessibility
+    if not isinstance(snapshot, dict) or snapshot.get("status") != "success":
+        return
+    for element in snapshot.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        name = str(element.get("name") or element.get("text") or "").strip()
+        if not name:
+            continue
+        row = dict(element)
+        row["text"] = name
+        row["source"] = "accessibility"
+        row.setdefault("confidence", 0.78)
+        row.setdefault("region", "ui_control")
+        row.setdefault("screen_bbox", element.get("bounds"))
+        yield row
 
 
 def _candidate_score(intent: dict[str, Any], item: dict[str, Any], text: str, all_items: list[dict[str, Any]]) -> tuple[float, str]:
     score = 0.0
     reasons: list[str] = []
+    source = str(item.get("source") or "ocr")
     text_folded = text.casefold()
     for term in intent["terms"]:
         term_folded = term.casefold()
         match = _text_match_score(term_folded, text_folded)
         if match:
-            score += match
-            reasons.append("文本匹配" if match >= 0.4 else "文本接近")
+            score += match + (0.16 if source == "accessibility" else 0.0)
+            reasons.append("UI控件名称匹配" if source == "accessibility" and match >= 0.4 else "文本匹配" if match >= 0.4 else "文本接近")
             break
     position_score, position_reasons = _position_score(intent, item)
     score += position_score
@@ -151,8 +203,20 @@ def _candidate_score(intent: dict[str, Any], item: dict[str, Any], text: str, al
         reasons.append(duplicate_reason)
     confidence = item.get("confidence")
     if isinstance(confidence, (int, float)):
-        score += min(1.0, max(0.0, float(confidence))) * 0.18
-        reasons.append(f"OCR {round(float(confidence) * 100)}%")
+        weight = 0.14 if source == "accessibility" else 0.18
+        score += min(1.0, max(0.0, float(confidence))) * weight
+        reasons.append(("UIA" if source == "accessibility" else "OCR") + f" {round(float(confidence) * 100)}%")
+    if source == "accessibility":
+        role = str(item.get("role") or "")
+        if _role_is_actionable(role):
+            score += 0.12
+            reasons.append("可操作控件")
+        if item.get("clickable") is True:
+            score += 0.08
+            reasons.append("可点击")
+        if item.get("enabled") is True:
+            score += 0.04
+            reasons.append("已启用")
     area_score = _area_score(item)
     if area_score:
         score += area_score
@@ -266,7 +330,7 @@ def _rank_candidates(candidates: list[TargetCandidate]) -> list[TargetCandidate]
         return []
     top = candidates[0]
     second = candidates[1] if len(candidates) > 1 else None
-    close = bool(second and abs(top.confidence - second.confidence) <= 0.08)
+    close = bool(second and (abs(top.confidence - second.confidence) <= 0.08 or _cross_source_conflict(top, second)))
     ranked: list[TargetCandidate] = []
     for index, candidate in enumerate(candidates, start=1):
         ambiguity = "none"
@@ -285,9 +349,49 @@ def _rank_candidates(candidates: list[TargetCandidate]) -> list[TargetCandidate]
                 ambiguity=ambiguity,
                 source=candidate.source,
                 reason=candidate.reason,
+                screen_bbox=candidate.screen_bbox,
+                role=candidate.role,
+                enabled=candidate.enabled,
+                clickable=candidate.clickable,
             )
         )
     return ranked
+
+
+def _fuse_candidates(ocr_candidates: list[TargetCandidate], accessibility_candidates: list[TargetCandidate]) -> list[TargetCandidate]:
+    fused: list[TargetCandidate] = []
+    used_ocr: set[int] = set()
+    used_accessibility: set[int] = set()
+    for acc_index, acc in enumerate(accessibility_candidates):
+        for ocr_index, ocr in enumerate(ocr_candidates):
+            if ocr_index in used_ocr:
+                continue
+            if not _text_related(acc, ocr):
+                continue
+            if not _bbox_near(acc.bbox, ocr.bbox):
+                continue
+            used_ocr.add(ocr_index)
+            used_accessibility.add(acc_index)
+            fused.append(
+                TargetCandidate(
+                    label=acc.label or ocr.label,
+                    text=acc.text or ocr.text,
+                    region_label=ocr.region_label if ocr.region_label != "unknown" else acc.region_label,
+                    bbox=ocr.bbox or acc.bbox,
+                    confidence=min(1.0, max(acc.confidence, ocr.confidence) + 0.12),
+                    source="fused",
+                    reason="UI控件与 OCR 指向同一区域",
+                    screen_bbox=acc.screen_bbox,
+                    role=acc.role,
+                    enabled=acc.enabled,
+                    clickable=acc.clickable,
+                )
+            )
+            break
+    rows = fused
+    rows.extend(candidate for index, candidate in enumerate(accessibility_candidates) if index not in used_accessibility)
+    rows.extend(candidate for index, candidate in enumerate(ocr_candidates) if index not in used_ocr)
+    return rows
 
 
 def _candidate_label(intent: dict[str, Any], text: str) -> str:
@@ -295,6 +399,38 @@ def _candidate_label(intent: dict[str, Any], text: str) -> str:
         if term.casefold() in text.casefold() or text.casefold() in term.casefold():
             return term[:32]
     return text[:32]
+
+
+def _role_is_actionable(role: str) -> bool:
+    folded = (role or "").casefold()
+    return any(token in folded for token in ("button", "menuitem", "hyperlink", "checkbox", "radiobutton", "tabitem", "splitbutton"))
+
+
+def _text_related(left: TargetCandidate, right: TargetCandidate) -> bool:
+    left_text = _normalize_text(left.label or left.text)
+    right_text = _normalize_text(right.label or right.text)
+    if not left_text or not right_text:
+        return False
+    return left_text in right_text or right_text in left_text
+
+
+def _bbox_near(left: tuple[int, int, int, int] | None, right: tuple[int, int, int, int] | None) -> bool:
+    if left is None or right is None:
+        return False
+    left_center = (left[0] + left[2] / 2, left[1] + left[3] / 2)
+    right_center = (right[0] + right[2] / 2, right[1] + right[3] / 2)
+    max_dx = max(80.0, (left[2] + right[2]) * 1.2)
+    max_dy = max(60.0, (left[3] + right[3]) * 1.8)
+    return abs(left_center[0] - right_center[0]) <= max_dx and abs(left_center[1] - right_center[1]) <= max_dy
+
+
+def _cross_source_conflict(left: TargetCandidate, right: TargetCandidate) -> bool:
+    sources = {left.source, right.source}
+    if sources != {"accessibility", "ocr"}:
+        return False
+    if not _text_related(left, right):
+        return False
+    return not _bbox_near(left.bbox, right.bbox)
 
 
 def _bbox_tuple(value: Any) -> tuple[int, int, int, int] | None:
@@ -350,3 +486,9 @@ def _positive_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None

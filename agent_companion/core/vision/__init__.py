@@ -1,3 +1,10 @@
+from agent_companion.core.vision.accessibility import (
+    AccessibilityObserver,
+    AccessibilitySnapshot,
+    AccessibleElement,
+    UnavailableAccessibilityObserver,
+    WindowsAccessibilityObserver,
+)
 from agent_companion.core.vision.observer import VisionObserver
 from agent_companion.core.vision.ocr import OcrExtractor, OcrResult, OcrTextBlock, PytesseractOcrExtractor, UnavailableOcrExtractor
 from agent_companion.core.vision.regions import OcrRegion, group_ocr_regions, regions_to_agent_state, summarize_ocr_regions
@@ -8,6 +15,9 @@ from agent_companion.core.vision.windows import WindowsScreenObserver
 
 __all__ = [
     "MockSummarizer",
+    "AccessibilityObserver",
+    "AccessibilitySnapshot",
+    "AccessibleElement",
     "OcrExtractor",
     "OcrRegion",
     "OcrResult",
@@ -17,11 +27,13 @@ __all__ = [
     "CaptureRect",
     "TargetCandidate",
     "UnavailableOcrExtractor",
+    "UnavailableAccessibilityObserver",
     "VisionObservation",
     "VisionObserver",
     "VisionSummarizer",
     "VisionSummary",
     "WindowsScreenObserver",
+    "WindowsAccessibilityObserver",
     "group_ocr_regions",
     "regions_to_agent_state",
     "resolve_target_candidates",

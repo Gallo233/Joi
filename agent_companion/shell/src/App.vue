@@ -359,6 +359,17 @@ function targetConfidence(candidate: Record<string, unknown>) {
   return `${Math.round(value * 100)}%`
 }
 
+function targetSource(candidate: Record<string, unknown>) {
+  const preview = asRecord(candidate.preview)
+  const source = stringValue(preview.source) || stringValue(candidate.source)
+  const labels: Record<string, string> = {
+    accessibility: 'UI控件',
+    ocr: 'OCR',
+    fused: '融合',
+  }
+  return labels[source] || '候选'
+}
+
 function targetReason(candidate: Record<string, unknown>) {
   return stringValue(candidate.reason) || 'OCR 候选'
 }
@@ -390,7 +401,7 @@ function targetPreviewSummary(event: AgentEvent | undefined, artifact: string) {
   if (!previews.length) return ''
   return previews
     .slice(0, 3)
-    .map((candidate) => [targetLabel(candidate), targetRegion(candidate), targetConfidence(candidate)].filter(Boolean).join(' · '))
+    .map((candidate) => [targetLabel(candidate), targetSource(candidate), targetRegion(candidate), targetConfidence(candidate)].filter(Boolean).join(' · '))
     .join(' / ')
 }
 
@@ -755,6 +766,7 @@ onBeforeUnmount(() => {
                 :key="`candidate-${task.taskId}-${candidateIndex}`"
               >
                 <strong>{{ targetRank(candidate, candidateIndex) }}. {{ targetLabel(candidate) }}</strong>
+                <span>{{ targetSource(candidate) }}</span>
                 <span>{{ targetRegion(candidate) }}</span>
                 <span>{{ targetConfidence(candidate) }}</span>
                 <span>{{ targetAmbiguity(candidate) }}</span>

@@ -18,6 +18,7 @@ from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
+from agent_companion.core.vision.accessibility import AccessibilitySnapshot, AccessibleElement
 from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock, PytesseractOcrExtractor, UnavailableOcrExtractor
 from agent_companion.core.vision.regions import group_ocr_regions
 from agent_companion.core.vision.schemas import CaptureRect, VisionObservation
@@ -114,6 +115,20 @@ class FakeOcrExtractor:
 
     def extract(self, image_path: Path) -> OcrResult:
         return self.result
+
+
+class FakeAccessibilityObserver:
+    def __init__(self, snapshot: AccessibilitySnapshot) -> None:
+        self.snapshot = snapshot
+        self.calls: list[tuple[int | None, str]] = []
+
+    def observe(self, window_handle: int | None = None, title: str = "") -> AccessibilitySnapshot:
+        self.calls.append((window_handle, title))
+        return self.snapshot
+
+
+def _no_accessibility() -> FakeAccessibilityObserver:
+    return FakeAccessibilityObserver(AccessibilitySnapshot("unavailable", error="test_unavailable"))
 
 
 class SequenceOcrExtractor:
@@ -309,6 +324,7 @@ def main() -> int:
             ],
         ),
         ocr=FakeOcrExtractor(region_ocr),
+        accessibility=_no_accessibility(),
     )
     target_result = target_tool.run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(target_result.requires_approval, "semantic target should ask for approval before click")
@@ -337,12 +353,105 @@ def main() -> int:
             ],
         ),
         ocr=FakeOcrExtractor(duplicate_login_ocr),
+        accessibility=_no_accessibility(),
     ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(not ambiguous_target.requires_approval, "close top candidates should not generate click approval")
     assert_true("approval_request" not in ambiguous_target.agent_state, "ambiguous semantic target should not synthesize click arguments")
     assert_true(ambiguous_target.agent_state["candidate_selection_required"], "ambiguous semantic target should ask for candidate selection")
     assert_true(ambiguous_target.agent_state["target_candidate"]["ambiguity"] == "close_score", "ambiguous target state should explain close score")
     assert_true(not any(fragment in ambiguous_target.voice_line.text for fragment in forbidden_target_voice), "ambiguous target voice leaked technical details")
+
+    accessibility_snapshot = AccessibilitySnapshot(
+        "success",
+        title="Joi Test Window",
+        window_handle=1234,
+        elements=[AccessibleElement("登录", "ButtonControl", (960, 230, 60, 30), enabled=True, clickable=True, confidence=0.92)],
+    )
+    accessibility_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-accessibility.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+        accessibility=FakeAccessibilityObserver(accessibility_snapshot),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(accessibility_target.requires_approval, "accessibility button should create approval-gated click candidate")
+    assert_true(accessibility_target.agent_state["target_candidate"]["source"] == "accessibility", "accessibility target should preserve source")
+    accessibility_click_args = accessibility_target.agent_state["approval_request"]["arguments"]
+    assert_true(accessibility_click_args["x"] == 990 and accessibility_click_args["y"] == 245, "accessibility bounds should click by absolute screen center")
+    assert_true(accessibility_target.agent_state["target_candidate"]["preview"]["bbox"] == [860, 30, 60, 30], "accessibility candidate should have screenshot-relative preview bbox")
+
+    fused_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-fused.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(region_ocr),
+        accessibility=FakeAccessibilityObserver(accessibility_snapshot),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(fused_target.requires_approval, "fused OCR/accessibility target should still ask approval before click")
+    assert_true(fused_target.agent_state["target_candidate"]["source"] == "fused", "OCR/accessibility same target should fuse")
+
+    left_login_ocr = OcrResult("success", "left login", [OcrTextBlock("登录", (40, 30, 60, 24), 0.95)])
+    conflict_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-conflict.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(left_login_ocr),
+        accessibility=FakeAccessibilityObserver(accessibility_snapshot),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(not conflict_target.requires_approval, "conflicting OCR/accessibility candidates should not click directly")
+    assert_true(conflict_target.agent_state["candidate_selection_required"], "conflicting OCR/accessibility candidates should ask for selection")
+    assert_true(conflict_target.agent_state["target_candidate"]["ambiguity"] == "close_score", "conflicting target should be marked ambiguous")
+
+    ocr_fallback_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-accessibility-unavailable.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(region_ocr),
+        accessibility=_no_accessibility(),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(ocr_fallback_target.requires_approval, "accessibility unavailable should keep OCR fallback working")
+    assert_true(ocr_fallback_target.agent_state["target_candidate"]["source"] == "ocr", "OCR fallback should preserve source")
+    assert_true(all(not any(fragment in event_text for fragment in forbidden_target_voice + ["990", "245", "selection-", "uiautomation"]) for event_text in [accessibility_target.voice_line.text, fused_target.voice_line.text, conflict_target.voice_line.text]), "accessibility voice leaked technical details")
 
     selection_app = AgentCompanionApp(workspace)
     selection_app.tools.register(
@@ -361,6 +470,7 @@ def main() -> int:
                 ],
             ),
             ocr=FakeOcrExtractor(duplicate_login_ocr),
+            accessibility=_no_accessibility(),
         )
     )
     selection_events = selection_app.handle_user_text("点登录按钮")
@@ -397,6 +507,7 @@ def main() -> int:
                 ],
             ),
             ocr=FakeOcrExtractor(duplicate_login_ocr),
+            accessibility=_no_accessibility(),
         )
     )
     fallback_app.handle_user_text("点登录按钮")
@@ -427,6 +538,7 @@ def main() -> int:
                 ],
             ),
             ocr=FakeOcrExtractor(duplicate_login_ocr),
+            accessibility=_no_accessibility(),
         )
     )
     first_selection_id = _selection_id(multi_app.handle_user_text("点登录按钮"))
@@ -455,6 +567,7 @@ def main() -> int:
                 ],
             ),
             ocr=FakeOcrExtractor(duplicate_login_ocr),
+            accessibility=_no_accessibility(),
         )
     )
     rpc_selection_id = _selection_id(bridge.app.handle_user_text("点登录按钮"))
@@ -472,6 +585,7 @@ def main() -> int:
                 observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/selection-expired.png", width=1000, height=1000, capture_rect=CaptureRect(100, 200, 1000, 1000))],
             ),
             ocr=FakeOcrExtractor(duplicate_login_ocr),
+            accessibility=_no_accessibility(),
         )
     )
     expired_selection_id = _selection_id(expired_app.handle_user_text("点登录按钮"))
@@ -501,6 +615,7 @@ def main() -> int:
             ],
         ),
         ocr=FakeOcrExtractor(region_ocr),
+        accessibility=_no_accessibility(),
     ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(not missing_rect_target.requires_approval, "semantic target should not approve clicks without capture rect")
     assert_true(missing_rect_target.agent_state["needs_clarification"], "missing capture rect should ask for clarification")
@@ -509,6 +624,7 @@ def main() -> int:
         workspace,
         computer_backend=FakeComputerBackend(workspace, observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/target-missing.png")]),
         ocr=FakeOcrExtractor(OcrResult("success", "noise", [OcrTextBlock("天气", (200, 200, 60, 20), 0.9)])),
+        accessibility=_no_accessibility(),
     ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(not unclear_target.requires_approval and unclear_target.agent_state["needs_clarification"], "unclear semantic target should ask for clarification")
 
@@ -923,6 +1039,7 @@ def main() -> int:
             workspace,
             computer_backend=semantic_backend,
             ocr=FakeOcrExtractor(region_ocr),
+            accessibility=_no_accessibility(),
         )
     )
     semantic_events = app.handle_user_text("点登录按钮")
@@ -1038,6 +1155,7 @@ def main() -> int:
     assert_true("runtimeStatusRows" in app_vue_source and "lastTtsError" in app_vue_source, "Shell developer mode should expose voice runtime status")
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
+    assert_true("targetSource" in app_vue_source and "UI控件" in app_vue_source and "融合" in app_vue_source, "Shell should show semantic target candidate source")
     assert_true("selectTargetCandidate" in app_vue_source and "selectSemanticTarget" in app_vue_source, "Shell candidate cards should continue semantic target selection through explicit RPC")
     assert_true("currentSemanticSelectionId" in app_vue_source and "selectionExpired" in app_vue_source, "Shell should disable stale or expired semantic target candidates")
     assert_true("选 ${rank}" not in app_vue_source, "Shell candidate buttons should not send natural-language selection text")

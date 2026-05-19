@@ -5,7 +5,7 @@
 - Vision now supports Windows active-window/fullscreen screenshots, optional visual model summaries, and best-effort OCR grounding with timeout; OCR quality depends on optional local dependencies, Tesseract language data, and captured image clarity.
 - Watch Together can reuse recent visual summaries in the current app session, but context is not persisted across restarts yet.
 - Voice input has OpenAI-compatible ASR wiring and explicit disabled state when unconfigured; local Whisper is not wired yet.
-- Computer Use actions are Windows-only and now include OCR-aware verification plus ranked semantic OCR target candidates with capture-rect grounding and selection-id binding, but this is still OCR grounding rather than accessibility-tree or visual-detector grounding.
+- Computer Use actions are Windows-only and now include OCR-aware verification plus ranked semantic OCR/accessibility target candidates with capture-rect grounding and selection-id binding, but visual-detector grounding is not connected yet.
 - The stage can load local character sprites from configuration, but bundled original VN expression variants and Live2D/VRM rendering are not product grade yet.
 - OK-WW callback currently proves launch/return code, but does not yet read detailed in-game completion state.
 - Codex permission requests do not yet flow back into Joi UI step by step.
@@ -25,7 +25,8 @@
 - OCR regions now support Watch Together region questions and semantic click proposals, while final execution still goes through one-time Computer Use approval.
 - Semantic target approvals now show candidate preview boxes and refuse to synthesize clicks when the screenshot-to-screen coordinate transform is not trustworthy.
 - Close semantic OCR candidates now show as selectable candidates in the task card instead of becoming a click approval automatically.
-- Candidate-card selection is now bound to a specific pending semantic target id, while phrases like "选 2" remain a latest-context fallback; the underlying grounding is still OCR-only and expires quickly.
+- Semantic target grounding can use optional Windows UI Automation control names/roles/bounds when `uiautomation` is installed; unavailable UIA falls back to OCR without failing the flow.
+- Candidate-card selection is now bound to a specific pending semantic target id, while phrases like "选 2" remain a latest-context fallback; candidate contexts are still session-only and expire quickly.
 - Watch Together follow-up questions reuse recent visual context instead of forcing another screenshot.
 - Watch observations are kept out of long-term memory by default.
 - Screenshot artifacts have task-card thumbnails and a click-to-preview modal.
