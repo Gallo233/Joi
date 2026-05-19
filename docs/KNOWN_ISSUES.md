@@ -2,7 +2,7 @@
 
 ## Active
 
-- Vision now supports Windows active-window/fullscreen screenshots, optional visual model summaries, and best-effort OCR grounding; OCR quality depends on optional local dependencies and the captured image clarity.
+- Vision now supports Windows active-window/fullscreen screenshots, optional visual model summaries, and best-effort OCR grounding with timeout; OCR quality depends on optional local dependencies, Tesseract language data, and captured image clarity.
 - Watch Together can reuse recent visual summaries in the current app session, but context is not persisted across restarts yet.
 - Voice input has OpenAI-compatible ASR wiring and explicit disabled state when unconfigured; local Whisper is not wired yet.
 - Computer Use actions are intentionally minimal: click/type/scroll/hotkey are Windows-only and do not yet include visual target grounding or before/after verification.

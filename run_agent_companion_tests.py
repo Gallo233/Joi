@@ -17,7 +17,7 @@ from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAs
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.watch import WatchRecallTool
-from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock, UnavailableOcrExtractor
+from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock, PytesseractOcrExtractor, UnavailableOcrExtractor
 from agent_companion.core.vision.schemas import VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummary
 from agent_companion.core.voice import safe_voice_line
@@ -66,6 +66,14 @@ class FakeOcrExtractor:
 
     def extract(self, image_path: Path) -> OcrResult:
         return self.result
+
+
+class RaisingOcrExtractor:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    def extract(self, image_path: Path) -> OcrResult:
+        raise self.exc
 
 
 def _fake_action_summary(action_type: str) -> str:
@@ -178,6 +186,33 @@ def main() -> int:
     assert_true("开始任务" in ocr_result.display_card.body, "OCR snippets should be visible in task details")
     forbidden_ocr_voice = ["10", "20", "开始任务", "sample.png", "{"]
     assert_true(not any(fragment in ocr_result.voice_line.text for fragment in forbidden_ocr_voice), "OCR voice should not read raw OCR details")
+
+    timeout_tool = ScreenObserveTool(
+        workspace,
+        FakeVisionObserver(workspace),
+        summarizer=MockSummarizer(),
+        ocr=RaisingOcrExtractor(TimeoutError("pytesseract timed out at C:\\secret\\ocr.png")),
+    )
+    timeout_result = timeout_tool.run(ToolRequest("observe.screen", {"query": "看看页面文字", "target": "fullscreen"}))
+    timeout_ocr = timeout_result.agent_state["observation"]["ocr"]
+    assert_true(timeout_result.ok, "OCR timeout should not fail screen observation")
+    assert_true(timeout_ocr["status"] == "failed" and timeout_ocr["error"] == "ocr_timeout", "OCR timeout should be sanitized")
+    assert_true("OCR 等太久" in timeout_result.display_card.body, "OCR timeout should be visible in card")
+    forbidden_timeout_voice = ["ocr_timeout", "C:\\", ".png", "{", "10", "20"]
+    assert_true(not any(fragment in timeout_result.voice_line.text for fragment in forbidden_timeout_voice), "OCR timeout voice should stay natural")
+
+    failing_ocr_tool = ScreenObserveTool(
+        workspace,
+        FakeVisionObserver(workspace),
+        summarizer=MockSummarizer(),
+        ocr=RaisingOcrExtractor(RuntimeError('{"path":"C:\\secret\\ocr.log","bbox":[1,2]}')),
+    )
+    failing_ocr_result = failing_ocr_tool.run(ToolRequest("observe.screen", {"query": "看看页面文字", "target": "fullscreen"}))
+    failing_ocr_state = failing_ocr_result.agent_state["observation"]["ocr"]
+    assert_true(failing_ocr_result.ok, "OCR failure should not fail screen observation")
+    assert_true(failing_ocr_state["status"] == "failed" and failing_ocr_state["error"] == "ocr_failed", "OCR failure should be sanitized")
+    forbidden_failure_voice = ["ocr_failed", "C:\\", ".log", "{", "1,2"]
+    assert_true(not any(fragment in failing_ocr_result.voice_line.text for fragment in forbidden_failure_voice), "OCR failure voice should stay natural")
 
     policy = PolicyGate()
     click_decision = policy.classify(ToolRequest("computer.click", {"x": 100, "y": 200}))
@@ -309,6 +344,8 @@ def main() -> int:
             "  max_seconds: 7\n"
             "  max_bytes: 4096\n"
             "  timeout_seconds: 9\n"
+            "ocr:\n"
+            "  timeout_seconds: 4\n"
             "characters:\n"
             "  - name: Test\n"
             "    color: '#fff'\n"
@@ -332,10 +369,13 @@ def main() -> int:
         assert_true(tmp_config.asr.is_configured, "ASR config should parse as configured")
         assert_true(tmp_config.asr.max_seconds == 7 and tmp_config.asr.max_bytes == 4096, "ASR limits should parse")
         assert_true(tmp_config.asr.timeout_seconds == 9, "ASR timeout should parse")
+        assert_true(tmp_config.ocr.timeout_seconds == 4, "OCR timeout should parse")
         asr_provider, asr_state = build_asr_provider(tmp)
         assert_true(isinstance(asr_provider, OpenAICompatibleAsrProvider), "configured ASR should use OpenAI-compatible provider")
         assert_true(asr_state.configured and asr_state.max_bytes == 4096, "ASR runtime state should expose limits")
         assert_true(asr_state.timeout_seconds == 9, "ASR runtime state should expose timeout")
+        assert_true(isinstance(tmp_app._build_ocr_extractor(), PytesseractOcrExtractor), "OCR extractor should build from config")
+        assert_true(tmp_app._build_ocr_extractor().timeout_seconds == 4, "OCR extractor should use configured timeout")
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)

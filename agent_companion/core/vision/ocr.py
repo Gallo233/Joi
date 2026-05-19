@@ -60,6 +60,9 @@ class UnavailableOcrExtractor:
 
 
 class PytesseractOcrExtractor:
+    def __init__(self, timeout_seconds: int = 5) -> None:
+        self.timeout_seconds = max(1, int(timeout_seconds or 5))
+
     def extract(self, image_path: Path) -> OcrResult:
         try:
             from PIL import Image
@@ -70,11 +73,19 @@ class PytesseractOcrExtractor:
             return OcrResult("failed", "截图文件不存在，OCR 没有执行。", error="screenshot_not_found")
         try:
             image = Image.open(image_path)
-            data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+            data = pytesseract.image_to_data(
+                image,
+                output_type=pytesseract.Output.DICT,
+                timeout=self.timeout_seconds,
+            )
             blocks = _blocks_from_tesseract(data)
             if not blocks:
                 return OcrResult("success", "没有识别到清晰文字。", [])
             return OcrResult("success", _ocr_summary(blocks), blocks)
+        except RuntimeError as exc:
+            if "timeout" in str(exc).casefold():
+                return OcrResult("failed", "OCR 等太久了，我先跳过文字识别。", error="ocr_timeout")
+            return OcrResult("failed", "OCR 没有跑通，截图仍然可查看。", error="ocr_failed")
         except Exception:
             return OcrResult("failed", "OCR 没有跑通，截图仍然可查看。", error="ocr_failed")
 

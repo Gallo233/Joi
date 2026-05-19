@@ -222,11 +222,17 @@ class AsrConfig:
 
 
 @dataclass(frozen=True)
+class OcrConfig:
+    timeout_seconds: int = 5
+
+
+@dataclass(frozen=True)
 class AppConfig:
     base_dir: Path
     llm: LlmConfig
     tts: TtsConfig
     asr: AsrConfig
+    ocr: OcrConfig
     characters: list[CharacterConfig]
 
     @property
@@ -252,6 +258,7 @@ def load_app_config(path: Path) -> AppConfig:
     llm_raw = raw.get("llm") or {}
     tts_raw = raw.get("tts") or {}
     asr_raw = raw.get("asr") or {}
+    ocr_raw = raw.get("ocr") or {}
     character_rows = raw.get("characters") or []
     characters = [_parse_character(row) for row in character_rows if isinstance(row, dict)]
 
@@ -295,6 +302,9 @@ def load_app_config(path: Path) -> AppConfig:
             max_seconds=max(1, int(asr_raw.get("max_seconds", 30) or 30)),
             max_bytes=max(1024, int(asr_raw.get("max_bytes", 12 * 1024 * 1024) or 12 * 1024 * 1024)),
             timeout_seconds=max(1, int(asr_raw.get("timeout_seconds", 30) or 30)),
+        ),
+        ocr=OcrConfig(
+            timeout_seconds=max(1, int(ocr_raw.get("timeout_seconds", 5) or 5)),
         ),
         characters=characters,
     )

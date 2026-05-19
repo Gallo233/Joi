@@ -27,6 +27,7 @@
 - Hardened voice audio matching with event timestamps so repeated voice lines in the same task cannot revive stale audio.
 - Added developer-mode ASR/TTS runtime status with sanitized TTS error reporting.
 - Added best-effort OCR grounding for screen observations, including visible text blocks, task-card OCR details, and Watch Together recall over recent OCR snippets.
+- Added OCR timeout configuration and optional OCR setup docs so slow or missing OCR cannot freeze observation.
 
 ## 2026-05-14
 

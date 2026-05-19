@@ -42,6 +42,9 @@ asr:
   max_bytes: 12582912
   timeout_seconds: 30
 
+ocr:
+  timeout_seconds: 5
+
 characters:
   - name: 星野澪
     color: "#d76f8f"

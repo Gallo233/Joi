@@ -101,6 +101,12 @@ class ScreenObserveTool(ToolAdapter):
     def _run_ocr(self, observation: VisionObservation) -> OcrResult:
         try:
             return self.ocr.extract(observation.screenshot_path)
+        except TimeoutError:
+            return OcrResult("failed", "OCR 等太久了，我先跳过文字识别。", error="ocr_timeout")
+        except RuntimeError as exc:
+            if "timeout" in str(exc).casefold():
+                return OcrResult("failed", "OCR 等太久了，我先跳过文字识别。", error="ocr_timeout")
+            return OcrResult("failed", "OCR 没有跑通，截图仍然可查看。", error="ocr_failed")
         except Exception:
             return OcrResult("failed", "OCR 没有跑通，截图仍然可查看。", error="ocr_failed")
 

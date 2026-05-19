@@ -27,7 +27,7 @@ Status: in progress
 
 - Add screenshot capture for browser, active window, and full screen. Windows active-window/fullscreen capture is connected through `observe.screen`.
 - Add `VisionSummarizer` with configurable vision model. OpenAI-compatible vision summaries are connected.
-- Add OCR grounding for visible text and rough screen regions. Optional `pytesseract`/Pillow OCR is best-effort; unavailable OCR does not fail screenshots or Watch Together.
+- Add OCR grounding for visible text and rough screen regions. Optional `pytesseract`/Pillow OCR is best-effort; unavailable or timed-out OCR does not fail screenshots or Watch Together.
 - Separate text model, vision model, and expression model. Model routing is connected for text, vision, and expression.
 - Do not mark blank pages or failed captures as success.
 

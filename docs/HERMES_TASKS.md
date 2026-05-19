@@ -37,7 +37,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 
 - `agent_companion/core/vision/` captures Windows active-window/fullscreen screenshots.
 - `agent_companion/core/vision/summarizer.py` can call an OpenAI-compatible vision model.
-- `agent_companion/core/vision/ocr.py` defines a stable OCR result schema and optional `pytesseract`/Pillow extraction with safe unavailable fallback.
+- `agent_companion/core/vision/ocr.py` defines a stable OCR result schema and optional `pytesseract`/Pillow extraction with timeout and safe unavailable fallback.
 - `agent_companion/core/computer_use/` defines observation, action, backend, and result contracts.
 - `agent_companion/core/tools/screen_observe.py` routes `observe.screen` through the Computer Use observation chain.
 - `agent_companion/core/tools/computer.py` exposes `computer.click`, `computer.type_text`, `computer.scroll`, and `computer.hotkey`.
@@ -50,6 +50,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Follow-up prompts like "你看到了什么" reuse recent summaries and screenshot artifacts instead of repeating screenshots.
 - Watch follow-up answers use the role-aware text/expression model when configured, then fall back to deterministic templates.
 - Watch follow-up answers can reuse recent OCR snippets for questions about visible text, page labels, and buttons.
+- Optional OCR setup is documented in `README.md`; Python packages are in `requirements-ocr.txt`, while Tesseract executable and language data remain system dependencies.
 - Watch observations are ephemeral by default and do not enter long-term memory unless an explicit save flow is added later.
 - The Vue shell renders screenshot artifacts as clickable thumbnails with a preview modal.
 - `agent_companion/core/speech_input.py` defines `SpeechInputProvider`, `MockAsrProvider`, and `AsrResult`.

@@ -24,6 +24,7 @@ from agent_companion.core.tools.mcp import McpListTool
 from agent_companion.core.tools.registry import ToolRegistry
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.watch import WatchRecallTool
+from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
 from agent_companion.core.watch import WatchAnswerer, WatchFrame, WatchSession
@@ -279,7 +280,13 @@ class AgentCompanionApp:
         self.tools.register(CodexTool(self.workspace))
         self.tools.register(BrowserTool(self.workspace, "browser.search"))
         self.tools.register(BrowserTool(self.workspace, "browser.observe"))
-        self.tools.register(ScreenObserveTool(self.workspace, summarizer=self._build_vision_summarizer()))
+        self.tools.register(
+            ScreenObserveTool(
+                self.workspace,
+                summarizer=self._build_vision_summarizer(),
+                ocr=self._build_ocr_extractor(),
+            )
+        )
         self.tools.register(
             WatchRecallTool(
                 self.workspace,
@@ -312,6 +319,16 @@ class AgentCompanionApp:
             model=endpoint.model,
             api_key=endpoint.api_key,
         )
+
+    def _build_ocr_extractor(self) -> PytesseractOcrExtractor:
+        config_path = self.workspace / "config.yaml"
+        if not config_path.is_file():
+            return PytesseractOcrExtractor()
+        try:
+            config = load_app_config(config_path)
+        except Exception:
+            return PytesseractOcrExtractor()
+        return PytesseractOcrExtractor(timeout_seconds=config.ocr.timeout_seconds)
 
     def _make_pending_step(self, plan: AgentPlan, index: int, step: ToolRequest) -> PendingStep:
         return PendingStep(

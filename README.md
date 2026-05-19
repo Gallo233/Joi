@@ -39,6 +39,14 @@ py -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
 ```
 
+Optional OCR support for visible text grounding:
+
+```powershell
+.\.venv\Scripts\pip install -r requirements-ocr.txt
+```
+
+OCR also needs the Tesseract executable installed on the system. Joi does not bundle Tesseract or its language packs. For Chinese OCR, install the appropriate Tesseract language data when you configure OCR for Chinese screenshots. If OCR is not installed or times out, Joi still saves screenshots and continues Watch Together with the available visual summary.
+
 Run core tests:
 
 ```powershell
