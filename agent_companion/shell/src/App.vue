@@ -15,6 +15,7 @@ const failedImageSrc = ref('')
 const previewArtifact = ref('')
 const voiceState = ref<'idle' | 'recording' | 'transcribing'>('idle')
 const lastTranscript = ref('')
+const lastTtsError = ref('')
 let mediaRecorder: MediaRecorder | null = null
 let mediaStream: MediaStream | null = null
 let audioChunks: Blob[] = []
@@ -316,6 +317,9 @@ async function playAudioPath(path?: string) {
 }
 
 function playVoiceAudio(payload: VoiceAudioPayload) {
+  if (payload.voice_audio_error) {
+    lastTtsError.value = ttsErrorLabel(payload.voice_audio_error)
+  }
   const eventEpoch = voiceEventEpochs.get(voiceAudioKey(payload))
   if (!shouldPlayVoiceAudio(eventEpoch, voiceEpoch)) return
   void playAudioPath(payload.voice_audio_path)
@@ -344,6 +348,50 @@ function beginNewVoiceIntent() {
   voiceEpoch = nextVoiceEpoch(voiceEpoch)
   stopSpokenAudio()
   return voiceEpoch
+}
+
+function runtimeStatusRows() {
+  const asr = ready.value?.asr
+  const tts = ready.value?.tts
+  return [
+    {
+      name: 'ASR',
+      state: asr?.configured ? 'ready' : 'off',
+      summary: [
+        asr?.configured ? '已配置' : '未配置',
+        `provider=${asr?.provider || 'none'}`,
+        `max=${asr?.max_seconds || 30}s`,
+        `limit=${formatBytes(asr?.max_bytes || 0)}`,
+        `timeout=${asr?.timeout_seconds || 30}s`,
+      ].join(' · '),
+    },
+    {
+      name: 'TTS',
+      state: tts?.configured ? 'ready' : 'off',
+      summary: [
+        tts?.configured ? '已配置' : '未配置',
+        `provider=${tts?.provider || 'none'}`,
+        `last=${lastTtsError.value || ttsErrorLabel(tts?.last_error || '') || 'ok'}`,
+      ].join(' · '),
+    },
+  ]
+}
+
+function ttsErrorLabel(error: string) {
+  const labels: Record<string, string> = {
+    tts_timeout: '合成超时',
+    tts_service_unavailable: '服务未连接',
+    tts_config_error: '配置有误',
+    tts_failed: '合成失败',
+  }
+  return labels[error] || ''
+}
+
+function formatBytes(value: number) {
+  const bytes = Number(value || 0)
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)}MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`
+  return `${Math.max(0, bytes)}B`
 }
 
 function stopSpokenAudio() {
@@ -553,6 +601,12 @@ onBeforeUnmount(() => {
         <div class="section-title">
           <h2>开发者事件</h2>
           <span>{{ events.length }} 条</span>
+        </div>
+        <div class="runtime-status">
+          <div v-for="row in runtimeStatusRows()" :key="row.name" :class="row.state">
+            <strong>{{ row.name }}</strong>
+            <span>{{ row.summary }}</span>
+          </div>
         </div>
         <div class="debug-list">
           <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">

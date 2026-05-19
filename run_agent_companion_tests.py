@@ -457,6 +457,8 @@ def main() -> int:
     )
     ready_payload = ready_bridge._ready_payload()
     assert_true(ready_payload["asr"]["timeout_seconds"] == 5, "Core ready payload should expose ASR timeout")
+    assert_true("tts" in ready_payload and "provider" in ready_payload["tts"], "Core ready payload should expose safe TTS status")
+    assert_true("server_url" not in ready_payload["tts"] and "gpt_sovits_work_path" not in ready_payload["tts"], "TTS status should not expose paths or endpoints")
 
     shell_api_source = (workspace / "agent_companion" / "shell" / "src" / "api.ts").read_text(encoding="utf-8")
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
@@ -467,8 +469,11 @@ def main() -> int:
     app_vue_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
     assert_true("beginNewVoiceIntent()" in app_vue_source and "voiceEventEpochs.get" in app_vue_source, "Shell should bump and compare voice epochs")
     assert_true("event_created_at: event.created_at" in app_vue_source, "Shell should key voice audio by event timestamp")
+    assert_true("runtimeStatusRows" in app_vue_source and "lastTtsError" in app_vue_source, "Shell developer mode should expose voice runtime status")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
+    tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
+    assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")

@@ -66,24 +66,25 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Shell tracks a voice epoch per user intent and drops late `agent.voice_audio` payloads from older epochs.
 - `voice.transcribe` uses a method-specific timeout based on `ready.asr.timeout_seconds + 10s`, so ASR timeouts can return friendly Joi messages before the UI gives up.
 - Voice audio payloads include the source event timestamp so repeated voice lines inside the same task do not collide.
+- Developer mode shows ASR/TTS runtime status and sanitized TTS synthesis errors.
 
 Next task options, in priority order:
 
-1. Add a small settings/status surface for ASR/TTS provider health and current timeout/limit values.
-2. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
-3. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
-4. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+1. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
+2. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
+3. Add an audit view for confirmed Computer Use actions, approvals, and sanitized arguments.
+4. Add a settings panel for changing ASR/TTS providers once runtime status is stable.
 5. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 6. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
 
 ## Suggested First Task
 
-Implement ASR/TTS status surface:
+Implement OCR/vision target grounding:
 
-- Show whether ASR is configured, provider name, max seconds, max bytes, and timeout.
-- Show TTS provider state and last synthesis error in developer mode first.
-- Keep raw API keys, paths, and provider errors out of voice and normal UI.
-- Add a smoke path: set `asr.timeout_seconds` low, force provider timeout, confirm the UI shows "语音识别等太久了" and remains interactive.
+- Add OCR extraction to `observe.screen` outputs when available.
+- Merge OCR text with vision summaries so watch answers can cite visible labels/text.
+- Keep screenshots and OCR session-local by default unless explicit save is added later.
+- Add tests for blank/noisy OCR fallback and for voice lines not reading raw OCR dumps.
 
 ## Allowed Edit Areas
 

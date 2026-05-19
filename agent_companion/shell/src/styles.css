@@ -307,6 +307,30 @@ input {
   gap: 10px;
 }
 
+.runtime-status {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-status div {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #f2f5f9;
+  color: #536075;
+  font-size: 12px;
+}
+
+.runtime-status .ready strong {
+  color: #177247;
+}
+
+.runtime-status .off strong {
+  color: #a13543;
+}
+
 .chat-row {
   display: grid;
   grid-template-columns: 44px 1fr;

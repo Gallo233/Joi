@@ -76,6 +76,7 @@ Status: in progress
 - Queue voice separately from text display and suppress stale voice audio with a client-side epoch when user intent changes.
 - Align voice transcription RPC timeout with configured ASR timeout so ASR failures surface as friendly Joi messages.
 - Match voice audio by event identity, including timestamp, to avoid collisions from repeated task lines.
+- Show sanitized ASR/TTS runtime status in developer mode.
 - Avoid speaking logs, JSON, paths, commands, tool ids, and inflated results.
 
 ## P7 Policy and Audit

@@ -25,6 +25,7 @@
 - Hardened voice runtime safety with pre-decode base64 limits, shell-side Blob size checks, ASR timeout handling, friendly voice error task cards, and stale audio interruption on new user intent.
 - Added voice queue epochs so late TTS from older intents is suppressed, and aligned `voice.transcribe` RPC timeout with configured ASR timeout.
 - Hardened voice audio matching with event timestamps so repeated voice lines in the same task cannot revive stale audio.
+- Added developer-mode ASR/TTS runtime status with sanitized TTS error reporting.
 
 ## 2026-05-14
 

@@ -55,6 +55,7 @@ export interface VoiceAudioPayload {
   voice_text?: string
   voice_audio_path?: string
   voice_audio_rel?: string
+  voice_audio_error?: string
 }
 
 export interface UserCommand {
@@ -72,6 +73,12 @@ export interface CoreReadyPayload {
     max_bytes?: number
     timeout_seconds?: number
     error?: string
+  }
+  tts?: {
+    enabled?: boolean
+    configured?: boolean
+    provider?: string
+    last_error?: string
   }
   character?: {
     name?: string

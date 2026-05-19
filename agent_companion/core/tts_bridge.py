@@ -16,6 +16,7 @@ class TtsBridge:
         self.workspace = workspace.resolve()
         self._config: Any | None = None
         self._client: Any | None = None
+        self._last_error = ""
         self._load()
 
     @property
@@ -43,9 +44,26 @@ class TtsBridge:
                 payload["voice_audio_rel"] = resolved.relative_to(self.workspace).as_posix()
             except ValueError:
                 payload["voice_audio_rel"] = str(resolved)
+            self._last_error = ""
             return payload
         except Exception as exc:
-            return {"voice_audio_error": str(exc)[:220]}
+            self._last_error = _safe_tts_error(exc)
+            return {"voice_audio_error": self._last_error}
+
+    def status_payload(self) -> dict[str, Any]:
+        provider = ""
+        enabled = False
+        configured = False
+        if self._config is not None:
+            provider = str(self._config.tts.provider or "")
+            enabled = bool(os.environ.get("AGENT_COMPANION_DISABLE_TTS") != "1" and self._config.tts.enabled)
+            configured = bool(enabled and provider.strip().casefold() == "gpt-sovits")
+        return {
+            "enabled": enabled,
+            "configured": configured,
+            "provider": provider or "none",
+            "last_error": self._last_error,
+        }
 
     def shutdown(self) -> None:
         if self._client is not None:
@@ -65,3 +83,14 @@ class TtsBridge:
             self._config = load_app_config(config_path)
         except Exception:
             self._config = None
+
+
+def _safe_tts_error(exc: Exception) -> str:
+    text = f"{type(exc).__name__} {exc}".casefold()
+    if "timeout" in text:
+        return "tts_timeout"
+    if "not running" in text or "connection" in text or "refused" in text:
+        return "tts_service_unavailable"
+    if "gpt_sovits_work_path" in text or "config" in text:
+        return "tts_config_error"
+    return "tts_failed"
