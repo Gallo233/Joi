@@ -279,6 +279,22 @@ class SemanticTargetSelectionTool(ToolAdapter):
             )
 
         candidate = selection.target_candidates[index - 1]
+        if not _candidate_state_can_be_clicked(candidate):
+            return ToolResult(
+                ok=True,
+                agent_state={
+                    "tool": self.name,
+                    "needs_clarification": True,
+                    "candidate_not_actionable": True,
+                    "selection_id": selection.selection_id,
+                    "selected_rank": index,
+                    "target_candidate": candidate,
+                    "target_candidates": selection.target_candidates,
+                    "artifacts": selection.artifacts,
+                },
+                display_card=DisplayCard("目标定位", f"已选择候选 {index}，但它不像可点击控件。", "请补充目标描述，或选择带有按钮/链接特征的候选。", status="info", artifacts=selection.artifacts),
+                voice_line=safe_voice_line("这个候选不像可点击控件，请再描述具体一点。", sprite="4"),
+            )
         click_args = click_arguments_from_state(candidate, selection.observation)
         if click_args is None:
             return ToolResult(
@@ -515,7 +531,29 @@ def _scale_is_trusted(scale_x: float, scale_y: float) -> bool:
 
 
 def _should_approve_candidate(candidate: TargetCandidate) -> bool:
-    return candidate.confidence >= 0.72 and candidate.ambiguity == "none"
+    return candidate.confidence >= 0.72 and candidate.ambiguity == "none" and _candidate_can_be_clicked(candidate)
+
+
+def _candidate_can_be_clicked(candidate: TargetCandidate) -> bool:
+    if candidate.source == "fused":
+        return True
+    if candidate.source == "accessibility":
+        return bool(candidate.clickable) or _role_is_actionable(candidate.role)
+    return True
+
+
+def _candidate_state_can_be_clicked(candidate: dict[str, Any]) -> bool:
+    source = str(candidate.get("source") or "")
+    if source == "fused":
+        return True
+    if source == "accessibility":
+        return bool(candidate.get("clickable")) or _role_is_actionable(str(candidate.get("role") or ""))
+    return True
+
+
+def _role_is_actionable(role: str) -> bool:
+    folded = (role or "").casefold()
+    return any(token in folded for token in ("button", "menuitem", "hyperlink", "checkbox", "radiobutton", "tabitem", "splitbutton"))
 
 
 def _candidate_list_body(candidates: list[TargetCandidate]) -> str:

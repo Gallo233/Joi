@@ -191,7 +191,7 @@ def _candidate_score(intent: dict[str, Any], item: dict[str, Any], text: str, al
         term_folded = term.casefold()
         match = _text_match_score(term_folded, text_folded)
         if match:
-            score += match + (0.16 if source == "accessibility" else 0.0)
+            score += match
             reasons.append("UI控件名称匹配" if source == "accessibility" and match >= 0.4 else "文本匹配" if match >= 0.4 else "文本接近")
             break
     position_score, position_reasons = _position_score(intent, item)
@@ -209,10 +209,10 @@ def _candidate_score(intent: dict[str, Any], item: dict[str, Any], text: str, al
     if source == "accessibility":
         role = str(item.get("role") or "")
         if _role_is_actionable(role):
-            score += 0.12
+            score += 0.16
             reasons.append("可操作控件")
         if item.get("clickable") is True:
-            score += 0.08
+            score += 0.12
             reasons.append("可点击")
         if item.get("enabled") is True:
             score += 0.04

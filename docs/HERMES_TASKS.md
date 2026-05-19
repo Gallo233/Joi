@@ -47,9 +47,9 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Computer Use actions compare before/after observations and report changed, likely no-op, or unavailable verification without reading technical details aloud.
 - Computer Use verification reuses the same OCR extractor/config as `observe.screen` and waits `computer_use.post_action_settle_ms` before after-observation.
 - OCR text is grouped into coarse regions and `vision.resolve_target` can propose semantic click candidates that still require Computer Use approval.
-- Optional Windows UI Automation snapshots can provide active-window control names, roles, screen bounds, enabled state, and clickable state for semantic targets.
+- Optional Windows UI Automation snapshots can provide active-window control names, roles, screen bounds, enabled state, and clickable state for semantic targets. Static text controls are visible as candidates, but cannot directly create click approvals unless fused with OCR or backed by actionable evidence.
 - Semantic target approvals now use active-window capture rectangles to convert OCR bbox centers into screen coordinates, and the shell draws candidate boxes on approval screenshots.
-- Semantic target candidates now expose rank, confidence, reason, source, and ambiguity; OCR/accessibility conflicts or low-confidence targets ask for clarification instead of synthesizing click approvals.
+- Semantic target candidates now expose rank, confidence, reason, source, and ambiguity; OCR/accessibility conflicts, low-confidence targets, or non-actionable UIA text ask for clarification instead of synthesizing click approvals.
 - Pending semantic target selections are session-only with a short TTL; "选 2" resumes the latest saved candidates as a fallback, while candidate-card buttons use explicit `semantic_target.select` with `selection_id` and rank before creating a one-time `computer.click` approval.
 - `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
 - `agent_companion/core/watch.py` keeps recent watch context in the current app session.

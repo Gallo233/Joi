@@ -155,10 +155,10 @@ def _bounds_from_control(control: Any) -> tuple[int, int, int, int] | None:
 
 
 def _looks_clickable(role: str, control: Any) -> bool:
-    folded = (role or "").casefold()
-    if any(token in folded for token in ("button", "menuitem", "hyperlink", "checkbox", "radiobutton", "tabitem")):
-        return True
     try:
-        return bool(getattr(control, "GetInvokePattern", None))
+        getter = getattr(control, "GetInvokePattern", None)
+        if not callable(getter):
+            return False
+        return getter() is not None
     except Exception:
         return False

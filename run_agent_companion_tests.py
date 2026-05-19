@@ -18,7 +18,7 @@ from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
-from agent_companion.core.vision.accessibility import AccessibilitySnapshot, AccessibleElement
+from agent_companion.core.vision.accessibility import AccessibilitySnapshot, AccessibleElement, _looks_clickable
 from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock, PytesseractOcrExtractor, UnavailableOcrExtractor
 from agent_companion.core.vision.regions import group_ocr_regions
 from agent_companion.core.vision.schemas import CaptureRect, VisionObservation
@@ -176,6 +176,16 @@ class FailingAsrProvider:
     def transcribe(self, audio: bytes, mime_type: str = "") -> AsrResult:
         self.called = True
         return AsrResult("", 0.0, "failing", self.error)
+
+
+class FakeInvokeControl:
+    def GetInvokePattern(self) -> object:
+        return object()
+
+
+class FakeNonInvokeControl:
+    def GetInvokePattern(self) -> object:
+        raise RuntimeError("no invoke pattern")
 
 
 def _approval_payload(events) -> dict:
@@ -361,6 +371,10 @@ def main() -> int:
     assert_true(ambiguous_target.agent_state["target_candidate"]["ambiguity"] == "close_score", "ambiguous target state should explain close score")
     assert_true(not any(fragment in ambiguous_target.voice_line.text for fragment in forbidden_target_voice), "ambiguous target voice leaked technical details")
 
+    assert_true(_looks_clickable("ButtonControl", FakeInvokeControl()), "UIA clickable should require a real invoke pattern")
+    assert_true(not _looks_clickable("ButtonControl", FakeNonInvokeControl()), "UIA role alone must not mark a control clickable")
+    assert_true(not _looks_clickable("TextControl", object()), "static UIA text should not be clickable")
+
     accessibility_snapshot = AccessibilitySnapshot(
         "success",
         title="Joi Test Window",
@@ -390,6 +404,34 @@ def main() -> int:
     assert_true(accessibility_click_args["x"] == 990 and accessibility_click_args["y"] == 245, "accessibility bounds should click by absolute screen center")
     assert_true(accessibility_target.agent_state["target_candidate"]["preview"]["bbox"] == [860, 30, 60, 30], "accessibility candidate should have screenshot-relative preview bbox")
 
+    static_text_snapshot = AccessibilitySnapshot(
+        "success",
+        title="Joi Test Window",
+        window_handle=1234,
+        elements=[AccessibleElement("登录", "TextControl", (960, 230, 60, 30), enabled=True, clickable=False, confidence=0.92)],
+    )
+    static_text_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-accessibility-text.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+        accessibility=FakeAccessibilityObserver(static_text_snapshot),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(not static_text_target.requires_approval, "static UIA text alone should not create click approval")
+    assert_true(static_text_target.agent_state["candidate_selection_required"], "static UIA text should ask for clarification or selection")
+    assert_true(static_text_target.agent_state["target_candidate"]["source"] == "accessibility", "static UIA text should remain visible as a candidate")
+    assert_true(static_text_target.agent_state["target_candidate"].get("role") == "TextControl", "static UIA candidate should keep role")
+
     fused_target = SemanticTargetTool(
         workspace,
         computer_backend=FakeComputerBackend(
@@ -405,7 +447,7 @@ def main() -> int:
             ],
         ),
         ocr=FakeOcrExtractor(region_ocr),
-        accessibility=FakeAccessibilityObserver(accessibility_snapshot),
+        accessibility=FakeAccessibilityObserver(static_text_snapshot),
     ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(fused_target.requires_approval, "fused OCR/accessibility target should still ask approval before click")
     assert_true(fused_target.agent_state["target_candidate"]["source"] == "fused", "OCR/accessibility same target should fuse")
@@ -451,7 +493,7 @@ def main() -> int:
     ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(ocr_fallback_target.requires_approval, "accessibility unavailable should keep OCR fallback working")
     assert_true(ocr_fallback_target.agent_state["target_candidate"]["source"] == "ocr", "OCR fallback should preserve source")
-    assert_true(all(not any(fragment in event_text for fragment in forbidden_target_voice + ["990", "245", "selection-", "uiautomation"]) for event_text in [accessibility_target.voice_line.text, fused_target.voice_line.text, conflict_target.voice_line.text]), "accessibility voice leaked technical details")
+    assert_true(all(not any(fragment in event_text for fragment in forbidden_target_voice + ["990", "245", "selection-", "uiautomation", "TextControl", "ButtonControl"]) for event_text in [accessibility_target.voice_line.text, static_text_target.voice_line.text, fused_target.voice_line.text, conflict_target.voice_line.text]), "accessibility voice leaked technical details")
 
     selection_app = AgentCompanionApp(workspace)
     selection_app.tools.register(
