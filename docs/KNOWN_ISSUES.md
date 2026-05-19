@@ -25,7 +25,7 @@
 - OCR regions now support Watch Together region questions and semantic click proposals, while final execution still goes through one-time Computer Use approval.
 - Semantic target approvals now show candidate preview boxes and refuse to synthesize clicks when the screenshot-to-screen coordinate transform is not trustworthy.
 - Close semantic OCR candidates now show as selectable candidates in the task card instead of becoming a click approval automatically.
-- Semantic target grounding can use optional Windows UI Automation control names/roles/bounds when `uiautomation` is installed; static UIA text is not treated as a clickable button unless fused with OCR or backed by actionable control evidence.
+- Semantic target grounding can use optional Windows UI Automation control names/roles/bounds when `uiautomation` is installed; static UIA text and explicitly disabled UIA controls are not treated as clickable targets unless a later observation provides actionable evidence.
 - Candidate-card selection is now bound to a specific pending semantic target id, while phrases like "选 2" remain a latest-context fallback; candidate contexts are still session-only and expire quickly.
 - Watch Together follow-up questions reuse recent visual context instead of forcing another screenshot.
 - Watch observations are kept out of long-term memory by default.

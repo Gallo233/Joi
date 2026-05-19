@@ -404,6 +404,34 @@ def main() -> int:
     assert_true(accessibility_click_args["x"] == 990 and accessibility_click_args["y"] == 245, "accessibility bounds should click by absolute screen center")
     assert_true(accessibility_target.agent_state["target_candidate"]["preview"]["bbox"] == [860, 30, 60, 30], "accessibility candidate should have screenshot-relative preview bbox")
 
+    disabled_button_snapshot = AccessibilitySnapshot(
+        "success",
+        title="Joi Test Window",
+        window_handle=1234,
+        elements=[AccessibleElement("登录", "ButtonControl", (960, 230, 60, 30), enabled=False, clickable=True, confidence=0.92)],
+    )
+    disabled_button_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-accessibility-disabled.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+        accessibility=FakeAccessibilityObserver(disabled_button_snapshot),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(not disabled_button_target.requires_approval, "disabled UIA button must not create click approval")
+    assert_true("approval_request" not in disabled_button_target.agent_state, "disabled UIA button must not synthesize click arguments")
+    assert_true(disabled_button_target.agent_state["candidate_selection_required"], "disabled UIA button should stay as a confirmable candidate")
+    assert_true("不可操作" in disabled_button_target.display_card.summary or "未启用" in disabled_button_target.display_card.summary, "disabled target card should explain unavailable actionability")
+
     static_text_snapshot = AccessibilitySnapshot(
         "success",
         title="Joi Test Window",
@@ -452,6 +480,28 @@ def main() -> int:
     assert_true(fused_target.requires_approval, "fused OCR/accessibility target should still ask approval before click")
     assert_true(fused_target.agent_state["target_candidate"]["source"] == "fused", "OCR/accessibility same target should fuse")
 
+    disabled_fused_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-fused-disabled.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(region_ocr),
+        accessibility=FakeAccessibilityObserver(disabled_button_snapshot),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(not disabled_fused_target.requires_approval, "disabled fused OCR/UIA target must not create click approval")
+    assert_true(disabled_fused_target.agent_state["target_candidate"]["source"] == "fused", "disabled OCR/UIA same target should still expose fused source")
+    assert_true(disabled_fused_target.agent_state["candidate_selection_required"], "disabled fused target should require clarification or candidate selection")
+    assert_true("不可操作" in disabled_fused_target.display_card.summary or "未启用" in disabled_fused_target.display_card.summary, "disabled fused card should explain unavailable actionability")
+
     left_login_ocr = OcrResult("success", "left login", [OcrTextBlock("登录", (40, 30, 60, 24), 0.95)])
     conflict_target = SemanticTargetTool(
         workspace,
@@ -493,7 +543,36 @@ def main() -> int:
     ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(ocr_fallback_target.requires_approval, "accessibility unavailable should keep OCR fallback working")
     assert_true(ocr_fallback_target.agent_state["target_candidate"]["source"] == "ocr", "OCR fallback should preserve source")
-    assert_true(all(not any(fragment in event_text for fragment in forbidden_target_voice + ["990", "245", "selection-", "uiautomation", "TextControl", "ButtonControl"]) for event_text in [accessibility_target.voice_line.text, static_text_target.voice_line.text, fused_target.voice_line.text, conflict_target.voice_line.text]), "accessibility voice leaked technical details")
+    forbidden_uia_voice = forbidden_target_voice + ["990", "245", "selection-", "uiautomation", "TextControl", "ButtonControl", "enabled", "role"]
+    assert_true(all(not any(fragment in event_text for fragment in forbidden_uia_voice) for event_text in [accessibility_target.voice_line.text, disabled_button_target.voice_line.text, static_text_target.voice_line.text, fused_target.voice_line.text, disabled_fused_target.voice_line.text, conflict_target.voice_line.text]), "accessibility voice leaked technical details")
+
+    disabled_selection_app = AgentCompanionApp(workspace)
+    disabled_selection_app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(
+                        workspace,
+                        rel="data/agent_companion/vision/selection-disabled.png",
+                        width=1000,
+                        height=1000,
+                        capture_rect=CaptureRect(100, 200, 1000, 1000),
+                    )
+                ],
+            ),
+            ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+            accessibility=FakeAccessibilityObserver(disabled_button_snapshot),
+        )
+    )
+    disabled_selection_events = disabled_selection_app.handle_user_text("点登录按钮")
+    disabled_selection_id = _selection_id(disabled_selection_events)
+    disabled_selected_events = disabled_selection_app.select_semantic_target(disabled_selection_id, 1)
+    assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in disabled_selected_events), "disabled candidate selection must not create click approval")
+    assert_true(any(event.agent_state.get("candidate_not_actionable") for event in disabled_selected_events), "disabled candidate selection should explain actionability block")
+    assert_true(any("不可操作" in event.display_card.summary or "未启用" in event.display_card.summary for event in disabled_selected_events), "disabled selection card should explain unavailable actionability")
+    assert_true(all(not any(fragment in event.voice_line.text for fragment in forbidden_uia_voice) for event in disabled_selected_events), "disabled selection voice leaked technical details")
 
     selection_app = AgentCompanionApp(workspace)
     selection_app.tools.register(

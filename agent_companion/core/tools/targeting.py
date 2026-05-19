@@ -154,14 +154,18 @@ class SemanticTargetTool(ToolAdapter):
 
         candidate = candidates[0]
         if not _should_approve_candidate(candidate):
+            blocking_hint = _candidate_blocking_hint(candidate)
             body = "\n".join(
                 [
                     f"目标描述：{query or '未提供'}",
                     _candidate_list_body(candidates),
                     accessibility_snapshot.detail_text(),
+                    f"提示：{blocking_hint}" if blocking_hint else "",
                     "结果：候选还不够唯一，请补充位置或从候选里指定编号。",
                 ]
             )
+            summary = "这个候选当前不可操作或未启用。" if blocking_hint else "我找到了几个可能的目标，需要你再确认一下。"
+            voice_text = "这个候选现在好像还不能操作，需要你再确认一下。" if blocking_hint else "我找到了几个可能的目标，还需要你再确认一下。"
             return ToolResult(
                 ok=True,
                 agent_state={
@@ -176,8 +180,8 @@ class SemanticTargetTool(ToolAdapter):
                     "candidate_selection_required": True,
                     "artifacts": artifacts,
                 },
-                display_card=DisplayCard("目标定位", "我找到了几个可能的目标，需要你再确认一下。", body, status="info", artifacts=artifacts),
-                voice_line=safe_voice_line("我找到了几个可能的目标，还需要你再确认一下。", sprite="4"),
+                display_card=DisplayCard("目标定位", summary, _compact_body(body), status="info", artifacts=artifacts),
+                voice_line=safe_voice_line(voice_text, sprite="4"),
             )
 
         click_args = _click_arguments(candidate, observation)
@@ -280,6 +284,10 @@ class SemanticTargetSelectionTool(ToolAdapter):
 
         candidate = selection.target_candidates[index - 1]
         if not _candidate_state_can_be_clicked(candidate):
+            blocking_hint = _candidate_state_blocking_hint(candidate)
+            summary = f"已选择候选 {index}，但它当前不可操作或未启用。" if blocking_hint else f"已选择候选 {index}，但它不像可点击控件。"
+            body = blocking_hint or "请补充目标描述，或选择带有按钮/链接特征的候选。"
+            voice_text = "这个候选现在好像还不能操作，请换一个目标。" if blocking_hint else "这个候选不像可点击控件，请再描述具体一点。"
             return ToolResult(
                 ok=True,
                 agent_state={
@@ -292,8 +300,8 @@ class SemanticTargetSelectionTool(ToolAdapter):
                     "target_candidates": selection.target_candidates,
                     "artifacts": selection.artifacts,
                 },
-                display_card=DisplayCard("目标定位", f"已选择候选 {index}，但它不像可点击控件。", "请补充目标描述，或选择带有按钮/链接特征的候选。", status="info", artifacts=selection.artifacts),
-                voice_line=safe_voice_line("这个候选不像可点击控件，请再描述具体一点。", sprite="4"),
+                display_card=DisplayCard("目标定位", summary, body, status="info", artifacts=selection.artifacts),
+                voice_line=safe_voice_line(voice_text, sprite="4"),
             )
         click_args = click_arguments_from_state(candidate, selection.observation)
         if click_args is None:
@@ -535,6 +543,8 @@ def _should_approve_candidate(candidate: TargetCandidate) -> bool:
 
 
 def _candidate_can_be_clicked(candidate: TargetCandidate) -> bool:
+    if candidate.enabled is False:
+        return False
     if candidate.source == "fused":
         return True
     if candidate.source == "accessibility":
@@ -543,6 +553,8 @@ def _candidate_can_be_clicked(candidate: TargetCandidate) -> bool:
 
 
 def _candidate_state_can_be_clicked(candidate: dict[str, Any]) -> bool:
+    if candidate.get("enabled") is False:
+        return False
     source = str(candidate.get("source") or "")
     if source == "fused":
         return True
@@ -551,9 +563,30 @@ def _candidate_state_can_be_clicked(candidate: dict[str, Any]) -> bool:
     return True
 
 
+def _candidate_blocking_hint(candidate: TargetCandidate) -> str:
+    if candidate.enabled is False:
+        return "这个候选当前不可操作或未启用。"
+    if candidate.source == "accessibility" and not (candidate.clickable or _role_is_actionable(candidate.role)):
+        return "这个候选不像可操作控件。"
+    return ""
+
+
+def _candidate_state_blocking_hint(candidate: dict[str, Any]) -> str:
+    if candidate.get("enabled") is False:
+        return "这个候选当前不可操作或未启用。"
+    source = str(candidate.get("source") or "")
+    if source == "accessibility" and not (candidate.get("clickable") or _role_is_actionable(str(candidate.get("role") or ""))):
+        return "这个候选不像可操作控件。"
+    return ""
+
+
 def _role_is_actionable(role: str) -> bool:
     folded = (role or "").casefold()
     return any(token in folded for token in ("button", "menuitem", "hyperlink", "checkbox", "radiobutton", "tabitem", "splitbutton"))
+
+
+def _compact_body(body: str) -> str:
+    return "\n".join(line for line in body.splitlines() if line.strip())
 
 
 def _candidate_list_body(candidates: list[TargetCandidate]) -> str:

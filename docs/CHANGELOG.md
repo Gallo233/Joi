@@ -38,6 +38,7 @@
 - Bound semantic target candidate buttons to explicit `selection_id`/rank JSON-RPC selection, preventing old candidate cards from selecting the newest pending context by accident.
 - Added optional Windows accessibility-tree grounding for semantic targets, fusing UI control names/roles/bounds with OCR candidates while keeping real clicks behind approval.
 - Hardened UI Automation actionability so static text controls do not become click approvals without actionable role/clickable evidence or OCR fusion.
+- Blocked click approvals for explicitly disabled UI Automation candidates, including fused OCR/UIA candidates and candidate-selection continuation.
 
 ## 2026-05-14
 
