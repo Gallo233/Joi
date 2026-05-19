@@ -67,7 +67,7 @@ def verify_post_action(before: ComputerObservation | None, after: ComputerObserv
     signals = VerificationSignals(
         screenshot_changed=None,
         title_changed=_changed(before.title, after.title),
-        ocr_changed=_changed(_ocr_signature(before), _ocr_signature(after)),
+        ocr_changed=_ocr_changed(before, after),
         artifact_changed=_changed(before.screenshot_rel, after.screenshot_rel),
         dimensions_changed=(before.width, before.height) != (after.width, after.height),
     )
@@ -97,6 +97,18 @@ def _changed(before: str, after: str) -> bool | None:
     if not left or not right:
         return None
     return left != right
+
+
+def _ocr_changed(before: ComputerObservation, after: ComputerObservation) -> bool | None:
+    if not _ocr_succeeded(before) or not _ocr_succeeded(after):
+        return None
+    return _ocr_signature(before) != _ocr_signature(after)
+
+
+def _ocr_succeeded(observation: ComputerObservation) -> bool:
+    if not isinstance(observation.ocr, dict):
+        return False
+    return str(observation.ocr.get("status") or "").casefold() == "success"
 
 
 def _ocr_signature(observation: ComputerObservation) -> str:

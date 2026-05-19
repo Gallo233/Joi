@@ -30,6 +30,7 @@
 - Added OCR timeout configuration and optional OCR setup docs so slow or missing OCR cannot freeze observation.
 - Added conservative Computer Use post-action verification with before/after artifacts, visible-change/no-op wording, and sanitized voice lines.
 - Upgraded Computer Use verification to reuse configured OCR and wait a configurable post-action settle delay before after-observation.
+- Fixed OCR verification semantics so successful empty-to-text OCR changes count as visible changes while failed or unavailable OCR stays inconclusive.
 
 ## 2026-05-14
 

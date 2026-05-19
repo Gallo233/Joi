@@ -52,14 +52,16 @@ def _fake_computer_observation(
     rel: str = "data/agent_companion/vision/sample.png",
     title: str = "Joi Test Window",
     ocr_text: list[str] | None = None,
+    ocr_status: str | None = None,
     width: int = 1280,
     height: int = 720,
 ) -> ComputerObservation:
     ocr = {}
-    if ocr_text:
+    if ocr_text is not None or ocr_status is not None:
         ocr = {
-            "status": "success",
-            "text_blocks": [{"text": text, "bbox": [0, 0, 40, 20], "confidence": 0.9} for text in ocr_text],
+            "status": ocr_status or "success",
+            "summary": "mock OCR",
+            "text_blocks": [{"text": text, "bbox": [0, 0, 40, 20], "confidence": 0.9} for text in (ocr_text or [])],
         }
     return ComputerObservation(
         target="active_window",
@@ -280,6 +282,27 @@ def main() -> int:
     assert_true(changed_verification.status == "changed", "verification should detect strong visible changes")
     assert_true(changed_verification.signals.title_changed is True, "verification should report title changes")
 
+    ocr_appeared_verification = verify_post_action(
+        _fake_computer_observation(workspace, rel="data/agent_companion/vision/empty-before.png", title="Stable", ocr_text=[]),
+        _fake_computer_observation(workspace, rel="data/agent_companion/vision/text-after.png", title="Stable", ocr_text=["新增内容"]),
+    )
+    assert_true(ocr_appeared_verification.status == "changed", "successful OCR text appearing after action should count as changed")
+    assert_true(ocr_appeared_verification.signals.ocr_changed is True, "OCR empty-to-text transition should be a strong signal")
+
+    failed_ocr_verification = verify_post_action(
+        _fake_computer_observation(workspace, rel="data/agent_companion/vision/failed-before.png", title="Stable", ocr_text=[], ocr_status="failed"),
+        _fake_computer_observation(workspace, rel="data/agent_companion/vision/text-after.png", title="Stable", ocr_text=["新增内容"]),
+    )
+    assert_true(failed_ocr_verification.status == "likely_noop", "failed OCR before action should not overclaim changed")
+    assert_true(failed_ocr_verification.signals.ocr_changed is None, "failed OCR should not drive verification")
+
+    unavailable_ocr_verification = verify_post_action(
+        _fake_computer_observation(workspace, rel="data/agent_companion/vision/unavailable-before.png", title="Stable", ocr_text=[], ocr_status="unavailable"),
+        _fake_computer_observation(workspace, rel="data/agent_companion/vision/text-after.png", title="Stable", ocr_text=["新增内容"]),
+    )
+    assert_true(unavailable_ocr_verification.status == "likely_noop", "unavailable OCR before action should not overclaim changed")
+    assert_true(unavailable_ocr_verification.signals.ocr_changed is None, "unavailable OCR should not drive verification")
+
     noop_verification = verify_post_action(
         _fake_computer_observation(workspace, rel="data/agent_companion/vision/before.png", title="Same", ocr_text=["一样"]),
         _fake_computer_observation(workspace, rel="data/agent_companion/vision/after.png", title="Same", ocr_text=["一样"]),
@@ -374,7 +397,7 @@ def main() -> int:
     no_ocr_result = ComputerActionTool(workspace, "computer.click", "click", no_ocr_backend, post_action_settle_ms=0).run(ToolRequest("computer.click", {"x": 88, "y": 99}))
     assert_true(no_ocr_result.agent_state["post_action_verification"]["status"] == "likely_noop", "test-only OCR should not mask missing production OCR wiring")
     assert_true("ocr" not in no_ocr_result.agent_state["computer_use"]["observation"], "computer observation should only include OCR when extractor is wired")
-    forbidden_computer_voice = ["10", "20", "88", "99", "Ctrl", "hello", "data/", ".png", "{", "task-", "完成", "相同", "提交"]
+    forbidden_computer_voice = ["10", "20", "88", "99", "Ctrl", "hello", "data/", ".png", "{", "task-", "完成", "相同", "提交", "新增内容"]
     computer_voice_lines = [changed_click.voice_line.text, artifact_only.voice_line.text, unavailable_action.voice_line.text, production_style.voice_line.text, no_ocr_result.voice_line.text]
     assert_true(all(not any(fragment in line for fragment in forbidden_computer_voice) for line in computer_voice_lines), "computer verification voice leaked technical details")
 
