@@ -40,6 +40,7 @@ asr:
   language: zh
   max_seconds: 30
   max_bytes: 12582912
+  timeout_seconds: 30
 
 characters:
   - name: 星野澪

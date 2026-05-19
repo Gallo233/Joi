@@ -25,3 +25,6 @@
 - Screenshot artifacts have task-card thumbnails and a click-to-preview modal.
 - Mock ASR is no longer used by default in production Core startup.
 - Voice transcript routing uses the same approval path as typed commands.
+- Voice input rejects oversized recordings in the shell and oversized base64 payloads in Core before decode.
+- Voice ASR timeout/error paths now create friendly task cards and sanitized voice lines instead of silent failures.
+- Stale spoken audio is stopped when a new typed or voice command starts.

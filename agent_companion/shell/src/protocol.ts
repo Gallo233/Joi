@@ -61,6 +61,7 @@ export interface CoreReadyPayload {
     provider?: string
     max_seconds?: number
     max_bytes?: number
+    timeout_seconds?: number
     error?: string
   }
   character?: {

@@ -13,7 +13,7 @@ from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.schemas import EventType, ToolRequest
 from agent_companion.core.server import JsonRpcBridge
-from agent_companion.core.speech_input import AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
+from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.watch import WatchRecallTool
@@ -74,6 +74,16 @@ class FakeWatchAnswerer:
     def answer(self, question: str, frames: list[WatchFrame]) -> tuple[str, str]:
         summary = frames[0].summary if frames else "没有画面"
         return f"自然回答会针对“{question}”：{summary}", "llm_answer"
+
+
+class FailingAsrProvider:
+    def __init__(self, error: str = "asr_failed") -> None:
+        self.error = error
+        self.called = False
+
+    def transcribe(self, audio: bytes, mime_type: str = "") -> AsrResult:
+        self.called = True
+        return AsrResult("", 0.0, "failing", self.error)
 
 
 def _approval_payload(events) -> dict:
@@ -263,6 +273,7 @@ def main() -> int:
             "  language: zh\n"
             "  max_seconds: 7\n"
             "  max_bytes: 4096\n"
+            "  timeout_seconds: 9\n"
             "characters:\n"
             "  - name: Test\n"
             "    color: '#fff'\n"
@@ -285,9 +296,11 @@ def main() -> int:
         tmp_config = load_app_config(tmp / "config.yaml")
         assert_true(tmp_config.asr.is_configured, "ASR config should parse as configured")
         assert_true(tmp_config.asr.max_seconds == 7 and tmp_config.asr.max_bytes == 4096, "ASR limits should parse")
+        assert_true(tmp_config.asr.timeout_seconds == 9, "ASR timeout should parse")
         asr_provider, asr_state = build_asr_provider(tmp)
         assert_true(isinstance(asr_provider, OpenAICompatibleAsrProvider), "configured ASR should use OpenAI-compatible provider")
         assert_true(asr_state.configured and asr_state.max_bytes == 4096, "ASR runtime state should expose limits")
+        assert_true(asr_state.timeout_seconds == 9, "ASR runtime state should expose timeout")
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -386,7 +399,28 @@ def main() -> int:
     unconfigured_bridge = JsonRpcBridge(workspace)
     unconfigured_payload = unconfigured_bridge.transcribe_and_submit("", "audio/webm")
     assert_true(not unconfigured_payload["ok"] and unconfigured_payload["error"] == "asr_unconfigured", "unconfigured ASR should fail clearly")
-    assert_true("events" not in unconfigured_payload, "unconfigured ASR should not submit user.message")
+    assert_true(not unconfigured_payload["submitted"], "unconfigured ASR should not submit user.message")
+    assert_true(any(event["type"] == "task_failed" for event in unconfigured_payload["events"]), "unconfigured ASR should create a friendly task event")
+
+    predecode_provider = FailingAsrProvider()
+    predecode_bridge = JsonRpcBridge(
+        workspace,
+        asr_provider=predecode_provider,
+        asr_state=AsrRuntimeState(True, True, "mock", max_bytes=2),
+    )
+    predecode_payload = predecode_bridge.transcribe_and_submit("AAAAAA==", "audio/webm")
+    assert_true(not predecode_payload["ok"] and predecode_payload["error"] == "audio_too_large", "oversized base64 should be rejected before decoding")
+    assert_true(not predecode_provider.called, "pre-decode oversized audio should not call ASR provider")
+
+    decoded_provider = FailingAsrProvider()
+    decoded_bridge = JsonRpcBridge(
+        workspace,
+        asr_provider=decoded_provider,
+        asr_state=AsrRuntimeState(True, True, "mock", max_bytes=2),
+    )
+    decoded_payload = decoded_bridge.transcribe_and_submit("AAAA", "audio/webm")
+    assert_true(not decoded_payload["ok"] and decoded_payload["error"] == "audio_too_large", "decoded oversized audio should still be rejected")
+    assert_true(not decoded_provider.called, "decoded oversized audio should not call ASR provider")
 
     too_large_bridge = JsonRpcBridge(
         workspace,
@@ -395,6 +429,26 @@ def main() -> int:
     )
     too_large_payload = too_large_bridge.transcribe_and_submit("AAAAAA==", "audio/webm")
     assert_true(not too_large_payload["ok"] and too_large_payload["error"] == "audio_too_large", "oversized audio should be rejected before ASR")
+
+    noisy_error_provider = FailingAsrProvider('Traceback C:\\secret\\run.ps1 {"task_id":"task-abcdef"} codex.run')
+    noisy_error_bridge = JsonRpcBridge(
+        workspace,
+        asr_provider=noisy_error_provider,
+        asr_state=AsrRuntimeState(True, True, "mock", max_bytes=4096),
+    )
+    noisy_error_payload = noisy_error_bridge.transcribe_and_submit("AAAA", "audio/webm")
+    assert_true(not noisy_error_payload["ok"] and noisy_error_payload["error"] == "asr_failed", "raw ASR errors should be normalized")
+    voice_lines = [event["voice_line"]["text"] for event in noisy_error_payload["events"]]
+    forbidden_voice_fragments = ["{", "}", "C:\\", ".ps1", "Traceback", "task-", "codex.run"]
+    assert_true(all(not any(fragment in line for fragment in forbidden_voice_fragments) for line in voice_lines), "voice error leaked technical detail")
+
+    timeout_bridge = JsonRpcBridge(
+        workspace,
+        asr_provider=FailingAsrProvider("asr_timeout"),
+        asr_state=AsrRuntimeState(True, True, "mock", max_bytes=4096, timeout_seconds=3),
+    )
+    timeout_payload = timeout_bridge.transcribe_and_submit("AAAA", "audio/webm")
+    assert_true(not timeout_payload["ok"] and timeout_payload["error"] == "asr_timeout", "ASR timeout should return friendly error code")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")

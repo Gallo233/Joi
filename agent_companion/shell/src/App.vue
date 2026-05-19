@@ -18,6 +18,7 @@ let mediaRecorder: MediaRecorder | null = null
 let mediaStream: MediaStream | null = null
 let audioChunks: Blob[] = []
 let voiceStopTimer: number | null = null
+let currentAudio: HTMLAudioElement | null = null
 
 const client = new CoreClient({
   url: 'ws://127.0.0.1:8765',
@@ -119,6 +120,7 @@ const currentMode = computed(() => {
 })
 const asrConfigured = computed(() => Boolean(ready.value?.asr?.configured))
 const voiceMaxSeconds = computed(() => Math.max(1, Number(ready.value?.asr?.max_seconds || 30)))
+const voiceMaxBytes = computed(() => Math.max(1024, Number(ready.value?.asr?.max_bytes || 12 * 1024 * 1024)))
 const voiceButtonLabel = computed(() => {
   if (!asrConfigured.value) return 'ASR 未配置'
   if (voiceState.value === 'recording') return '停止'
@@ -265,6 +267,7 @@ function eventTime(event: AgentEvent) {
 function submit() {
   const text = input.value.trim()
   if (!text) return
+  stopSpokenAudio()
   void client.sendUserText(text).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '发送失败'
   })
@@ -287,13 +290,27 @@ function approvalIdFor(event: AgentEvent) {
 
 async function playAudioPath(path?: string) {
   if (!path) return
+  let audio: HTMLAudioElement | null = null
   try {
+    stopSpokenAudio()
     const url = convertFileSrc(path)
-    const audio = new Audio(url)
+    audio = new Audio(url)
+    currentAudio = audio
+    audio.onended = () => {
+      if (currentAudio === audio) currentAudio = null
+    }
     await audio.play()
   } catch {
+    if (audio && currentAudio === audio) currentAudio = null
     // Text remains visible when local audio is unavailable.
   }
+}
+
+function stopSpokenAudio() {
+  if (!currentAudio) return
+  currentAudio.pause()
+  currentAudio.currentTime = 0
+  currentAudio = null
 }
 
 async function toggleVoiceInput() {
@@ -315,6 +332,8 @@ async function startVoiceRecording() {
       errorText.value = '当前 WebView 不支持麦克风录音'
       return
     }
+    stopSpokenAudio()
+    lastTranscript.value = ''
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
     audioChunks = []
     mediaRecorder = new MediaRecorder(mediaStream)
@@ -360,6 +379,14 @@ function cleanupVoiceStream() {
 
 async function transcribeVoiceBlob(blob: Blob, mimeType: string) {
   try {
+    if (blob.size <= 0) {
+      errorText.value = '我没有录到声音，请再说一次。'
+      return
+    }
+    if (blob.size > voiceMaxBytes.value) {
+      errorText.value = '这段语音太长了，我没有发送出去。'
+      return
+    }
     const audioBase64 = await blobToBase64(blob)
     const result = (await client.transcribeVoice(audioBase64, mimeType)) as { ok?: boolean; transcript?: string; error?: string; message?: string }
     if (result.ok && result.transcript) lastTranscript.value = result.transcript
@@ -383,6 +410,7 @@ function blobToBase64(blob: Blob) {
 onMounted(() => client.connect())
 onBeforeUnmount(() => {
   cleanupVoiceStream()
+  stopSpokenAudio()
   client.close()
 })
 </script>

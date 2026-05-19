@@ -31,7 +31,7 @@ Keep `config.yaml` local only. Public examples should go in `config.example.yaml
 
 ## Current Priority
 
-Continue P4.2 Voice Input hardening and prepare voice interruption / TTS queue cleanup.
+Continue P4.2 Voice Input hardening and prepare deeper interruption / TTS queue cleanup.
 
 The current observation, first action layer, approval hardening, watch loop, and production ASR path are implemented:
 
@@ -59,10 +59,14 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Shell disables the microphone and shows "ASR 未配置" when no real ASR is configured.
 - Voice transcripts are shown in the stage and then routed through the normal task/approval flow.
 - Core serializes `user.message`, `voice.transcribe`, and `approval.resolve` mutations with a command lock.
+- Core rejects oversized base64 audio before decode and keeps decoded-byte validation as a second guard.
+- Shell rejects recorded audio blobs over `ready.asr.max_bytes` before converting to base64.
+- ASR has a configurable `timeout_seconds`; timeout and provider failures create friendly task cards with sanitized voice lines.
+- Shell stops currently playing voice audio when the user sends text or starts a new recording.
 
 Next task options, in priority order:
 
-1. Add voice interrupt/cancel behavior so a new command can stop stale TTS playback.
+1. Add deeper voice queue cancellation so late `agent.voice_audio` payloads from old events can be dropped by generation id.
 2. Add ASR provider health/status display in settings once settings UI exists.
 3. Add OCR/vision target grounding so pages and video frames can be discussed with more precise references.
 4. Add post-action verification that compares before/after screenshots and flags likely no-op actions.
@@ -72,13 +76,12 @@ Next task options, in priority order:
 
 ## Suggested First Task
 
-Implement voice interruption and queue cleanup:
+Implement voice queue generation cleanup:
 
-- Track currently playing audio in the shell.
-- Stop stale TTS when the user submits text or starts a new recording.
+- Assign a client-side voice generation id when user intent changes.
 - Add a Core event or client-side policy for dropping old `agent.voice_audio` payloads.
 - Keep transcript and task events intact; only interrupt playback.
-- Add tests or a small browser smoke check for stale audio cancellation.
+- Add a browser smoke check for late audio cancellation.
 
 ## Allowed Edit Areas
 

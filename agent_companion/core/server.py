@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent_companion.core.app import AgentCompanionApp
-from agent_companion.core.schemas import AgentEvent
+from agent_companion.core.schemas import AgentEvent, DisplayCard
 from agent_companion.core.schemas import EventType
 from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
+from agent_companion.core.voice import safe_voice_line
 
 
 SPEAKABLE_EVENTS = {
@@ -146,12 +147,19 @@ class JsonRpcBridge:
         await self._broadcast(message)
 
     def transcribe_and_submit(self, audio_base64: str, mime_type: str = "") -> dict[str, Any]:
+        if _encoded_audio_exceeds_limit(audio_base64, self.asr_state.max_bytes):
+            return self._asr_error("audio_too_large", _friendly_asr_message("audio_too_large"))
         audio = _decode_audio_base64(audio_base64)
+        if audio_base64 and not audio:
+            return self._asr_error("audio_decode_failed", _friendly_asr_message("audio_decode_failed"))
         if not self.asr_state.configured:
-            return self._asr_error("asr_unconfigured", "ASR 未配置，请先在 config.yaml 里配置语音识别。")
+            return self._asr_error("asr_unconfigured", _friendly_asr_message(self.asr_state.error or "asr_unconfigured"))
         if len(audio) > self.asr_state.max_bytes:
-            return self._asr_error("audio_too_large", "录音太长了，请缩短后再试。")
+            return self._asr_error("audio_too_large", _friendly_asr_message("audio_too_large"))
         result = self.asr.transcribe(audio, mime_type)
+        if not result.ok:
+            error_code = _safe_asr_error_code(result.error)
+            return self._asr_error(error_code, _friendly_asr_message(error_code))
         payload: dict[str, Any] = {
             "ok": result.ok,
             "transcript": result.transcript,
@@ -159,8 +167,6 @@ class JsonRpcBridge:
             "provider": result.provider,
             "submitted": False,
         }
-        if result.error:
-            payload["error"] = result.error
         if result.ok:
             sequence, events = self._run_serial("voice.transcribe", lambda: self.app.handle_user_text(result.transcript))
             payload["submitted"] = True
@@ -183,9 +189,29 @@ class JsonRpcBridge:
             events = callback()
         return sequence, events
 
-    @staticmethod
-    def _asr_error(error: str, message: str) -> dict[str, Any]:
-        return {"ok": False, "submitted": False, "transcript": "", "error": error, "message": message}
+    def _asr_error(self, error: str, message: str) -> dict[str, Any]:
+        error_code = _safe_asr_error_code(error)
+        sequence, events = self._run_serial("voice.error", lambda: self._emit_voice_error(error_code, message))
+        return {
+            "ok": False,
+            "submitted": False,
+            "transcript": "",
+            "error": error_code,
+            "message": message,
+            "sequence": sequence,
+            "events": [event.to_dict() for event in events],
+        }
+
+    def _emit_voice_error(self, error: str, message: str) -> list[AgentEvent]:
+        event = AgentEvent(
+            EventType.TASK_FAILED,
+            f"voice-{uuid.uuid4().hex[:8]}",
+            DisplayCard("语音输入", message, status="failed"),
+            safe_voice_line(message, fallback="语音输入没成功，请再试一次。", sprite="4"),
+            {"event": "voice.error", "error": error},
+        )
+        self.app.bus.emit(event)
+        return self.app.bus.drain()
 
     async def _broadcast(self, message: str) -> None:
         stale: list[Any] = []
@@ -206,6 +232,7 @@ class JsonRpcBridge:
                 "provider": self.asr_state.provider,
                 "max_seconds": self.asr_state.max_seconds,
                 "max_bytes": self.asr_state.max_bytes,
+                "timeout_seconds": self.asr_state.timeout_seconds,
                 "error": self.asr_state.error,
             },
             "character": {
@@ -269,6 +296,64 @@ def _decode_audio_base64(audio_base64: str) -> bytes:
         return base64.b64decode(payload, validate=False)
     except Exception:
         return b""
+
+
+def _encoded_audio_exceeds_limit(audio_base64: str, max_bytes: int) -> bool:
+    if not audio_base64:
+        return False
+    return _base64_payload_length(audio_base64) > _max_base64_length(max_bytes)
+
+
+def _base64_payload_length(audio_base64: str) -> int:
+    start = 0
+    comma = audio_base64.find(",", 0, 120)
+    if comma != -1:
+        start = comma + 1
+    return sum(1 for char in audio_base64[start:] if not char.isspace())
+
+
+def _max_base64_length(max_bytes: int) -> int:
+    return ((max(1, max_bytes) + 2) // 3) * 4
+
+
+def _safe_asr_error_code(error: str) -> str:
+    raw = (error or "asr_failed").strip().split(":", 1)[0].casefold()
+    allowed = {
+        "asr_unconfigured",
+        "asr_disabled",
+        "asr_config_error",
+        "mock_asr_developer_only",
+        "audio_too_large",
+        "audio_decode_failed",
+        "asr_timeout",
+        "openai_package_missing",
+        "empty_audio",
+        "empty_transcript",
+        "asr_failed",
+    }
+    if raw in allowed:
+        return raw
+    if "timeout" in raw:
+        return "asr_timeout"
+    return "asr_failed"
+
+
+def _friendly_asr_message(error: str) -> str:
+    code = _safe_asr_error_code(error)
+    messages = {
+        "asr_unconfigured": "ASR 未配置，请先在设置里启用语音识别。",
+        "asr_disabled": "语音识别还没有启用，请先在设置里打开。",
+        "asr_config_error": "语音识别配置有问题，请检查设置后再试。",
+        "mock_asr_developer_only": "当前语音识别只允许开发测试使用，请配置真实 ASR。",
+        "audio_too_large": "这段语音太长了，我没有发送出去。",
+        "audio_decode_failed": "这段语音没有读出来，请重新录一次。",
+        "asr_timeout": "语音识别等太久了，我先停下，你可以再试一次。",
+        "openai_package_missing": "语音识别组件还没准备好。",
+        "empty_audio": "我没有录到声音，请再说一次。",
+        "empty_transcript": "我没有听清楚，请再说一次。",
+        "asr_failed": "语音识别没有成功，请再试一次。",
+    }
+    return messages.get(code, messages["asr_failed"])
 
 
 def main(argv: list[str] | None = None) -> int:

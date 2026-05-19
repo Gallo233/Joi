@@ -208,6 +208,7 @@ class AsrConfig:
     language: str = "zh"
     max_seconds: int = 30
     max_bytes: int = 12 * 1024 * 1024
+    timeout_seconds: int = 30
 
     @property
     def is_configured(self) -> bool:
@@ -293,6 +294,7 @@ def load_app_config(path: Path) -> AppConfig:
             language=str(asr_raw.get("language", "zh") or "zh"),
             max_seconds=max(1, int(asr_raw.get("max_seconds", 30) or 30)),
             max_bytes=max(1024, int(asr_raw.get("max_bytes", 12 * 1024 * 1024) or 12 * 1024 * 1024)),
+            timeout_seconds=max(1, int(asr_raw.get("timeout_seconds", 30) or 30)),
         ),
         characters=characters,
     )

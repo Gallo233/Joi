@@ -11,6 +11,7 @@ from agent_companion.core.config import AsrConfig, load_app_config
 
 DEFAULT_ASR_MAX_BYTES = 12 * 1024 * 1024
 DEFAULT_ASR_MAX_SECONDS = 30
+DEFAULT_ASR_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class AsrRuntimeState:
     provider: str
     max_seconds: int = DEFAULT_ASR_MAX_SECONDS
     max_bytes: int = DEFAULT_ASR_MAX_BYTES
+    timeout_seconds: int = DEFAULT_ASR_TIMEOUT_SECONDS
     error: str = ""
 
 
@@ -73,7 +75,11 @@ class OpenAICompatibleAsrProvider:
             return AsrResult("", 0.0, "openai_compatible", "openai_package_missing")
         try:
             if self._client is None:
-                self._client = OpenAI(api_key=self.config.api_key, base_url=self.config.base_url)
+                self._client = OpenAI(
+                    api_key=self.config.api_key,
+                    base_url=self.config.base_url,
+                    timeout=float(max(1, self.config.timeout_seconds)),
+                )
             buffer = io.BytesIO(audio)
             buffer.name = _audio_filename(mime_type)
             kwargs = {"model": self.config.model, "file": buffer}
@@ -85,7 +91,9 @@ class OpenAICompatibleAsrProvider:
                 return AsrResult("", 0.0, "openai_compatible", "empty_transcript")
             return AsrResult(transcript, 0.0, "openai_compatible")
         except Exception as exc:
-            return AsrResult("", 0.0, "openai_compatible", f"asr_failed: {type(exc).__name__}")
+            if "timeout" in type(exc).__name__.casefold():
+                return AsrResult("", 0.0, "openai_compatible", "asr_timeout")
+            return AsrResult("", 0.0, "openai_compatible", "asr_failed")
 
 
 def build_asr_provider(workspace: Path, *, allow_mock: bool = False) -> tuple[SpeechInputProvider, AsrRuntimeState]:
@@ -104,6 +112,7 @@ def build_asr_provider(workspace: Path, *, allow_mock: bool = False) -> tuple[Sp
         provider=asr.provider or "none",
         max_seconds=asr.max_seconds,
         max_bytes=asr.max_bytes,
+        timeout_seconds=asr.timeout_seconds,
         error="" if asr.is_configured else "asr_unconfigured",
     )
     if not asr.enabled:
@@ -118,6 +127,7 @@ def build_asr_provider(workspace: Path, *, allow_mock: bool = False) -> tuple[Sp
             "mock",
             asr.max_seconds,
             asr.max_bytes,
+            asr.timeout_seconds,
             "mock_asr_developer_only",
         )
     if provider in {"openai_compatible", "openai"} and asr.is_configured:
