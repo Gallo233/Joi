@@ -310,6 +310,11 @@ function targetBoxStyle(candidate: Record<string, unknown>) {
   }
 }
 
+function targetRank(candidate: Record<string, unknown>, index: number) {
+  const rank = Number(candidate.rank || 0)
+  return Number.isFinite(rank) && rank > 0 ? rank : index + 1
+}
+
 function targetLabel(candidate: Record<string, unknown>) {
   const preview = asRecord(candidate.preview)
   return stringValue(preview.label) || stringValue(candidate.label) || '候选目标'
@@ -325,6 +330,20 @@ function targetConfidence(candidate: Record<string, unknown>) {
   const value = Number(preview.confidence || candidate.confidence || 0)
   if (!Number.isFinite(value) || value <= 0) return ''
   return `${Math.round(value * 100)}%`
+}
+
+function targetReason(candidate: Record<string, unknown>) {
+  return stringValue(candidate.reason) || 'OCR 候选'
+}
+
+function targetAmbiguity(candidate: Record<string, unknown>) {
+  const labels: Record<string, string> = {
+    none: '较明确',
+    close_score: '分数接近',
+    low_confidence: '置信偏低',
+  }
+  const value = stringValue(candidate.ambiguity)
+  return labels[value] || '需要确认'
 }
 
 function targetPreviewSummary(event: AgentEvent | undefined, artifact: string) {
@@ -654,7 +673,7 @@ onBeforeUnmount(() => {
                       class="target-box"
                       :style="targetBoxStyle(candidate)"
                     >
-                      <span>{{ targetLabel(candidate) }}</span>
+                      <span>{{ targetRank(candidate, candidateIndex) }}</span>
                     </div>
                   </div>
                 </div>
@@ -671,6 +690,18 @@ onBeforeUnmount(() => {
               >
                 {{ artifactLabel(artifact, index) }}
               </span>
+            </div>
+            <div class="target-list" v-if="targetCandidates(task.latest).length">
+              <div
+                v-for="(candidate, candidateIndex) in targetCandidates(task.latest).slice(0, 5)"
+                :key="`candidate-${task.taskId}-${candidateIndex}`"
+              >
+                <strong>{{ targetRank(candidate, candidateIndex) }}. {{ targetLabel(candidate) }}</strong>
+                <span>{{ targetRegion(candidate) }}</span>
+                <span>{{ targetConfidence(candidate) }}</span>
+                <span>{{ targetAmbiguity(candidate) }}</span>
+                <p>{{ targetReason(candidate) }}</p>
+              </div>
             </div>
           </details>
           <div class="approval-actions" v-if="task.latest.type === 'approval_required' && pendingApproval?.task_id === task.taskId && approvalIdFor(task.latest)">
@@ -769,7 +800,7 @@ onBeforeUnmount(() => {
               class="target-box"
               :style="targetBoxStyle(candidate)"
             >
-              <span>{{ targetLabel(candidate) }}</span>
+              <span>{{ targetRank(candidate, candidateIndex) }}</span>
             </div>
           </div>
         </div>

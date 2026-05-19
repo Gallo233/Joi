@@ -269,6 +269,20 @@ def main() -> int:
     assert_true(login_candidates and login_candidates[0].label == "登录", "semantic phrase should resolve to matching OCR candidate")
     corner_candidates = resolve_target_candidates("右上角", grouped_state)
     assert_true(corner_candidates and corner_candidates[0].text == "登录", "right-top phrase should resolve to a top/right OCR candidate")
+    duplicate_login_ocr = OcrResult(
+        "success",
+        "duplicate login",
+        [
+            OcrTextBlock("登录", (40, 30, 60, 24), 0.95),
+            OcrTextBlock("登录", (860, 30, 60, 24), 0.95),
+        ],
+    )
+    duplicate_grouped = [region.to_agent_state() for region in group_ocr_regions(duplicate_login_ocr, 1000, 1000)]
+    positioned_login = resolve_target_candidates("右上角登录", duplicate_grouped)
+    assert_true(positioned_login and positioned_login[0].bbox == (860, 30, 60, 24), "position words should rank the correct duplicate OCR candidate")
+    assert_true(positioned_login[0].rank == 1 and positioned_login[0].ambiguity == "none", "resolved candidate should expose rank and non-ambiguous state")
+    ambiguous_login = resolve_target_candidates("点登录按钮", duplicate_grouped)
+    assert_true(len(ambiguous_login) >= 2 and ambiguous_login[0].ambiguity == "close_score", "close duplicate candidates should be marked ambiguous")
     noisy_candidates = resolve_target_candidates("点登录按钮", group_ocr_regions(OcrResult("success", "noise", [OcrTextBlock("天气", (200, 200, 60, 20), 0.9)]), 1000, 1000))
     assert_true(not noisy_candidates, "missing/noisy OCR should not create confident target candidate")
 
@@ -293,11 +307,34 @@ def main() -> int:
     assert_true(target_result.agent_state["approval_request"]["tool"] == "computer.click", "semantic target approval should resolve to computer.click")
     click_args = target_result.agent_state["approval_request"]["arguments"]
     assert_true(click_args["x"] == 990 and click_args["y"] == 242, "semantic target click should convert relative bbox to absolute screen coordinates")
+    assert_true(target_result.agent_state["target_candidate"]["rank"] == 1 and target_result.agent_state["target_candidate"]["ambiguity"] == "none", "high-confidence single target should be unambiguous")
     assert_true(target_result.agent_state["target_candidate"]["preview"]["bbox"] == [860, 30, 60, 24], "semantic target card should keep relative preview bbox")
     assert_true(len(target_result.agent_state["target_candidates"]) >= 1, "semantic target approval should preserve candidate previews")
     assert_true("登录" in target_result.display_card.summary, "semantic target card should name the friendly target")
     forbidden_target_voice = ["登录", "860", "30", "data/", ".png", "{", "vision.resolve_target", "computer.click"]
     assert_true(not any(fragment in target_result.voice_line.text for fragment in forbidden_target_voice), "semantic target voice leaked technical details")
+
+    ambiguous_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-ambiguous.png",
+                    width=1000,
+                    height=1000,
+                    capture_rect=CaptureRect(100, 200, 1000, 1000),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(duplicate_login_ocr),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    assert_true(not ambiguous_target.requires_approval, "close top candidates should not generate click approval")
+    assert_true("approval_request" not in ambiguous_target.agent_state, "ambiguous semantic target should not synthesize click arguments")
+    assert_true(ambiguous_target.agent_state["candidate_selection_required"], "ambiguous semantic target should ask for candidate selection")
+    assert_true(ambiguous_target.agent_state["target_candidate"]["ambiguity"] == "close_score", "ambiguous target state should explain close score")
+    assert_true(not any(fragment in ambiguous_target.voice_line.text for fragment in forbidden_target_voice), "ambiguous target voice leaked technical details")
 
     missing_rect_target = SemanticTargetTool(
         workspace,
@@ -850,6 +887,7 @@ def main() -> int:
     assert_true("event_created_at: event.created_at" in app_vue_source, "Shell should key voice audio by event timestamp")
     assert_true("runtimeStatusRows" in app_vue_source and "lastTtsError" in app_vue_source, "Shell developer mode should expose voice runtime status")
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
+    assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")

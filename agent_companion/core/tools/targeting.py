@@ -70,6 +70,31 @@ class SemanticTargetTool(ToolAdapter):
             )
 
         candidate = candidates[0]
+        if not _should_approve_candidate(candidate):
+            body = "\n".join(
+                [
+                    f"目标描述：{query or '未提供'}",
+                    _candidate_list_body(candidates),
+                    "结果：候选还不够唯一，请补充位置或从候选里指定编号。",
+                ]
+            )
+            return ToolResult(
+                ok=True,
+                agent_state={
+                    "tool": self.name,
+                    "observation": observation.to_agent_state(),
+                    "ocr": ocr_result.to_agent_state(),
+                    "ocr_regions": region_state,
+                    "target_candidate": _candidate_state(candidate, observation),
+                    "target_candidates": candidate_states,
+                    "needs_clarification": True,
+                    "candidate_selection_required": True,
+                    "artifacts": artifacts,
+                },
+                display_card=DisplayCard("目标定位", "我找到了几个可能的目标，需要你再确认一下。", body, status="info", artifacts=artifacts),
+                voice_line=safe_voice_line("我找到了几个可能的目标，还需要你再确认一下。", sprite="4"),
+            )
+
         click_args = _click_arguments(candidate, observation)
         if click_args is None:
             return ToolResult(
@@ -98,6 +123,7 @@ class SemanticTargetTool(ToolAdapter):
             [
                 f"候选目标：{candidate.label}",
                 f"所在区域：{_friendly_region(candidate.region_label)}",
+                _candidate_list_body(candidates),
                 summarize_ocr_regions(regions),
                 "下一步：确认后才会点击这个候选区域。",
             ]
@@ -195,3 +221,29 @@ def _scale_is_trusted(scale_x: float, scale_y: float) -> bool:
     if not (0.2 <= scale_x <= 5.0 and 0.2 <= scale_y <= 5.0):
         return False
     return abs(scale_x - scale_y) / max(scale_x, scale_y) <= 0.25
+
+
+def _should_approve_candidate(candidate: TargetCandidate) -> bool:
+    return candidate.confidence >= 0.72 and candidate.ambiguity == "none"
+
+
+def _candidate_list_body(candidates: list[TargetCandidate]) -> str:
+    if not candidates:
+        return "候选：无"
+    rows: list[str] = ["候选："]
+    for candidate in candidates[:5]:
+        confidence = round(candidate.confidence * 100)
+        ambiguity = _friendly_ambiguity(candidate.ambiguity)
+        reason = candidate.reason or "OCR 候选"
+        rows.append(
+            f"{candidate.rank or len(rows)}. {candidate.label} / {_friendly_region(candidate.region_label)} / {confidence}% / {ambiguity} / {reason}"
+        )
+    return "\n".join(rows)
+
+
+def _friendly_ambiguity(value: str) -> str:
+    return {
+        "none": "较明确",
+        "close_score": "分数接近",
+        "low_confidence": "置信偏低",
+    }.get(value, "需要确认")

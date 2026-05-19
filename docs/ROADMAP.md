@@ -30,6 +30,7 @@ Status: in progress
 - Add OCR grounding for visible text and rough screen regions. Optional `pytesseract`/Pillow OCR is best-effort; unavailable or timed-out OCR does not fail screenshots or Watch Together.
 - Group OCR text into coarse regions and expose semantic target candidates for phrases such as "登录按钮" or "右上角".
 - Attach active-window capture rectangles and preview boxes so semantic targets can be reviewed visually before approval.
+- Rank semantic target candidates with explainable confidence and hold ambiguous matches for user clarification.
 - Separate text model, vision model, and expression model. Model routing is connected for text, vision, and expression.
 - Do not mark blank pages or failed captures as success.
 

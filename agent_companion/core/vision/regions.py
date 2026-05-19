@@ -106,6 +106,8 @@ def _item_from_block(block: OcrTextBlock, width: int, height: int, label: str) -
         "text": text[:160],
         "region": label,
         "source": "ocr",
+        "image_width": width,
+        "image_height": height,
     }
     if block.bbox is not None:
         item["bbox"] = list(block.bbox)

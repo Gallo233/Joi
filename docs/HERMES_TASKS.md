@@ -48,6 +48,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Computer Use verification reuses the same OCR extractor/config as `observe.screen` and waits `computer_use.post_action_settle_ms` before after-observation.
 - OCR text is grouped into coarse regions and `vision.resolve_target` can propose semantic click candidates that still require Computer Use approval.
 - Semantic target approvals now use active-window capture rectangles to convert OCR bbox centers into screen coordinates, and the shell draws candidate boxes on approval screenshots.
+- Semantic target candidates now expose rank, confidence, reason, and ambiguity; close or low-confidence OCR targets ask for clarification instead of synthesizing click approvals.
 - `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
 - `agent_companion/core/watch.py` keeps recent watch context in the current app session.
 - `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.
@@ -77,7 +78,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 
 Next task options, in priority order:
 
-1. Improve semantic target confidence by ranking overlapping OCR candidates and adding image/pixel change signals to candidate selection.
+1. Connect semantic target grounding to Windows accessibility tree and/or a lightweight visual detector so Joi can go beyond OCR text boxes.
 2. Add an audit view for confirmed Computer Use actions, approvals, verification status, and sanitized arguments.
 3. Add pixel or image-hash diff as an additional verification signal for actions where OCR/title do not change.
 4. Add a settings panel for changing ASR/TTS/OCR providers once runtime status is stable.

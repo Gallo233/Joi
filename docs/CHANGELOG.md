@@ -33,6 +33,7 @@
 - Fixed OCR verification semantics so successful empty-to-text OCR changes count as visible changes while failed or unavailable OCR stays inconclusive.
 - Added OCR region grouping and semantic target candidate resolution for Watch Together and approval-gated Computer Use clicks.
 - Added capture rect grounding for semantic targets, converting OCR screenshot boxes to screen coordinates only when the active-window rect is trusted, with approval-card candidate overlays.
+- Added ranked semantic target confidence with ambiguity detection, so close OCR candidates are shown for clarification instead of becoming click approvals.
 
 ## 2026-05-14
 
