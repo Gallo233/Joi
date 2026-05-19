@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -85,22 +86,17 @@ class HeuristicVisualDetector:
         if not image_path.exists():
             return VisualDetectionResult("unavailable", "截图暂时不可用。", artifacts=_artifacts(observation), error="screenshot_missing")
         try:
-            from PIL import Image, ImageFilter, ImageStat  # type: ignore[import-not-found]
-        except Exception:
-            return VisualDetectionResult("unavailable", "缺少轻量图像处理依赖。", artifacts=_artifacts(observation), error="pillow_missing")
-
-        try:
-            with Image.open(image_path) as raw:
-                image = raw.convert("RGB")
-                gray = image.convert("L")
-                edges = gray.filter(ImageFilter.FIND_EDGES)
-                candidates = self._detect_regions(gray, edges, ImageStat, observation, query)
+            image = _load_grayscale_image(image_path)
+            if image is None:
+                return VisualDetectionResult("unavailable", "缺少轻量图像处理依赖。", artifacts=_artifacts(observation), error="pillow_missing")
+            candidates = self._detect_regions(image, observation, query)
         except Exception:
             return VisualDetectionResult("failed", "视觉启发式检测失败。", artifacts=_artifacts(observation), error="visual_detector_failed")
 
         if not candidates:
             return VisualDetectionResult("success", "没有发现明显的交互块。", artifacts=_artifacts(observation))
         candidates.sort(key=lambda candidate: candidate.confidence, reverse=True)
+        candidates = _dedupe_candidates(candidates)
         return VisualDetectionResult(
             "success",
             f"视觉启发式找到 {len(candidates[: self.max_candidates])} 个可能的交互区域。",
@@ -108,8 +104,8 @@ class HeuristicVisualDetector:
             artifacts=_artifacts(observation),
         )
 
-    def _detect_regions(self, gray: Any, edges: Any, image_stat: Any, observation: ComputerObservation, query: str) -> list[VisualCandidate]:
-        width, height = gray.size
+    def _detect_regions(self, image: "_GrayImage", observation: ComputerObservation, query: str) -> list[VisualCandidate]:
+        width, height = image.width, image.height
         label = _label_from_query(query)
         rows: list[VisualCandidate] = []
         seen: set[tuple[int, int, int, int]] = set()
@@ -117,8 +113,8 @@ class HeuristicVisualDetector:
             if bbox in seen:
                 continue
             seen.add(bbox)
-            score = _region_score(gray, edges, image_stat, bbox, prior)
-            if score < 0.42:
+            score = _region_score(image, bbox, prior)
+            if score < 0.46:
                 continue
             rows.append(
                 VisualCandidate(
@@ -154,21 +150,136 @@ def _candidate_regions(width: int, height: int) -> list[tuple[tuple[int, int, in
     return regions
 
 
-def _region_score(gray: Any, edges: Any, image_stat: Any, bbox: tuple[int, int, int, int], prior: float) -> float:
+def _region_score(image: "_GrayImage", bbox: tuple[int, int, int, int], prior: float) -> float:
     left, top, width, height = bbox
     if width <= 0 or height <= 0:
         return 0.0
-    crop_box = (left, top, left + width, top + height)
-    gray_stat = image_stat.Stat(gray.crop(crop_box))
-    edge_stat = image_stat.Stat(edges.crop(crop_box))
-    contrast = float(gray_stat.stddev[0] if gray_stat.stddev else 0.0)
-    edge_mean = float(edge_stat.mean[0] if edge_stat.mean else 0.0)
+    contrast, edge_mean = image.region_stats(bbox)
     area = width * height
-    total = gray.size[0] * gray.size[1]
+    total = image.width * image.height
     area_ratio = area / total if total else 0.0
     area_bonus = 0.08 if 0.005 <= area_ratio <= 0.08 else 0.03 if area_ratio <= 0.14 else 0.0
-    score = 0.22 + min(0.25, contrast / 220.0) + min(0.24, edge_mean / 210.0) + area_bonus + prior
+    score = 0.18 + min(0.28, contrast / 190.0) + min(0.26, edge_mean / 180.0) + area_bonus + prior
     return min(0.74, max(0.0, score))
+
+
+@dataclass(frozen=True)
+class _GrayImage:
+    width: int
+    height: int
+    pixels: list[int]
+
+    def region_stats(self, bbox: tuple[int, int, int, int]) -> tuple[float, float]:
+        left, top, width, height = bbox
+        right = min(self.width, left + width)
+        bottom = min(self.height, top + height)
+        left = max(0, left)
+        top = max(0, top)
+        values: list[int] = []
+        edge_total = 0
+        edge_count = 0
+        step_x = max(1, (right - left) // 80)
+        step_y = max(1, (bottom - top) // 60)
+        for y in range(top, bottom, step_y):
+            row_offset = y * self.width
+            next_row = min(self.height - 1, y + step_y) * self.width
+            for x in range(left, right, step_x):
+                value = self.pixels[row_offset + x]
+                values.append(value)
+                nx = min(self.width - 1, x + step_x)
+                edge_total += abs(value - self.pixels[row_offset + nx])
+                edge_total += abs(value - self.pixels[next_row + x])
+                edge_count += 2
+        if not values:
+            return 0.0, 0.0
+        mean = sum(values) / len(values)
+        variance = sum((value - mean) ** 2 for value in values) / len(values)
+        edge_mean = edge_total / edge_count if edge_count else 0.0
+        return math.sqrt(variance), edge_mean
+
+
+def _load_grayscale_image(path: Path) -> _GrayImage | None:
+    if path.suffix.casefold() in {".ppm", ".pnm"}:
+        return _load_ppm(path)
+    try:
+        from PIL import Image  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    with Image.open(path) as raw:
+        gray = raw.convert("L")
+        width, height = gray.size
+        return _GrayImage(width, height, list(gray.getdata()))
+
+
+def _load_ppm(path: Path) -> _GrayImage | None:
+    data = path.read_bytes()
+    tokens: list[bytes] = []
+    index = 0
+    while len(tokens) < 4 and index < len(data):
+        while index < len(data) and data[index] in b" \t\r\n":
+            index += 1
+        if index < len(data) and data[index] == ord("#"):
+            while index < len(data) and data[index] not in b"\r\n":
+                index += 1
+            continue
+        start = index
+        while index < len(data) and data[index] not in b" \t\r\n":
+            index += 1
+        if start < index:
+            tokens.append(data[start:index])
+    if len(tokens) < 4 or tokens[0] not in {b"P6", b"P3"}:
+        return None
+    width = int(tokens[1])
+    height = int(tokens[2])
+    max_value = max(1, int(tokens[3]))
+    while index < len(data) and data[index] in b" \t\r\n":
+        index += 1
+    if width <= 0 or height <= 0:
+        return None
+    if tokens[0] == b"P6":
+        raw = data[index : index + width * height * 3]
+        if len(raw) < width * height * 3:
+            return None
+        pixels = [_rgb_to_gray(raw[offset], raw[offset + 1], raw[offset + 2], max_value) for offset in range(0, len(raw), 3)]
+        return _GrayImage(width, height, pixels)
+    values = [int(part) for part in data[index:].split()]
+    if len(values) < width * height * 3:
+        return None
+    pixels = [_rgb_to_gray(values[offset], values[offset + 1], values[offset + 2], max_value) for offset in range(0, width * height * 3, 3)]
+    return _GrayImage(width, height, pixels)
+
+
+def _rgb_to_gray(red: int, green: int, blue: int, max_value: int) -> int:
+    scale = 255 / max_value if max_value != 255 else 1.0
+    return int(round((0.299 * red + 0.587 * green + 0.114 * blue) * scale))
+
+
+def _dedupe_candidates(candidates: list[VisualCandidate]) -> list[VisualCandidate]:
+    rows: list[VisualCandidate] = []
+    for candidate in candidates:
+        if any(_iou(candidate.bbox, existing.bbox) >= 0.22 or _center_distance(candidate.bbox, existing.bbox) < 0.9 for existing in rows):
+            continue
+        rows.append(candidate)
+    return rows
+
+
+def _iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
+    lx1, ly1, lw, lh = left
+    rx1, ry1, rw, rh = right
+    lx2, ly2 = lx1 + lw, ly1 + lh
+    rx2, ry2 = rx1 + rw, ry1 + rh
+    inter_w = max(0, min(lx2, rx2) - max(lx1, rx1))
+    inter_h = max(0, min(ly2, ry2) - max(ly1, ry1))
+    inter = inter_w * inter_h
+    union = lw * lh + rw * rh - inter
+    return inter / union if union else 0.0
+
+
+def _center_distance(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
+    lx, ly = left[0] + left[2] / 2, left[1] + left[3] / 2
+    rx, ry = right[0] + right[2] / 2, right[1] + right[3] / 2
+    scale = max(left[2], left[3], right[2], right[3], 1)
+    return math.sqrt((lx - rx) ** 2 + (ly - ry) ** 2) / scale
 
 
 def _preview(observation: ComputerObservation, bbox: tuple[int, int, int, int], label: str, region: str, confidence: float) -> dict[str, Any]:

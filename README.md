@@ -47,6 +47,8 @@ Optional OCR support for visible text grounding:
 
 OCR also needs the Tesseract executable installed on the system. Joi does not bundle Tesseract or its language packs. For Chinese OCR, install the appropriate Tesseract language data when you configure OCR for Chinese screenshots. If OCR is not installed or times out, Joi still saves screenshots and continues Watch Together with the available visual summary.
 
+The lightweight visual detector uses Pillow for real PNG/JPEG screenshots. If you only install the base requirements, this detector safely reports unavailable instead of blocking OCR/UIA grounding. The checked-in fixture eval uses synthetic PPM images so the regression suite can run without private screenshots.
+
 Optional Windows accessibility-tree support for UI control grounding:
 
 ```powershell

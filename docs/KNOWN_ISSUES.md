@@ -26,7 +26,7 @@
 - Semantic target approvals now show candidate preview boxes and refuse to synthesize clicks when the screenshot-to-screen coordinate transform is not trustworthy.
 - Close semantic OCR candidates now show as selectable candidates in the task card instead of becoming a click approval automatically.
 - Semantic target grounding can use optional Windows UI Automation control names/roles/bounds when `uiautomation` is installed; static UIA text and explicitly disabled UIA controls are not treated as clickable targets unless a later observation provides actionable evidence.
-- Canvas/game-like screens with sparse OCR/UIA can now expose visual heuristic candidates, but visual-only targets still require user selection and a separate click approval.
+- Canvas/game-like screens with sparse OCR/UIA can now expose visual heuristic candidates, but visual-only targets still require user selection and a separate click approval; fixture coverage is synthetic and intentionally avoids real private/game-account screenshots.
 - Candidate-card selection is now bound to a specific pending semantic target id, while phrases like "选 2" remain a latest-context fallback; candidate contexts are still session-only and expire quickly.
 - Watch Together follow-up questions reuse recent visual context instead of forcing another screenshot.
 - Watch observations are kept out of long-term memory by default.

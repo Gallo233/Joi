@@ -1,0 +1,35 @@
+[
+  {
+    "id": "bottom_hud_primary",
+    "image": "canvas_bottom_hud.ppm",
+    "image_size": [400, 225],
+    "query": "点开始任务",
+    "expected_regions": ["bottom_controls"],
+    "expected_candidate_count": {"min": 1, "max": 3},
+    "allowed_bbox_area": [120, 150, 270, 65],
+    "approximate_bbox": [288, 162, 92, 36],
+    "should_require_selection": true
+  },
+  {
+    "id": "right_hud_panel",
+    "image": "canvas_right_hud.ppm",
+    "image_size": [400, 225],
+    "query": "点右侧操作区",
+    "expected_regions": ["sidebar"],
+    "expected_candidate_count": {"min": 1, "max": 3},
+    "allowed_bbox_area": [245, 20, 145, 140],
+    "approximate_bbox": [256, 34, 80, 54],
+    "should_require_selection": true
+  },
+  {
+    "id": "center_canvas_prompt",
+    "image": "canvas_center_prompt.ppm",
+    "image_size": [400, 225],
+    "query": "点中间确认",
+    "expected_regions": ["main_content"],
+    "expected_candidate_count": {"min": 1, "max": 3},
+    "allowed_bbox_area": [110, 55, 190, 110],
+    "approximate_bbox": [128, 68, 80, 54],
+    "should_require_selection": true
+  }
+]

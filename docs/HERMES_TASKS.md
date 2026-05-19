@@ -48,7 +48,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Computer Use verification reuses the same OCR extractor/config as `observe.screen` and waits `computer_use.post_action_settle_ms` before after-observation.
 - OCR text is grouped into coarse regions and `vision.resolve_target` can propose semantic click candidates that still require Computer Use approval.
 - Optional Windows UI Automation snapshots can provide active-window control names, roles, screen bounds, enabled state, and clickable state for semantic targets. Static text controls are visible as candidates, but cannot directly create click approvals unless fused with OCR or backed by actionable evidence; explicitly disabled UIA controls also remain candidates instead of click approvals.
-- A lightweight heuristic visual detector can add candidate boxes for canvas/game-like screens when OCR and UIA are sparse. Visual-only candidates are shown for selection first and never auto-click.
+- A lightweight heuristic visual detector can add candidate boxes for canvas/game-like screens when OCR and UIA are sparse. Visual-only candidates are shown for selection first and never auto-click, and synthetic fixture evals live under `tests/fixtures/visual_detector/`.
 - Semantic target approvals now use active-window capture rectangles to convert OCR bbox centers into screen coordinates, and the shell draws candidate boxes on approval screenshots.
 - Semantic target candidates now expose rank, confidence, reason, source, and ambiguity; OCR/accessibility conflicts, low-confidence targets, non-actionable UIA text, or disabled UIA controls ask for clarification instead of synthesizing click approvals.
 - Pending semantic target selections are session-only with a short TTL; "选 2" resumes the latest saved candidates as a fallback, while candidate-card buttons use explicit `semantic_target.select` with `selection_id` and rank before creating a one-time `computer.click` approval.
@@ -81,7 +81,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 
 Next task options, in priority order:
 
-1. Calibrate the lightweight visual detector fallback against real browser canvas/game HUD screenshots and add fixture-based evals.
+1. Expand the visual detector fixture suite with more synthetic HUD/canvas layouts and optional local-only real screenshots that are never committed.
 2. Add an audit view for confirmed Computer Use actions, approvals, verification status, and sanitized arguments.
 3. Add pixel or image-hash diff as an additional verification signal for actions where OCR/title do not change.
 4. Add a settings panel for changing ASR/TTS/OCR providers once runtime status is stable.
@@ -93,7 +93,7 @@ Next task options, in priority order:
 Improve semantic target grounding beyond first-pass UIA/OCR/visual heuristics:
 
 - Tune UIA/OCR fusion against real browser and desktop pages.
-- Tune the visual detector fallback for canvas/game UIs where accessibility tree is sparse.
+- Tune the visual detector fallback for canvas/game UIs where accessibility tree is sparse, using `tools/eval_visual_detector.py` as the regression gate.
 - Keep Computer Use approval previews friendly and sanitized.
 - Add tests for accessibility/OCR disagreement, ambiguous candidates, no candidate, and voice-line sanitization.
 
