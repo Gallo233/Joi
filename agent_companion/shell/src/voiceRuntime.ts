@@ -1,13 +1,19 @@
 export interface VoiceAudioIdentity {
   task_id?: string
   event_type?: string
+  event_created_at?: number
   voice_text?: string
 }
 
 const VOICE_KEY_SEPARATOR = '\u001f'
 
 export function voiceAudioKey(payload: VoiceAudioIdentity) {
-  return [payload.task_id || '', payload.event_type || '', payload.voice_text || ''].join(VOICE_KEY_SEPARATOR)
+  return [
+    payload.task_id || '',
+    payload.event_type || '',
+    payload.event_created_at === undefined ? '' : String(payload.event_created_at),
+    payload.voice_text || '',
+  ].join(VOICE_KEY_SEPARATOR)
 }
 
 export function nextVoiceEpoch(currentEpoch: number) {

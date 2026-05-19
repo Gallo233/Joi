@@ -463,8 +463,12 @@ def main() -> int:
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
     assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
+    assert_true("event_created_at" in voice_runtime_source, "voice runtime key should include event identity")
     app_vue_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
     assert_true("beginNewVoiceIntent()" in app_vue_source and "voiceEventEpochs.get" in app_vue_source, "Shell should bump and compare voice epochs")
+    assert_true("event_created_at: event.created_at" in app_vue_source, "Shell should key voice audio by event timestamp")
+    server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
+    assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")

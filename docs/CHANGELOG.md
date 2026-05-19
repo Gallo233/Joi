@@ -24,6 +24,7 @@
 - Productionized voice input with ASR config parsing, OpenAI-compatible in-memory transcription, explicit unconfigured UI state, audio limits, transcript display, and serialized Core command handling.
 - Hardened voice runtime safety with pre-decode base64 limits, shell-side Blob size checks, ASR timeout handling, friendly voice error task cards, and stale audio interruption on new user intent.
 - Added voice queue epochs so late TTS from older intents is suppressed, and aligned `voice.transcribe` RPC timeout with configured ASR timeout.
+- Hardened voice audio matching with event timestamps so repeated voice lines in the same task cannot revive stale audio.
 
 ## 2026-05-14
 

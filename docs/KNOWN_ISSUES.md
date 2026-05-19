@@ -30,3 +30,4 @@
 - Stale spoken audio is stopped when a new typed or voice command starts.
 - Late TTS audio from older user intents is suppressed by a client-side voice epoch.
 - Voice transcription uses the configured ASR timeout plus grace time instead of the generic Core request timeout.
+- Voice audio identity now includes event timestamps so repeated lines in the same task do not collide.

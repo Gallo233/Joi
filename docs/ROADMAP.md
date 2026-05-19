@@ -75,6 +75,7 @@ Status: in progress
 - Serialize `user.message`, `voice.transcribe`, and `approval.resolve` mutations through a Core command lock.
 - Queue voice separately from text display and suppress stale voice audio with a client-side epoch when user intent changes.
 - Align voice transcription RPC timeout with configured ASR timeout so ASR failures surface as friendly Joi messages.
+- Match voice audio by event identity, including timestamp, to avoid collisions from repeated task lines.
 - Avoid speaking logs, JSON, paths, commands, tool ids, and inflated results.
 
 ## P7 Policy and Audit

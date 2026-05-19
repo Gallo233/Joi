@@ -51,6 +51,7 @@ export interface AgentEvent {
 export interface VoiceAudioPayload {
   task_id?: string
   event_type?: string
+  event_created_at?: number
   voice_text?: string
   voice_audio_path?: string
   voice_audio_rel?: string

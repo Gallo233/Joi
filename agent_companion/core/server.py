@@ -140,6 +140,7 @@ class JsonRpcBridge:
         payload = {
             "task_id": event.task_id,
             "event_type": event.type.value,
+            "event_created_at": event.created_at,
             "voice_text": event.voice_line.text,
             **audio,
         }

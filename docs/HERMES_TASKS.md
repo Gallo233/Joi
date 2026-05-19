@@ -65,6 +65,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Shell stops currently playing voice audio when the user sends text or starts a new recording.
 - Shell tracks a voice epoch per user intent and drops late `agent.voice_audio` payloads from older epochs.
 - `voice.transcribe` uses a method-specific timeout based on `ready.asr.timeout_seconds + 10s`, so ASR timeouts can return friendly Joi messages before the UI gives up.
+- Voice audio payloads include the source event timestamp so repeated voice lines inside the same task do not collide.
 
 Next task options, in priority order:
 
