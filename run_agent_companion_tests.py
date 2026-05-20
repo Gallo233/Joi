@@ -5,6 +5,8 @@ import inspect
 import tempfile
 from pathlib import Path
 
+import yaml
+
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, ComputerAction, ComputerObservation, ComputerUseResult, computer_action_audit_event, verify_post_action
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouter, load_app_config
@@ -12,12 +14,14 @@ from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core import runtime_status as runtime_status_module
+from agent_companion.core.runtime_config_writer import preview_runtime_config_update, update_runtime_config
 from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.schemas import DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.server import JsonRpcBridge
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.codex import CodexTool
+from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
@@ -99,6 +103,25 @@ def _assert_runtime_payload_has_no_probe_leaks(runtime_payload: dict) -> None:
         "token",
     ]
     assert_true(all(fragment not in text for fragment in forbidden), "OCR runtime probe leaked raw path, stderr, secret, or token")
+
+
+def _assert_config_mutation_payload_safe(payload: object, message: str) -> None:
+    text = str(payload)
+    forbidden = [
+        "/Users/",
+        "C:\\",
+        "sk-",
+        "token",
+        "secret",
+        "https://",
+        "http://",
+        "server_url",
+        "api_key",
+        "joi.gguf",
+        "voice.wav",
+        ".yaml",
+    ]
+    assert_true(all(fragment not in text for fragment in forbidden), message)
 
 
 class FakeVisionObserver:
@@ -1438,6 +1461,147 @@ def main() -> int:
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+    mutation_tmpdir = tempfile.mkdtemp()
+    try:
+        mutation_tmp = Path(mutation_tmpdir)
+        config_path = mutation_tmp / "config.yaml"
+        secrets_path = mutation_tmp / "secrets.yaml"
+        config_path.write_text(
+            """
+llm:
+  provider: openai_compatible
+  use_mock: true
+  base_url: https://api.private.example/v1
+  model: gpt-public-text
+  api_key: ${JOI_LLM_API_KEY}
+  vision_enabled: false
+  vision_model: gpt-public-vision
+  expression_enabled: false
+  expression_model: gpt-public-expression
+  temperature: 0.7
+tts:
+  enabled: false
+  provider: gpt-sovits
+  server_url: http://127.0.0.1:9880/
+  gpt_sovits_work_path: /Users/private/GPT-SoVITS
+  text_lang: zh
+  prompt_lang: zh
+  speed_factor: 1.2
+  fallback_to_system: false
+asr:
+  enabled: false
+  provider: openai_compatible
+  base_url: ${JOI_ASR_BASE_URL}
+  model: whisper-1
+  api_key: ${JOI_ASR_API_KEY}
+  language: zh
+  max_seconds: 30
+  max_bytes: 12582912
+  timeout_seconds: 30
+ocr:
+  timeout_seconds: 5
+computer_use:
+  post_action_settle_ms: 200
+custom_section:
+  unknown_flag: keep-me
+""",
+            encoding="utf-8",
+        )
+        secrets_path.write_text(
+            """
+llm:
+  api_key: sk-secret-text
+asr:
+  api_key: sk-secret-asr
+""",
+            encoding="utf-8",
+        )
+        secrets_before = secrets_path.read_text(encoding="utf-8")
+        safe_updates = {
+            "asr": {
+                "enabled": True,
+                "provider": "openai_compatible",
+                "base_url": "https://asr.private.example/v1",
+                "model": "whisper-safe",
+                "language": "en",
+                "max_seconds": 45,
+                "max_bytes": 4096,
+                "timeout_seconds": 12,
+            },
+            "tts": {
+                "enabled": True,
+                "provider": "gpt-sovits",
+                "volume": 0.7,
+                "text_lang": "zh",
+                "prompt_lang": "zh",
+                "speed_factor": 1.1,
+                "fallback_to_system": True,
+            },
+            "ocr": {"timeout_seconds": 8},
+            "computer_use": {"post_action_settle_ms": 325},
+            "llm": {
+                "provider": "openai_compatible",
+                "model": "gpt-public-next",
+                "vision_enabled": True,
+                "vision_model": "gpt-public-vision-next",
+                "expression_enabled": True,
+                "expression_model": "gpt-public-expression-next",
+                "temperature": 0.3,
+                "use_mock": False,
+            },
+        }
+        preview_mutation = preview_runtime_config_update(mutation_tmp, safe_updates)
+        assert_true(preview_mutation.ok and preview_mutation.changed and preview_mutation.dry_run, "safe config mutation preview should report changes")
+        _assert_config_mutation_payload_safe(preview_mutation.to_agent_state(), "config mutation preview leaked sensitive detail")
+        assert_true("https://asr.private.example" not in preview_mutation.summary, "config mutation summary leaked endpoint")
+
+        applied_mutation = update_runtime_config(mutation_tmp, safe_updates, dry_run=False)
+        assert_true(applied_mutation.ok and applied_mutation.changed and not applied_mutation.dry_run, "safe config mutation should write allowlisted fields")
+        _assert_config_mutation_payload_safe(applied_mutation.to_agent_state(), "config mutation result leaked sensitive detail")
+        mutated_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert_true(mutated_config["asr"]["enabled"] is True and mutated_config["asr"]["max_seconds"] == 45, "ASR allowlist fields should update")
+        assert_true(mutated_config["asr"]["base_url"] == "https://asr.private.example/v1", "ASR base_url should be writable but not exposed in summaries")
+        assert_true(mutated_config["tts"]["fallback_to_system"] is True and mutated_config["tts"]["volume"] == 0.7, "TTS allowlist fields should update")
+        assert_true(mutated_config["ocr"]["timeout_seconds"] == 8 and mutated_config["computer_use"]["post_action_settle_ms"] == 325, "runtime numeric allowlist fields should update")
+        assert_true(mutated_config["llm"]["model"] == "gpt-public-next" and mutated_config["llm"]["use_mock"] is False, "LLM allowlist fields should update")
+        assert_true(mutated_config["custom_section"]["unknown_flag"] == "keep-me", "unknown config fields must be preserved")
+        assert_true(mutated_config["llm"]["api_key"] == "${JOI_LLM_API_KEY}" and mutated_config["asr"]["api_key"] == "${JOI_ASR_API_KEY}", "env placeholders must be preserved")
+        assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "secrets.yaml must not be rewritten")
+        assert_true("sk-secret" not in config_path.read_text(encoding="utf-8"), "secrets must not be copied into config.yaml")
+
+        runtime_update_request = ToolRequest("runtime.update_config", {"updates": {"ocr": {"timeout_seconds": 9}}, "dry_run": True})
+        runtime_policy = PolicyGate().classify(runtime_update_request)
+        assert_true(runtime_policy.requires_approval and runtime_policy.risk == RiskLevel.MEDIUM, "runtime config updates should require approval by default")
+        assert_true("https://" not in str(PolicyGate.public_payload(runtime_update_request)) and "api_key" not in str(PolicyGate.public_payload(runtime_update_request)), "runtime config policy preview should be sanitized")
+        runtime_tool_result = RuntimeConfigUpdateTool(mutation_tmp).run(runtime_update_request)
+        assert_true(runtime_tool_result.ok and runtime_tool_result.agent_state["runtime_config_update"]["dry_run"], "runtime config tool should support safe dry-run")
+        _assert_config_mutation_payload_safe(runtime_tool_result.agent_state["runtime_config_update"], "runtime config tool state leaked sensitive detail")
+        _assert_config_mutation_payload_safe(runtime_tool_result.display_card.body, "runtime config tool card leaked sensitive detail")
+        assert_true("https://" not in runtime_tool_result.voice_line.text and "api_key" not in runtime_tool_result.voice_line.text and "{" not in runtime_tool_result.voice_line.text, "runtime config tool voice leaked raw config")
+
+        before_forbidden = config_path.read_text(encoding="utf-8")
+        forbidden_mutation = update_runtime_config(
+            mutation_tmp,
+            {
+                "llm": {"api_key": "sk-new-secret", "model": "/Users/private/joi.gguf"},
+                "tts": {"server_url": "http://127.0.0.1:9880/private"},
+                "characters": {"refer_audio_path": "/Users/private/voice.wav"},
+            },
+            dry_run=False,
+        )
+        assert_true(not forbidden_mutation.ok, "secret, endpoint server_url, and path-like config writes must be forbidden")
+        assert_true(config_path.read_text(encoding="utf-8") == before_forbidden, "forbidden config mutation must not touch config.yaml")
+        _assert_config_mutation_payload_safe(forbidden_mutation.to_agent_state(), "forbidden config mutation error leaked sensitive detail")
+
+        before_invalid = config_path.read_text(encoding="utf-8")
+        invalid_mutation = update_runtime_config(mutation_tmp, {"ocr": {"timeout_seconds": 0}, "tts": {"volume": "loud"}}, dry_run=False)
+        assert_true(not invalid_mutation.ok, "invalid type/range config mutation should fail")
+        assert_true(config_path.read_text(encoding="utf-8") == before_invalid, "invalid config mutation must not touch config.yaml")
+    finally:
+        import shutil
+
+        shutil.rmtree(mutation_tmpdir, ignore_errors=True)
 
     chat_app = AgentCompanionApp(workspace)
     chat_events = chat_app.handle_user_text("你好")

@@ -58,6 +58,7 @@
 - Tightened UIA screen-bounds click grounding so accessibility candidates must map back into a trusted current capture rectangle before creating click arguments.
 - Added sanitized Codex coding-task audit state from `codex exec --json`, including run status, event timeline, safe artifact labels, resumable permission-request approvals, denial/expiry handling, and fail-closed behavior when Codex cannot be safely resumed.
 - Corrected unresumable Codex permission state so fail-closed runs no longer look like pending Joi approvals, and recorded the real CLI probe boundary without committing raw JSONL or local paths.
+- Added a Core safe runtime config mutation foundation with allowlisted non-secret provider fields, dry-run summaries, validation, atomic writes, `secrets.yaml` preservation, and approval-gated `runtime.update_config` plumbing without enabling a full settings UI.
 
 ## 2026-05-14
 

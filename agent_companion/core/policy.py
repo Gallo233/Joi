@@ -27,6 +27,7 @@ MEDIUM_RISK = {
     "computer.hotkey",
     "game.ok_ww.run",
     "files.write_workspace",
+    "runtime.update_config",
 }
 HIGH_RISK = {"shell.run", "files.delete", "package.install", "git.push", "external.launch_admin"}
 
@@ -65,6 +66,8 @@ class PolicyGate:
             preview = _computer_preview(request.arguments)
         elif request.name == "codex.run":
             preview = _codex_preview(request.arguments)
+        elif request.name == "runtime.update_config":
+            preview = _runtime_config_preview(request.arguments)
         return {
             "tool": request.name,
             "reason": request.reason,
@@ -94,3 +97,18 @@ def _codex_preview(arguments: dict[str, Any]) -> dict[str, str]:
     if arguments.get("codex_permission_decision"):
         preview["decision"] = "approval_required_to_continue"
     return preview or {"request": "coding_task"}
+
+
+def _runtime_config_preview(arguments: dict[str, Any]) -> dict[str, str]:
+    updates = arguments.get("updates")
+    field_count = _count_update_fields(updates) if isinstance(updates, dict) else 0
+    return {
+        "settings": f"{field_count} requested",
+        "mode": "preview" if arguments.get("dry_run") else "write",
+    }
+
+
+def _count_update_fields(value: Any) -> int:
+    if isinstance(value, dict):
+        return sum(_count_update_fields(item) for item in value.values())
+    return 1

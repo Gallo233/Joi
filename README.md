@@ -104,7 +104,7 @@ Copy-Item config.example.yaml config.yaml
 
 Use environment variables or `secrets.yaml` for private credentials. Both `config.yaml` and `secrets.yaml` are ignored by Git.
 
-Developer mode includes a read-only runtime status panel for provider availability and last safe error categories. Change providers in local config files for now; the shell does not write provider settings or secrets.
+Developer mode includes a read-only runtime status panel for provider availability and last safe error categories. Core has a tested safe writer for allowlisted non-secret runtime fields, but the shell does not yet expose a full settings editor and never writes provider secrets.
 
 ## Repository Layout
 

@@ -32,6 +32,7 @@ from agent_companion.core.tools.files import FileReadTool
 from agent_companion.core.tools.game_ok_ww import OkWwTool
 from agent_companion.core.tools.mcp import McpListTool
 from agent_companion.core.tools.registry import ToolRegistry
+from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import PendingSemanticTargetSelection, SemanticTargetSelectionStore, SemanticTargetSelectionTool, SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
@@ -404,6 +405,7 @@ class AgentCompanionApp:
             "computer.hotkey": "快捷键",
             "mcp.list_tools": "工具清单",
             "files.read": "文件读取",
+            "runtime.update_config": "运行设置",
         }
         return labels.get(name, "工具任务")
 
@@ -446,6 +448,8 @@ class AgentCompanionApp:
             return "启动游戏自动化前需要你确认。"
         if step.name == "codex.run":
             return "交给 Codex 执行前需要你确认。"
+        if step.name == "runtime.update_config":
+            return "更新运行设置前需要你确认。"
         if step.name.startswith("computer."):
             return "操作当前电脑前需要你确认。"
         return f"{self._tool_label(step.name)}需要你确认。"
@@ -492,6 +496,7 @@ class AgentCompanionApp:
         self.tools.register(OkWwTool(self.workspace))
         self.tools.register(McpListTool(self.workspace))
         self.tools.register(FileReadTool(self.workspace))
+        self.tools.register(RuntimeConfigUpdateTool(self.workspace))
 
     def _load_runtime_config(self) -> AppConfig | None:
         config_path = self.workspace / "config.yaml"
