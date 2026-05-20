@@ -315,6 +315,12 @@ def _run_semantic_case(root: Path, suite: str, base_dir: Path, case: dict[str, A
             failures.append(f"expected approval tool {expected['approval_tool']}, got {approval}")
         elif not isinstance(approval.get("arguments"), dict) or "x" not in approval["arguments"] or "y" not in approval["arguments"]:
             failures.append("approval request did not include click arguments")
+        elif "click_x_range" in expected or "click_y_range" in expected:
+            args = approval["arguments"]
+            if "click_x_range" in expected and not _within_range(args.get("x"), expected.get("click_x_range")):
+                failures.append(f"approval x outside expected range: {args.get('x')}")
+            if "click_y_range" in expected and not _within_range(args.get("y"), expected.get("click_y_range")):
+                failures.append(f"approval y outside expected range: {args.get('y')}")
     candidates = tool_result.agent_state.get("target_candidates")
     candidate_rows = candidates if isinstance(candidates, list) else []
     min_candidates = expected.get("min_candidates")
@@ -346,6 +352,9 @@ def _run_semantic_case(root: Path, suite: str, base_dir: Path, case: dict[str, A
     forbidden.extend(_case_visible_terms(case))
     if any(fragment and fragment in tool_result.voice_line.text for fragment in forbidden):
         failures.append("voice_line leaked semantic grounding details")
+    display_text = f"{tool_result.display_card.summary} {tool_result.display_card.body or ''}"
+    if any(fragment and fragment in display_text for fragment in ("bbox", "source", str(case.get("image") or ""), ".ppm", "data/", "approval-", "task-")):
+        failures.append("display card leaked semantic grounding technical details")
     summary = [
         f"approval={bool(tool_result.requires_approval)}",
         f"selection={bool(tool_result.agent_state.get('candidate_selection_required'))}",
@@ -454,6 +463,18 @@ def _bbox(value: Any) -> tuple[int, int, int, int] | None:
     if not isinstance(value, list) or len(value) != 4:
         return None
     return (int(value[0]), int(value[1]), int(value[2]), int(value[3]))
+
+
+def _within_range(value: Any, expected_range: Any) -> bool:
+    if not isinstance(expected_range, list) or len(expected_range) != 2:
+        return True
+    try:
+        number = float(value)
+        low = float(expected_range[0])
+        high = float(expected_range[1])
+    except (TypeError, ValueError):
+        return False
+    return low <= number <= high
 
 
 def _center_inside(bbox: tuple[int, int, int, int], area: tuple[int, int, int, int]) -> bool:

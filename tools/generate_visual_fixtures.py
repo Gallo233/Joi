@@ -602,6 +602,127 @@ SEMANTIC_CASES: list[dict] = [
             "min_candidates": 2,
         },
     },
+    {
+        "id": "semantic_modal_foreground_background_priority_approval",
+        "image": "semantic_modal_foreground_background_priority.ppm",
+        "query": "点目标确认",
+        "shapes": [
+            (36, 34, 82, 26, (88, 104, 132)),
+            (68, 54, 264, 132, (52, 58, 78)),
+            (220, 142, 78, 28, (210, 146, 72)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标确认", "bbox": [36, 34, 82, 26], "confidence": 0.38},
+            {"text": "目标确认", "bbox": [220, 142, 78, 28], "confidence": 0.96},
+        ],
+        "accessibility_elements": [
+            {"name": "目标确认", "role": "ButtonControl", "bounds": [220, 142, 78, 28], "enabled": True, "clickable": True, "confidence": 0.95}
+        ],
+        "expected": {
+            "requires_approval": True,
+            "candidate_selection_required": False,
+            "top_source": "fused",
+            "top_ambiguity": "none",
+            "approval_tool": "computer.click",
+            "click_x_range": [256, 263],
+            "click_y_range": [153, 159],
+        },
+    },
+    {
+        "id": "semantic_nested_popover_background_conflict_selection",
+        "image": "semantic_nested_popover_background_conflict.ppm",
+        "query": "点目标保存",
+        "shapes": [
+            (44, 48, 90, 26, (86, 128, 190)),
+            (170, 42, 190, 138, (48, 56, 76)),
+            (236, 128, 90, 26, (208, 146, 72)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标保存", "bbox": [44, 48, 90, 26], "confidence": 0.92},
+            {"text": "目标保存", "bbox": [236, 128, 90, 26], "confidence": 0.91},
+        ],
+        "accessibility_elements": [
+            {"name": "目标保存", "role": "ButtonControl", "bounds": [44, 48, 90, 26], "enabled": True, "clickable": True, "confidence": 0.92},
+            {"name": "目标保存", "role": "ButtonControl", "bounds": [236, 128, 90, 26], "enabled": True, "clickable": True, "confidence": 0.91},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "fused",
+            "top_ambiguity": "close_score",
+            "min_candidates": 2,
+        },
+    },
+    {
+        "id": "semantic_nonzero_fractional_capture_approval",
+        "image": "semantic_nonzero_fractional_capture.ppm",
+        "query": "点目标定位",
+        "capture_rect": {"screen_x": 120, "screen_y": 80, "width": 320, "height": 180, "scale_x": 1.25, "scale_y": 1.25},
+        "shapes": [(200, 96, 80, 32, (70, 132, 204))],
+        "ocr_blocks": [{"text": "目标定位", "bbox": [200, 96, 80, 32], "confidence": 0.97}],
+        "expected": {
+            "requires_approval": True,
+            "candidate_selection_required": False,
+            "top_source": "ocr",
+            "top_ambiguity": "none",
+            "approval_tool": "computer.click",
+            "click_x_range": [310, 314],
+            "click_y_range": [169, 175],
+        },
+    },
+    {
+        "id": "semantic_retina_scale_capture_approval",
+        "image": "semantic_retina_scale_capture.ppm",
+        "query": "点目标视网膜",
+        "capture_rect": {"screen_x": 40, "screen_y": 60, "width": 200, "height": 112, "scale_x": 2.0, "scale_y": 2.0},
+        "shapes": [(180, 80, 80, 30, (74, 136, 206))],
+        "ocr_blocks": [{"text": "目标视网膜", "bbox": [180, 80, 80, 30], "confidence": 0.97}],
+        "expected": {
+            "requires_approval": True,
+            "candidate_selection_required": False,
+            "top_source": "ocr",
+            "top_ambiguity": "none",
+            "approval_tool": "computer.click",
+            "click_x_range": [148, 152],
+            "click_y_range": [106, 110],
+        },
+    },
+    {
+        "id": "semantic_fractional_scale_mismatch_clarification",
+        "image": "semantic_fractional_scale_mismatch.ppm",
+        "query": "点目标缩放",
+        "capture_rect": {"screen_x": 80, "screen_y": 50, "width": 267, "height": 225, "scale_x": 1.5, "scale_y": 1.0},
+        "shapes": [(166, 88, 76, 28, (70, 132, 204))],
+        "ocr_blocks": [{"text": "目标缩放", "bbox": [166, 88, 76, 28], "confidence": 0.96}],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "no_approval_request": True,
+        },
+    },
+    {
+        "id": "semantic_edge_offset_low_confidence_selection",
+        "image": "semantic_edge_offset_low_confidence.ppm",
+        "query": "点目标边缘",
+        "shapes": [
+            (312, 186, 72, 24, (84, 126, 190)),
+            (306, 182, 82, 32, (50, 58, 76)),
+        ],
+        "visual_candidates": [
+            {"label": "目标边缘", "bbox": [312, 186, 72, 24], "confidence": 0.62, "reason": "边缘低置信候选", "region": "bottom_controls"}
+        ],
+        "accessibility_elements": [
+            {"name": "边缘说明", "role": "TextControl", "bounds": [308, 184, 74, 24], "enabled": True, "clickable": False, "confidence": 0.42}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "visual",
+            "top_ambiguity": "low_confidence",
+            "min_candidates": 1,
+        },
+    },
 ]
 
 
