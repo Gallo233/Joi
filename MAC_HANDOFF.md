@@ -136,7 +136,7 @@ Before committing:
 
 ```bash
 git status -sb
-git grep -n -E "七海|爱弥斯|Shinsekai MVP|sk-[A-Za-z0-9]" -- .
+git grep -n -E "<removed project or asset terms>|sk-[A-Za-z0-9]" -- .
 ```
 
 Expected: no real secrets or third-party character assets. Placeholder keys in tests/docs must be obvious fake examples.

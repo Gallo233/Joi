@@ -102,6 +102,27 @@ export interface RuntimeProviderStatus {
   notes?: string[]
 }
 
+export interface RuntimeConfigMutationChange {
+  setting: string
+  label: string
+  action: string
+  value_kind: string
+}
+
+export interface RuntimeConfigMutationError {
+  code: string
+  setting: string
+}
+
+export interface RuntimeConfigMutationResult {
+  ok: boolean
+  changed: boolean
+  dry_run: boolean
+  summary: string
+  changes: RuntimeConfigMutationChange[]
+  errors: RuntimeConfigMutationError[]
+}
+
 export interface UserCommand {
   id: string
   text: string
@@ -122,12 +143,39 @@ export interface CoreReadyPayload {
     enabled?: boolean
     configured?: boolean
     provider?: string
+    volume?: number
+    speed_factor?: number
+    fallback_to_system?: boolean
     last_error?: string
   }
   runtime?: {
     read_only?: boolean
     safe_for_display?: boolean
     providers?: RuntimeProviderStatus[]
+  }
+  runtime_settings?: {
+    asr?: {
+      enabled?: boolean
+      max_seconds?: number
+      max_bytes?: number
+      timeout_seconds?: number
+    }
+    tts?: {
+      enabled?: boolean
+      volume?: number
+      speed_factor?: number
+      fallback_to_system?: boolean
+    }
+    ocr?: {
+      timeout_seconds?: number
+    }
+    llm?: {
+      temperature?: number
+      use_mock?: boolean
+    }
+    computer_use?: {
+      post_action_settle_ms?: number
+    }
   }
   character?: {
     name?: string

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import inspect
+import re
 import tempfile
 from pathlib import Path
 
@@ -110,7 +111,6 @@ def _assert_config_mutation_payload_safe(payload: object, message: str) -> None:
     forbidden = [
         "/Users/",
         "C:\\",
-        "sk-",
         "token",
         "secret",
         "https://",
@@ -122,6 +122,7 @@ def _assert_config_mutation_payload_safe(payload: object, message: str) -> None:
         ".yaml",
     ]
     assert_true(all(fragment not in text for fragment in forbidden), message)
+    assert_true(re.search(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{4,}", text) is None, message)
 
 
 class FakeVisionObserver:
@@ -309,6 +310,15 @@ def _approval_payload(events) -> dict:
     for event in events:
         if event.type == EventType.APPROVAL_REQUIRED:
             approval = event.agent_state.get("approval")
+            if isinstance(approval, dict):
+                return approval
+    return {}
+
+
+def _approval_payload_from_dicts(events: list[dict]) -> dict:
+    for event in events:
+        if event.get("type") == EventType.APPROVAL_REQUIRED.value:
+            approval = event.get("agent_state", {}).get("approval")
             if isinstance(approval, dict):
                 return approval
     return {}
@@ -1603,6 +1613,138 @@ asr:
 
         shutil.rmtree(mutation_tmpdir, ignore_errors=True)
 
+    p4_20_tmpdir = tempfile.mkdtemp()
+    try:
+        p4_20_tmp = Path(p4_20_tmpdir)
+        character_dir = p4_20_tmp / "agent_companion" / "config"
+        character_dir.mkdir(parents=True, exist_ok=True)
+        (character_dir / "default_character.yaml").write_text(
+            """
+id: test-joi
+name: Joi
+asset_policy: test
+style:
+  tone: concise
+  speech: safe
+  boundaries: []
+persona: "Test companion."
+voice:
+  default_lang: zh
+  start: "开始。"
+  progress: "处理中。"
+  done: "完成。"
+  failed: "失败。"
+""",
+            encoding="utf-8",
+        )
+        config_path = p4_20_tmp / "config.yaml"
+        secrets_path = p4_20_tmp / "secrets.yaml"
+        config_path.write_text(
+            """
+llm:
+  provider: openai_compatible
+  use_mock: true
+  base_url: https://api.private.example/v1
+  model: gpt-public-text
+  api_key: ${JOI_LLM_API_KEY}
+  temperature: 0.7
+tts:
+  enabled: false
+  provider: gpt-sovits
+  server_url: http://127.0.0.1:9880/
+  volume: 0.85
+  speed_factor: 1.2
+  fallback_to_system: false
+asr:
+  enabled: false
+  provider: openai_compatible
+  base_url: ${JOI_ASR_BASE_URL}
+  model: whisper-1
+  api_key: ${JOI_ASR_API_KEY}
+  language: zh
+  max_seconds: 30
+  max_bytes: 12582912
+  timeout_seconds: 30
+ocr:
+  timeout_seconds: 5
+computer_use:
+  post_action_settle_ms: 200
+characters:
+  - name: Joi
+    color: "#d76f8f"
+    setting: "local test companion"
+""",
+            encoding="utf-8",
+        )
+        secrets_path.write_text(
+            """
+llm:
+  api_key: sk-runtime-text-secret
+asr:
+  api_key: sk-runtime-asr-secret
+""",
+            encoding="utf-8",
+        )
+        config_before = config_path.read_text(encoding="utf-8")
+        secrets_before = secrets_path.read_text(encoding="utf-8")
+        bridge = JsonRpcBridge(p4_20_tmp, asr_provider=MockAsrProvider("你好"), asr_state=AsrRuntimeState(False, False, "none"))
+        safe_panel_updates = {
+            "asr": {"enabled": True, "max_seconds": 42, "max_bytes": 4096, "timeout_seconds": 11},
+            "tts": {"enabled": True, "volume": 0.75, "speed_factor": 1.1, "fallback_to_system": True},
+            "ocr": {"timeout_seconds": 7},
+            "computer_use": {"post_action_settle_ms": 350},
+            "llm": {"temperature": 0.4, "use_mock": False},
+        }
+        preview_payload = bridge.preview_runtime_config_update_command(safe_panel_updates)
+        assert_true(preview_payload["ok"] and preview_payload["preview"]["dry_run"], "runtime config preview RPC should be read-only")
+        assert_true(config_path.read_text(encoding="utf-8") == config_before, "runtime config preview must not write config.yaml")
+        assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "runtime config preview must not touch secrets.yaml")
+        _assert_config_mutation_payload_safe(preview_payload["preview"], "runtime config preview RPC leaked sensitive detail")
+
+        denied_payload = bridge.apply_runtime_config_update_command(safe_panel_updates)
+        assert_true(denied_payload["ok"] and denied_payload["submitted"], "runtime config apply should submit an approval-gated request")
+        denied_events = denied_payload["events"]
+        denied_approval = _approval_payload_from_dicts(denied_events)
+        assert_true(bool(denied_approval), "runtime config apply should create a Joi approval card")
+        assert_true(config_path.read_text(encoding="utf-8") == config_before, "runtime config apply must not write before approval")
+        _assert_config_mutation_payload_safe([event.get("agent_state", {}) for event in denied_events], "runtime config approval state leaked sensitive detail")
+        denied_result = bridge.resolve_approval_command(str(denied_approval["approval_id"]), False)
+        assert_true(config_path.read_text(encoding="utf-8") == config_before, "denied runtime config approval must not write config.yaml")
+        assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "denied runtime config approval must preserve secrets.yaml byte-for-byte")
+        _assert_config_mutation_payload_safe(denied_result["events"], "denied runtime config events leaked sensitive detail")
+
+        invalid_payload = bridge.apply_runtime_config_update_command({"ocr": {"timeout_seconds": 0}, "tts": {"volume": "loud"}})
+        assert_true(not invalid_payload["ok"] and not invalid_payload["submitted"], "invalid runtime config updates should fail before approval")
+        assert_true(config_path.read_text(encoding="utf-8") == config_before, "invalid runtime config update must not write config.yaml")
+        assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "invalid runtime config update must preserve secrets.yaml byte-for-byte")
+        _assert_config_mutation_payload_safe(invalid_payload["preview"], "invalid runtime config preview leaked sensitive detail")
+
+        apply_payload = bridge.apply_runtime_config_update_command(safe_panel_updates)
+        approval = _approval_payload_from_dicts(apply_payload["events"])
+        assert_true(bool(approval), "second runtime config apply should create a fresh approval")
+        applied_payload = bridge.resolve_approval_command(str(approval["approval_id"]), True)
+        assert_true(any(event["type"] == EventType.TOOL_COMPLETED.value for event in applied_payload["events"]), "approved runtime config update should complete the tool")
+        mutated_runtime_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert_true(mutated_runtime_config["asr"]["enabled"] is True and mutated_runtime_config["asr"]["max_seconds"] == 42, "approved runtime config update should write ASR safe fields")
+        assert_true(mutated_runtime_config["tts"]["volume"] == 0.75 and mutated_runtime_config["tts"]["fallback_to_system"] is True, "approved runtime config update should write TTS safe fields")
+        assert_true(mutated_runtime_config["ocr"]["timeout_seconds"] == 7 and mutated_runtime_config["computer_use"]["post_action_settle_ms"] == 350, "approved runtime config update should write local runtime safe fields")
+        assert_true(mutated_runtime_config["llm"]["temperature"] == 0.4 and mutated_runtime_config["llm"]["use_mock"] is False, "approved runtime config update should write LLM safe fields")
+        assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "approved runtime config update must preserve secrets.yaml byte-for-byte")
+        assert_true("sk-runtime" not in config_path.read_text(encoding="utf-8"), "runtime config apply must not copy secrets into config.yaml")
+        ready_payload = applied_payload.get("ready") or {}
+        assert_true(ready_payload.get("runtime_settings", {}).get("asr", {}).get("max_seconds") == 42, "runtime ready payload should refresh ASR safe settings after apply")
+        assert_true(ready_payload.get("runtime_settings", {}).get("tts", {}).get("volume") == 0.75, "runtime ready payload should refresh TTS safe settings after apply")
+        assert_true(ready_payload.get("runtime_settings", {}).get("llm", {}).get("temperature") == 0.4, "runtime ready payload should refresh LLM safe settings after apply")
+        assert_true(ready_payload.get("runtime", {}).get("safe_for_display") is True, "runtime status payload should remain marked safe for display")
+        _assert_config_mutation_payload_safe(ready_payload.get("runtime"), "runtime status payload leaked sensitive detail after config apply")
+        _assert_config_mutation_payload_safe(ready_payload.get("runtime_settings"), "runtime settings payload leaked sensitive detail after config apply")
+        _assert_config_mutation_payload_safe(applied_payload["events"], "approved runtime config events leaked sensitive detail")
+        _assert_config_mutation_payload_safe(bridge.app.memory.recent(10), "runtime config memory leaked sensitive detail")
+    finally:
+        import shutil
+
+        shutil.rmtree(p4_20_tmpdir, ignore_errors=True)
+
     chat_app = AgentCompanionApp(workspace)
     chat_events = chat_app.handle_user_text("你好")
     assert_true(any(event.display_card.title == "对话" for event in chat_events), "chat should produce a dialogue card")
@@ -2126,6 +2268,7 @@ llm:
     shell_api_source = (workspace / "agent_companion" / "shell" / "src" / "api.ts").read_text(encoding="utf-8")
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
+    assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
     assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
     assert_true("event_created_at" in voice_runtime_source, "voice runtime key should include event identity")
@@ -2135,6 +2278,9 @@ llm:
     assert_true("runtimeStatusRows" in app_vue_source and "provider-card" in app_vue_source and "运行设置" in app_vue_source, "Shell developer mode should expose runtime provider settings/status view")
     assert_true("providerMeta" in app_vue_source and "providerErrorLabel" in app_vue_source, "Shell runtime status view should render sanitized provider details")
     assert_true("tesseract_missing" in app_vue_source and "tesseract_unavailable" in app_vue_source, "Shell runtime status view should label Tesseract runtime probe failures")
+    assert_true("runtimeDraft" in app_vue_source and "previewRuntimeSettings" in app_vue_source and "applyRuntimeSettings" in app_vue_source, "Shell developer panel should include runtime settings dry-run/apply controls")
+    assert_true("runtime_settings" in app_vue_source and "runtimePreview" in app_vue_source and "提交审批" in app_vue_source, "Shell runtime settings UI should refresh from safe ready payload and require approval apply")
+    assert_true("api_key" not in app_vue_source and "server_url" not in app_vue_source and "base_url" not in app_vue_source and "refer_audio_path" not in app_vue_source and "gpt_sovits_work_path" not in app_vue_source, "Shell runtime settings UI must not expose secret, endpoint, or path fields")
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
     assert_true("targetSource" in app_vue_source and "UI控件" in app_vue_source and "融合" in app_vue_source and "视觉" in app_vue_source, "Shell should show semantic target candidate source")

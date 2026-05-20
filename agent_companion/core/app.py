@@ -144,6 +144,42 @@ class AgentCompanionApp:
         self._run_plan(plan, 0)
         return self.bus.drain()
 
+    def request_runtime_config_update(self, updates: dict) -> list[AgentEvent]:
+        plan = AgentPlan(
+            task_id=f"task-{uuid.uuid4().hex[:10]}",
+            user_text="更新运行设置",
+            intent="runtime_settings",
+            steps=[
+                ToolRequest(
+                    "runtime.update_config",
+                    {"updates": updates, "dry_run": False},
+                    "应用已预览的安全运行设置变更。",
+                )
+            ],
+        )
+        self._emit(
+            AgentEvent(
+                EventType.USER_MESSAGE,
+                plan.task_id,
+                DisplayCard("用户请求", plan.user_text),
+                safe_voice_line("我收到了。", sprite="1"),
+                {"intent": plan.intent},
+            ),
+            plan.user_text,
+        )
+        self._emit(
+            AgentEvent(
+                EventType.PLAN_CREATED,
+                plan.task_id,
+                DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
+                safe_voice_line("我整理了一下步骤。", sprite="3"),
+                {"steps": [step.name for step in plan.steps]},
+            ),
+            plan.user_text,
+        )
+        self._run_plan(plan, 0)
+        return self.bus.drain()
+
     def resolve_approval(self, approval_id: str, approved: bool) -> list[AgentEvent]:
         if not approval_id:
             return self.bus.drain()
@@ -421,6 +457,7 @@ class AgentCompanionApp:
             "computer_use": "电脑操作",
             "semantic_target": "目标定位",
             "semantic_target_selection": "候选选择",
+            "runtime_settings": "运行设置",
         }
         return labels.get(intent, intent)
 

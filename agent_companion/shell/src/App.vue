@@ -2,7 +2,7 @@
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeProviderStatus, VoiceAudioPayload } from './protocol'
+import type { AgentEvent, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -18,6 +18,11 @@ const voiceState = ref<'idle' | 'recording' | 'transcribing'>('idle')
 const lastTranscript = ref('')
 const lastTtsError = ref('')
 const nowSeconds = ref(Date.now() / 1000)
+const runtimeDraft = ref(defaultRuntimeDraft())
+const runtimeDraftDirty = ref(false)
+const runtimePreview = ref<RuntimeConfigMutationResult | null>(null)
+const runtimePreviewLoading = ref(false)
+const runtimeApplyLoading = ref(false)
 let mediaRecorder: MediaRecorder | null = null
 let mediaStream: MediaStream | null = null
 let audioChunks: Blob[] = []
@@ -37,6 +42,7 @@ const client = new CoreClient({
   },
   onReady: (payload) => {
     ready.value = payload
+    syncRuntimeDraft(payload)
   },
   onVoiceAudio: (payload) => void playVoiceAudio(payload),
   onError: (message) => (errorText.value = message),
@@ -731,6 +737,11 @@ function playVoiceAudio(payload: VoiceAudioPayload) {
 }
 
 function rememberVoiceEventEpoch(event: AgentEvent) {
+  const runtimeUpdate = asRecord(event.agent_state?.runtime_config_update)
+  if (event.type === 'tool_completed' && runtimeUpdate.ok) {
+    runtimePreview.value = runtimeUpdate as unknown as RuntimeConfigMutationResult
+    if (runtimeUpdate.changed && !runtimeUpdate.dry_run) runtimeDraftDirty.value = false
+  }
   let eventEpoch = taskVoiceEpochs.get(event.task_id)
   if (event.type === 'user_message' || eventEpoch === undefined) {
     eventEpoch = voiceEpoch
@@ -810,6 +821,149 @@ function providerMeta(row: RuntimeProviderStatus) {
   return meta
 }
 
+function defaultRuntimeDraft() {
+  return {
+    asr_enabled: false,
+    asr_max_seconds: 30,
+    asr_max_bytes: 12 * 1024 * 1024,
+    asr_timeout_seconds: 30,
+    tts_enabled: false,
+    tts_volume: 0.85,
+    tts_speed_factor: 1.2,
+    tts_fallback_to_system: false,
+    ocr_timeout_seconds: 5,
+    llm_temperature: 0.7,
+    llm_use_mock: true,
+    computer_post_action_settle_ms: 200,
+  }
+}
+
+function syncRuntimeDraft(payload: CoreReadyPayload) {
+  if (runtimeDraftDirty.value) return
+  const draft = defaultRuntimeDraft()
+  const settings = payload.runtime_settings || {}
+  const asr = settings.asr || payload.asr || {}
+  const tts = payload.tts || {}
+  draft.asr_enabled = Boolean(asr.enabled)
+  draft.asr_max_seconds = Math.max(1, Number(asr.max_seconds || draft.asr_max_seconds))
+  draft.asr_max_bytes = Math.max(1024, Number(asr.max_bytes || draft.asr_max_bytes))
+  draft.asr_timeout_seconds = Math.max(1, Number(asr.timeout_seconds || draft.asr_timeout_seconds))
+  const ttsSettings = settings.tts || tts
+  draft.tts_enabled = Boolean(ttsSettings.enabled)
+  draft.tts_volume = Math.max(0, Number(ttsSettings.volume ?? draft.tts_volume))
+  draft.tts_speed_factor = Math.max(0.5, Number(ttsSettings.speed_factor ?? draft.tts_speed_factor))
+  draft.tts_fallback_to_system = Boolean(ttsSettings.fallback_to_system)
+  const ocr = settings.ocr || runtimeProvider(payload, 'ocr')
+  draft.ocr_timeout_seconds = Math.max(1, Number(ocr?.timeout_seconds || draft.ocr_timeout_seconds))
+  const computerUse = settings.computer_use || {}
+  const settleMs = computerUse.post_action_settle_ms ?? (parseSettleMs(runtimeProvider(payload, 'computer_use')?.limit) || draft.computer_post_action_settle_ms)
+  draft.computer_post_action_settle_ms = Math.max(0, Number(settleMs))
+  const llmSettings = settings.llm || {}
+  const text = runtimeProvider(payload, 'text')
+  draft.llm_temperature = Math.max(0, Number(llmSettings.temperature ?? draft.llm_temperature))
+  draft.llm_use_mock = typeof llmSettings.use_mock === 'boolean' ? llmSettings.use_mock : text?.state === 'mock'
+  runtimeDraft.value = draft
+}
+
+function runtimeProvider(payload: CoreReadyPayload, name: string) {
+  return (payload.runtime?.providers || []).find((row) => row.name === name)
+}
+
+function parseSettleMs(value?: string) {
+  const match = String(value || '').match(/settle\s+(\d+)ms/i)
+  return match ? Number(match[1]) : 0
+}
+
+function runtimeUpdatePayload() {
+  const draft = runtimeDraft.value
+  return {
+    asr: {
+      enabled: Boolean(draft.asr_enabled),
+      max_seconds: safeInteger(draft.asr_max_seconds, 1),
+      max_bytes: safeInteger(draft.asr_max_bytes, 1024),
+      timeout_seconds: safeInteger(draft.asr_timeout_seconds, 1),
+    },
+    tts: {
+      enabled: Boolean(draft.tts_enabled),
+      volume: safeNumber(draft.tts_volume, 0.85),
+      speed_factor: safeNumber(draft.tts_speed_factor, 1.2),
+      fallback_to_system: Boolean(draft.tts_fallback_to_system),
+    },
+    ocr: {
+      timeout_seconds: safeInteger(draft.ocr_timeout_seconds, 1),
+    },
+    llm: {
+      temperature: safeNumber(draft.llm_temperature, 0.7),
+      use_mock: Boolean(draft.llm_use_mock),
+    },
+    computer_use: {
+      post_action_settle_ms: safeInteger(draft.computer_post_action_settle_ms, 0),
+    },
+  }
+}
+
+function markRuntimeDraftDirty() {
+  runtimeDraftDirty.value = true
+  runtimePreview.value = null
+}
+
+async function previewRuntimeSettings() {
+  runtimePreviewLoading.value = true
+  runtimePreview.value = null
+  try {
+    const result = (await client.previewRuntimeConfig(runtimeUpdatePayload())) as { ok?: boolean; preview?: RuntimeConfigMutationResult }
+    runtimePreview.value = result.preview || null
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '运行设置预览失败'
+  } finally {
+    runtimePreviewLoading.value = false
+  }
+}
+
+async function applyRuntimeSettings() {
+  runtimeApplyLoading.value = true
+  try {
+    await client.applyRuntimeConfig(runtimeUpdatePayload())
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '运行设置提交失败'
+  } finally {
+    runtimeApplyLoading.value = false
+  }
+}
+
+function runtimeChangeActionLabel(action: string) {
+  const labels: Record<string, string> = {
+    changed: '将更新',
+    unchanged: '无变化',
+  }
+  return labels[action] || '待处理'
+}
+
+function runtimeValueKindLabel(kind: string) {
+  const labels: Record<string, string> = {
+    boolean: '开关',
+    seconds: '秒',
+    bytes: '字节',
+    milliseconds: '毫秒',
+    number: '数值',
+    identifier: '标识',
+    model: '模型名',
+    endpoint: '端点',
+    language: '语言',
+  }
+  return labels[kind] || '设置'
+}
+
+function safeInteger(value: unknown, fallback: number) {
+  const number = Number(value)
+  return Number.isFinite(number) ? Math.round(number) : fallback
+}
+
+function safeNumber(value: unknown, fallback: number) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
 function providerStateLabel(state: string) {
   const labels: Record<string, string> = {
     ready: '可用',
@@ -847,6 +1001,18 @@ function providerErrorLabel(error: string) {
     computer_use_windows_only: '仅 Windows 可执行',
     model_unconfigured: '模型未配置',
     runtime_status_unavailable: '状态不可用',
+    empty_update: '没有变更',
+    field_not_allowed: '不允许修改',
+    duplicate_field: '重复设置',
+    invalid_type: '类型不正确',
+    invalid_value: '值不可用',
+    invalid_endpoint: '端点不可用',
+    out_of_range: '超出范围',
+    sensitive_field_forbidden: '敏感字段已拒绝',
+    sensitive_value_forbidden: '敏感值已拒绝',
+    config_missing: '缺少配置',
+    config_invalid: '配置不可读取',
+    write_failed: '写入失败',
   }
   return error
     .split(';')
@@ -1201,6 +1367,83 @@ onBeforeUnmount(() => {
             <p>{{ providerSummary(row) }}</p>
             <div class="provider-meta" v-if="providerMeta(row).length">
               <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="runtime-settings">
+          <div class="runtime-settings-head">
+            <strong>安全设置</strong>
+            <span>非密钥字段</span>
+          </div>
+          <div class="runtime-controls">
+            <label>
+              <span>ASR</span>
+              <input v-model="runtimeDraft.asr_enabled" type="checkbox" @change="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>ASR 时长</span>
+              <input v-model.number="runtimeDraft.asr_max_seconds" type="number" min="1" max="600" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>ASR 体积</span>
+              <input v-model.number="runtimeDraft.asr_max_bytes" type="number" min="1024" step="1024" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>ASR 超时</span>
+              <input v-model.number="runtimeDraft.asr_timeout_seconds" type="number" min="1" max="300" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>TTS</span>
+              <input v-model="runtimeDraft.tts_enabled" type="checkbox" @change="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>音量</span>
+              <input v-model.number="runtimeDraft.tts_volume" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>语速</span>
+              <input v-model.number="runtimeDraft.tts_speed_factor" type="number" min="0.5" max="2" step="0.05" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>系统回退</span>
+              <input v-model="runtimeDraft.tts_fallback_to_system" type="checkbox" @change="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>OCR 超时</span>
+              <input v-model.number="runtimeDraft.ocr_timeout_seconds" type="number" min="1" max="120" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>温度</span>
+              <input v-model.number="runtimeDraft.llm_temperature" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>Mock 模型</span>
+              <input v-model="runtimeDraft.llm_use_mock" type="checkbox" @change="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>操作等待</span>
+              <input v-model.number="runtimeDraft.computer_post_action_settle_ms" type="number" min="0" max="10000" step="25" @input="markRuntimeDraftDirty" />
+            </label>
+          </div>
+          <div class="runtime-actions">
+            <button type="button" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">
+              {{ runtimePreviewLoading ? '预览中' : '预览' }}
+            </button>
+            <button type="button" class="secondary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">
+              {{ runtimeApplyLoading ? '提交中' : '提交审批' }}
+            </button>
+          </div>
+          <div class="runtime-preview" v-if="runtimePreview">
+            <p>{{ runtimePreview.summary }}</p>
+            <div class="runtime-preview-list" v-if="runtimePreview.changes?.length">
+              <span v-for="change in runtimePreview.changes" :key="change.setting">
+                <strong>{{ change.label }}</strong>{{ runtimeChangeActionLabel(change.action) }} · {{ runtimeValueKindLabel(change.value_kind) }}
+              </span>
+            </div>
+            <div class="runtime-preview-list failed" v-if="runtimePreview.errors?.length">
+              <span v-for="error in runtimePreview.errors" :key="`${error.setting}-${error.code}`">
+                <strong>{{ error.setting }}</strong>{{ providerErrorLabel(error.code) || '无法应用' }}
+              </span>
             </div>
           </div>
         </div>

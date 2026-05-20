@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent_companion.core.app import AgentCompanionApp
+from agent_companion.core.runtime_config_writer import preview_runtime_config_update
 from agent_companion.core.schemas import AgentEvent, DisplayCard
 from agent_companion.core.schemas import EventType
 from agent_companion.core.runtime_status import build_runtime_status
@@ -111,6 +112,19 @@ class JsonRpcBridge:
                 asyncio.create_task(asyncio.to_thread(self.resolve_approval_command, approval_id, approved))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
                 return
+            if method == "runtime.config.preview":
+                updates = params.get("updates")
+                result = self.preview_runtime_config_update_command(updates if isinstance(updates, dict) else {})
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "runtime.config.apply":
+                updates = params.get("updates")
+                if not isinstance(updates, dict):
+                    await websocket.send(self._result(request_id, {"ok": False, "error": "invalid_update"}))
+                    return
+                asyncio.create_task(asyncio.to_thread(self.apply_runtime_config_update_command, updates))
+                await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
+                return
             if method == "semantic_target.select":
                 selection_id = str(params.get("selection_id") or "").strip()
                 rank = _safe_int(params.get("rank"))
@@ -143,6 +157,9 @@ class JsonRpcBridge:
             payload = event.to_dict()
             message = json.dumps({"jsonrpc": "2.0", "method": "agent.event", "params": payload}, ensure_ascii=False)
             await self._broadcast(message)
+            if _event_applied_runtime_config(event):
+                self._reload_runtime_after_config_change()
+                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
             if event.type in SPEAKABLE_EVENTS:
                 asyncio.create_task(self._synthesize_voice(event))
 
@@ -196,10 +213,25 @@ class JsonRpcBridge:
 
     def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
         sequence, events = self._run_serial("approval.resolve", lambda: self.app.resolve_approval(approval_id, approved))
-        return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+        payload: dict[str, Any] = {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+        if any(_event_applied_runtime_config(event) for event in events):
+            self._reload_runtime_after_config_change()
+            payload["ready"] = self._ready_payload()
+        return payload
 
     def select_semantic_target_command(self, selection_id: str, rank: int) -> dict[str, Any]:
         sequence, events = self._run_serial("semantic_target.select", lambda: self.app.select_semantic_target(selection_id, rank))
+        return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+
+    def preview_runtime_config_update_command(self, updates: dict[str, Any]) -> dict[str, Any]:
+        result = preview_runtime_config_update(self.workspace, updates if isinstance(updates, dict) else {})
+        return {"ok": result.ok, "preview": result.to_agent_state()}
+
+    def apply_runtime_config_update_command(self, updates: dict[str, Any]) -> dict[str, Any]:
+        preview = preview_runtime_config_update(self.workspace, updates if isinstance(updates, dict) else {})
+        if not preview.ok:
+            return {"ok": False, "submitted": False, "preview": preview.to_agent_state()}
+        sequence, events = self._run_serial("runtime.config.apply", lambda: self.app.request_runtime_config_update(updates))
         return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
 
     def _run_serial(self, label: str, callback: Callable[[], list[AgentEvent]]) -> tuple[int, list[AgentEvent]]:
@@ -270,6 +302,7 @@ class JsonRpcBridge:
             from agent_companion.core.config import load_app_config
 
             config = load_app_config(config_path)
+            payload["runtime_settings"] = _safe_runtime_settings(config)
             character = config.primary_character
             sprites: list[dict[str, str]] = []
             for sprite in character.sprites:
@@ -291,6 +324,10 @@ class JsonRpcBridge:
         except Exception:
             return payload
         return payload
+
+    def _reload_runtime_after_config_change(self) -> None:
+        self.asr, self.asr_state = build_asr_provider(self.workspace)
+        self.tts.reload()
 
     @staticmethod
     def _image_data_url(path: Path) -> str:
@@ -366,6 +403,39 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _event_applied_runtime_config(event: AgentEvent) -> bool:
+    state = event.agent_state or {}
+    update = state.get("runtime_config_update")
+    return event.type == EventType.TOOL_COMPLETED and isinstance(update, dict) and bool(update.get("ok")) and bool(update.get("changed")) and not bool(update.get("dry_run"))
+
+
+def _safe_runtime_settings(config: Any) -> dict[str, Any]:
+    return {
+        "asr": {
+            "enabled": bool(config.asr.enabled),
+            "max_seconds": max(1, int(config.asr.max_seconds or 1)),
+            "max_bytes": max(1024, int(config.asr.max_bytes or 1024)),
+            "timeout_seconds": max(1, int(config.asr.timeout_seconds or 1)),
+        },
+        "tts": {
+            "enabled": bool(config.tts.enabled),
+            "volume": float(config.tts.volume),
+            "speed_factor": float(config.tts.speed_factor),
+            "fallback_to_system": bool(config.tts.fallback_to_system),
+        },
+        "ocr": {
+            "timeout_seconds": max(1, int(config.ocr.timeout_seconds or 1)),
+        },
+        "llm": {
+            "temperature": float(config.llm.temperature),
+            "use_mock": bool(config.llm.use_mock),
+        },
+        "computer_use": {
+            "post_action_settle_ms": max(0, int(config.computer_use.post_action_settle_ms or 0)),
+        },
+    }
 
 
 def _friendly_asr_message(error: str) -> str:

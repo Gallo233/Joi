@@ -60,6 +60,14 @@ export class CoreClient {
     return this.send('semantic_target.select', { selection_id: selectionId, rank })
   }
 
+  previewRuntimeConfig(updates: Record<string, unknown>) {
+    return this.send('runtime.config.preview', { updates })
+  }
+
+  applyRuntimeConfig(updates: Record<string, unknown>) {
+    return this.send('runtime.config.apply', { updates })
+  }
+
   transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number) {
     return this.send(
       'voice.transcribe',

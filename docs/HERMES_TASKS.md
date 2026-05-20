@@ -86,9 +86,10 @@ The current observation, first action layer, approval hardening, watch loop, and
 - `tools/generate_visual_fixtures.py` now generates committed synthetic fixtures for both visual detector grounding and Computer Use image-diff verification.
 - `tools/eval_visual_detector.py` reports committed synthetic visual detector results, optional local private visual detector results, committed synthetic image verification results, and optional local private image verification results as separate suites.
 - Local private screenshots and manifests must stay under ignored `data/local_visual_eval/`; missing local manifests skip instead of failing.
-- Developer mode now has a read-only runtime provider status panel for ASR, TTS, OCR, text/vision/expression models, Computer Use platform availability, and audit/verification capability.
+- Developer mode now has a runtime provider status panel for ASR, TTS, OCR, text/vision/expression models, Computer Use platform availability, and audit/verification capability.
 - Runtime status payloads are sanitized: no API keys, tokens, endpoints, full local model paths, raw logs, screenshot/audio filenames, task ids, or approval ids should be displayed or spoken.
-- Safe runtime config mutation foundation now exists in Core: `runtime_config_writer` can preview or write allowlisted non-secret provider/runtime fields, preserves unknown YAML fields plus env placeholders, leaves `secrets.yaml` untouched, validates types/ranges, and returns only sanitized change labels. `runtime.update_config` is registered as medium-risk and must stay approval-gated. Full settings UI remains intentionally deferred.
+- Safe runtime config mutation foundation now exists in Core: `runtime_config_writer` can preview or write allowlisted non-secret provider/runtime fields, preserves unknown YAML fields plus env placeholders, leaves `secrets.yaml` untouched, validates types/ranges, and returns only sanitized change labels. `runtime.update_config` is registered as medium-risk and must stay approval-gated. Full provider/secret settings UI remains intentionally deferred.
+- The shell now exposes compact developer-mode safe runtime controls for enabled flags, local limits, timeout/volume/speed/temperature, system fallback, and Computer Use settle delay. The flow is preview-only dry run first, then `runtime.update_config` approval, then apply/refresh; provider secrets, endpoints, base URLs, local paths, and model/audio filenames remain excluded from the UI.
 - OCR runtime status now probes Pillow, `pytesseract`, the system `tesseract` executable, and a safe version check before reporting ready.
 - Coding tasks now parse `codex exec --json` output into a sanitized `codex_run` status with started/progress/final/error/permission categories, safe summaries, elapsed/return code, and artifact labels. Raw commands, absolute paths, JSONL text, stderr, tokens, task ids, approval ids, and resume tokens must never enter `voice_line`.
 - Codex permission requests can become a second Joi approval only when the JSONL event explicitly marks the request as resumable. The approval remains one-time/TTL-bound through the existing task id, step index, tool, and arguments-hash mechanism. Denied or expired permission approvals stop the coding task without resuming the runner.
@@ -105,7 +106,7 @@ Next task options, in priority order:
 
 1. Continue local private semantic calibration against real dense browser, desktop, and game layouts where screenshots are available, then convert only safe failure categories into generated synthetic fixtures.
 2. Re-test real Codex CLI permission JSONL only when a documented permission-specific resume contract is available; keep fail-closed behavior until then.
-3. Add the runtime settings UI later on top of the safe writer; keep secret entry/storage separate and approval-gated.
+3. Expand runtime settings only after a secret-safe config writer/UI contract exists for provider endpoints and credentials; keep the current safe controls approval-gated.
 4. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 5. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, screenshot filenames, approval ids, and task ids.
 

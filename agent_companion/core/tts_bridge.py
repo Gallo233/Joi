@@ -73,6 +73,11 @@ class TtsBridge:
                 pass
             self._client = None
 
+    def reload(self) -> None:
+        self.shutdown()
+        self._config = None
+        self._load()
+
     def _load(self) -> None:
         config_path = self.workspace / "config.yaml"
         if not config_path.is_file():

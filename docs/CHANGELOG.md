@@ -59,6 +59,7 @@
 - Added sanitized Codex coding-task audit state from `codex exec --json`, including run status, event timeline, safe artifact labels, resumable permission-request approvals, denial/expiry handling, and fail-closed behavior when Codex cannot be safely resumed.
 - Corrected unresumable Codex permission state so fail-closed runs no longer look like pending Joi approvals, and recorded the real CLI probe boundary without committing raw JSONL or local paths.
 - Added a Core safe runtime config mutation foundation with allowlisted non-secret provider fields, dry-run summaries, validation, atomic writes, `secrets.yaml` preservation, and approval-gated `runtime.update_config` plumbing without enabling a full settings UI.
+- Added developer-mode runtime settings dry-run/apply controls for safe non-secret fields, with sanitized previews, Joi approval before writes, runtime status refresh after apply, and continued exclusion of provider secrets, endpoints, base URLs, local paths, and model/audio filenames.
 
 ## 2026-05-14
 
