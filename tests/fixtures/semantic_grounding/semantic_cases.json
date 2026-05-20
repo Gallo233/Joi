@@ -1413,5 +1413,300 @@
       400,
       225
     ]
+  },
+  {
+    "id": "semantic_multi_monitor_offset_mismatch_clarification",
+    "image": "semantic_multi_monitor_offset_mismatch.ppm",
+    "query": "点目标偏移",
+    "capture_rect": {
+      "screen_x": -1920,
+      "screen_y": 80,
+      "width": 320,
+      "height": 180,
+      "scale_x": 1.0,
+      "scale_y": 1.0
+    },
+    "accessibility_elements": [
+      {
+        "name": "目标偏移",
+        "role": "ButtonControl",
+        "bounds": [
+          -1630,
+          130,
+          80,
+          30
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.97
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": false,
+      "needs_clarification": true,
+      "no_approval_request": true,
+      "top_source": "accessibility",
+      "top_ambiguity": "none"
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_window_moved_between_observations_clarification",
+    "image": "semantic_window_moved_between_observations.ppm",
+    "query": "点目标移动",
+    "capture_rect": {
+      "screen_x": 420,
+      "screen_y": 260,
+      "width": 240,
+      "height": 150,
+      "scale_x": 1.0,
+      "scale_y": 1.0
+    },
+    "accessibility_elements": [
+      {
+        "name": "目标移动",
+        "role": "ButtonControl",
+        "bounds": [
+          638,
+          318,
+          72,
+          28
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.97
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": false,
+      "needs_clarification": true,
+      "no_approval_request": true,
+      "top_source": "accessibility",
+      "top_ambiguity": "none"
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_mixed_monitor_scale_approval",
+    "image": "semantic_mixed_monitor_scale.ppm",
+    "query": "点目标混合",
+    "capture_rect": {
+      "screen_x": -960,
+      "screen_y": 240,
+      "width": 267,
+      "height": 150,
+      "scale_x": 1.5,
+      "scale_y": 1.5
+    },
+    "ocr_blocks": [
+      {
+        "text": "目标混合",
+        "bbox": [
+          210,
+          90,
+          90,
+          30
+        ],
+        "confidence": 0.97
+      }
+    ],
+    "expected": {
+      "requires_approval": true,
+      "candidate_selection_required": false,
+      "top_source": "ocr",
+      "top_ambiguity": "none",
+      "approval_tool": "computer.click",
+      "click_x_range": [
+        -792,
+        -788
+      ],
+      "click_y_range": [
+        308,
+        312
+      ]
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_mixed_scale_window_overlap_same_label_selection",
+    "image": "semantic_mixed_scale_window_overlap_same_label.ppm",
+    "query": "点目标同步",
+    "capture_rect": {
+      "screen_x": -960,
+      "screen_y": 240,
+      "width": 267,
+      "height": 150,
+      "scale_x": 1.5,
+      "scale_y": 1.5
+    },
+    "ocr_blocks": [
+      {
+        "text": "目标同步",
+        "bbox": [
+          72,
+          54,
+          78,
+          28
+        ],
+        "confidence": 0.93
+      },
+      {
+        "text": "目标同步",
+        "bbox": [
+          236,
+          132,
+          78,
+          28
+        ],
+        "confidence": 0.92
+      }
+    ],
+    "accessibility_elements": [
+      {
+        "name": "目标同步",
+        "role": "ButtonControl",
+        "bounds": [
+          -912,
+          276,
+          52,
+          19
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.93
+      },
+      {
+        "name": "目标同步",
+        "role": "ButtonControl",
+        "bounds": [
+          -803,
+          328,
+          52,
+          19
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.92
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "fused",
+      "top_ambiguity": "close_score",
+      "min_candidates": 2
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_dense_repeated_actionable_mixed_monitor_selection",
+    "image": "semantic_dense_repeated_actionable_mixed_monitor.ppm",
+    "query": "点目标执行",
+    "capture_rect": {
+      "screen_x": 1440,
+      "screen_y": -180,
+      "width": 320,
+      "height": 180,
+      "scale_x": 1.25,
+      "scale_y": 1.25
+    },
+    "ocr_blocks": [
+      {
+        "text": "目标执行",
+        "bbox": [
+          260,
+          30,
+          78,
+          28
+        ],
+        "confidence": 0.93
+      },
+      {
+        "text": "目标执行",
+        "bbox": [
+          260,
+          72,
+          78,
+          28
+        ],
+        "confidence": 0.92
+      },
+      {
+        "text": "目标执行",
+        "bbox": [
+          260,
+          114,
+          78,
+          28
+        ],
+        "confidence": 0.91
+      }
+    ],
+    "accessibility_elements": [
+      {
+        "name": "目标执行",
+        "role": "ButtonControl",
+        "bounds": [
+          1648,
+          -156,
+          62,
+          22
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.93
+      },
+      {
+        "name": "目标执行",
+        "role": "ButtonControl",
+        "bounds": [
+          1648,
+          -122,
+          62,
+          22
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.92
+      },
+      {
+        "name": "目标执行",
+        "role": "ButtonControl",
+        "bounds": [
+          1648,
+          -88,
+          62,
+          22
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.91
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "fused",
+      "top_ambiguity": "close_score",
+      "min_candidates": 3
+    },
+    "image_size": [
+      400,
+      225
+    ]
   }
 ]

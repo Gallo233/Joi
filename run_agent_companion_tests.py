@@ -703,6 +703,25 @@ def main() -> int:
         partial_capture_state,
     )
     assert_true(trusted_uia_args == {"x": 190, "y": 135}, "trusted UIA screen_bbox center should create expected click args")
+    mixed_scale_state = _fake_computer_observation(
+        workspace,
+        rel="data/agent_companion/vision/target-mixed-monitor.png",
+        width=400,
+        height=225,
+        capture_rect=CaptureRect(-960, 240, 267, 150, scale_x=1.5, scale_y=1.5),
+    ).to_agent_state()
+    mixed_ocr_args = click_arguments_from_state({"source": "ocr", "bbox": [210, 90, 90, 30]}, mixed_scale_state)
+    assert_true(mixed_ocr_args == {"x": -790, "y": 310}, "mixed-scale OCR bbox should convert through trusted negative-origin capture rect")
+    mixed_uia_inside_args = click_arguments_from_state(
+        {"source": "accessibility", "bbox": [90, 60, 120, 45], "screen_bbox": [-900, 280, 80, 30]},
+        mixed_scale_state,
+    )
+    assert_true(mixed_uia_inside_args == {"x": -860, "y": 295}, "negative-origin UIA screen_bbox inside capture rect should create click args")
+    mixed_uia_outside_args = click_arguments_from_state(
+        {"source": "accessibility", "bbox": [360, 90, 40, 30], "screen_bbox": [-720, 300, 80, 30]},
+        mixed_scale_state,
+    )
+    assert_true(mixed_uia_outside_args is None, "negative-origin UIA screen_bbox center outside capture rect must fail closed")
 
     clipped_uia_snapshot = AccessibilitySnapshot(
         "success",
@@ -2477,6 +2496,9 @@ llm:
     assert_true("semantic_partial_capture_rect_clarification" in semantic_fixture_manifest and "semantic_partial_capture_rect_trusted_approval" in semantic_fixture_manifest, "partial capture rect semantic fixtures should cover fail-closed and approval paths")
     assert_true("semantic_clipped_uia_center_outside_clarification" in semantic_fixture_manifest and "semantic_clipped_uia_selection_still_untrusted" in semantic_fixture_manifest, "clipped UIA screen-bounds fixtures should cover direct and selected unsafe paths")
     assert_true("semantic_uia_screen_bbox_inside_approval" in semantic_fixture_manifest, "trusted UIA screen-bounds fixture should cover positive approval path")
+    assert_true("semantic_multi_monitor_offset_mismatch_clarification" in semantic_fixture_manifest and "semantic_window_moved_between_observations_clarification" in semantic_fixture_manifest, "multi-monitor offset and moved-window semantic fixtures should fail closed")
+    assert_true("semantic_mixed_monitor_scale_approval" in semantic_fixture_manifest and "semantic_mixed_scale_window_overlap_same_label_selection" in semantic_fixture_manifest, "mixed-scale approval and overlapping-window selection fixtures should be present")
+    assert_true("semantic_dense_repeated_actionable_mixed_monitor_selection" in semantic_fixture_manifest, "dense repeated actionable mixed-monitor semantic fixture should be present")
     eval_source = (workspace / "tools" / "eval_visual_detector.py").read_text(encoding="utf-8")
     assert_true("local private image verification eval: skipped" in eval_source and "image_diff_cases.local.json" in eval_source, "local private image-diff eval should skip when missing")
     assert_true("_print_private_results" in eval_source and "failure_category" in eval_source and "local_private_case_" in eval_source, "local private eval output should be sanitized")
