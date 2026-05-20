@@ -79,12 +79,12 @@ def run_eval(root: Path = ROOT, verbose: bool = True) -> int:
         if local_skipped:
             print(f"local private visual detector eval: skipped ({_rel(root, LOCAL_CASE_FILE)} not found)")
         else:
-            _print_results("local private visual detector eval", local_results)
+            _print_private_results("local private visual detector eval", local_results)
         _print_results("committed synthetic image verification eval", synthetic_image_results)
         if local_image_skipped:
             print(f"local private image verification eval: skipped ({_rel(root, LOCAL_IMAGE_DIFF_CASE_FILE)} not found)")
         else:
-            _print_results("local private image verification eval", local_image_results)
+            _print_private_results("local private image verification eval", local_image_results)
     all_results = [*synthetic_results, *local_results, *synthetic_image_results, *local_image_results]
     return 0 if all(result.passed for result in all_results) else 1
 
@@ -109,6 +109,17 @@ def _print_results(label: str, results: list[CaseResult]) -> None:
             print(f"  candidate: {candidate}")
         for failure in result.failures:
             print(f"  failure: {failure}")
+
+
+def _print_private_results(label: str, results: list[CaseResult]) -> None:
+    passed = sum(1 for result in results if result.passed)
+    print(f"{label}: {passed}/{len(results)} passed")
+    for index, result in enumerate(results, start=1):
+        status = "PASS" if result.passed else "FAIL"
+        print(f"[{status}] local_private_case_{index}")
+        categories = sorted({_failure_category(failure) for failure in result.failures})
+        for category in categories:
+            print(f"  failure_category: {category}")
 
 
 def _run_case(root: Path, suite: str, base_dir: Path, case: dict[str, Any]) -> CaseResult:
@@ -265,6 +276,31 @@ def _iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> f
 def _candidate_summary(candidate: Any) -> str:
     confidence = round(float(candidate.confidence) * 100)
     return f"{candidate.region} {candidate.bbox} {confidence}% {candidate.reason}"
+
+
+def _failure_category(failure: str) -> str:
+    text = failure.casefold()
+    if "at least" in text:
+        return "candidate_count_low"
+    if "at most" in text:
+        return "candidate_count_high"
+    if "outside allowed area" in text or "overlap approximate" in text:
+        return "localization_miss"
+    if "preview" in text:
+        return "preview_unrenderable"
+    if "voice_line" in text or "voice leaked" in text:
+        return "voice_leak"
+    if "direct approval" in text:
+        return "approval_gate_regression"
+    if "request selection" in text:
+        return "selection_gate_regression"
+    if "status" in text:
+        return "status_mismatch"
+    if "image_changed=true" in text:
+        return "image_change_false_negative"
+    if "image_changed=false" in text:
+        return "image_change_false_positive"
+    return "calibration_failure"
 
 
 def _rel(root: Path, path: Path) -> str:

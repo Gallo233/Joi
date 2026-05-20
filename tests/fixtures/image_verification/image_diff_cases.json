@@ -53,5 +53,38 @@
       400,
       225
     ]
+  },
+  {
+    "id": "image_diff_thin_progress_change",
+    "before_image": "thin_progress_before.ppm",
+    "after_image": "thin_progress_after.ppm",
+    "expected_image_changed": true,
+    "expected_verification_status": "changed",
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "image_diff_small_badge_change",
+    "before_image": "small_badge_before.ppm",
+    "after_image": "small_badge_after.ppm",
+    "expected_image_changed": true,
+    "expected_verification_status": "changed",
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "image_diff_cursor_blink_noop",
+    "before_image": "cursor_blink_before.ppm",
+    "after_image": "cursor_blink_after.ppm",
+    "expected_image_changed": false,
+    "expected_verification_status": "likely_noop",
+    "image_size": [
+      400,
+      225
+    ]
   }
 ]

@@ -231,5 +231,81 @@
       400,
       225
     ]
+  },
+  {
+    "id": "sparse_page_bottom_action_strip",
+    "image": "sparse_page_bottom_action_strip.ppm",
+    "query": "点底部操作",
+    "expected_regions": [
+      "bottom_controls"
+    ],
+    "expected_candidate_count": {
+      "min": 1,
+      "max": 4
+    },
+    "allowed_bbox_area": [
+      80,
+      155,
+      240,
+      65
+    ],
+    "approximate_bbox": [
+      136,
+      176,
+      128,
+      22
+    ],
+    "should_require_selection": true,
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "right_bottom_split_controls",
+    "image": "right_bottom_split_controls.ppm",
+    "query": "点右侧或底部控件",
+    "expected_regions": [
+      "sidebar",
+      "bottom_controls"
+    ],
+    "expected_candidate_count": {
+      "min": 1,
+      "max": 4
+    },
+    "allowed_bbox_area": [
+      235,
+      20,
+      150,
+      195
+    ],
+    "should_require_selection": true,
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "modal_low_contrast_actions",
+    "image": "modal_low_contrast_actions.ppm",
+    "query": "点确认",
+    "expected_regions": [
+      "main_content"
+    ],
+    "expected_candidate_count": {
+      "min": 1,
+      "max": 4
+    },
+    "allowed_bbox_area": [
+      86,
+      80,
+      230,
+      100
+    ],
+    "should_require_selection": true,
+    "image_size": [
+      400,
+      225
+    ]
   }
 ]

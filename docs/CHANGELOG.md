@@ -50,6 +50,8 @@
 - Added synthetic image-diff regressions for large visible changes, subtle visible changes, identical frames, tiny compression-like noise, and unreadable screenshots.
 - Added a read-only developer runtime provider status panel for ASR, TTS, OCR, text/vision/expression models, Computer Use platform availability, and audit/verification capability without exposing secrets, endpoints, logs, screenshot/audio filenames, or local model paths.
 - Tightened OCR runtime status so it only reports ready after Pillow, `pytesseract`, the system `tesseract` executable, and a sanitized version probe are available.
+- Promoted local private visual calibration lessons into committed synthetic fixtures for sparse page controls, right/bottom HUD controls, low-contrast modal actions, thin progress changes, small badge changes, and cursor-blink no-op verification.
+- Sanitized local private visual eval output so it reports suite counts and abstract failure categories without printing private case ids, screenshot filenames, paths, text, account data, URLs, or window titles.
 
 ## 2026-05-14
 
