@@ -349,6 +349,156 @@ SEMANTIC_CASES: list[dict] = [
             "max_candidates": 0,
         },
     },
+    {
+        "id": "semantic_dense_duplicate_regions_selection",
+        "image": "semantic_dense_duplicate_regions.ppm",
+        "query": "点目标丙",
+        "shapes": [
+            (24, 22, 70, 24, (78, 122, 190)),
+            (298, 74, 70, 24, (82, 132, 198)),
+            (158, 176, 70, 24, (86, 138, 204)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标丙", "bbox": [24, 22, 70, 24], "confidence": 0.88},
+            {"text": "目标丙", "bbox": [298, 74, 70, 24], "confidence": 0.87},
+            {"text": "目标丙", "bbox": [158, 176, 70, 24], "confidence": 0.86},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_ambiguity": "close_score",
+            "min_candidates": 3,
+        },
+    },
+    {
+        "id": "semantic_modal_foreground_fused_approval",
+        "image": "semantic_modal_foreground_fused.ppm",
+        "query": "点目标丁",
+        "shapes": [
+            (18, 28, 70, 24, (82, 98, 124)),
+            (92, 56, 216, 114, (54, 60, 78)),
+            (214, 132, 76, 28, (210, 146, 74)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标丁", "bbox": [214, 132, 76, 28], "confidence": 0.96},
+            {"text": "目标丁", "bbox": [18, 28, 70, 24], "confidence": 0.42},
+        ],
+        "accessibility_elements": [
+            {"name": "目标丁", "role": "ButtonControl", "bounds": [214, 132, 76, 28], "enabled": True, "clickable": True, "confidence": 0.94}
+        ],
+        "expected": {
+            "requires_approval": True,
+            "candidate_selection_required": False,
+            "top_source": "fused",
+            "top_ambiguity": "none",
+            "approval_tool": "computer.click",
+        },
+    },
+    {
+        "id": "semantic_modal_foreground_ambiguous_selection",
+        "image": "semantic_modal_foreground_ambiguous.ppm",
+        "query": "点目标戊",
+        "shapes": [
+            (90, 54, 220, 112, (56, 62, 78)),
+            (114, 132, 74, 28, (104, 116, 136)),
+            (214, 132, 74, 28, (208, 144, 78)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标戊", "bbox": [114, 132, 74, 28], "confidence": 0.92},
+            {"text": "目标戊", "bbox": [214, 132, 74, 28], "confidence": 0.91},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_ambiguity": "close_score",
+            "min_candidates": 2,
+        },
+    },
+    {
+        "id": "semantic_dense_table_adjacent_low_confidence_selection",
+        "image": "semantic_dense_table_adjacent_low_confidence.ppm",
+        "query": "点目标己",
+        "shapes": [
+            (54, 62, 292, 1, (180, 186, 196)),
+            (54, 90, 292, 1, (180, 186, 196)),
+            (54, 118, 292, 1, (180, 186, 196)),
+            (270, 68, 54, 18, (88, 128, 184)),
+            (270, 96, 54, 18, (90, 130, 186)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标己", "bbox": [270, 68, 54, 18], "confidence": 0.35},
+            {"text": "目标己", "bbox": [270, 96, 54, 18], "confidence": 0.34},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_ambiguity": "close_score",
+            "max_top_confidence": 0.72,
+            "min_candidates": 2,
+        },
+    },
+    {
+        "id": "semantic_missing_capture_rect_clarification",
+        "image": "semantic_missing_capture_rect.ppm",
+        "query": "点目标庚",
+        "capture_rect": None,
+        "shapes": [(166, 88, 76, 28, (68, 132, 204))],
+        "ocr_blocks": [{"text": "目标庚", "bbox": [166, 88, 76, 28], "confidence": 0.96}],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "no_approval_request": True,
+        },
+    },
+    {
+        "id": "semantic_bad_scale_clarification",
+        "image": "semantic_bad_scale.ppm",
+        "query": "点目标辛",
+        "capture_rect": {"screen_x": 0, "screen_y": 0, "width": 400, "height": 225, "scale_x": 6.0, "scale_y": 1.0},
+        "shapes": [(166, 88, 76, 28, (68, 132, 204))],
+        "ocr_blocks": [{"text": "目标辛", "bbox": [166, 88, 76, 28], "confidence": 0.96}],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "no_approval_request": True,
+        },
+    },
+    {
+        "id": "semantic_out_of_bounds_uia_clarification",
+        "image": "semantic_out_of_bounds_uia.ppm",
+        "query": "点目标壬",
+        "shapes": [(318, 88, 60, 28, (68, 132, 204))],
+        "accessibility_elements": [
+            {"name": "目标壬", "role": "ButtonControl", "bounds": [460, 88, 76, 28], "enabled": True, "clickable": True, "confidence": 0.94}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "no_approval_request": True,
+            "preview_required": False,
+        },
+    },
+    {
+        "id": "semantic_dense_visual_only_selection",
+        "image": "semantic_dense_visual_only.ppm",
+        "query": "点右下操作",
+        "shapes": [
+            (58, 52, 286, 118, (52, 58, 76)),
+            (284, 172, 86, 30, (208, 146, 72)),
+            (138, 178, 124, 22, (64, 124, 218)),
+        ],
+        "visual_candidates": [
+            {"label": "右下操作", "bbox": [284, 172, 86, 30], "confidence": 0.68, "reason": "右下高对比操作块", "region": "bottom_controls"}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "visual",
+        },
+    },
 ]
 
 

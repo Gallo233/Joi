@@ -93,10 +93,12 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Local private eval output is sanitized to show only suite counts, `local_private_case_*` placeholders, and abstract failure categories.
 - Semantic target grounding calibration now has committed synthetic coverage for UIA/OCR disagreement, static UIA text, disabled UIA controls, visual-only selection gates, close low-confidence candidates, and no-candidate clarification. Visual-only candidates still require explicit selection first, then a separate click approval.
 - Visual/OCR/UIA ranking now preserves existing ambiguity labels during visual merge so close-score and low-confidence gates survive cross-source reranking.
+- Dense semantic calibration now has committed synthetic coverage for repeated labels across regions, modal foreground/background conflicts, dense table/list low-confidence neighbors, positive actionable UIA/OCR fusion approvals, missing or abnormal capture rectangles, out-of-bounds UIA candidates, and dense visual-only gates.
+- UIA screen bounds now need trusted capture-rect grounding before they can create click arguments; otherwise Joi asks for clarification instead of generating a click.
 
 Next task options, in priority order:
 
-1. Continue local private semantic calibration against denser real browser, desktop, and game layouts, then convert only safe failure categories into generated synthetic fixtures.
+1. Continue local private semantic calibration against real dense browser, desktop, and game layouts where screenshots are available, then convert only safe failure categories into generated synthetic fixtures.
 2. Add safe runtime provider mutation later only after the config writer can preserve secrets and validate changes.
 3. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 4. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, screenshot filenames, approval ids, and task ids.

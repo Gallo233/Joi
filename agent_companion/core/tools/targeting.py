@@ -376,7 +376,7 @@ class SemanticTargetSelectionTool(ToolAdapter):
 
 
 def _click_arguments(candidate: TargetCandidate, observation: ComputerObservation) -> dict[str, int] | None:
-    screen_center = _screen_center_from_screen_bbox(candidate.screen_bbox)
+    screen_center = _screen_center_from_screen_bbox(candidate.screen_bbox, observation)
     if screen_center is not None:
         return {"x": screen_center[0], "y": screen_center[1]}
     screen_center = _screen_center(candidate, observation)
@@ -387,7 +387,7 @@ def _click_arguments(candidate: TargetCandidate, observation: ComputerObservatio
 
 def click_arguments_from_state(candidate_state: dict[str, Any], observation_state: dict[str, Any]) -> dict[str, int] | None:
     screen_bbox = _bbox_tuple(candidate_state.get("screen_bbox") or candidate_state.get("bounds"))
-    screen_center = _screen_center_from_screen_bbox(screen_bbox)
+    screen_center = _screen_center_from_state_screen_bbox(screen_bbox, observation_state)
     if screen_center is not None:
         return {"x": screen_center[0], "y": screen_center[1]}
     bbox = _bbox_tuple(candidate_state.get("bbox"))
@@ -450,11 +450,24 @@ def _screen_center_from_values(
     return (int(screen_x), int(screen_y))
 
 
-def _screen_center_from_screen_bbox(screen_bbox: tuple[int, int, int, int] | None) -> tuple[int, int] | None:
+def _screen_center_from_screen_bbox(screen_bbox: tuple[int, int, int, int] | None, observation: ComputerObservation) -> tuple[int, int] | None:
     if screen_bbox is None:
         return None
     left, top, width, height = screen_bbox
     if width <= 0 or height <= 0:
+        return None
+    if _relative_bbox_from_screen_bbox(screen_bbox, observation) is None:
+        return None
+    return (int(left + width / 2), int(top + height / 2))
+
+
+def _screen_center_from_state_screen_bbox(screen_bbox: tuple[int, int, int, int] | None, observation_state: dict[str, Any]) -> tuple[int, int] | None:
+    if screen_bbox is None:
+        return None
+    left, top, width, height = screen_bbox
+    if width <= 0 or height <= 0:
+        return None
+    if _relative_bbox_from_state_screen_bbox(screen_bbox, observation_state) is None:
         return None
     return (int(left + width / 2), int(top + height / 2))
 
@@ -587,6 +600,8 @@ def _relative_bbox_from_screen_bbox(screen_bbox: tuple[int, int, int, int] | Non
     rect = observation.capture_rect
     scale_x = _positive_float(rect.scale_x) or 1.0
     scale_y = _positive_float(rect.scale_y) or 1.0
+    if not _scale_is_trusted(scale_x, scale_y):
+        return None
     rel_left = round((left - rect.screen_x) * scale_x)
     rel_top = round((top - rect.screen_y) * scale_y)
     rel_width = round(width * scale_x)
@@ -601,6 +616,42 @@ def _relative_bbox_from_screen_bbox(screen_bbox: tuple[int, int, int, int] | Non
     clamped_top = max(0, rel_top)
     clamped_right = min(observation.width, rel_left + rel_width)
     clamped_bottom = min(observation.height, rel_top + rel_height)
+    if clamped_right <= clamped_left or clamped_bottom <= clamped_top:
+        return None
+    return (clamped_left, clamped_top, clamped_right - clamped_left, clamped_bottom - clamped_top)
+
+
+def _relative_bbox_from_state_screen_bbox(screen_bbox: tuple[int, int, int, int] | None, observation_state: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    if screen_bbox is None:
+        return None
+    rect = _capture_rect_from_state(observation_state.get("capture_rect"))
+    if rect is None:
+        return None
+    width = _positive_int(observation_state.get("width"))
+    height = _positive_int(observation_state.get("height"))
+    if width is None or height is None:
+        return None
+    left, top, box_width, box_height = screen_bbox
+    if box_width <= 0 or box_height <= 0:
+        return None
+    scale_x = _positive_float(rect.get("scale_x")) or 1.0
+    scale_y = _positive_float(rect.get("scale_y")) or 1.0
+    if not _scale_is_trusted(scale_x, scale_y):
+        return None
+    rel_left = round((left - int(rect["screen_x"])) * scale_x)
+    rel_top = round((top - int(rect["screen_y"])) * scale_y)
+    rel_width = round(box_width * scale_x)
+    rel_height = round(box_height * scale_y)
+    if rel_width <= 0 or rel_height <= 0:
+        return None
+    if rel_left + rel_width < -2 or rel_top + rel_height < -2:
+        return None
+    if rel_left > width + 2 or rel_top > height + 2:
+        return None
+    clamped_left = max(0, rel_left)
+    clamped_top = max(0, rel_top)
+    clamped_right = min(width, rel_left + rel_width)
+    clamped_bottom = min(height, rel_top + rel_height)
     if clamped_right <= clamped_left or clamped_bottom <= clamped_top:
         return None
     return (clamped_left, clamped_top, clamped_right - clamped_left, clamped_bottom - clamped_top)

@@ -290,7 +290,7 @@ def _run_semantic_case(root: Path, suite: str, base_dir: Path, case: dict[str, A
         height=height,
         title="Synthetic semantic grounding fixture",
         window_handle=0,
-        capture_rect=CaptureRect(0, 0, width, height),
+        capture_rect=_capture_rect_from_case(case, width, height),
         query=str(case.get("query") or ""),
     )
     tool_result = SemanticTargetTool(
@@ -307,6 +307,14 @@ def _run_semantic_case(root: Path, suite: str, base_dir: Path, case: dict[str, A
         failures.append(f"expected candidate_selection_required={bool(expected.get('candidate_selection_required'))}, got {bool(tool_result.agent_state.get('candidate_selection_required'))}")
     if "needs_clarification" in expected and bool(tool_result.agent_state.get("needs_clarification")) != bool(expected.get("needs_clarification")):
         failures.append(f"expected needs_clarification={bool(expected.get('needs_clarification'))}, got {bool(tool_result.agent_state.get('needs_clarification'))}")
+    if expected.get("no_approval_request") and "approval_request" in tool_result.agent_state:
+        failures.append("expected no approval_request, but one was present")
+    if expected.get("approval_tool"):
+        approval = tool_result.agent_state.get("approval_request")
+        if not isinstance(approval, dict) or approval.get("tool") != expected["approval_tool"]:
+            failures.append(f"expected approval tool {expected['approval_tool']}, got {approval}")
+        elif not isinstance(approval.get("arguments"), dict) or "x" not in approval["arguments"] or "y" not in approval["arguments"]:
+            failures.append("approval request did not include click arguments")
     candidates = tool_result.agent_state.get("target_candidates")
     candidate_rows = candidates if isinstance(candidates, list) else []
     min_candidates = expected.get("min_candidates")
@@ -329,7 +337,8 @@ def _run_semantic_case(root: Path, suite: str, base_dir: Path, case: dict[str, A
         if max_confidence is not None and float(top.get("confidence") or 0) > float(max_confidence):
             failures.append(f"expected top confidence <= {float(max_confidence)}, got {top.get('confidence')}")
         preview = top.get("preview")
-        if candidate_rows and (not isinstance(preview, dict) or not preview.get("bbox") or not preview.get("artifact")):
+        preview_required = bool(expected.get("preview_required", True))
+        if candidate_rows and preview_required and (not isinstance(preview, dict) or not preview.get("bbox") or not preview.get("artifact")):
             failures.append("semantic target preview is not renderable")
     elif candidate_rows:
         failures.append("semantic candidates exist but top candidate state is missing")
@@ -357,6 +366,25 @@ def _ocr_from_case(case: dict[str, Any]) -> OcrResult:
             continue
         blocks.append(OcrTextBlock(str(row.get("text") or ""), bbox, float(row.get("confidence", 0.9))))
     return OcrResult("success", "synthetic OCR", blocks)
+
+
+def _capture_rect_from_case(case: dict[str, Any], width: int, height: int) -> CaptureRect | None:
+    if "capture_rect" not in case:
+        return CaptureRect(0, 0, width, height)
+    value = case.get("capture_rect")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return CaptureRect(0, 0, width, height)
+    return CaptureRect(
+        int(value.get("screen_x", 0)),
+        int(value.get("screen_y", 0)),
+        int(value.get("width", width)),
+        int(value.get("height", height)),
+        float(value.get("capture_scale", 1.0)),
+        float(value.get("scale_x", 1.0)),
+        float(value.get("scale_y", 1.0)),
+    )
 
 
 def _accessibility_from_case(case: dict[str, Any]) -> AccessibilitySnapshot:

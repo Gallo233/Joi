@@ -181,5 +181,302 @@
       400,
       225
     ]
+  },
+  {
+    "id": "semantic_dense_duplicate_regions_selection",
+    "image": "semantic_dense_duplicate_regions.ppm",
+    "query": "点目标丙",
+    "ocr_blocks": [
+      {
+        "text": "目标丙",
+        "bbox": [
+          24,
+          22,
+          70,
+          24
+        ],
+        "confidence": 0.88
+      },
+      {
+        "text": "目标丙",
+        "bbox": [
+          298,
+          74,
+          70,
+          24
+        ],
+        "confidence": 0.87
+      },
+      {
+        "text": "目标丙",
+        "bbox": [
+          158,
+          176,
+          70,
+          24
+        ],
+        "confidence": 0.86
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_ambiguity": "close_score",
+      "min_candidates": 3
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_modal_foreground_fused_approval",
+    "image": "semantic_modal_foreground_fused.ppm",
+    "query": "点目标丁",
+    "ocr_blocks": [
+      {
+        "text": "目标丁",
+        "bbox": [
+          214,
+          132,
+          76,
+          28
+        ],
+        "confidence": 0.96
+      },
+      {
+        "text": "目标丁",
+        "bbox": [
+          18,
+          28,
+          70,
+          24
+        ],
+        "confidence": 0.42
+      }
+    ],
+    "accessibility_elements": [
+      {
+        "name": "目标丁",
+        "role": "ButtonControl",
+        "bounds": [
+          214,
+          132,
+          76,
+          28
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.94
+      }
+    ],
+    "expected": {
+      "requires_approval": true,
+      "candidate_selection_required": false,
+      "top_source": "fused",
+      "top_ambiguity": "none",
+      "approval_tool": "computer.click"
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_modal_foreground_ambiguous_selection",
+    "image": "semantic_modal_foreground_ambiguous.ppm",
+    "query": "点目标戊",
+    "ocr_blocks": [
+      {
+        "text": "目标戊",
+        "bbox": [
+          114,
+          132,
+          74,
+          28
+        ],
+        "confidence": 0.92
+      },
+      {
+        "text": "目标戊",
+        "bbox": [
+          214,
+          132,
+          74,
+          28
+        ],
+        "confidence": 0.91
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_ambiguity": "close_score",
+      "min_candidates": 2
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_dense_table_adjacent_low_confidence_selection",
+    "image": "semantic_dense_table_adjacent_low_confidence.ppm",
+    "query": "点目标己",
+    "ocr_blocks": [
+      {
+        "text": "目标己",
+        "bbox": [
+          270,
+          68,
+          54,
+          18
+        ],
+        "confidence": 0.35
+      },
+      {
+        "text": "目标己",
+        "bbox": [
+          270,
+          96,
+          54,
+          18
+        ],
+        "confidence": 0.34
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_ambiguity": "close_score",
+      "max_top_confidence": 0.72,
+      "min_candidates": 2
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_missing_capture_rect_clarification",
+    "image": "semantic_missing_capture_rect.ppm",
+    "query": "点目标庚",
+    "capture_rect": null,
+    "ocr_blocks": [
+      {
+        "text": "目标庚",
+        "bbox": [
+          166,
+          88,
+          76,
+          28
+        ],
+        "confidence": 0.96
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": false,
+      "needs_clarification": true,
+      "no_approval_request": true
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_bad_scale_clarification",
+    "image": "semantic_bad_scale.ppm",
+    "query": "点目标辛",
+    "capture_rect": {
+      "screen_x": 0,
+      "screen_y": 0,
+      "width": 400,
+      "height": 225,
+      "scale_x": 6.0,
+      "scale_y": 1.0
+    },
+    "ocr_blocks": [
+      {
+        "text": "目标辛",
+        "bbox": [
+          166,
+          88,
+          76,
+          28
+        ],
+        "confidence": 0.96
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": false,
+      "needs_clarification": true,
+      "no_approval_request": true
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_out_of_bounds_uia_clarification",
+    "image": "semantic_out_of_bounds_uia.ppm",
+    "query": "点目标壬",
+    "accessibility_elements": [
+      {
+        "name": "目标壬",
+        "role": "ButtonControl",
+        "bounds": [
+          460,
+          88,
+          76,
+          28
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.94
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": false,
+      "needs_clarification": true,
+      "no_approval_request": true,
+      "preview_required": false
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_dense_visual_only_selection",
+    "image": "semantic_dense_visual_only.ppm",
+    "query": "点右下操作",
+    "visual_candidates": [
+      {
+        "label": "右下操作",
+        "bbox": [
+          284,
+          172,
+          86,
+          30
+        ],
+        "confidence": 0.68,
+        "reason": "右下高对比操作块",
+        "region": "bottom_controls"
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "visual"
+    },
+    "image_size": [
+      400,
+      225
+    ]
   }
 ]
