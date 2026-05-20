@@ -17,6 +17,7 @@ from agent_companion.core.schemas import DisplayCard, EventType, RiskLevel, Tool
 from agent_companion.core.server import JsonRpcBridge
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
 from agent_companion.core.tools.computer import ComputerActionTool
+from agent_companion.core.tools.codex import CodexTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
@@ -297,6 +298,119 @@ def _audit_rows(events) -> list[dict]:
         if isinstance(audit, list):
             rows.extend(row for row in audit if isinstance(row, dict))
     return rows
+
+
+def _write_fake_codex_executable(path: Path) -> None:
+    path.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+if "--version" in sys.argv:
+    print("fake codex 0.0")
+    raise SystemExit(0)
+
+def arg_after(flag):
+    try:
+        return sys.argv[sys.argv.index(flag) + 1]
+    except Exception:
+        return ""
+
+def emit(payload):
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+mode = os.environ.get("JOI_FAKE_CODEX_MODE", "success")
+resume_token = os.environ.get("AGENT_COMPANION_CODEX_RESUME_TOKEN", "")
+final_path = arg_after("--output-last-message")
+emit({"type": "started", "message": "Started in /Users/private/project with token sk-test-secret"})
+
+if mode == "permission" and not resume_token:
+    emit({
+        "type": "permission_request",
+        "message": "Run command cat /Users/me/secret.log --token sk-test",
+        "tool": "shell.run",
+        "arguments": {"cmd": "cat /Users/me/secret.log", "approval_id": "approval-abcdef123456"},
+        "resume_supported": True,
+        "resume_token": "resume-safe-token",
+    })
+    raise SystemExit(0)
+
+if mode == "permission_no_resume":
+    emit({
+        "type": "permission_request",
+        "message": "Escalation required for C:\\\\secret\\\\run.ps1 sk-test",
+        "tool": "shell.run",
+        "arguments": {"cmd": "powershell C:\\\\secret\\\\run.ps1"},
+        "resume_supported": False,
+    })
+    raise SystemExit(0)
+
+if mode == "fail":
+    emit({"type": "error", "message": "Traceback /Users/me/error.log stderr sk-test approval-abcdef123456"})
+    sys.stderr.write("Traceback /Users/me/raw.log stderr token sk-test approval-abcdef123456\\n")
+    raise SystemExit(7)
+
+emit({"type": "progress", "message": "Working safely"})
+if final_path:
+    Path(final_path).write_text("Final touched /Users/me/project/app.py with command --danger and token sk-test", encoding="utf-8")
+emit({"type": "final", "message": "Done"})
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o755)
+
+
+def _assert_no_codex_voice_leaks(events_or_results, message: str) -> None:
+    forbidden = [
+        "/Users/",
+        "C:\\",
+        "data/",
+        ".jsonl",
+        ".log",
+        ".txt",
+        ".py",
+        "{",
+        "}",
+        "sk-",
+        "secret",
+        "token",
+        "stderr",
+        "Traceback",
+        "approval-",
+        "task-",
+        "resume-",
+        "--",
+        "cat ",
+    ]
+    lines = []
+    for item in events_or_results:
+        voice = getattr(item, "voice_line", None)
+        if voice is not None:
+            lines.append(voice.text)
+    assert_true(all(not any(fragment in line for fragment in forbidden) for line in lines), message)
+
+
+def _assert_no_codex_safe_text_leaks(payload: object, message: str) -> None:
+    text = str(payload)
+    forbidden = [
+        "/Users/",
+        "C:\\",
+        "secret.log",
+        "raw.log",
+        "error.log",
+        "app.py",
+        "sk-",
+        "approval-abcdef",
+        "resume-safe-token",
+        "--token",
+        "--danger",
+        "Traceback",
+        "stderr raw",
+    ]
+    assert_true(all(fragment not in text for fragment in forbidden), message)
 
 
 def _selection_id(events) -> str:
@@ -1403,6 +1517,98 @@ def main() -> int:
         else:
             os.environ["AGENT_COMPANION_CODEX_BIN"] = previous
 
+    fake_codex_dir = Path(tempfile.mkdtemp())
+    fake_codex = fake_codex_dir / "codex"
+    _write_fake_codex_executable(fake_codex)
+    previous_bin = os.environ.get("AGENT_COMPANION_CODEX_BIN")
+    previous_mode = os.environ.get("JOI_FAKE_CODEX_MODE")
+    try:
+        os.environ["AGENT_COMPANION_CODEX_BIN"] = str(fake_codex)
+
+        os.environ["JOI_FAKE_CODEX_MODE"] = "success"
+        codex_success = CodexTool(workspace).run(ToolRequest("codex.run", {"goal": "修复 bug 并跑测试 --secret /Users/me/project"}))
+        assert_true(codex_success.ok, "fake Codex success should complete")
+        assert_true(codex_success.agent_state["codex_run"]["status"] == "completed", "Codex success should expose completed status")
+        assert_true(codex_success.agent_state["codex_run"]["returncode"] == 0, "Codex success should preserve return code")
+        assert_true(any(row.get("category") == "final" for row in codex_success.agent_state["codex_run"]["events"]), "Codex final event should be parsed")
+        _assert_no_codex_safe_text_leaks(codex_success.agent_state["codex_run"], "Codex run state leaked raw JSONL details")
+        _assert_no_codex_safe_text_leaks(codex_success.display_card.body, "Codex success card leaked raw paths or commands")
+        _assert_no_codex_voice_leaks([codex_success], "Codex success voice leaked raw machine detail")
+
+        os.environ["JOI_FAKE_CODEX_MODE"] = "fail"
+        codex_failure = CodexTool(workspace).run(ToolRequest("codex.run", {"goal": "修复 bug"}))
+        assert_true(not codex_failure.ok, "fake Codex nonzero exit should fail")
+        assert_true(codex_failure.agent_state["codex_run"]["status"] == "failed", "Codex nonzero exit should expose failed status")
+        assert_true(codex_failure.agent_state["codex_run"]["returncode"] == 7, "Codex nonzero exit should preserve return code")
+        _assert_no_codex_safe_text_leaks(codex_failure.agent_state["codex_run"], "Codex failure state leaked raw stderr details")
+        _assert_no_codex_safe_text_leaks(codex_failure.display_card.body, "Codex failure card leaked raw stderr details")
+        _assert_no_codex_voice_leaks([codex_failure], "Codex failure voice leaked raw machine detail")
+
+        os.environ["JOI_FAKE_CODEX_MODE"] = "permission"
+        codex_permission = CodexTool(workspace).run(ToolRequest("codex.run", {"goal": "改代码"}))
+        assert_true(codex_permission.requires_approval, "resumable Codex permission request should become Joi approval")
+        assert_true(codex_permission.agent_state["codex_run"]["status"] == "permission_required", "Codex permission status missing")
+        assert_true(codex_permission.agent_state["codex_run"]["permission_required"], "Codex permission flag missing")
+        codex_permission_request = codex_permission.agent_state["approval_request"]
+        assert_true(codex_permission_request["tool"] == "codex.run", "Codex permission approval should rerun codex.run")
+        assert_true("codex_permission_hash" in codex_permission_request["arguments"], "Codex permission approval should bind permission hash")
+        _assert_no_codex_safe_text_leaks(codex_permission.agent_state["codex_run"], "Codex permission state leaked raw command or approval id")
+        _assert_no_codex_safe_text_leaks(codex_permission.display_card.body, "Codex permission card leaked raw command or approval id")
+        _assert_no_codex_voice_leaks([codex_permission], "Codex permission voice leaked raw machine detail")
+
+        os.environ["JOI_FAKE_CODEX_MODE"] = "permission_no_resume"
+        codex_fail_closed = CodexTool(workspace).run(ToolRequest("codex.run", {"goal": "改代码"}))
+        assert_true(not codex_fail_closed.ok and not codex_fail_closed.requires_approval, "non-resumable Codex permission should fail closed")
+        assert_true("暂不能继续" in codex_fail_closed.display_card.summary, "non-resumable Codex permission should explain fail-closed state")
+        _assert_no_codex_safe_text_leaks(codex_fail_closed.agent_state["codex_run"], "fail-closed Codex state leaked raw permission detail")
+        _assert_no_codex_voice_leaks([codex_fail_closed], "fail-closed Codex voice leaked raw machine detail")
+
+        os.environ["JOI_FAKE_CODEX_MODE"] = "permission"
+        codex_app = AgentCompanionApp(workspace)
+        initial_codex_events = codex_app.handle_user_text("修复这个项目 bug 并跑测试")
+        initial_codex_approval = _approval_payload(initial_codex_events)
+        assert_true(initial_codex_approval.get("tool") == "codex.run", "coding task should still require initial Codex approval")
+        permission_events = codex_app.resolve_approval(str(initial_codex_approval["approval_id"]), approved=True)
+        bridge_approval = _approval_payload(permission_events)
+        assert_true(bridge_approval.get("tool") == "codex.run", "Codex permission bridge should create a second approval")
+        assert_true(any(event.type == EventType.APPROVAL_REQUIRED and event.agent_state.get("codex_run", {}).get("permission_required") for event in permission_events), "Codex permission card should carry runtime state")
+        bridge_completed = codex_app.resolve_approval(str(bridge_approval["approval_id"]), approved=True)
+        assert_true(any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("codex_run", {}).get("status") == "completed" for event in bridge_completed), "approved Codex permission should resume fake runner")
+        _assert_no_codex_voice_leaks(initial_codex_events + permission_events + bridge_completed, "Codex approval/resume voice leaked raw machine detail")
+
+        denied_app = AgentCompanionApp(workspace)
+        denied_initial = denied_app.handle_user_text("修复这个项目 bug 并跑测试")
+        denied_permission = denied_app.resolve_approval(str(_approval_payload(denied_initial)["approval_id"]), approved=True)
+        denied_approval = _approval_payload(denied_permission)
+        denied_events = denied_app.resolve_approval(str(denied_approval["approval_id"]), approved=False)
+        assert_true(any(event.type == EventType.TASK_FAILED for event in denied_events), "denied Codex permission should cancel task")
+        assert_true(any("拒绝" in event.display_card.summary or "拒绝" in event.display_card.title for event in denied_events), "denied Codex permission should show friendly failure")
+        denied_duplicate = denied_app.resolve_approval(str(denied_approval["approval_id"]), approved=True)
+        assert_true(not any(event.agent_state.get("codex_run", {}).get("status") == "completed" for event in denied_duplicate), "duplicate Codex permission must not continue")
+        _assert_no_codex_voice_leaks(denied_permission + denied_events + denied_duplicate, "denied Codex permission voice leaked raw machine detail")
+
+        expired_app = AgentCompanionApp(workspace)
+        expired_initial = expired_app.handle_user_text("修复这个项目 bug 并跑测试")
+        expired_permission = expired_app.resolve_approval(str(_approval_payload(expired_initial)["approval_id"]), approved=True)
+        expired_approval = _approval_payload(expired_permission)
+        expired_app.approval_ttl_seconds = -1
+        expired_events = expired_app.resolve_approval(str(expired_approval["approval_id"]), approved=True)
+        assert_true(any(event.type == EventType.TASK_FAILED for event in expired_events), "expired Codex permission should fail safely")
+        assert_true(not any(event.agent_state.get("codex_run", {}).get("status") == "completed" for event in expired_events), "expired Codex permission must not continue")
+        _assert_no_codex_voice_leaks(expired_permission + expired_events, "expired Codex permission voice leaked raw machine detail")
+    finally:
+        if previous_bin is None:
+            os.environ.pop("AGENT_COMPANION_CODEX_BIN", None)
+        else:
+            os.environ["AGENT_COMPANION_CODEX_BIN"] = previous_bin
+        if previous_mode is None:
+            os.environ.pop("JOI_FAKE_CODEX_MODE", None)
+        else:
+            os.environ["JOI_FAKE_CODEX_MODE"] = previous_mode
+        import shutil
+
+        shutil.rmtree(fake_codex_dir, ignore_errors=True)
+
     app = AgentCompanionApp(workspace)
     semantic_backend = FakeComputerBackend(
         workspace,
@@ -1769,6 +1975,7 @@ llm:
     assert_true("audit-panel" in app_vue_source and "auditEventsForTask" in app_vue_source, "Shell developer mode should render Computer Use audit timeline")
     assert_true("auditArgumentRows" in app_vue_source and "auditArtifacts" in app_vue_source, "Shell audit view should show sanitized arguments and before/after artifacts")
     assert_true("auditSignalRows" in app_vue_source and "image_changed" in app_vue_source, "Shell audit view should show sanitized image verification signals")
+    assert_true("codexTimeline" in app_vue_source and "codexRunStatusLabel" in app_vue_source and "Codex 运行审计" in app_vue_source, "Shell developer mode should show sanitized Codex run audit state")
     visual_fixture_manifest = (workspace / "tests" / "fixtures" / "visual_detector" / "visual_cases.json").read_text(encoding="utf-8")
     image_fixture_manifest = (workspace / "tests" / "fixtures" / "image_verification" / "image_diff_cases.json").read_text(encoding="utf-8")
     semantic_fixture_manifest = (workspace / "tests" / "fixtures" / "semantic_grounding" / "semantic_cases.json").read_text(encoding="utf-8")

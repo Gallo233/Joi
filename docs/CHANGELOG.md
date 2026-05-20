@@ -56,6 +56,7 @@
 - Preserved upstream ambiguity labels when visual candidates are merged with OCR/UIA semantic target candidates.
 - Added dense semantic grounding regressions for repeated labels across regions, modal foreground/background conflicts, dense table/list low-confidence neighbors, positive actionable UIA/OCR fusion approvals, unsafe capture rectangles, out-of-bounds UIA candidates, and dense visual-only gates.
 - Tightened UIA screen-bounds click grounding so accessibility candidates must map back into a trusted current capture rectangle before creating click arguments.
+- Added sanitized Codex coding-task audit state from `codex exec --json`, including run status, event timeline, safe artifact labels, resumable permission-request approvals, denial/expiry handling, and fail-closed behavior when Codex cannot be safely resumed.
 
 ## 2026-05-14
 

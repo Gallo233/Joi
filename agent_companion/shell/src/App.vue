@@ -181,6 +181,7 @@ function isCompanionChat(event: AgentEvent) {
 
 function isTaskCardEvent(event: AgentEvent) {
   if (event.type === 'user_message' || isCompanionChat(event)) return false
+  if (event.type === 'tool_started' && toolName(event) === 'codex.run') return true
   return ['approval_required', 'tool_completed', 'tool_failed', 'task_completed', 'task_failed'].includes(event.type)
 }
 
@@ -228,7 +229,13 @@ function taskMeta(event: AgentEvent, detail?: AgentEvent) {
     if (candidates.length) meta.push(`候选目标：${candidates.length}`)
     if (source.display_card.artifacts?.length) meta.push(`截图：${source.display_card.artifacts.length}`)
   }
-  if (tool === 'codex.run') meta.push(event.display_card.status === 'success' ? '代码任务完成' : '代码任务')
+  const codex = codexRun(source)
+  if (tool === 'codex.run' || codex.status) {
+    meta.push(codexRunStatusLabel(stringValue(codex.status) || (event.display_card.status === 'success' ? 'completed' : 'running')))
+    if (codex.permission_required) meta.push('等待权限')
+    const elapsed = Number(codex.elapsed_seconds || 0)
+    if (elapsed > 0) meta.push(`${elapsed.toFixed(1)}s`)
+  }
   if (tool === 'game.ok_ww.run') meta.push('游戏技能')
   if (tool.startsWith('computer.')) meta.push(computerActionLabel(tool))
   return meta
@@ -278,7 +285,7 @@ function auditTitle(row: ComputerUseAuditEvent) {
   return labels[row.event_type] || '审计事件'
 }
 
-function auditTime(row: ComputerUseAuditEvent) {
+function auditTime(row: { timestamp?: unknown }) {
   const timestamp = Number(row.timestamp || 0)
   if (!timestamp) return ''
   return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -436,6 +443,64 @@ function artifactLabel(artifact: string, index: number) {
   if (/\.(jsonl|json)$/.test(value)) return `事件记录 ${index + 1}`
   if (/\.(log|txt)$/.test(value)) return `日志 ${index + 1}`
   return `附件 ${index + 1}`
+}
+
+function codexRun(event?: AgentEvent) {
+  return asRecord(event?.agent_state?.codex_run)
+}
+
+function codexRunForTask(event?: AgentEvent, detail?: AgentEvent) {
+  const latest = codexRun(event)
+  if (latest.status || latest.safe_summary) return latest
+  return codexRun(detail)
+}
+
+function codexTimeline(event?: AgentEvent, detail?: AgentEvent) {
+  const run = codexRunForTask(event, detail)
+  const rows = Array.isArray(run.events) ? run.events : []
+  return rows.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
+}
+
+function codexArtifactRows(event?: AgentEvent, detail?: AgentEvent) {
+  const run = codexRunForTask(event, detail)
+  const rows = Array.isArray(run.artifacts) ? run.artifacts : []
+  return rows.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
+}
+
+function codexRunStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    running: '运行中',
+    completed: '已完成',
+    failed: '失败',
+    permission_required: '等待权限',
+    denied: '已拒绝',
+    expired: '已过期',
+    mismatch: '已失效',
+    not_found: 'Codex 未找到',
+  }
+  return labels[status] || '代码任务'
+}
+
+function codexEventLabel(row: Record<string, unknown>) {
+  const category = stringValue(row.category) || stringValue(row.event_type)
+  const labels: Record<string, string> = {
+    started: '开始',
+    progress: '进度',
+    final: '最终结果',
+    error: '错误',
+    permission_request: '权限请求',
+    permission_denied: '权限已拒绝',
+    permission_expired: '权限已过期',
+    permission_mismatch: '权限已失效',
+    unknown: '未知事件',
+    malformed: '无法解析',
+  }
+  return labels[category] || 'Codex 事件'
+}
+
+function codexRunSummary(event?: AgentEvent, detail?: AgentEvent) {
+  const run = codexRunForTask(event, detail)
+  return stringValue(run.safe_summary)
 }
 
 function isImageArtifact(artifact: string) {
@@ -1063,6 +1128,34 @@ onBeforeUnmount(() => {
                       {{ auditArtifactLabel(artifact, artifactIndex) }}
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="audit-panel" v-if="developerMode && codexTimeline(task.latest, task.detail).length">
+            <header>
+              <span>Codex 运行审计</span>
+              <small>{{ codexRunStatusLabel(stringValue(codexRunForTask(task.latest, task.detail).status)) }}</small>
+            </header>
+            <p v-if="codexRunSummary(task.latest, task.detail)">{{ codexRunSummary(task.latest, task.detail) }}</p>
+            <div class="audit-meta" v-if="codexArtifactRows(task.latest, task.detail).length">
+              <span v-for="artifact in codexArtifactRows(task.latest, task.detail)" :key="stringValue(artifact.kind) || stringValue(artifact.label)">
+                {{ stringValue(artifact.label) || 'Codex 产物' }}
+              </span>
+            </div>
+            <div class="audit-timeline">
+              <div
+                v-for="(row, codexIndex) in codexTimeline(task.latest, task.detail)"
+                :key="`${task.taskId}-codex-${codexIndex}-${stringValue(row.category)}`"
+                class="audit-row"
+              >
+                <div class="audit-marker"></div>
+                <div>
+                  <div class="audit-row-head">
+                    <strong>{{ codexEventLabel(row) }}</strong>
+                    <span>{{ auditTime(row) }}</span>
+                  </div>
+                  <p>{{ stringValue(row.summary) || 'Codex 状态已更新。' }}</p>
                 </div>
               </div>
             </div>

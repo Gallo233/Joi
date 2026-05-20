@@ -17,6 +17,7 @@ from agent_companion.core.computer_use import (
 )
 from agent_companion.core.character import CharacterHarness, load_character
 from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
+from agent_companion.core.codex_events import codex_cancel_run_state
 from agent_companion.core.event_bus import EventBus
 from agent_companion.core.expression import ExpressionEngine
 from agent_companion.core.memory import MemoryStore
@@ -156,11 +157,17 @@ class AgentCompanionApp:
         if self._pending_step_expired(pending):
             state = {"intent": pending.plan.intent, "approval_expired": True, "approval_id": approval_id}
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval expired before execution.")] if self._is_computer_pending(pending) else [])
+            if self._is_codex_permission_pending(pending):
+                state["codex_run"] = codex_cancel_run_state("expired")
             self._emit(
                 AgentEvent(
                     EventType.TASK_FAILED,
                     pending.plan.task_id,
-                    DisplayCard("审批已过期", "这次确认已经过期，我没有继续执行。", status="failed"),
+                    DisplayCard(
+                        "Codex 权限确认已过期" if self._is_codex_permission_pending(pending) else "审批已过期",
+                        "Codex 权限确认已经过期，我没有继续执行。" if self._is_codex_permission_pending(pending) else "这次确认已经过期，我没有继续执行。",
+                        status="failed",
+                    ),
                     safe_voice_line("这次确认已经过期，我没有继续执行。", sprite="4"),
                     state,
                 ),
@@ -170,11 +177,17 @@ class AgentCompanionApp:
         if not approved:
             state = {"intent": pending.plan.intent, "cancelled": True, "approval_id": approval_id}
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "denied", "Approval was denied; no action ran.")] if self._is_computer_pending(pending) else [])
+            if self._is_codex_permission_pending(pending):
+                state["codex_run"] = codex_cancel_run_state("denied")
             self._emit(
                 AgentEvent(
                     EventType.TASK_FAILED,
                     pending.plan.task_id,
-                    DisplayCard("任务已取消", "你拒绝了这一步，我没有继续执行。", status="failed"),
+                    DisplayCard(
+                        "Codex 权限已拒绝" if self._is_codex_permission_pending(pending) else "任务已取消",
+                        "你拒绝了 Codex 权限请求，我没有继续执行。" if self._is_codex_permission_pending(pending) else "你拒绝了这一步，我没有继续执行。",
+                        status="failed",
+                    ),
                     safe_voice_line("好，我先停在这里。", sprite="1"),
                     state,
                 ),
@@ -184,6 +197,8 @@ class AgentCompanionApp:
         if not self._pending_step_matches(pending):
             state = {"intent": pending.plan.intent, "approval_id": approval_id, "approval_mismatch": True}
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval no longer matched the pending action.")] if self._is_computer_pending(pending) else [])
+            if self._is_codex_permission_pending(pending):
+                state["codex_run"] = codex_cancel_run_state("mismatch")
             self._emit(
                 AgentEvent(
                     EventType.TASK_FAILED,
@@ -289,6 +304,8 @@ class AgentCompanionApp:
                         "target_candidate": result.agent_state.get("target_candidate"),
                         "target_candidates": result.agent_state.get("target_candidates"),
                     }
+                    if "codex_run" in result.agent_state:
+                        agent_state["codex_run"] = result.agent_state["codex_run"]
                     audit_entries = target_grounding_audit_events(plan.task_id, result, result.risk)
                     if pending_request.name.startswith("computer."):
                         audit_entries.append(
@@ -664,6 +681,11 @@ class AgentCompanionApp:
     def _is_computer_pending(pending: PendingStep) -> bool:
         request = pending.request_override or pending.plan.steps[pending.index]
         return request.name.startswith("computer.")
+
+    @staticmethod
+    def _is_codex_permission_pending(pending: PendingStep) -> bool:
+        request = pending.request_override or pending.plan.steps[pending.index]
+        return request.name == "codex.run" and "codex_permission_hash" in request.arguments
 
 
 def _arguments_hash(arguments: dict) -> str:

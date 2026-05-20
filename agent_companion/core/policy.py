@@ -63,6 +63,8 @@ class PolicyGate:
         preview = {key: str(value)[:160] for key, value in request.arguments.items()}
         if request.name.startswith("computer."):
             preview = _computer_preview(request.arguments)
+        elif request.name == "codex.run":
+            preview = _codex_preview(request.arguments)
         return {
             "tool": request.name,
             "reason": request.reason,
@@ -81,3 +83,14 @@ def _computer_preview(arguments: dict[str, Any]) -> dict[str, str]:
     if "keys" in arguments:
         preview["keys"] = " + ".join(str(key) for key in arguments.get("keys") or [])
     return preview
+
+
+def _codex_preview(arguments: dict[str, Any]) -> dict[str, str]:
+    preview: dict[str, str] = {}
+    if arguments.get("goal"):
+        preview["goal"] = "coding_request"
+    if arguments.get("codex_permission_hash"):
+        preview["permission"] = "one_time_codex_permission"
+    if arguments.get("codex_permission_decision"):
+        preview["decision"] = "approval_required_to_continue"
+    return preview or {"request": "coding_task"}
