@@ -923,7 +923,9 @@ async function previewRuntimeSettings() {
 async function applyRuntimeSettings() {
   runtimeApplyLoading.value = true
   try {
-    await client.applyRuntimeConfig(runtimeUpdatePayload())
+    const result = (await client.applyRuntimeConfig(runtimeUpdatePayload())) as { ok?: boolean; submitted?: boolean; preview?: RuntimeConfigMutationResult }
+    if (result.preview) runtimePreview.value = result.preview
+    if (result.ok === false) errorText.value = result.preview?.summary || '运行设置没有提交'
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '运行设置提交失败'
   } finally {

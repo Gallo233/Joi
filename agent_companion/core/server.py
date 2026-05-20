@@ -119,11 +119,8 @@ class JsonRpcBridge:
                 return
             if method == "runtime.config.apply":
                 updates = params.get("updates")
-                if not isinstance(updates, dict):
-                    await websocket.send(self._result(request_id, {"ok": False, "error": "invalid_update"}))
-                    return
-                asyncio.create_task(asyncio.to_thread(self.apply_runtime_config_update_command, updates))
-                await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
+                result = self.apply_runtime_config_update_command(updates if isinstance(updates, dict) else {})
+                await websocket.send(self._result(request_id, result))
                 return
             if method == "semantic_target.select":
                 selection_id = str(params.get("selection_id") or "").strip()
@@ -231,8 +228,10 @@ class JsonRpcBridge:
         preview = preview_runtime_config_update(self.workspace, updates if isinstance(updates, dict) else {})
         if not preview.ok:
             return {"ok": False, "submitted": False, "preview": preview.to_agent_state()}
+        if not preview.changed:
+            return {"ok": True, "submitted": False, "preview": preview.to_agent_state()}
         sequence, events = self._run_serial("runtime.config.apply", lambda: self.app.request_runtime_config_update(updates))
-        return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+        return {"ok": True, "submitted": True, "preview": preview.to_agent_state(), "sequence": sequence, "events": [event.to_dict() for event in events]}
 
     def _run_serial(self, label: str, callback: Callable[[], list[AgentEvent]]) -> tuple[int, list[AgentEvent]]:
         with self._command_lock:

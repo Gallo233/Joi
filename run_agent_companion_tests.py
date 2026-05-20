@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import inspect
 import re
@@ -322,6 +324,25 @@ def _approval_payload_from_dicts(events: list[dict]) -> dict:
             if isinstance(approval, dict):
                 return approval
     return {}
+
+
+class _FakeRpcWebSocket:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, message: str) -> None:
+        self.messages.append(message)
+
+
+def _runtime_apply_rpc_result(bridge: JsonRpcBridge, updates: object, request_id: str) -> dict:
+    socket = _FakeRpcWebSocket()
+    raw = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": "runtime.config.apply", "params": {"updates": updates}}, ensure_ascii=False)
+    asyncio.run(bridge._handle_message(socket, raw))
+    assert_true(bool(socket.messages), "runtime config apply RPC should send a JSON-RPC response")
+    response = json.loads(socket.messages[-1])
+    result = response.get("result")
+    assert_true(isinstance(result, dict), "runtime config apply RPC should return a result object")
+    return result
 
 
 def _audit_rows(events) -> list[dict]:
@@ -1701,8 +1722,41 @@ asr:
         assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "runtime config preview must not touch secrets.yaml")
         _assert_config_mutation_payload_safe(preview_payload["preview"], "runtime config preview RPC leaked sensitive detail")
 
+        invalid_rpc_payload = _runtime_apply_rpc_result(bridge, {"ocr": {"timeout_seconds": 0}, "tts": {"server_url": "http://127.0.0.1:9880/private"}}, "p4-21-invalid")
+        assert_true(not invalid_rpc_payload["ok"] and not invalid_rpc_payload["submitted"], "invalid runtime config WebSocket apply should synchronously fail")
+        assert_true(not _approval_payload_from_dicts(invalid_rpc_payload.get("events", [])), "invalid runtime config WebSocket apply must not create approval")
+        assert_true(config_path.read_text(encoding="utf-8") == config_before, "invalid runtime config WebSocket apply must not write config.yaml")
+        assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "invalid runtime config WebSocket apply must preserve secrets.yaml")
+        _assert_config_mutation_payload_safe(invalid_rpc_payload.get("preview"), "invalid runtime config WebSocket apply leaked sensitive preview detail")
+
+        noop_updates = {
+            "asr": {"enabled": False, "max_seconds": 30, "max_bytes": 12582912, "timeout_seconds": 30},
+            "tts": {"enabled": False, "volume": 0.85, "speed_factor": 1.2, "fallback_to_system": False},
+            "ocr": {"timeout_seconds": 5},
+            "computer_use": {"post_action_settle_ms": 200},
+            "llm": {"temperature": 0.7, "use_mock": True},
+        }
+        noop_rpc_payload = _runtime_apply_rpc_result(bridge, noop_updates, "p4-21-noop")
+        assert_true(noop_rpc_payload["ok"] and not noop_rpc_payload["submitted"], "no-op runtime config WebSocket apply should not submit approval")
+        assert_true(noop_rpc_payload["preview"]["ok"] and not noop_rpc_payload["preview"]["changed"], "no-op runtime config WebSocket apply should return unchanged preview")
+        assert_true(not _approval_payload_from_dicts(noop_rpc_payload.get("events", [])), "no-op runtime config WebSocket apply must not create approval")
+        assert_true(config_path.read_text(encoding="utf-8") == config_before, "no-op runtime config WebSocket apply must not write config.yaml")
+        _assert_config_mutation_payload_safe(noop_rpc_payload.get("preview"), "no-op runtime config WebSocket apply leaked sensitive preview detail")
+
+        valid_rpc_payload = _runtime_apply_rpc_result(bridge, safe_panel_updates, "p4-21-valid")
+        assert_true(valid_rpc_payload["ok"] and valid_rpc_payload["submitted"], "valid changed runtime config WebSocket apply should submit approval")
+        assert_true(valid_rpc_payload["preview"]["ok"] and valid_rpc_payload["preview"]["changed"], "valid runtime config WebSocket apply should return changed preview")
+        valid_rpc_approval = _approval_payload_from_dicts(valid_rpc_payload.get("events", []))
+        assert_true(bool(valid_rpc_approval), "valid runtime config WebSocket apply should produce an approval event")
+        assert_true(config_path.read_text(encoding="utf-8") == config_before, "valid runtime config WebSocket apply must not write before approval")
+        _assert_config_mutation_payload_safe(valid_rpc_payload, "valid runtime config WebSocket apply leaked sensitive detail")
+        denied_ws_result = bridge.resolve_approval_command(str(valid_rpc_approval["approval_id"]), False)
+        assert_true(config_path.read_text(encoding="utf-8") == config_before, "denied WebSocket runtime config approval must not write config.yaml")
+        _assert_config_mutation_payload_safe(denied_ws_result["events"], "denied WebSocket runtime config approval leaked sensitive detail")
+
         denied_payload = bridge.apply_runtime_config_update_command(safe_panel_updates)
         assert_true(denied_payload["ok"] and denied_payload["submitted"], "runtime config apply should submit an approval-gated request")
+        assert_true(denied_payload["preview"]["ok"] and denied_payload["preview"]["changed"], "runtime config direct apply should include changed preview")
         denied_events = denied_payload["events"]
         denied_approval = _approval_payload_from_dicts(denied_events)
         assert_true(bool(denied_approval), "runtime config apply should create a Joi approval card")
