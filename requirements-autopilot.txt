@@ -1,0 +1,7 @@
+# Default Joi autopilot backend uses the local Codex CLI logged in with ChatGPT.
+# No Python packages are required for that path.
+#
+# Optional API-billed Agents SDK experiments only:
+# openai
+# openai-agents
+# python-dotenv
