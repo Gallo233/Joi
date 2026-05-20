@@ -92,6 +92,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Coding tasks now parse `codex exec --json` output into a sanitized `codex_run` status with started/progress/final/error/permission categories, safe summaries, elapsed/return code, and artifact labels. Raw commands, absolute paths, JSONL text, stderr, tokens, task ids, approval ids, and resume tokens must never enter `voice_line`.
 - Codex permission requests can become a second Joi approval only when the JSONL event explicitly marks the request as resumable. The approval remains one-time/TTL-bound through the existing task id, step index, tool, and arguments-hash mechanism. Denied or expired permission approvals stop the coding task without resuming the runner.
 - If a real Codex CLI permission prompt cannot be reliably resumed, Joi must fail closed with "Codex 需要外部权限确认，Joi 暂不能继续。" and should not auto-approve or continue outside the approval bridge.
+- P4.18 real CLI probe: a local Codex CLI was available, but a safe read-only fixture probe produced only startup-class JSONL events before timing out and did not expose a per-permission resume token or reliable pause/resume contract. `codex exec resume` appears session-oriented rather than a permission-specific continuation bridge, so Joi continues to fail closed for unresumable real CLI permission prompts.
 - A local private visual calibration pass has started under ignored `data/local_visual_eval/`. Safe abstract conclusions were promoted into committed synthetic fixtures for sparse page controls, mixed right/bottom HUD controls, low-contrast modal actions, thin progress/small badge visual changes, and cursor-blink no-op verification. Do not commit local screenshots, local manifests, local case ids, real text, URLs, account data, window titles, or paths.
 - Local private eval output is sanitized to show only suite counts, `local_private_case_*` placeholders, and abstract failure categories.
 - Semantic target grounding calibration now has committed synthetic coverage for UIA/OCR disagreement, static UIA text, disabled UIA controls, visual-only selection gates, close low-confidence candidates, and no-candidate clarification. Visual-only candidates still require explicit selection first, then a separate click approval.
@@ -102,7 +103,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 Next task options, in priority order:
 
 1. Continue local private semantic calibration against real dense browser, desktop, and game layouts where screenshots are available, then convert only safe failure categories into generated synthetic fixtures.
-2. Test real Codex CLI JSONL permission events when available; keep fail-closed behavior unless the CLI protocol provides reliable pause/resume semantics.
+2. Re-test real Codex CLI permission JSONL only when a documented permission-specific resume contract is available; keep fail-closed behavior until then.
 3. Add safe runtime provider mutation later only after the config writer can preserve secrets and validate changes.
 4. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 5. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, screenshot filenames, approval ids, and task ids.

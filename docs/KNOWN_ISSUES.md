@@ -9,7 +9,7 @@
 - Local real-screenshot calibration is supported only through ignored manifests under `data/local_visual_eval/`; shared regression coverage must still be converted into synthetic fixtures before commit.
 - The stage can load local character sprites from configuration, but bundled original VN expression variants and Live2D/VRM rendering are not product grade yet.
 - OK-WW callback currently proves launch/return code, but does not yet read detailed in-game completion state.
-- Codex permission requests now surface as sanitized task cards and can resume only when a local JSONL runner explicitly proves resumable permission handling; current real Codex CLI permission prompts may still fail closed with "Codex 需要外部权限确认，Joi 暂不能继续。"
+- Codex permission requests now surface as sanitized task cards and can resume only when a JSONL event explicitly proves permission-specific resumable handling; the local real CLI probe did not expose a reliable permission resume token, so real Codex CLI permission prompts still fail closed with "Codex 需要外部权限确认，Joi 暂不能继续。"
 - Runtime provider settings are inspectable in developer mode, but the panel is intentionally read-only until Joi has a safe config mutation flow that preserves secrets and validates provider changes.
 
 ## Fixed

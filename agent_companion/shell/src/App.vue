@@ -473,6 +473,8 @@ function codexRunStatusLabel(status: string) {
     completed: '已完成',
     failed: '失败',
     permission_required: '等待权限',
+    fail_closed: '权限不可继续',
+    permission_unresumable: '权限不可继续',
     denied: '已拒绝',
     expired: '已过期',
     mismatch: '已失效',

@@ -84,9 +84,12 @@ def build_codex_run_state(
     if not events:
         events = [_event("progress", "Codex 没有输出结构化事件。")]
 
-    if permission is not None:
+    if permission is not None and permission.get("resumable"):
         status = "permission_required"
-        safe_summary = "Codex 需要你确认一个外部权限请求。" if permission.get("resumable") else PERMISSION_FAIL_CLOSED_MESSAGE
+        safe_summary = "Codex 需要你确认一个外部权限请求。"
+    elif permission is not None:
+        status = "fail_closed"
+        safe_summary = PERMISSION_FAIL_CLOSED_MESSAGE
     elif returncode == 0:
         status = "completed"
         safe_summary = "Codex 已完成本次写码任务。"
@@ -101,7 +104,8 @@ def build_codex_run_state(
         "elapsed_seconds": round(max(0.0, elapsed_seconds), 2),
         "returncode": returncode,
         "safe_summary": safe_summary,
-        "permission_required": permission is not None,
+        "permission_required": bool(permission is not None and permission.get("resumable")),
+        "permission_detected": permission is not None,
         "artifacts": artifact_labels,
         "events": events[-24:],
         "signals": {
