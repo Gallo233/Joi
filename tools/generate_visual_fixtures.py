@@ -723,6 +723,130 @@ SEMANTIC_CASES: list[dict] = [
             "min_candidates": 1,
         },
     },
+    {
+        "id": "semantic_stale_uia_snapshot_clarification",
+        "image": "semantic_stale_uia_snapshot.ppm",
+        "query": "点目标继续",
+        "shapes": [
+            (42, 38, 260, 124, (54, 62, 82)),
+            (124, 126, 92, 28, (74, 136, 206)),
+        ],
+        "accessibility_elements": [
+            {"name": "目标继续", "role": "ButtonControl", "bounds": [680, 420, 82, 28], "enabled": True, "clickable": True, "confidence": 0.96}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "no_approval_request": True,
+            "top_source": "accessibility",
+            "preview_required": False,
+        },
+    },
+    {
+        "id": "semantic_clipped_foreground_edge_selection",
+        "image": "semantic_clipped_foreground_edge.ppm",
+        "query": "点目标边栏",
+        "shapes": [
+            (0, 0, 400, 225, (34, 40, 58)),
+            (324, 42, 76, 134, (52, 62, 84)),
+            (358, 88, 42, 30, (86, 148, 208)),
+        ],
+        "visual_candidates": [
+            {"label": "目标边栏", "bbox": [358, 88, 60, 30], "confidence": 0.62, "reason": "裁剪边缘视觉候选", "region": "sidebar"}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "visual",
+            "top_ambiguity": "low_confidence",
+            "min_candidates": 1,
+        },
+    },
+    {
+        "id": "semantic_multi_window_background_conflict_selection",
+        "image": "semantic_multi_window_background_conflict.ppm",
+        "query": "点目标打开",
+        "shapes": [
+            (28, 24, 210, 116, (42, 50, 70)),
+            (64, 54, 88, 28, (88, 126, 188)),
+            (168, 88, 204, 112, (54, 60, 80)),
+            (240, 146, 88, 28, (208, 146, 72)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标打开", "bbox": [64, 54, 88, 28], "confidence": 0.93},
+            {"text": "目标打开", "bbox": [240, 146, 88, 28], "confidence": 0.92},
+        ],
+        "accessibility_elements": [
+            {"name": "目标打开", "role": "ButtonControl", "bounds": [64, 54, 88, 28], "enabled": True, "clickable": True, "confidence": 0.93},
+            {"name": "目标打开", "role": "ButtonControl", "bounds": [240, 146, 88, 28], "enabled": True, "clickable": True, "confidence": 0.92},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "fused",
+            "top_ambiguity": "close_score",
+            "min_candidates": 2,
+        },
+    },
+    {
+        "id": "semantic_truncated_dropdown_oob_selection",
+        "image": "semantic_truncated_dropdown_oob.ppm",
+        "query": "点目标菜单",
+        "shapes": [
+            (250, 40, 150, 128, (48, 56, 76)),
+            (344, 74, 56, 28, (82, 134, 198)),
+            (344, 108, 56, 28, (70, 84, 114)),
+        ],
+        "visual_candidates": [
+            {"label": "目标菜单", "bbox": [344, 74, 72, 28], "confidence": 0.63, "reason": "截断下拉视觉候选", "region": "sidebar"}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "visual",
+            "top_ambiguity": "low_confidence",
+            "min_candidates": 1,
+        },
+    },
+    {
+        "id": "semantic_partial_capture_rect_clarification",
+        "image": "semantic_partial_capture_rect.ppm",
+        "query": "点目标裁剪",
+        "capture_rect": {"screen_x": 80, "screen_y": 40, "width": 260, "height": 150, "scale_x": 1.0, "scale_y": 1.0},
+        "shapes": [
+            (0, 0, 400, 225, (38, 44, 62)),
+            (330, 92, 72, 30, (74, 136, 206)),
+        ],
+        "ocr_blocks": [{"text": "目标裁剪", "bbox": [330, 92, 72, 30], "confidence": 0.97}],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "no_approval_request": True,
+            "top_source": "ocr",
+        },
+    },
+    {
+        "id": "semantic_partial_capture_rect_trusted_approval",
+        "image": "semantic_partial_capture_rect_trusted.ppm",
+        "query": "点目标局部",
+        "capture_rect": {"screen_x": 80, "screen_y": 40, "width": 260, "height": 150, "scale_x": 1.0, "scale_y": 1.0},
+        "shapes": [
+            (0, 0, 400, 225, (38, 44, 62)),
+            (110, 80, 72, 30, (74, 136, 206)),
+        ],
+        "ocr_blocks": [{"text": "目标局部", "bbox": [110, 80, 72, 30], "confidence": 0.97}],
+        "expected": {
+            "requires_approval": True,
+            "candidate_selection_required": False,
+            "top_source": "ocr",
+            "top_ambiguity": "none",
+            "approval_tool": "computer.click",
+            "click_x_range": [224, 228],
+            "click_y_range": [133, 137],
+        },
+    },
 ]
 
 

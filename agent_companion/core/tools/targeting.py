@@ -447,6 +447,11 @@ def _screen_center_from_values(
         return None
     screen_x = screen_origin_x + round(center_x / scale_x)
     screen_y = screen_origin_y + round(center_y / scale_y)
+    if not (
+        screen_origin_x <= screen_x <= screen_origin_x + rect_width
+        and screen_origin_y <= screen_y <= screen_origin_y + rect_height
+    ):
+        return None
     return (int(screen_x), int(screen_y))
 
 
