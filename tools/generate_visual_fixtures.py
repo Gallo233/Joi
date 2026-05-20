@@ -847,6 +847,77 @@ SEMANTIC_CASES: list[dict] = [
             "click_y_range": [133, 137],
         },
     },
+    {
+        "id": "semantic_clipped_uia_center_outside_clarification",
+        "image": "semantic_clipped_uia_center_outside.ppm",
+        "query": "点目标越界",
+        "capture_rect": {"screen_x": 100, "screen_y": 80, "width": 200, "height": 150, "scale_x": 1.0, "scale_y": 1.0},
+        "shapes": [
+            (0, 0, 400, 225, (38, 44, 62)),
+            (180, 50, 80, 30, (74, 136, 206)),
+        ],
+        "accessibility_elements": [
+            {"name": "目标越界", "role": "ButtonControl", "bounds": [280, 130, 80, 30], "enabled": True, "clickable": True, "confidence": 0.97}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "no_approval_request": True,
+            "top_source": "accessibility",
+            "top_ambiguity": "none",
+        },
+    },
+    {
+        "id": "semantic_clipped_uia_selection_still_untrusted",
+        "image": "semantic_clipped_uia_selection_still_untrusted.ppm",
+        "query": "点目标选择",
+        "capture_rect": {"screen_x": 100, "screen_y": 80, "width": 200, "height": 150, "scale_x": 1.0, "scale_y": 1.0},
+        "shapes": [
+            (0, 0, 400, 225, (38, 44, 62)),
+            (180, 50, 80, 30, (74, 136, 206)),
+            (40, 50, 72, 30, (90, 118, 164)),
+        ],
+        "accessibility_elements": [
+            {"name": "目标选择", "role": "ButtonControl", "bounds": [280, 130, 80, 30], "enabled": True, "clickable": True, "confidence": 0.97},
+            {"name": "目标选择", "role": "ButtonControl", "bounds": [140, 130, 72, 30], "enabled": True, "clickable": True, "confidence": 0.95},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "accessibility",
+            "top_ambiguity": "close_score",
+            "min_candidates": 2,
+            "selection": {
+                "rank": 1,
+                "requires_approval": False,
+                "coordinate_untrusted": True,
+                "no_approval_request": True,
+            },
+        },
+    },
+    {
+        "id": "semantic_uia_screen_bbox_inside_approval",
+        "image": "semantic_uia_screen_bbox_inside.ppm",
+        "query": "点目标可信",
+        "capture_rect": {"screen_x": 100, "screen_y": 80, "width": 200, "height": 150, "scale_x": 1.0, "scale_y": 1.0},
+        "shapes": [
+            (0, 0, 400, 225, (38, 44, 62)),
+            (50, 40, 80, 30, (74, 136, 206)),
+        ],
+        "accessibility_elements": [
+            {"name": "目标可信", "role": "ButtonControl", "bounds": [150, 120, 80, 30], "enabled": True, "clickable": True, "confidence": 0.97}
+        ],
+        "expected": {
+            "requires_approval": True,
+            "candidate_selection_required": False,
+            "top_source": "accessibility",
+            "top_ambiguity": "none",
+            "approval_tool": "computer.click",
+            "click_x_range": [188, 192],
+            "click_y_range": [133, 137],
+        },
+    },
 ]
 
 

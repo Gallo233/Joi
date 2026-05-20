@@ -376,8 +376,10 @@ class SemanticTargetSelectionTool(ToolAdapter):
 
 
 def _click_arguments(candidate: TargetCandidate, observation: ComputerObservation) -> dict[str, int] | None:
-    screen_center = _screen_center_from_screen_bbox(candidate.screen_bbox, observation)
-    if screen_center is not None:
+    if candidate.screen_bbox is not None:
+        screen_center = _screen_center_from_screen_bbox(candidate.screen_bbox, observation)
+        if screen_center is None:
+            return None
         return {"x": screen_center[0], "y": screen_center[1]}
     screen_center = _screen_center(candidate, observation)
     if screen_center is None:
@@ -387,8 +389,10 @@ def _click_arguments(candidate: TargetCandidate, observation: ComputerObservatio
 
 def click_arguments_from_state(candidate_state: dict[str, Any], observation_state: dict[str, Any]) -> dict[str, int] | None:
     screen_bbox = _bbox_tuple(candidate_state.get("screen_bbox") or candidate_state.get("bounds"))
-    screen_center = _screen_center_from_state_screen_bbox(screen_bbox, observation_state)
-    if screen_center is not None:
+    if screen_bbox is not None:
+        screen_center = _screen_center_from_state_screen_bbox(screen_bbox, observation_state)
+        if screen_center is None:
+            return None
         return {"x": screen_center[0], "y": screen_center[1]}
     bbox = _bbox_tuple(candidate_state.get("bbox"))
     rect = _capture_rect_from_state(observation_state.get("capture_rect"))
@@ -447,10 +451,7 @@ def _screen_center_from_values(
         return None
     screen_x = screen_origin_x + round(center_x / scale_x)
     screen_y = screen_origin_y + round(center_y / scale_y)
-    if not (
-        screen_origin_x <= screen_x <= screen_origin_x + rect_width
-        and screen_origin_y <= screen_y <= screen_origin_y + rect_height
-    ):
+    if not _state_screen_point_inside_capture_rect(screen_x, screen_y, rect):
         return None
     return (int(screen_x), int(screen_y))
 
@@ -463,7 +464,10 @@ def _screen_center_from_screen_bbox(screen_bbox: tuple[int, int, int, int] | Non
         return None
     if _relative_bbox_from_screen_bbox(screen_bbox, observation) is None:
         return None
-    return (int(left + width / 2), int(top + height / 2))
+    center = (int(left + width / 2), int(top + height / 2))
+    if not _screen_point_inside_capture_rect(center[0], center[1], observation.capture_rect):
+        return None
+    return center
 
 
 def _screen_center_from_state_screen_bbox(screen_bbox: tuple[int, int, int, int] | None, observation_state: dict[str, Any]) -> tuple[int, int] | None:
@@ -474,7 +478,10 @@ def _screen_center_from_state_screen_bbox(screen_bbox: tuple[int, int, int, int]
         return None
     if _relative_bbox_from_state_screen_bbox(screen_bbox, observation_state) is None:
         return None
-    return (int(left + width / 2), int(top + height / 2))
+    center = (int(left + width / 2), int(top + height / 2))
+    if not _state_screen_point_inside_capture_rect(center[0], center[1], observation_state.get("capture_rect")):
+        return None
+    return center
 
 
 def _candidate_state(
@@ -660,6 +667,50 @@ def _relative_bbox_from_state_screen_bbox(screen_bbox: tuple[int, int, int, int]
     if clamped_right <= clamped_left or clamped_bottom <= clamped_top:
         return None
     return (clamped_left, clamped_top, clamped_right - clamped_left, clamped_bottom - clamped_top)
+
+
+def _screen_point_inside_capture_rect(x: Any, y: Any, rect: Any) -> bool:
+    if rect is None:
+        return False
+    return _screen_point_inside_values(
+        x,
+        y,
+        _int_value(getattr(rect, "screen_x", None)),
+        _int_value(getattr(rect, "screen_y", None)),
+        _positive_int(getattr(rect, "width", None)),
+        _positive_int(getattr(rect, "height", None)),
+    )
+
+
+def _state_screen_point_inside_capture_rect(x: Any, y: Any, rect: Any) -> bool:
+    if not isinstance(rect, dict):
+        return False
+    return _screen_point_inside_values(
+        x,
+        y,
+        _int_value(rect.get("screen_x")),
+        _int_value(rect.get("screen_y")),
+        _positive_int(rect.get("width")),
+        _positive_int(rect.get("height")),
+    )
+
+
+def _screen_point_inside_values(
+    x: Any,
+    y: Any,
+    screen_x: int | None,
+    screen_y: int | None,
+    width: int | None,
+    height: int | None,
+) -> bool:
+    try:
+        point_x = float(x)
+        point_y = float(y)
+    except (TypeError, ValueError):
+        return False
+    if screen_x is None or screen_y is None or width is None or height is None:
+        return False
+    return screen_x <= point_x <= screen_x + width and screen_y <= point_y <= screen_y + height
 
 
 def _friendly_region(label: str) -> str:

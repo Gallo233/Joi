@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 from agent_companion.core.computer_use import verify_post_action
 from agent_companion.core.computer_use.schemas import ComputerAction, ComputerObservation, ComputerUseResult
 from agent_companion.core.schemas import ToolRequest
-from agent_companion.core.tools.targeting import SemanticTargetTool
+from agent_companion.core.tools.targeting import PendingSemanticTargetSelection, SemanticTargetSelectionStore, SemanticTargetSelectionTool, SemanticTargetTool
 from agent_companion.core.vision import AccessibilitySnapshot, AccessibleElement, CaptureRect, UnavailableAccessibilityObserver
 from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock
 from agent_companion.core.vision.visual_detector import HeuristicVisualDetector, VisualDetectionResult
@@ -355,6 +355,27 @@ def _run_semantic_case(root: Path, suite: str, base_dir: Path, case: dict[str, A
     display_text = f"{tool_result.display_card.summary} {tool_result.display_card.body or ''}"
     if any(fragment and fragment in display_text for fragment in ("bbox", "source", str(case.get("image") or ""), ".ppm", "data/", "approval-", "task-")):
         failures.append("display card leaked semantic grounding technical details")
+    selection_expected = expected.get("selection") if isinstance(expected.get("selection"), dict) else None
+    if selection_expected is not None:
+        rank = int(selection_expected.get("rank") or 1)
+        store = SemanticTargetSelectionStore()
+        selection = PendingSemanticTargetSelection(
+            task_id=f"fixture-{case_id}",
+            query=str(case.get("query") or ""),
+            target_candidates=candidate_rows,
+            observation=tool_result.agent_state.get("observation") or observation.to_agent_state(),
+            artifacts=tool_result.agent_state.get("artifacts") or [],
+        )
+        store.save(selection)
+        selected = SemanticTargetSelectionTool(store).run(ToolRequest("vision.select_target", {"selection_id": selection.selection_id, "selection": rank}))
+        if "requires_approval" in selection_expected and bool(selected.requires_approval) != bool(selection_expected.get("requires_approval")):
+            failures.append(f"expected selected requires_approval={bool(selection_expected.get('requires_approval'))}, got {bool(selected.requires_approval)}")
+        if selection_expected.get("coordinate_untrusted") and not selected.agent_state.get("coordinate_untrusted"):
+            failures.append("expected selected candidate to remain coordinate_untrusted")
+        if selection_expected.get("no_approval_request") and "approval_request" in selected.agent_state:
+            failures.append("expected selected candidate to have no approval_request")
+        if any(fragment and fragment in selected.voice_line.text for fragment in forbidden):
+            failures.append("selected candidate voice_line leaked semantic grounding details")
     summary = [
         f"approval={bool(tool_result.requires_approval)}",
         f"selection={bool(tool_result.agent_state.get('candidate_selection_required'))}",

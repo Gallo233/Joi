@@ -1268,5 +1268,150 @@
       400,
       225
     ]
+  },
+  {
+    "id": "semantic_clipped_uia_center_outside_clarification",
+    "image": "semantic_clipped_uia_center_outside.ppm",
+    "query": "点目标越界",
+    "capture_rect": {
+      "screen_x": 100,
+      "screen_y": 80,
+      "width": 200,
+      "height": 150,
+      "scale_x": 1.0,
+      "scale_y": 1.0
+    },
+    "accessibility_elements": [
+      {
+        "name": "目标越界",
+        "role": "ButtonControl",
+        "bounds": [
+          280,
+          130,
+          80,
+          30
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.97
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": false,
+      "needs_clarification": true,
+      "no_approval_request": true,
+      "top_source": "accessibility",
+      "top_ambiguity": "none"
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_clipped_uia_selection_still_untrusted",
+    "image": "semantic_clipped_uia_selection_still_untrusted.ppm",
+    "query": "点目标选择",
+    "capture_rect": {
+      "screen_x": 100,
+      "screen_y": 80,
+      "width": 200,
+      "height": 150,
+      "scale_x": 1.0,
+      "scale_y": 1.0
+    },
+    "accessibility_elements": [
+      {
+        "name": "目标选择",
+        "role": "ButtonControl",
+        "bounds": [
+          280,
+          130,
+          80,
+          30
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.97
+      },
+      {
+        "name": "目标选择",
+        "role": "ButtonControl",
+        "bounds": [
+          140,
+          130,
+          72,
+          30
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.95
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "accessibility",
+      "top_ambiguity": "close_score",
+      "min_candidates": 2,
+      "selection": {
+        "rank": 1,
+        "requires_approval": false,
+        "coordinate_untrusted": true,
+        "no_approval_request": true
+      }
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_uia_screen_bbox_inside_approval",
+    "image": "semantic_uia_screen_bbox_inside.ppm",
+    "query": "点目标可信",
+    "capture_rect": {
+      "screen_x": 100,
+      "screen_y": 80,
+      "width": 200,
+      "height": 150,
+      "scale_x": 1.0,
+      "scale_y": 1.0
+    },
+    "accessibility_elements": [
+      {
+        "name": "目标可信",
+        "role": "ButtonControl",
+        "bounds": [
+          150,
+          120,
+          80,
+          30
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.97
+      }
+    ],
+    "expected": {
+      "requires_approval": true,
+      "candidate_selection_required": false,
+      "top_source": "accessibility",
+      "top_ambiguity": "none",
+      "approval_tool": "computer.click",
+      "click_x_range": [
+        188,
+        192
+      ],
+      "click_y_range": [
+        133,
+        137
+      ]
+    },
+    "image_size": [
+      400,
+      225
+    ]
   }
 ]

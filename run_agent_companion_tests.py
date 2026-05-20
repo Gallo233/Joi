@@ -26,7 +26,7 @@ from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.codex import CodexTool
 from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
-from agent_companion.core.tools.targeting import SemanticTargetTool
+from agent_companion.core.tools.targeting import SemanticTargetTool, click_arguments_from_state
 from agent_companion.core.tools.watch import WatchRecallTool
 from agent_companion.core.vision.accessibility import AccessibilitySnapshot, AccessibleElement, _looks_clickable
 from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock, PytesseractOcrExtractor, UnavailableOcrExtractor
@@ -686,6 +686,79 @@ def main() -> int:
     assert_true(accessibility_click_args["x"] == 990 and accessibility_click_args["y"] == 245, "accessibility bounds should click by absolute screen center")
     assert_true(accessibility_target.agent_state["target_candidate"]["preview"]["bbox"] == [860, 30, 60, 30], "accessibility candidate should have screenshot-relative preview bbox")
 
+    partial_capture_state = _fake_computer_observation(
+        workspace,
+        rel="data/agent_companion/vision/target-uia-partial.png",
+        width=400,
+        height=225,
+        capture_rect=CaptureRect(100, 80, 200, 150),
+    ).to_agent_state()
+    clipped_uia_args = click_arguments_from_state(
+        {"source": "accessibility", "bbox": [180, 50, 80, 30], "screen_bbox": [280, 130, 80, 30]},
+        partial_capture_state,
+    )
+    assert_true(clipped_uia_args is None, "clipped UIA screen_bbox center outside capture_rect must not create click args")
+    trusted_uia_args = click_arguments_from_state(
+        {"source": "accessibility", "bbox": [50, 40, 80, 30], "screen_bbox": [150, 120, 80, 30]},
+        partial_capture_state,
+    )
+    assert_true(trusted_uia_args == {"x": 190, "y": 135}, "trusted UIA screen_bbox center should create expected click args")
+
+    clipped_uia_snapshot = AccessibilitySnapshot(
+        "success",
+        title="Joi Test Window",
+        window_handle=1234,
+        elements=[AccessibleElement("目标越界", "ButtonControl", (280, 130, 80, 30), enabled=True, clickable=True, confidence=0.97)],
+    )
+    clipped_uia_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-uia-clipped.png",
+                    width=400,
+                    height=225,
+                    capture_rect=CaptureRect(100, 80, 200, 150),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+        accessibility=FakeAccessibilityObserver(clipped_uia_snapshot),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点目标越界"}))
+    assert_true(not clipped_uia_target.requires_approval, "partially clipped UIA center outside capture rect must not create approval")
+    assert_true(clipped_uia_target.agent_state["needs_clarification"], "unsafe clipped UIA target should ask for clarification")
+    assert_true("approval_request" not in clipped_uia_target.agent_state, "unsafe clipped UIA target must not synthesize click arguments")
+    assert_true(clipped_uia_target.agent_state["target_candidate"]["preview"]["bbox"] == [180, 50, 80, 30], "unsafe clipped UIA target may keep clamped preview bbox")
+
+    trusted_partial_uia_snapshot = AccessibilitySnapshot(
+        "success",
+        title="Joi Test Window",
+        window_handle=1234,
+        elements=[AccessibleElement("目标可信", "ButtonControl", (150, 120, 80, 30), enabled=True, clickable=True, confidence=0.97)],
+    )
+    trusted_partial_uia_target = SemanticTargetTool(
+        workspace,
+        computer_backend=FakeComputerBackend(
+            workspace,
+            observations=[
+                _fake_computer_observation(
+                    workspace,
+                    rel="data/agent_companion/vision/target-uia-trusted.png",
+                    width=400,
+                    height=225,
+                    capture_rect=CaptureRect(100, 80, 200, 150),
+                )
+            ],
+        ),
+        ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+        accessibility=FakeAccessibilityObserver(trusted_partial_uia_snapshot),
+    ).run(ToolRequest("vision.resolve_target", {"query": "点目标可信"}))
+    trusted_partial_click_args = trusted_partial_uia_target.agent_state["approval_request"]["arguments"]
+    assert_true(trusted_partial_uia_target.requires_approval, "UIA center inside partial capture rect should keep approval path")
+    assert_true(trusted_partial_click_args == {"x": 190, "y": 135}, "trusted partial UIA approval should preserve absolute screen center")
+
     disabled_button_snapshot = AccessibilitySnapshot(
         "success",
         title="Joi Test Window",
@@ -937,6 +1010,43 @@ def main() -> int:
     assert_true(any(event.agent_state.get("candidate_not_actionable") for event in disabled_selected_events), "disabled candidate selection should explain actionability block")
     assert_true(any("不可操作" in event.display_card.summary or "未启用" in event.display_card.summary for event in disabled_selected_events), "disabled selection card should explain unavailable actionability")
     assert_true(all(not any(fragment in event.voice_line.text for fragment in forbidden_uia_voice) for event in disabled_selected_events), "disabled selection voice leaked technical details")
+
+    clipped_uia_selection_app = AgentCompanionApp(workspace)
+    clipped_uia_selection_snapshot = AccessibilitySnapshot(
+        "success",
+        title="Joi Test Window",
+        window_handle=1234,
+        elements=[
+            AccessibleElement("登录", "ButtonControl", (280, 130, 80, 30), enabled=True, clickable=True, confidence=0.97),
+            AccessibleElement("登录", "ButtonControl", (140, 130, 72, 30), enabled=True, clickable=True, confidence=0.95),
+        ],
+    )
+    clipped_uia_selection_app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(
+                        workspace,
+                        rel="data/agent_companion/vision/selection-uia-clipped.png",
+                        width=400,
+                        height=225,
+                        capture_rect=CaptureRect(100, 80, 200, 150),
+                    )
+                ],
+            ),
+            ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+            accessibility=FakeAccessibilityObserver(clipped_uia_selection_snapshot),
+        )
+    )
+    clipped_uia_selection_events = clipped_uia_selection_app.handle_user_text("点登录按钮")
+    clipped_uia_selection_id = _selection_id(clipped_uia_selection_events)
+    assert_true(clipped_uia_selection_id.startswith("selection-"), "clipped UIA ambiguity should create pending selection context")
+    clipped_uia_selected_events = clipped_uia_selection_app.select_semantic_target(clipped_uia_selection_id, 1)
+    assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in clipped_uia_selected_events), "selected clipped UIA candidate outside capture rect must not create click approval")
+    assert_true(any(event.agent_state.get("coordinate_untrusted") for event in clipped_uia_selected_events), "selected clipped UIA candidate should report untrusted coordinates")
+    assert_true(all(not any(fragment in event.voice_line.text for fragment in forbidden_uia_voice + ["280", "130", "selection-uia-clipped.png"]) for event in clipped_uia_selected_events), "clipped UIA selection voice leaked technical details")
 
     selection_app = AgentCompanionApp(workspace)
     selection_app.tools.register(
@@ -2365,11 +2475,13 @@ llm:
     assert_true("semantic_stale_uia_snapshot_clarification" in semantic_fixture_manifest and "semantic_clipped_foreground_edge_selection" in semantic_fixture_manifest, "stale UIA and clipped foreground semantic fixtures should be present")
     assert_true("semantic_multi_window_background_conflict_selection" in semantic_fixture_manifest and "semantic_truncated_dropdown_oob_selection" in semantic_fixture_manifest, "multi-window conflict and truncated dropdown semantic fixtures should be present")
     assert_true("semantic_partial_capture_rect_clarification" in semantic_fixture_manifest and "semantic_partial_capture_rect_trusted_approval" in semantic_fixture_manifest, "partial capture rect semantic fixtures should cover fail-closed and approval paths")
+    assert_true("semantic_clipped_uia_center_outside_clarification" in semantic_fixture_manifest and "semantic_clipped_uia_selection_still_untrusted" in semantic_fixture_manifest, "clipped UIA screen-bounds fixtures should cover direct and selected unsafe paths")
+    assert_true("semantic_uia_screen_bbox_inside_approval" in semantic_fixture_manifest, "trusted UIA screen-bounds fixture should cover positive approval path")
     eval_source = (workspace / "tools" / "eval_visual_detector.py").read_text(encoding="utf-8")
     assert_true("local private image verification eval: skipped" in eval_source and "image_diff_cases.local.json" in eval_source, "local private image-diff eval should skip when missing")
     assert_true("_print_private_results" in eval_source and "failure_category" in eval_source and "local_private_case_" in eval_source, "local private eval output should be sanitized")
     assert_true("local private semantic grounding eval: skipped" in eval_source and "semantic_cases.local.json" in eval_source, "local private semantic eval should skip when missing")
-    assert_true("approval_tool" in eval_source and "_capture_rect_from_case" in eval_source, "semantic eval should cover approval and capture-rect grounding paths")
+    assert_true("approval_tool" in eval_source and "_capture_rect_from_case" in eval_source and "SemanticTargetSelectionTool" in eval_source, "semantic eval should cover approval, selection, and capture-rect grounding paths")
     assert_true(run_visual_detector_eval(workspace, verbose=False) == 0, "visual/image verification eval should pass committed suites and skip or run local private suites safely")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")

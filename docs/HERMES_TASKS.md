@@ -105,6 +105,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - UIA screen bounds now need trusted capture-rect grounding before they can create click arguments; otherwise Joi asks for clarification instead of generating a click.
 - P4.24 promoted only safe multi-window/clipped-capture abstractions into synthetic fixtures: stale UIA snapshots, clipped foreground-edge candidates, overlapping background-window conflicts, truncated dropdown edge candidates, partial capture-rect fail-closed behavior, and a positive partial-capture approval path. The committed synthetic semantic suite is now 30 cases; local private output still prints only suite counts and `local_private_case_*` placeholders.
 - Screenshot-relative OCR targets now also need the computed click point to stay inside the trusted capture rectangle before Joi creates click arguments; otherwise Joi asks for clarification.
+- P4.25 fixed the remaining UIA `screen_bbox` trust gap: clamped previews can still render for partially visible controls, but direct approvals and selected-candidate continuations now fail closed unless the original screen-bounds center sits inside the trusted capture rectangle. The committed synthetic semantic suite is now 33 cases.
 
 Next task options, in priority order:
 
