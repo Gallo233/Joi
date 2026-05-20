@@ -478,5 +478,262 @@
       400,
       225
     ]
+  },
+  {
+    "id": "semantic_dense_browser_repeated_nav_selection",
+    "image": "semantic_dense_browser_repeated_nav.ppm",
+    "query": "点目标菜单",
+    "ocr_blocks": [
+      {
+        "text": "目标菜单",
+        "bbox": [
+          18,
+          18,
+          68,
+          24
+        ],
+        "confidence": 0.91
+      },
+      {
+        "text": "目标菜单",
+        "bbox": [
+          112,
+          18,
+          68,
+          24
+        ],
+        "confidence": 0.9
+      },
+      {
+        "text": "目标菜单",
+        "bbox": [
+          298,
+          52,
+          78,
+          24
+        ],
+        "confidence": 0.89
+      },
+      {
+        "text": "目标菜单",
+        "bbox": [
+          38,
+          156,
+          82,
+          24
+        ],
+        "confidence": 0.88
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_ambiguity": "close_score",
+      "min_candidates": 3
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_settings_static_disabled_neighbor_selection",
+    "image": "semantic_settings_static_disabled_neighbor.ppm",
+    "query": "点目标开关",
+    "ocr_blocks": [
+      {
+        "text": "目标开关",
+        "bbox": [
+          274,
+          62,
+          64,
+          22
+        ],
+        "confidence": 0.94
+      },
+      {
+        "text": "目标开关",
+        "bbox": [
+          274,
+          96,
+          64,
+          22
+        ],
+        "confidence": 0.88
+      }
+    ],
+    "accessibility_elements": [
+      {
+        "name": "目标开关",
+        "role": "TextControl",
+        "bounds": [
+          76,
+          64,
+          92,
+          18
+        ],
+        "enabled": true,
+        "clickable": false,
+        "confidence": 0.9
+      },
+      {
+        "name": "目标开关",
+        "role": "ButtonControl",
+        "bounds": [
+          274,
+          62,
+          64,
+          22
+        ],
+        "enabled": false,
+        "clickable": true,
+        "confidence": 0.93
+      },
+      {
+        "name": "目标开关",
+        "role": "ButtonControl",
+        "bounds": [
+          274,
+          96,
+          64,
+          22
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.87
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "fused",
+      "top_ambiguity": "close_score",
+      "top_enabled": false,
+      "min_candidates": 3
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_canvas_hud_visual_ocr_conflict_selection",
+    "image": "semantic_canvas_hud_visual_ocr_conflict.ppm",
+    "query": "点右下操作",
+    "ocr_blocks": [
+      {
+        "text": "右下操作",
+        "bbox": [
+          136,
+          176,
+          128,
+          22
+        ],
+        "confidence": 0.32
+      }
+    ],
+    "visual_candidates": [
+      {
+        "label": "右下操作",
+        "bbox": [
+          284,
+          172,
+          86,
+          30
+        ],
+        "confidence": 0.68,
+        "reason": "右下 HUD 操作块",
+        "region": "bottom_controls"
+      },
+      {
+        "label": "右下操作",
+        "bbox": [
+          136,
+          176,
+          128,
+          22
+        ],
+        "confidence": 0.67,
+        "reason": "底部 HUD 操作块",
+        "region": "bottom_controls"
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "visual",
+      "top_ambiguity": "close_score",
+      "min_candidates": 3
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_dense_adjacent_actionable_fused_selection",
+    "image": "semantic_dense_adjacent_actionable_fused.ppm",
+    "query": "点目标行",
+    "ocr_blocks": [
+      {
+        "text": "目标行",
+        "bbox": [
+          268,
+          62,
+          58,
+          18
+        ],
+        "confidence": 0.93
+      },
+      {
+        "text": "目标行",
+        "bbox": [
+          268,
+          90,
+          58,
+          18
+        ],
+        "confidence": 0.92
+      }
+    ],
+    "accessibility_elements": [
+      {
+        "name": "目标行",
+        "role": "ButtonControl",
+        "bounds": [
+          268,
+          62,
+          58,
+          18
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.93
+      },
+      {
+        "name": "目标行",
+        "role": "ButtonControl",
+        "bounds": [
+          268,
+          90,
+          58,
+          18
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.92
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "fused",
+      "top_ambiguity": "close_score",
+      "min_candidates": 2
+    },
+    "image_size": [
+      400,
+      225
+    ]
   }
 ]

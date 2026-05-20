@@ -100,11 +100,12 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Semantic target grounding calibration now has committed synthetic coverage for UIA/OCR disagreement, static UIA text, disabled UIA controls, visual-only selection gates, close low-confidence candidates, and no-candidate clarification. Visual-only candidates still require explicit selection first, then a separate click approval.
 - Visual/OCR/UIA ranking now preserves existing ambiguity labels during visual merge so close-score and low-confidence gates survive cross-source reranking.
 - Dense semantic calibration now has committed synthetic coverage for repeated labels across regions, modal foreground/background conflicts, dense table/list low-confidence neighbors, positive actionable UIA/OCR fusion approvals, missing or abnormal capture rectangles, out-of-bounds UIA candidates, and dense visual-only gates.
+- P4.22 local private dense-layout calibration kept real screenshots/manifests under ignored `data/local_visual_eval/` and promoted only abstract regressions: repeated browser navigation labels, desktop settings static/disabled neighbor conflicts, canvas/HUD visual-vs-OCR disagreement, and adjacent actionable fused controls. The committed synthetic semantic suite is now 18 cases; local private semantic output remains sanitized as suite counts plus `local_private_case_*` placeholders.
 - UIA screen bounds now need trusted capture-rect grounding before they can create click arguments; otherwise Joi asks for clarification instead of generating a click.
 
 Next task options, in priority order:
 
-1. Continue local private semantic calibration against real dense browser, desktop, and game layouts where screenshots are available, then convert only safe failure categories into generated synthetic fixtures.
+1. Continue local private semantic calibration against larger dense browser, desktop, and game layouts where screenshots are available, especially foreground/background modal conflicts and unusual capture scaling, then convert only safe failure categories into generated synthetic fixtures.
 2. Re-test real Codex CLI permission JSONL only when a documented permission-specific resume contract is available; keep fail-closed behavior until then.
 3. Expand runtime settings only after a secret-safe config writer/UI contract exists for provider endpoints and credentials; keep the current safe controls approval-gated.
 4. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.

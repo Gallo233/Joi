@@ -499,6 +499,109 @@ SEMANTIC_CASES: list[dict] = [
             "top_source": "visual",
         },
     },
+    {
+        "id": "semantic_dense_browser_repeated_nav_selection",
+        "image": "semantic_dense_browser_repeated_nav.ppm",
+        "query": "点目标菜单",
+        "shapes": [
+            (18, 18, 68, 24, (78, 122, 190)),
+            (112, 18, 68, 24, (82, 128, 196)),
+            (298, 52, 78, 24, (88, 136, 204)),
+            (38, 156, 82, 24, (76, 116, 184)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标菜单", "bbox": [18, 18, 68, 24], "confidence": 0.91},
+            {"text": "目标菜单", "bbox": [112, 18, 68, 24], "confidence": 0.9},
+            {"text": "目标菜单", "bbox": [298, 52, 78, 24], "confidence": 0.89},
+            {"text": "目标菜单", "bbox": [38, 156, 82, 24], "confidence": 0.88},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_ambiguity": "close_score",
+            "min_candidates": 3,
+        },
+    },
+    {
+        "id": "semantic_settings_static_disabled_neighbor_selection",
+        "image": "semantic_settings_static_disabled_neighbor.ppm",
+        "query": "点目标开关",
+        "shapes": [
+            (54, 56, 292, 1, (178, 184, 194)),
+            (54, 90, 292, 1, (178, 184, 194)),
+            (76, 64, 92, 18, (94, 104, 126)),
+            (274, 62, 64, 22, (130, 134, 146)),
+            (274, 96, 64, 22, (78, 126, 194)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标开关", "bbox": [274, 62, 64, 22], "confidence": 0.94},
+            {"text": "目标开关", "bbox": [274, 96, 64, 22], "confidence": 0.88},
+        ],
+        "accessibility_elements": [
+            {"name": "目标开关", "role": "TextControl", "bounds": [76, 64, 92, 18], "enabled": True, "clickable": False, "confidence": 0.9},
+            {"name": "目标开关", "role": "ButtonControl", "bounds": [274, 62, 64, 22], "enabled": False, "clickable": True, "confidence": 0.93},
+            {"name": "目标开关", "role": "ButtonControl", "bounds": [274, 96, 64, 22], "enabled": True, "clickable": True, "confidence": 0.87},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "fused",
+            "top_ambiguity": "close_score",
+            "top_enabled": False,
+            "min_candidates": 3,
+        },
+    },
+    {
+        "id": "semantic_canvas_hud_visual_ocr_conflict_selection",
+        "image": "semantic_canvas_hud_visual_ocr_conflict.ppm",
+        "query": "点右下操作",
+        "shapes": [
+            (56, 50, 288, 120, (50, 58, 78)),
+            (136, 176, 128, 22, (66, 124, 216)),
+            (284, 172, 86, 30, (208, 146, 72)),
+        ],
+        "ocr_blocks": [
+            {"text": "右下操作", "bbox": [136, 176, 128, 22], "confidence": 0.32}
+        ],
+        "visual_candidates": [
+            {"label": "右下操作", "bbox": [284, 172, 86, 30], "confidence": 0.68, "reason": "右下 HUD 操作块", "region": "bottom_controls"},
+            {"label": "右下操作", "bbox": [136, 176, 128, 22], "confidence": 0.67, "reason": "底部 HUD 操作块", "region": "bottom_controls"},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "visual",
+            "top_ambiguity": "close_score",
+            "min_candidates": 3,
+        },
+    },
+    {
+        "id": "semantic_dense_adjacent_actionable_fused_selection",
+        "image": "semantic_dense_adjacent_actionable_fused.ppm",
+        "query": "点目标行",
+        "shapes": [
+            (52, 56, 296, 1, (178, 184, 194)),
+            (52, 84, 296, 1, (178, 184, 194)),
+            (52, 112, 296, 1, (178, 184, 194)),
+            (268, 62, 58, 18, (82, 126, 190)),
+            (268, 90, 58, 18, (86, 132, 196)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标行", "bbox": [268, 62, 58, 18], "confidence": 0.93},
+            {"text": "目标行", "bbox": [268, 90, 58, 18], "confidence": 0.92},
+        ],
+        "accessibility_elements": [
+            {"name": "目标行", "role": "ButtonControl", "bounds": [268, 62, 58, 18], "enabled": True, "clickable": True, "confidence": 0.93},
+            {"name": "目标行", "role": "ButtonControl", "bounds": [268, 90, 58, 18], "enabled": True, "clickable": True, "confidence": 0.92},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "fused",
+            "top_ambiguity": "close_score",
+            "min_candidates": 2,
+        },
+    },
 ]
 
 
