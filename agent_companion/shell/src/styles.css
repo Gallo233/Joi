@@ -510,28 +510,73 @@ input {
   gap: 10px;
 }
 
-.runtime-status {
+.provider-grid {
   display: grid;
-  gap: 8px;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  margin-bottom: 14px;
 }
 
-.runtime-status div {
+.provider-card {
   display: grid;
-  grid-template-columns: 56px 1fr;
-  gap: 8px;
+  gap: 7px;
+  border: 1px solid #e2e7ee;
   border-radius: 8px;
-  padding: 9px 10px;
-  background: #f2f5f9;
+  padding: 10px;
+  background: #f8fafc;
   color: #536075;
   font-size: 12px;
 }
 
-.runtime-status .ready strong {
+.provider-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.provider-card strong {
+  color: #1f2d3f;
+}
+
+.provider-card header span,
+.provider-meta span {
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: #edf2f8;
+  color: #516071;
+  white-space: nowrap;
+}
+
+.provider-card p {
+  margin: 0;
+}
+
+.provider-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.provider-card.ready header span,
+.provider-card.mock header span {
+  background: #e6f4ed;
   color: #177247;
 }
 
-.runtime-status .off strong {
+.provider-card.off header span {
+  background: #f2f4f7;
+  color: #667085;
+}
+
+.provider-card.unavailable header span,
+.provider-card.error header span {
+  background: #fae9ec;
   color: #a13543;
+}
+
+.debug-title {
+  margin-top: 8px;
 }
 
 .chat-row {

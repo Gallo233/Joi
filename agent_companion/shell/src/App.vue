@@ -2,7 +2,7 @@
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, VoiceAudioPayload } from './protocol'
+import type { AgentEvent, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeProviderStatus, VoiceAudioPayload } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -187,7 +187,7 @@ function isTaskCardEvent(event: AgentEvent) {
 function isSpeakableEvent(event: AgentEvent) {
   if (event.type === 'user_message' || event.type === 'plan_created' || event.type === 'tool_started' || event.type === 'audit_event') return false
   const text = event.voice_line?.text || ''
-  return !/[{}[\]"=]|task-|approval-|selection-|codex-|\.png|\.jpg|\.jpeg|\.webp|\.bmp|\.gif|\.ppm|\.json|\.log|[A-Z]:\\/.test(text)
+  return !/[{}[\]"=]|task-|approval-|selection-|codex-|sk-|\/(?:Users|home|private|tmp|var|Volumes)\/|\.png|\.jpg|\.jpeg|\.webp|\.bmp|\.gif|\.ppm|\.json|\.jsonl|\.log|\.txt|\.yaml|\.yml|\.gguf|\.safetensors|\.ckpt|\.pth|\.onnx|\.bin|[A-Z]:\\/.test(text)
 }
 
 function taskGoal(taskId: string, fallback: string) {
@@ -688,31 +688,102 @@ function beginNewVoiceIntent() {
   return voiceEpoch
 }
 
-function runtimeStatusRows() {
+function runtimeStatusRows(): RuntimeProviderStatus[] {
+  const providers = ready.value?.runtime?.providers
+  if (providers?.length) {
+    return providers.map((row) =>
+      row.name === 'tts' && lastTtsError.value
+        ? { ...row, last_error: lastTtsError.value }
+        : row,
+    )
+  }
   const asr = ready.value?.asr
   const tts = ready.value?.tts
   return [
     {
-      name: 'ASR',
+      name: 'asr',
+      label: 'ASR',
       state: asr?.configured ? 'ready' : 'off',
-      summary: [
-        asr?.configured ? '已配置' : '未配置',
-        `provider=${asr?.provider || 'none'}`,
-        `max=${asr?.max_seconds || 30}s`,
-        `limit=${formatBytes(asr?.max_bytes || 0)}`,
-        `timeout=${asr?.timeout_seconds || 30}s`,
-      ].join(' · '),
+      enabled: Boolean(asr?.enabled),
+      configured: Boolean(asr?.configured),
+      provider: asr?.provider || 'none',
+      summary: asr?.configured ? '已配置' : '未配置',
+      timeout_seconds: asr?.timeout_seconds || 30,
+      limit: formatBytes(asr?.max_bytes || 0),
+      notes: [`max ${asr?.max_seconds || 30}s`],
     },
     {
-      name: 'TTS',
+      name: 'tts',
+      label: 'TTS',
       state: tts?.configured ? 'ready' : 'off',
-      summary: [
-        tts?.configured ? '已配置' : '未配置',
-        `provider=${tts?.provider || 'none'}`,
-        `last=${lastTtsError.value || ttsErrorLabel(tts?.last_error || '') || 'ok'}`,
-      ].join(' · '),
+      enabled: Boolean(tts?.enabled),
+      configured: Boolean(tts?.configured),
+      provider: tts?.provider || 'none',
+      summary: tts?.configured ? '已配置' : '未配置',
+      last_error: tts?.last_error || '',
     },
   ]
+}
+
+function providerSummary(row: RuntimeProviderStatus) {
+  return row.summary || providerStateLabel(row.state)
+}
+
+function providerMeta(row: RuntimeProviderStatus) {
+  const meta: string[] = []
+  if (row.provider) meta.push(`provider=${row.provider}`)
+  if (row.model) meta.push(`model=${row.model}`)
+  if (row.timeout_seconds) meta.push(`timeout=${row.timeout_seconds}s`)
+  if (row.limit) meta.push(row.limit)
+  const error = providerErrorLabel(row.last_error || '')
+  if (error) meta.push(`last=${error}`)
+  for (const note of row.notes || []) {
+    if (note) meta.push(note)
+  }
+  return meta
+}
+
+function providerStateLabel(state: string) {
+  const labels: Record<string, string> = {
+    ready: '可用',
+    mock: 'Mock',
+    off: '未启用',
+    unavailable: '不可用',
+    error: '需配置',
+  }
+  return labels[state] || '未知'
+}
+
+function providerErrorLabel(error: string) {
+  if (!error) return ''
+  const labels: Record<string, string> = {
+    asr_unconfigured: 'ASR 未配置',
+    asr_disabled: 'ASR 未启用',
+    asr_config_error: 'ASR 配置有误',
+    mock_asr_developer_only: '仅开发可用',
+    audio_too_large: '音频过大',
+    audio_decode_failed: '音频解码失败',
+    asr_timeout: '识别超时',
+    openai_package_missing: '缺少 OpenAI 包',
+    empty_audio: '音频为空',
+    empty_transcript: '无转写文本',
+    asr_failed: '识别失败',
+    tts_timeout: '合成超时',
+    tts_service_unavailable: '服务未连接',
+    tts_config_error: 'TTS 配置有误',
+    tts_failed: '合成失败',
+    pillow_missing: '缺少 Pillow',
+    pytesseract_missing: '缺少 pytesseract',
+    ocr_dependency_missing: 'OCR 依赖缺失',
+    computer_use_windows_only: '仅 Windows 可执行',
+    model_unconfigured: '模型未配置',
+    runtime_status_unavailable: '状态不可用',
+  }
+  return error
+    .split(';')
+    .map((part) => labels[part] || '')
+    .filter(Boolean)
+    .join(' / ')
 }
 
 function ttsErrorLabel(error: string) {
@@ -1021,14 +1092,24 @@ onBeforeUnmount(() => {
 
       <section class="debug-section" v-if="developerMode">
         <div class="section-title">
+          <h2>运行设置</h2>
+          <span>{{ ready?.runtime?.read_only ? '只读' : '状态' }}</span>
+        </div>
+        <div class="provider-grid">
+          <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
+            <header>
+              <strong>{{ row.label || row.name }}</strong>
+              <span>{{ providerStateLabel(row.state) }}</span>
+            </header>
+            <p>{{ providerSummary(row) }}</p>
+            <div class="provider-meta" v-if="providerMeta(row).length">
+              <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="section-title debug-title">
           <h2>开发者事件</h2>
           <span>{{ events.length }} 条</span>
-        </div>
-        <div class="runtime-status">
-          <div v-for="row in runtimeStatusRows()" :key="row.name" :class="row.state">
-            <strong>{{ row.name }}</strong>
-            <span>{{ row.summary }}</span>
-          </div>
         </div>
         <div class="debug-list">
           <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">

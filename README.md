@@ -10,6 +10,7 @@ The current repository is intentionally focused on the Joi main line.
 - Tool adapters: Codex, browser observation/search queue, OK-WW game skill, MCP discovery, safe file reads.
 - Tauri/Vue Shell: product UI, character stage, chat stream, task cards, approval actions, developer event view.
 - Computer Use audit: developer mode shows sanitized observe/target/approval/action/verification timelines with before/after screenshots and local image-change verification for confirmed local computer actions.
+- Runtime provider status: developer mode shows read-only ASR, TTS, OCR, text/vision/expression model, Computer Use, and audit/verification status without exposing secrets, endpoints, logs, screenshot/audio filenames, or local model paths.
 - Voice path: optional GPT-SoVITS bridge through local `config.yaml`; no fallback to system TTS unless explicitly implemented later.
 
 ## Project Docs
@@ -100,6 +101,8 @@ Copy-Item config.example.yaml config.yaml
 ```
 
 Use environment variables or `secrets.yaml` for private credentials. Both `config.yaml` and `secrets.yaml` are ignored by Git.
+
+Developer mode includes a read-only runtime status panel for provider availability and last safe error categories. Change providers in local config files for now; the shell does not write provider settings or secrets.
 
 ## Repository Layout
 

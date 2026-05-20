@@ -11,6 +11,8 @@ from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouter, l
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
+from agent_companion.core import runtime_status as runtime_status_module
+from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.schemas import DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.server import JsonRpcBridge
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
@@ -277,6 +279,14 @@ def main() -> int:
     assert_true("100,200" not in blocked_coordinate.text, "voice leaked coordinates")
     blocked_approval = safe_voice_line("approval-abcdef123456 已确认，截图 sample.png")
     assert_true("approval-" not in blocked_approval.text and "sample.png" not in blocked_approval.text, "voice leaked approval id or screenshot filename")
+    blocked_runtime_detail = safe_voice_line("provider sk-test token path /Users/me/models/joi.gguf trace.log")
+    assert_true(
+        "sk-" not in blocked_runtime_detail.text
+        and "/Users/" not in blocked_runtime_detail.text
+        and ".gguf" not in blocked_runtime_detail.text
+        and ".log" not in blocked_runtime_detail.text,
+        "voice leaked provider secret, local model path, or log filename",
+    )
 
     memory_dir = Path(tempfile.mkdtemp())
     try:
@@ -1507,6 +1517,110 @@ def main() -> int:
     assert_true(ready_payload["asr"]["timeout_seconds"] == 5, "Core ready payload should expose ASR timeout")
     assert_true("tts" in ready_payload and "provider" in ready_payload["tts"], "Core ready payload should expose safe TTS status")
     assert_true("server_url" not in ready_payload["tts"] and "gpt_sovits_work_path" not in ready_payload["tts"], "TTS status should not expose paths or endpoints")
+    assert_true(ready_payload["runtime"]["read_only"] and ready_payload["runtime"]["safe_for_display"], "Core ready payload should expose safe read-only runtime status")
+    runtime_provider_names = {row["name"] for row in ready_payload["runtime"]["providers"]}
+    assert_true(
+        {"asr", "tts", "ocr", "text", "vision", "expression", "computer_use", "audit_verification"}.issubset(runtime_provider_names),
+        "Runtime status should include provider, platform, audit, and verification rows",
+    )
+    runtime_payload_text = str(ready_payload["runtime"])
+    forbidden_runtime_fragments = ["sk-", "server_url", "gpt_sovits_work_path", "base_url", "api_key", "/Users/", "C:\\", "secret"]
+    assert_true(
+        all(fragment not in runtime_payload_text for fragment in forbidden_runtime_fragments),
+        "Runtime status leaked secrets, endpoints, or private paths",
+    )
+
+    with tempfile.TemporaryDirectory() as runtime_tmp_name:
+        runtime_tmp = Path(runtime_tmp_name)
+        (runtime_tmp / "config.yaml").write_text(
+            """
+llm:
+  provider: openai_compatible
+  use_mock: false
+  base_url: https://api.private.example/v1
+  model: gpt-public-text
+  api_key: sk-test-private
+  vision_enabled: true
+  vision_model: gpt-public-vision
+  vision_api_key: sk-test-vision
+  expression_enabled: true
+  expression_model: gpt-public-expression
+  expression_api_key: sk-test-expression
+tts:
+  enabled: true
+  provider: gpt-sovits
+  server_url: http://127.0.0.1:9880/
+  gpt_sovits_work_path: /Users/private/GPT-SoVITS
+ocr:
+  timeout_seconds: 7
+computer_use:
+  post_action_settle_ms: 325
+""",
+            encoding="utf-8",
+        )
+        configured_runtime = build_runtime_status(
+            runtime_tmp,
+            AsrRuntimeState(True, True, "openai_compatible", max_seconds=12, max_bytes=2048, timeout_seconds=9),
+            {"enabled": True, "configured": True, "provider": "gpt-sovits", "last_error": "tts_timeout"},
+        )
+        configured_rows = {row["name"]: row for row in configured_runtime["providers"]}
+        assert_true(configured_rows["asr"]["state"] == "ready" and configured_rows["asr"]["timeout_seconds"] == 9, "ASR runtime status should show configured fake state")
+        assert_true(configured_rows["tts"]["state"] == "ready" and configured_rows["tts"]["last_error"] == "tts_timeout", "TTS runtime status should show sanitized configured state")
+        assert_true(configured_rows["text"]["model"] == "gpt-public-text", "Text model status should expose safe public model name")
+        assert_true(configured_rows["vision"]["model"] == "gpt-public-vision", "Vision model status should expose safe public model name")
+        assert_true(configured_rows["expression"]["model"] == "gpt-public-expression", "Expression model status should expose safe public model name")
+        configured_text = str(configured_runtime)
+        assert_true(
+            "sk-test" not in configured_text
+            and "api.private" not in configured_text
+            and "GPT-SoVITS" not in configured_text
+            and "/Users/private" not in configured_text,
+            "Configured runtime status should redact keys, endpoints, and local TTS/model paths",
+        )
+
+    with tempfile.TemporaryDirectory() as runtime_tmp_name:
+        runtime_tmp = Path(runtime_tmp_name)
+        original_find_spec = runtime_status_module.importlib.util.find_spec
+
+        def fake_find_spec(name: str, *args: object, **kwargs: object) -> object:
+            if name in {"PIL", "pytesseract"}:
+                return None
+            return original_find_spec(name, *args, **kwargs)
+
+        runtime_status_module.importlib.util.find_spec = fake_find_spec
+        try:
+            unconfigured_runtime = build_runtime_status(
+                runtime_tmp,
+                AsrRuntimeState(False, False, "none", error="asr_unconfigured"),
+                {"enabled": False, "configured": False, "provider": "none", "last_error": ""},
+            )
+        finally:
+            runtime_status_module.importlib.util.find_spec = original_find_spec
+        unconfigured_rows = {row["name"]: row for row in unconfigured_runtime["providers"]}
+        assert_true(unconfigured_rows["asr"]["state"] == "off" and unconfigured_rows["tts"]["state"] == "off", "Unconfigured ASR/TTS runtime states should be off")
+        assert_true(unconfigured_rows["ocr"]["state"] == "unavailable" and "pytesseract_missing" in unconfigured_rows["ocr"]["last_error"], "OCR runtime status should report missing optional dependencies safely")
+        assert_true(unconfigured_rows["text"]["state"] == "off" and unconfigured_rows["vision"]["state"] == "off" and unconfigured_rows["expression"]["state"] == "off", "Unconfigured model runtime states should be off")
+
+    with tempfile.TemporaryDirectory() as runtime_tmp_name:
+        runtime_tmp = Path(runtime_tmp_name)
+        (runtime_tmp / "config.yaml").write_text(
+            """
+llm:
+  provider: openai_compatible
+  use_mock: false
+  model: /Users/private/models/joi.gguf
+  api_key: sk-test-private
+""",
+            encoding="utf-8",
+        )
+        redacted_runtime = build_runtime_status(
+            runtime_tmp,
+            AsrRuntimeState(False, False, "none"),
+            {"enabled": False, "configured": False, "provider": "none", "last_error": ""},
+        )
+        redacted_rows = {row["name"]: row for row in redacted_runtime["providers"]}
+        assert_true(redacted_rows["text"]["model"] == "redacted", "Local model paths should be redacted from runtime status")
+        assert_true("/Users/private" not in str(redacted_runtime) and "joi.gguf" not in str(redacted_runtime), "Runtime status should not expose local model paths")
 
     shell_api_source = (workspace / "agent_companion" / "shell" / "src" / "api.ts").read_text(encoding="utf-8")
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
@@ -1517,7 +1631,8 @@ def main() -> int:
     app_vue_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
     assert_true("beginNewVoiceIntent()" in app_vue_source and "voiceEventEpochs.get" in app_vue_source, "Shell should bump and compare voice epochs")
     assert_true("event_created_at: event.created_at" in app_vue_source, "Shell should key voice audio by event timestamp")
-    assert_true("runtimeStatusRows" in app_vue_source and "lastTtsError" in app_vue_source, "Shell developer mode should expose voice runtime status")
+    assert_true("runtimeStatusRows" in app_vue_source and "provider-card" in app_vue_source and "运行设置" in app_vue_source, "Shell developer mode should expose runtime provider settings/status view")
+    assert_true("providerMeta" in app_vue_source and "providerErrorLabel" in app_vue_source, "Shell runtime status view should render sanitized provider details")
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
     assert_true("targetSource" in app_vue_source and "UI控件" in app_vue_source and "融合" in app_vue_source and "视觉" in app_vue_source, "Shell should show semantic target candidate source")

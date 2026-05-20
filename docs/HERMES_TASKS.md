@@ -86,11 +86,13 @@ The current observation, first action layer, approval hardening, watch loop, and
 - `tools/generate_visual_fixtures.py` now generates committed synthetic fixtures for both visual detector grounding and Computer Use image-diff verification.
 - `tools/eval_visual_detector.py` reports committed synthetic visual detector results, optional local private visual detector results, committed synthetic image verification results, and optional local private image verification results as separate suites.
 - Local private screenshots and manifests must stay under ignored `data/local_visual_eval/`; missing local manifests skip instead of failing.
+- Developer mode now has a read-only runtime provider status panel for ASR, TTS, OCR, text/vision/expression models, Computer Use platform availability, and audit/verification capability.
+- Runtime status payloads are sanitized: no API keys, tokens, endpoints, full local model paths, raw logs, screenshot/audio filenames, task ids, or approval ids should be displayed or spoken.
 
 Next task options, in priority order:
 
 1. Run local private visual/image verification calibration against real screenshots in `data/local_visual_eval/`, then convert only safe lessons into generated synthetic fixtures.
-2. Add a settings panel for changing ASR/TTS/OCR providers once runtime status is stable.
+2. Add safe runtime provider mutation later only after the config writer can preserve secrets and validate changes.
 3. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 4. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, screenshot filenames, approval ids, and task ids.
 

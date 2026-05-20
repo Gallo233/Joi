@@ -10,7 +10,7 @@
 - The stage can load local character sprites from configuration, but bundled original VN expression variants and Live2D/VRM rendering are not product grade yet.
 - OK-WW callback currently proves launch/return code, but does not yet read detailed in-game completion state.
 - Codex permission requests do not yet flow back into Joi UI step by step.
-- Model routing is split between text, vision, and expression models, but the settings UI does not yet expose current provider/model usage.
+- Runtime provider settings are inspectable in developer mode, but the panel is intentionally read-only until Joi has a safe config mutation flow that preserves secrets and validates provider changes.
 
 ## Fixed
 
@@ -42,7 +42,7 @@
 - Voice transcription uses the configured ASR timeout plus grace time instead of the generic Core request timeout.
 - Watch Together can cite recent OCR snippets for visible text and labels, but region grouping is still coarse bbox data rather than semantic UI targets.
 - Voice audio identity now includes event timestamps so repeated lines in the same task do not collide.
-- Developer mode shows ASR/TTS runtime status, but there is not yet a full settings panel for changing providers.
+- Developer mode shows sanitized ASR/TTS/OCR/text-model/vision-model/expression-model runtime status, Computer Use platform availability, and audit/verification capability without exposing provider secrets, local paths, or raw logs.
 - Computer Use approval, action, and verification audit entries are visible in developer mode with sanitized arguments and before/after screenshot links.
 - Computer Use denied, expired, duplicate, unavailable, inconclusive, and likely no-op paths now produce clear audit entries without speaking raw ids, paths, coordinates, typed text, or screenshot filenames.
 - Computer Use audit entries include sanitized image-change signals for post-action verification.

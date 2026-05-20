@@ -87,6 +87,21 @@ export interface VoiceAudioPayload {
   voice_audio_error?: string
 }
 
+export interface RuntimeProviderStatus {
+  name: string
+  label: string
+  state: string
+  enabled?: boolean
+  configured?: boolean
+  provider?: string
+  model?: string
+  summary?: string
+  timeout_seconds?: number
+  limit?: string
+  last_error?: string
+  notes?: string[]
+}
+
 export interface UserCommand {
   id: string
   text: string
@@ -108,6 +123,11 @@ export interface CoreReadyPayload {
     configured?: boolean
     provider?: string
     last_error?: string
+  }
+  runtime?: {
+    read_only?: boolean
+    safe_for_display?: boolean
+    providers?: RuntimeProviderStatus[]
   }
   character?: {
     name?: string

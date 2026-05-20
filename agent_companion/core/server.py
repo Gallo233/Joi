@@ -13,6 +13,7 @@ from typing import Any, Callable
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.schemas import AgentEvent, DisplayCard
 from agent_companion.core.schemas import EventType
+from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
 from agent_companion.core.voice import safe_voice_line
@@ -243,6 +244,7 @@ class JsonRpcBridge:
             self.clients.discard(client)
 
     def _ready_payload(self) -> dict[str, Any]:
+        tts_status = self.tts.status_payload()
         payload: dict[str, Any] = {
             "workspace": str(self.workspace),
             "asr": {
@@ -254,7 +256,8 @@ class JsonRpcBridge:
                 "timeout_seconds": self.asr_state.timeout_seconds,
                 "error": self.asr_state.error,
             },
-            "tts": self.tts.status_payload(),
+            "tts": tts_status,
+            "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
             "character": {
                 "name": self.app.character.name,
                 "sprites": [],
