@@ -37,6 +37,69 @@ def assert_true(value: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def _runtime_with_ocr_probe(
+    workspace: Path,
+    *,
+    has_pillow: bool,
+    has_pytesseract: bool,
+    tesseract_path: str | None,
+    version_probe: bool | Exception,
+) -> dict:
+    original_find_spec = runtime_status_module.importlib.util.find_spec
+    original_which = runtime_status_module.shutil.which
+    original_probe = runtime_status_module._probe_tesseract_version
+
+    def fake_find_spec(name: str, *args: object, **kwargs: object) -> object | None:
+        if name == "PIL":
+            return object() if has_pillow else None
+        if name == "pytesseract":
+            return object() if has_pytesseract else None
+        return original_find_spec(name, *args, **kwargs)
+
+    def fake_which(command: str, *args: object, **kwargs: object) -> str | None:
+        if command == "tesseract":
+            return tesseract_path
+        return original_which(command, *args, **kwargs)
+
+    def fake_probe() -> bool:
+        if isinstance(version_probe, Exception):
+            raise version_probe
+        return bool(version_probe)
+
+    runtime_status_module.importlib.util.find_spec = fake_find_spec
+    runtime_status_module.shutil.which = fake_which
+    runtime_status_module._probe_tesseract_version = fake_probe
+    try:
+        return build_runtime_status(
+            workspace,
+            AsrRuntimeState(False, False, "none"),
+            {"enabled": False, "configured": False, "provider": "none", "last_error": ""},
+        )
+    finally:
+        runtime_status_module.importlib.util.find_spec = original_find_spec
+        runtime_status_module.shutil.which = original_which
+        runtime_status_module._probe_tesseract_version = original_probe
+
+
+def _ocr_status_row(runtime_payload: dict) -> dict:
+    return {row["name"]: row for row in runtime_payload["providers"]}["ocr"]
+
+
+def _assert_runtime_payload_has_no_probe_leaks(runtime_payload: dict) -> None:
+    text = str(runtime_payload)
+    forbidden = [
+        "/Users/",
+        "C:\\",
+        "private/bin/tesseract-real",
+        "stderr raw",
+        "traceback",
+        "sk-",
+        "secret",
+        "token",
+    ]
+    assert_true(all(fragment not in text for fragment in forbidden), "OCR runtime probe leaked raw path, stderr, secret, or token")
+
+
 class FakeVisionObserver:
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
@@ -1601,6 +1664,69 @@ computer_use:
         assert_true(unconfigured_rows["ocr"]["state"] == "unavailable" and "pytesseract_missing" in unconfigured_rows["ocr"]["last_error"], "OCR runtime status should report missing optional dependencies safely")
         assert_true(unconfigured_rows["text"]["state"] == "off" and unconfigured_rows["vision"]["state"] == "off" and unconfigured_rows["expression"]["state"] == "off", "Unconfigured model runtime states should be off")
 
+    with tempfile.TemporaryDirectory() as ocr_tmp_name:
+        ocr_tmp = Path(ocr_tmp_name)
+        fake_tesseract_path = "/Users/private/bin/tesseract-real"
+        pil_missing_runtime = _runtime_with_ocr_probe(
+            ocr_tmp,
+            has_pillow=False,
+            has_pytesseract=True,
+            tesseract_path=fake_tesseract_path,
+            version_probe=True,
+        )
+        pil_missing = _ocr_status_row(pil_missing_runtime)
+        assert_true(pil_missing["state"] == "unavailable" and not pil_missing["configured"], "OCR should be unavailable when Pillow is missing")
+        assert_true(pil_missing["last_error"] == "pillow_missing", "OCR should report sanitized Pillow missing category")
+        _assert_runtime_payload_has_no_probe_leaks(pil_missing_runtime)
+
+        pytesseract_missing_runtime = _runtime_with_ocr_probe(
+            ocr_tmp,
+            has_pillow=True,
+            has_pytesseract=False,
+            tesseract_path=fake_tesseract_path,
+            version_probe=True,
+        )
+        pytesseract_missing = _ocr_status_row(pytesseract_missing_runtime)
+        assert_true(pytesseract_missing["state"] == "unavailable" and not pytesseract_missing["configured"], "OCR should be unavailable when pytesseract is missing")
+        assert_true(pytesseract_missing["last_error"] == "pytesseract_missing", "OCR should report sanitized pytesseract missing category")
+        _assert_runtime_payload_has_no_probe_leaks(pytesseract_missing_runtime)
+
+        executable_missing_runtime = _runtime_with_ocr_probe(
+            ocr_tmp,
+            has_pillow=True,
+            has_pytesseract=True,
+            tesseract_path=None,
+            version_probe=True,
+        )
+        executable_missing = _ocr_status_row(executable_missing_runtime)
+        assert_true(executable_missing["state"] == "unavailable" and not executable_missing["configured"], "OCR should be unavailable when the system tesseract executable is missing")
+        assert_true(executable_missing["last_error"] == "tesseract_missing", "OCR should report sanitized tesseract executable missing category")
+        _assert_runtime_payload_has_no_probe_leaks(executable_missing_runtime)
+
+        probe_failed_runtime = _runtime_with_ocr_probe(
+            ocr_tmp,
+            has_pillow=True,
+            has_pytesseract=True,
+            tesseract_path=fake_tesseract_path,
+            version_probe=RuntimeError("stderr raw /Users/private/tesseract.log sk-test-secret token C:\\secret\\tesseract.exe"),
+        )
+        probe_failed = _ocr_status_row(probe_failed_runtime)
+        assert_true(probe_failed["state"] == "unavailable" and not probe_failed["configured"], "OCR should be unavailable when tesseract version probe fails")
+        assert_true(probe_failed["last_error"] == "tesseract_unavailable", "OCR should report sanitized tesseract probe failure category")
+        _assert_runtime_payload_has_no_probe_leaks(probe_failed_runtime)
+
+        ready_ocr_runtime = _runtime_with_ocr_probe(
+            ocr_tmp,
+            has_pillow=True,
+            has_pytesseract=True,
+            tesseract_path=fake_tesseract_path,
+            version_probe=True,
+        )
+        ready_ocr = _ocr_status_row(ready_ocr_runtime)
+        assert_true(ready_ocr["state"] == "ready" and ready_ocr["configured"], "OCR should only be ready when package, executable, and version probe all pass")
+        assert_true(ready_ocr["last_error"] == "", "Ready OCR status should not carry a stale error")
+        _assert_runtime_payload_has_no_probe_leaks(ready_ocr_runtime)
+
     with tempfile.TemporaryDirectory() as runtime_tmp_name:
         runtime_tmp = Path(runtime_tmp_name)
         (runtime_tmp / "config.yaml").write_text(
@@ -1633,6 +1759,7 @@ llm:
     assert_true("event_created_at: event.created_at" in app_vue_source, "Shell should key voice audio by event timestamp")
     assert_true("runtimeStatusRows" in app_vue_source and "provider-card" in app_vue_source and "运行设置" in app_vue_source, "Shell developer mode should expose runtime provider settings/status view")
     assert_true("providerMeta" in app_vue_source and "providerErrorLabel" in app_vue_source, "Shell runtime status view should render sanitized provider details")
+    assert_true("tesseract_missing" in app_vue_source and "tesseract_unavailable" in app_vue_source, "Shell runtime status view should label Tesseract runtime probe failures")
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
     assert_true("targetSource" in app_vue_source and "UI控件" in app_vue_source and "融合" in app_vue_source and "视觉" in app_vue_source, "Shell should show semantic target candidate source")

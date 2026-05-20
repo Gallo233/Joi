@@ -774,6 +774,8 @@ function providerErrorLabel(error: string) {
     tts_failed: '合成失败',
     pillow_missing: '缺少 Pillow',
     pytesseract_missing: '缺少 pytesseract',
+    tesseract_missing: '缺少 Tesseract',
+    tesseract_unavailable: 'Tesseract 不可用',
     ocr_dependency_missing: 'OCR 依赖缺失',
     computer_use_windows_only: '仅 Windows 可执行',
     model_unconfigured: '模型未配置',

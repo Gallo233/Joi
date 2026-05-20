@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import importlib
 import importlib.util
 from pathlib import Path
 import platform
+import shutil
 import sys
 from typing import Any
 
@@ -97,25 +99,48 @@ def _tts_status(payload: dict[str, Any]) -> RuntimeProviderStatus:
 
 def _ocr_status(config: AppConfig | None) -> RuntimeProviderStatus:
     has_pillow = importlib.util.find_spec("PIL") is not None
-    has_tesseract = importlib.util.find_spec("pytesseract") is not None
-    configured = has_pillow and has_tesseract
+    has_pytesseract = importlib.util.find_spec("pytesseract") is not None
+    has_tesseract_executable = shutil.which("tesseract") is not None
+    version_ok = False
+    if has_pillow and has_pytesseract and has_tesseract_executable:
+        try:
+            version_ok = _probe_tesseract_version()
+        except Exception:
+            version_ok = False
+    configured = has_pillow and has_pytesseract and has_tesseract_executable and version_ok
     timeout = config.ocr.timeout_seconds if config else 5
     missing = []
     if not has_pillow:
         missing.append("pillow_missing")
-    if not has_tesseract:
+    if not has_pytesseract:
         missing.append("pytesseract_missing")
+    if has_pytesseract and not has_tesseract_executable:
+        missing.append("tesseract_missing")
+    if has_pillow and has_pytesseract and has_tesseract_executable and not version_ok:
+        missing.append("tesseract_unavailable")
     return RuntimeProviderStatus(
         "ocr",
         "OCR",
         "ready" if configured else "unavailable",
         enabled=True,
         configured=configured,
-        provider="pytesseract" if configured or has_tesseract else "none",
-        summary="可用" if configured else "依赖未完整安装",
+        provider="pytesseract" if has_pytesseract else "none",
+        summary="可用" if configured else "依赖或本地运行时不可用",
         timeout_seconds=max(1, int(timeout or 5)),
-        last_error=";".join(missing),
+        last_error=_safe_error(";".join(missing)),
+        notes=["version probe ok"] if configured else [],
     )
+
+
+def _probe_tesseract_version() -> bool:
+    try:
+        pytesseract = importlib.import_module("pytesseract")
+        version_probe = getattr(pytesseract, "get_tesseract_version", None)
+        if not callable(version_probe):
+            return False
+        return bool(str(version_probe()).strip())
+    except Exception:
+        return False
 
 
 def _model_status(config: AppConfig | None, use: str) -> RuntimeProviderStatus:
@@ -235,6 +260,8 @@ def _safe_error(value: Any) -> str:
         "ocr_dependency_missing",
         "pillow_missing",
         "pytesseract_missing",
+        "tesseract_missing",
+        "tesseract_unavailable",
         "computer_use_windows_only",
         "model_unconfigured",
     }

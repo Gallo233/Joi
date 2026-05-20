@@ -2,7 +2,7 @@
 
 ## Active
 
-- Vision now supports Windows active-window/fullscreen screenshots, optional visual model summaries, and best-effort OCR grounding with timeout; OCR quality depends on optional local dependencies, Tesseract language data, and captured image clarity.
+- Vision now supports Windows active-window/fullscreen screenshots, optional visual model summaries, and best-effort OCR grounding with timeout; OCR runtime status now reflects both Python package and local Tesseract runtime availability, while OCR quality still depends on Tesseract language data and captured image clarity.
 - Watch Together can reuse recent visual summaries in the current app session, but context is not persisted across restarts yet.
 - Voice input has OpenAI-compatible ASR wiring and explicit disabled state when unconfigured; local Whisper is not wired yet.
 - Computer Use actions are Windows-only and now include OCR/title/dimension plus local image-diff verification, an inspectable developer-mode audit timeline, and ranked semantic OCR/accessibility/visual target candidates with capture-rect grounding and selection-id binding, but UI Automation tree quality depends on the target program and the visual detector is still a lightweight heuristic rather than a trained detector.

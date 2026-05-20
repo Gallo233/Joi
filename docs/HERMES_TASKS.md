@@ -88,6 +88,7 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Local private screenshots and manifests must stay under ignored `data/local_visual_eval/`; missing local manifests skip instead of failing.
 - Developer mode now has a read-only runtime provider status panel for ASR, TTS, OCR, text/vision/expression models, Computer Use platform availability, and audit/verification capability.
 - Runtime status payloads are sanitized: no API keys, tokens, endpoints, full local model paths, raw logs, screenshot/audio filenames, task ids, or approval ids should be displayed or spoken.
+- OCR runtime status now probes Pillow, `pytesseract`, the system `tesseract` executable, and a safe version check before reporting ready.
 
 Next task options, in priority order:
 

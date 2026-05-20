@@ -49,6 +49,7 @@
 - Added a local-only visual and image-verification calibration workflow: committed synthetic detector/image-diff fixtures run by default, while private real screenshot manifests under `data/local_visual_eval/` are reported separately and skipped when absent.
 - Added synthetic image-diff regressions for large visible changes, subtle visible changes, identical frames, tiny compression-like noise, and unreadable screenshots.
 - Added a read-only developer runtime provider status panel for ASR, TTS, OCR, text/vision/expression models, Computer Use platform availability, and audit/verification capability without exposing secrets, endpoints, logs, screenshot/audio filenames, or local model paths.
+- Tightened OCR runtime status so it only reports ready after Pillow, `pytesseract`, the system `tesseract` executable, and a sanitized version probe are available.
 
 ## 2026-05-14
 

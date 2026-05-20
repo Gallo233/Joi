@@ -49,6 +49,8 @@ Optional OCR support for visible text grounding:
 
 OCR also needs the Tesseract executable installed on the system. Joi does not bundle Tesseract or its language packs. For Chinese OCR, install the appropriate Tesseract language data when you configure OCR for Chinese screenshots. If OCR is not installed or times out, Joi still saves screenshots and continues Watch Together with the available visual summary.
 
+The developer runtime status reflects both Python package availability and local Tesseract runtime availability; OCR is shown as ready only after Pillow, `pytesseract`, the `tesseract` executable, and a lightweight version probe all pass.
+
 The lightweight visual detector and Computer Use image-diff verifier use local screenshot data only. Pillow is used for real PNG/JPEG screenshots when installed; synthetic PPM fixtures keep the committed regression suite dependency-light and reproducible.
 
 Visual detector and image verification fixture workflow:
