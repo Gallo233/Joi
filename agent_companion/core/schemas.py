@@ -16,6 +16,7 @@ class EventType(str, Enum):
     USER_MESSAGE = "user_message"
     PLAN_CREATED = "plan_created"
     APPROVAL_REQUIRED = "approval_required"
+    AUDIT_EVENT = "audit_event"
     TOOL_STARTED = "tool_started"
     TOOL_COMPLETED = "tool_completed"
     TOOL_FAILED = "tool_failed"
@@ -77,4 +78,3 @@ class AgentPlan:
     user_text: str
     intent: str
     steps: list[ToolRequest]
-

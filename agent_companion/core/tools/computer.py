@@ -58,7 +58,7 @@ class ComputerActionTool(ToolAdapter):
         if result.ok:
             self._settle_after_action()
             result, verification = self._attach_after_observation(result, before_observation)
-        return self._to_tool_result(result, verification)
+        return self._to_tool_result(result, verification, before_observation)
 
     def _action_from_request(self, request: ToolRequest) -> ComputerAction | None:
         args = request.arguments
@@ -87,7 +87,12 @@ class ComputerActionTool(ToolAdapter):
             return ComputerAction("hotkey", keys=keys)
         return None
 
-    def _to_tool_result(self, result: ComputerUseResult, verification: PostActionVerification | None = None) -> ToolResult:
+    def _to_tool_result(
+        self,
+        result: ComputerUseResult,
+        verification: PostActionVerification | None = None,
+        before_observation: ComputerObservation | None = None,
+    ) -> ToolResult:
         action_label = _action_label(result.action.action_type if result.action else self.action_type)
         status = _card_status(result.ok, verification)
         summary = verification.summary if verification else result.summary if result.ok and result.summary else f"{action_label}没有完成。"
@@ -98,6 +103,10 @@ class ComputerActionTool(ToolAdapter):
         elif result.observation:
             body = f"{body}\n结果：已自动观察执行后的画面。"
         agent_state = {"tool": self.name, "computer_use": result.to_agent_state()}
+        if before_observation and before_observation.screenshot_rel:
+            agent_state["computer_use"]["before_artifact"] = before_observation.screenshot_rel
+        if result.observation and result.observation.screenshot_rel:
+            agent_state["computer_use"]["after_artifact"] = result.observation.screenshot_rel
         if verification:
             agent_state["post_action_verification"] = verification.to_agent_state()
             agent_state["computer_use"]["verification"] = verification.to_agent_state()

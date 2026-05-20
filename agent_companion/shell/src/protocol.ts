@@ -2,6 +2,7 @@ export type EventType =
   | 'user_message'
   | 'plan_created'
   | 'approval_required'
+  | 'audit_event'
   | 'tool_started'
   | 'tool_completed'
   | 'tool_failed'
@@ -20,6 +21,33 @@ export interface VoiceLine {
   text: string
   emotion?: string
   sprite?: string
+}
+
+export interface ComputerUseAuditArtifact {
+  role: 'before' | 'after' | string
+  kind: 'screenshot' | 'artifact' | string
+  label: string
+  ref?: string
+}
+
+export interface ComputerUseAuditEvent {
+  task_id: string
+  event_type: string
+  timestamp: number
+  sanitized_summary: string
+  risk_level?: 'low' | 'medium' | 'high' | string
+  approval_id?: string
+  approval_status?: string
+  tool_name?: string
+  action_name?: string
+  sanitized_arguments?: Record<string, unknown>
+  before_artifacts?: ComputerUseAuditArtifact[]
+  after_artifacts?: ComputerUseAuditArtifact[]
+  verification_result?: {
+    status?: string
+    summary?: string
+    signals?: Record<string, string>
+  }
 }
 
 export interface AgentEvent {
@@ -43,6 +71,7 @@ export interface AgentEvent {
       tool?: string
       arguments_hash?: string
     }
+    computer_use_audit?: ComputerUseAuditEvent[]
     [key: string]: unknown
   }
   created_at: number

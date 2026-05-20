@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_companion.core.computer_use.image_compare import compare_screenshots
 from agent_companion.core.computer_use.schemas import ComputerObservation
 
 
 @dataclass(frozen=True)
 class VerificationSignals:
     screenshot_changed: bool | None = None
+    image_changed: bool | None = None
     title_changed: bool | None = None
     ocr_changed: bool | None = None
     artifact_changed: bool | None = None
@@ -17,6 +19,7 @@ class VerificationSignals:
     def to_agent_state(self) -> dict[str, bool | None]:
         return {
             "screenshot_changed": self.screenshot_changed,
+            "image_changed": self.image_changed,
             "title_changed": self.title_changed,
             "ocr_changed": self.ocr_changed,
             "artifact_changed": self.artifact_changed,
@@ -28,6 +31,7 @@ class VerificationSignals:
             value is True
             for value in (
                 self.screenshot_changed,
+                self.image_changed,
                 self.title_changed,
                 self.ocr_changed,
                 self.dimensions_changed,
@@ -64,8 +68,10 @@ def verify_post_action(before: ComputerObservation | None, after: ComputerObserv
             artifacts,
         )
 
+    image_comparison = compare_screenshots(before.screenshot_path, after.screenshot_path)
     signals = VerificationSignals(
-        screenshot_changed=None,
+        screenshot_changed=image_comparison.changed,
+        image_changed=image_comparison.changed,
         title_changed=_changed(before.title, after.title),
         ocr_changed=_ocr_changed(before, after),
         artifact_changed=_changed(before.screenshot_rel, after.screenshot_rel),

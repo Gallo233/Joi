@@ -78,15 +78,21 @@ The current observation, first action layer, approval hardening, watch loop, and
 - `voice.transcribe` uses a method-specific timeout based on `ready.asr.timeout_seconds + 10s`, so ASR timeouts can return friendly Joi messages before the UI gives up.
 - Voice audio payloads include the source event timestamp so repeated voice lines inside the same task do not collide.
 - Developer mode shows ASR/TTS runtime status and sanitized TTS synthesis errors.
+- Computer Use now emits stable audit entries for observe, target candidates, approval lifecycle, confirmed action results, and post-action verification.
+- Developer mode shows a Computer Use audit timeline on task cards with sanitized arguments, risk/status chips, before/after screenshot links, and verification status.
+- Approval denied, expired, duplicate, verification unavailable/inconclusive, and likely no-op cases are represented as audit entries while `voice_line` stays free of raw ids, paths, coordinates, raw typed text, JSON, logs, and screenshot filenames.
+- Computer Use post-action verification now compares before/after screenshots locally with a deterministic lightweight pixel/image signal. Meaningful image changes count as positive verification while missing or unreadable screenshots fall back to the existing OCR/title/dimensions signals.
+- The audit timeline shows sanitized image/pixel verification signals without exposing raw paths or screenshot filenames in `voice_line`.
+- `tools/generate_visual_fixtures.py` now generates committed synthetic fixtures for both visual detector grounding and Computer Use image-diff verification.
+- `tools/eval_visual_detector.py` reports committed synthetic visual detector results, optional local private visual detector results, committed synthetic image verification results, and optional local private image verification results as separate suites.
+- Local private screenshots and manifests must stay under ignored `data/local_visual_eval/`; missing local manifests skip instead of failing.
 
 Next task options, in priority order:
 
-1. Run the visual detector against local-only real screenshots in `data/local_visual_eval/` and use the failures to add more synthetic fixtures without committing private images.
-2. Add an audit view for confirmed Computer Use actions, approvals, verification status, and sanitized arguments.
-3. Add pixel or image-hash diff as an additional verification signal for actions where OCR/title do not change.
-4. Add a settings panel for changing ASR/TTS/OCR providers once runtime status is stable.
-5. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
-6. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, and task ids.
+1. Run local private visual/image verification calibration against real screenshots in `data/local_visual_eval/`, then convert only safe lessons into generated synthetic fixtures.
+2. Add a settings panel for changing ASR/TTS/OCR providers once runtime status is stable.
+3. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
+4. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, screenshot filenames, approval ids, and task ids.
 
 ## Suggested First Task
 

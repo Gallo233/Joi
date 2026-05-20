@@ -2,7 +2,7 @@
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, CoreReadyPayload, VoiceAudioPayload } from './protocol'
+import type { AgentEvent, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, VoiceAudioPayload } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -185,9 +185,9 @@ function isTaskCardEvent(event: AgentEvent) {
 }
 
 function isSpeakableEvent(event: AgentEvent) {
-  if (event.type === 'user_message' || event.type === 'plan_created' || event.type === 'tool_started') return false
+  if (event.type === 'user_message' || event.type === 'plan_created' || event.type === 'tool_started' || event.type === 'audit_event') return false
   const text = event.voice_line?.text || ''
-  return !/[{}[\]"=]|task-|codex-|\.json|\.log|[A-Z]:\\/.test(text)
+  return !/[{}[\]"=]|task-|approval-|selection-|codex-|\.png|\.jpg|\.jpeg|\.webp|\.bmp|\.gif|\.ppm|\.json|\.log|[A-Z]:\\/.test(text)
 }
 
 function taskGoal(taskId: string, fallback: string) {
@@ -242,6 +242,178 @@ function computerActionLabel(tool: string) {
     'computer.hotkey': '快捷键',
   }
   return labels[tool] || '电脑操作'
+}
+
+function auditEventsForTask(taskId: string) {
+  const rows: ComputerUseAuditEvent[] = []
+  for (const event of events.value) {
+    if (event.task_id !== taskId) continue
+    const auditRows = event.agent_state?.computer_use_audit
+    if (!Array.isArray(auditRows)) continue
+    for (const row of auditRows) {
+      if (row && typeof row === 'object') rows.push(row)
+    }
+  }
+  return rows.sort((left, right) => Number(left.timestamp || 0) - Number(right.timestamp || 0))
+}
+
+function auditTitle(row: ComputerUseAuditEvent) {
+  const labels: Record<string, string> = {
+    observe: '观察',
+    target_candidates: '候选目标',
+    approval_pending: '等待确认',
+    approval_approved: '已确认',
+    approval_denied: '已拒绝',
+    approval_expired: '已过期',
+    approval_duplicate: '重复确认',
+    action_verified: '动作已验证',
+    action_failed: '动作失败',
+    verification_noop: '变化不明显',
+    verification_unavailable: '验证不可用',
+    verification_inconclusive: '验证不确定',
+    target_selection_expired: '候选过期',
+    target_selection_missing: '候选缺失',
+    target_selection_not_current: '候选已失效',
+  }
+  return labels[row.event_type] || '审计事件'
+}
+
+function auditTime(row: ComputerUseAuditEvent) {
+  const timestamp = Number(row.timestamp || 0)
+  if (!timestamp) return ''
+  return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function auditMeta(row: ComputerUseAuditEvent) {
+  const meta: string[] = []
+  const action = auditActionLabel(row)
+  if (action) meta.push(action)
+  if (row.risk_level) meta.push(riskLabel(String(row.risk_level)))
+  if (row.approval_status) meta.push(approvalStatusLabel(String(row.approval_status)))
+  const verification = verificationStatusLabel(String(row.verification_result?.status || ''))
+  if (verification) meta.push(verification)
+  return meta
+}
+
+function auditSignalRows(row: ComputerUseAuditEvent) {
+  const signals = row.verification_result?.signals || {}
+  return Object.entries(signals)
+    .filter(([key]) => ['image_changed', 'screenshot_changed', 'title_changed', 'ocr_changed', 'dimensions_changed'].includes(key))
+    .map(([key, value]) => [signalLabel(key), signalValue(String(value || 'unknown'))])
+}
+
+function auditActionLabel(row: ComputerUseAuditEvent) {
+  if (row.tool_name?.startsWith('computer.')) return computerActionLabel(row.tool_name)
+  const labels: Record<string, string> = {
+    observe: '画面观察',
+    target_candidate: '目标定位',
+  }
+  return labels[row.action_name || ''] || ''
+}
+
+function riskLabel(value: string) {
+  const labels: Record<string, string> = {
+    low: '低风险',
+    medium: '中风险',
+    high: '高风险',
+  }
+  return labels[value] || '风险未知'
+}
+
+function approvalStatusLabel(value: string) {
+  const labels: Record<string, string> = {
+    pending: '待确认',
+    approved: '已允许',
+    denied: '已拒绝',
+    expired: '已过期',
+    duplicate: '重复响应',
+  }
+  return labels[value] || '确认状态未知'
+}
+
+function verificationStatusLabel(value: string) {
+  const labels: Record<string, string> = {
+    changed: '验证：有变化',
+    likely_noop: '验证：变化不明显',
+    unavailable: '验证：不可用',
+    inconclusive: '验证：不确定',
+    failed: '验证：失败',
+  }
+  return labels[value] || ''
+}
+
+function signalLabel(key: string) {
+  const labels: Record<string, string> = {
+    image_changed: '图像',
+    screenshot_changed: '像素',
+    title_changed: '标题',
+    ocr_changed: 'OCR',
+    dimensions_changed: '尺寸',
+  }
+  return labels[key] || key
+}
+
+function signalValue(value: string) {
+  const labels: Record<string, string> = {
+    changed: '有变化',
+    unchanged: '无明显变化',
+    unknown: '未知',
+  }
+  return labels[value] || '未知'
+}
+
+function auditArgumentRows(row: ComputerUseAuditEvent) {
+  const args = row.sanitized_arguments || {}
+  return Object.entries(args).map(([key, value]) => [argumentLabel(key), argumentValue(value)])
+}
+
+function argumentLabel(key: string) {
+  const labels: Record<string, string> = {
+    target: '目标',
+    button: '按键',
+    input: '输入',
+    characters: '字符数',
+    direction: '方向',
+    amount: '数量',
+    shortcut: '快捷键',
+    key_count: '键数',
+    target_description: '描述',
+    candidate_count: '候选数',
+    requires_selection: '需选择',
+    requires_approval: '需确认',
+    source: '来源',
+    ambiguity: '歧义',
+    rank: '排序',
+    selected_rank: '已选',
+    selection_status: '候选状态',
+  }
+  return labels[key] || key
+}
+
+function argumentValue(value: unknown) {
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (typeof value === 'number') return String(value)
+  const text = stringValue(value)
+  const labels: Record<string, string> = {
+    screen_position: '屏幕位置',
+    typed_text_hidden: '已隐藏文本',
+    keys_hidden: '已隐藏按键',
+    scroll_steps_hidden: '已隐藏步数',
+    hidden: '已隐藏',
+    up: '向上',
+    down: '向下',
+    unknown: '未知',
+  }
+  return labels[text] || trimText(text, 28)
+}
+
+function auditArtifacts(row: ComputerUseAuditEvent) {
+  return [...(row.before_artifacts || []), ...(row.after_artifacts || [])].filter((artifact) => artifact.ref)
+}
+
+function auditArtifactLabel(artifact: ComputerUseAuditArtifact, index: number) {
+  if (artifact.label) return artifact.role === 'before' ? '执行前截图' : artifact.role === 'after' ? '执行后截图' : artifact.label
+  return artifactLabel(artifact.ref || '', index)
 }
 
 function visionStatusLabel(status: string) {
@@ -776,6 +948,52 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </details>
+          <div class="audit-panel" v-if="developerMode && auditEventsForTask(task.taskId).length">
+            <header>
+              <span>Computer Use 审计</span>
+              <small>{{ auditEventsForTask(task.taskId).length }} 条</small>
+            </header>
+            <div class="audit-timeline">
+              <div
+                v-for="(row, auditIndex) in auditEventsForTask(task.taskId)"
+                :key="`${task.taskId}-audit-${auditIndex}-${row.timestamp}`"
+                class="audit-row"
+              >
+                <div class="audit-marker"></div>
+                <div>
+                  <div class="audit-row-head">
+                    <strong>{{ auditTitle(row) }}</strong>
+                    <span>{{ auditTime(row) }}</span>
+                  </div>
+                  <p>{{ row.sanitized_summary }}</p>
+                  <div class="audit-meta" v-if="auditMeta(row).length">
+                    <span v-for="item in auditMeta(row)" :key="item">{{ item }}</span>
+                  </div>
+                  <div class="audit-args" v-if="auditArgumentRows(row).length">
+                    <span v-for="[key, value] in auditArgumentRows(row)" :key="`${row.timestamp}-${key}`">
+                      <strong>{{ key }}</strong>{{ value }}
+                    </span>
+                  </div>
+                  <div class="audit-signals" v-if="auditSignalRows(row).length">
+                    <span v-for="[key, value] in auditSignalRows(row)" :key="`${row.timestamp}-signal-${key}`">
+                      <strong>{{ key }}</strong>{{ value }}
+                    </span>
+                  </div>
+                  <div class="audit-artifacts" v-if="auditArtifacts(row).length">
+                    <button
+                      v-for="(artifact, artifactIndex) in auditArtifacts(row)"
+                      :key="`${row.timestamp}-${artifact.ref}`"
+                      type="button"
+                      :disabled="!artifact.ref || !isImageArtifact(artifact.ref)"
+                      @click="artifact.ref && isImageArtifact(artifact.ref) ? openArtifactPreview(artifact.ref, task.latest) : undefined"
+                    >
+                      {{ auditArtifactLabel(artifact, artifactIndex) }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
           <div class="approval-actions" v-if="task.latest.type === 'approval_required' && pendingApproval?.task_id === task.taskId && approvalIdFor(task.latest)">
             <button type="button" @click="resolveApproval(true)">允许执行</button>
             <button type="button" class="secondary" @click="resolveApproval(false)">停在这里</button>

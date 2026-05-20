@@ -396,6 +396,109 @@ input {
   opacity: 0.55;
 }
 
+.audit-panel {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #e6ebf2;
+  padding-top: 12px;
+}
+
+.audit-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.audit-panel header span {
+  color: #4f5d70;
+  font-size: 13px;
+}
+
+.audit-timeline {
+  display: grid;
+  gap: 10px;
+}
+
+.audit-row {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.audit-marker {
+  width: 9px;
+  height: 9px;
+  margin-top: 7px;
+  border-radius: 999px;
+  background: #d76f8f;
+  box-shadow: 0 0 0 4px #ffe9f0;
+}
+
+.audit-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.audit-row-head strong {
+  color: #2f3848;
+  font-size: 13px;
+}
+
+.audit-row-head span,
+.audit-row p {
+  color: #697589;
+  font-size: 12px;
+}
+
+.audit-row p {
+  margin: 3px 0 0;
+}
+
+.audit-meta,
+.audit-args,
+.audit-signals,
+.audit-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.audit-meta span,
+.audit-args span,
+.audit-signals span,
+.audit-artifacts button {
+  border: 1px solid #dfe5ee;
+  border-radius: 8px;
+  padding: 4px 7px;
+  background: #f7f9fc;
+  color: #536075;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.audit-args strong {
+  margin-right: 4px;
+  color: #c55475;
+}
+
+.audit-signals strong {
+  margin-right: 4px;
+  color: #177247;
+}
+
+.audit-artifacts button {
+  cursor: pointer;
+}
+
+.audit-artifacts button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .chat-section,
 .debug-section {
   padding: 16px;

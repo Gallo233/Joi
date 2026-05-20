@@ -4,8 +4,17 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+import time
 import uuid
 
+from agent_companion.core.computer_use import (
+    COMPUTER_AUDIT_STATE_KEY,
+    ComputerUseAuditEvent,
+    audit_state,
+    computer_action_audit_event,
+    computer_approval_audit_event,
+    target_grounding_audit_events,
+)
 from agent_companion.core.character import CharacterHarness, load_character
 from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
 from agent_companion.core.event_bus import EventBus
@@ -13,7 +22,7 @@ from agent_companion.core.expression import ExpressionEngine
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
-from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, ToolRequest, ToolResult
+from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.codex import CodexTool
@@ -39,6 +48,7 @@ class PendingStep:
     tool: str
     arguments_hash: str
     request_override: ToolRequest | None = None
+    created_at: float = 0.0
 
 
 class AgentCompanionApp:
@@ -54,7 +64,9 @@ class AgentCompanionApp:
         self.watch_session = WatchSession()
         self.semantic_selection = SemanticTargetSelectionStore()
         self.pending_steps: dict[str, PendingStep] = {}
+        self.approval_history: dict[str, PendingStep] = {}
         self.resolved_approval_ids: set[str] = set()
+        self.approval_ttl_seconds = 120.0
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
@@ -131,36 +143,59 @@ class AgentCompanionApp:
         return self.bus.drain()
 
     def resolve_approval(self, approval_id: str, approved: bool) -> list[AgentEvent]:
-        if not approval_id or approval_id in self.resolved_approval_ids:
+        if not approval_id:
+            return self.bus.drain()
+        if approval_id in self.resolved_approval_ids:
+            self._emit_duplicate_approval_audit(approval_id)
             return self.bus.drain()
         pending = self.pending_steps.pop(approval_id, None)
         if pending is None:
+            self._emit_duplicate_approval_audit(approval_id)
             return self.bus.drain()
         self.resolved_approval_ids.add(approval_id)
+        if self._pending_step_expired(pending):
+            state = {"intent": pending.plan.intent, "approval_expired": True, "approval_id": approval_id}
+            self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval expired before execution.")] if self._is_computer_pending(pending) else [])
+            self._emit(
+                AgentEvent(
+                    EventType.TASK_FAILED,
+                    pending.plan.task_id,
+                    DisplayCard("审批已过期", "这次确认已经过期，我没有继续执行。", status="failed"),
+                    safe_voice_line("这次确认已经过期，我没有继续执行。", sprite="4"),
+                    state,
+                ),
+                pending.plan.user_text,
+            )
+            return self.bus.drain()
         if not approved:
+            state = {"intent": pending.plan.intent, "cancelled": True, "approval_id": approval_id}
+            self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "denied", "Approval was denied; no action ran.")] if self._is_computer_pending(pending) else [])
             self._emit(
                 AgentEvent(
                     EventType.TASK_FAILED,
                     pending.plan.task_id,
                     DisplayCard("任务已取消", "你拒绝了这一步，我没有继续执行。", status="failed"),
                     safe_voice_line("好，我先停在这里。", sprite="1"),
-                    {"intent": pending.plan.intent, "cancelled": True, "approval_id": approval_id},
+                    state,
                 ),
                 pending.plan.user_text,
             )
             return self.bus.drain()
         if not self._pending_step_matches(pending):
+            state = {"intent": pending.plan.intent, "approval_id": approval_id, "approval_mismatch": True}
+            self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval no longer matched the pending action.")] if self._is_computer_pending(pending) else [])
             self._emit(
                 AgentEvent(
                     EventType.TASK_FAILED,
                     pending.plan.task_id,
                     DisplayCard("审批已失效", "这次确认和待执行步骤不匹配，我没有继续执行。", status="failed"),
                     safe_voice_line("这次确认已经失效，我没有继续执行。", sprite="4"),
-                    {"intent": pending.plan.intent, "approval_id": approval_id, "approval_mismatch": True},
+                    state,
                 ),
                 pending.plan.user_text,
             )
             return self.bus.drain()
+        self._emit_computer_audit([self._approval_lifecycle_audit(pending, "approved", "Approval was accepted; action may run.")], pending.plan.user_text)
         self._run_plan(pending.plan, pending.index, approved_step=pending)
         return self.bus.drain()
 
@@ -173,24 +208,40 @@ class AgentCompanionApp:
             decision = self.policy.classify(step, approved=is_approved_step)
             if decision.requires_approval:
                 pending = self._make_pending_step(plan, index, step)
-                self.pending_steps[pending.approval_id] = pending
+                self._store_pending_step(pending)
+                agent_state = {
+                    "policy": self.policy.public_payload(step),
+                    "risk": decision.risk.value,
+                    "approval": {
+                        "approval_id": pending.approval_id,
+                        "task_id": plan.task_id,
+                        "step_index": index,
+                        "tool": step.name,
+                        "arguments_hash": pending.arguments_hash,
+                    },
+                }
+                self._attach_audit_state(
+                    agent_state,
+                    [
+                        computer_approval_audit_event(
+                            plan.task_id,
+                            step,
+                            decision.risk,
+                            pending.approval_id,
+                            "pending",
+                            "Approval is required before this Computer Use action can run.",
+                        )
+                    ]
+                    if step.name.startswith("computer.")
+                    else [],
+                )
                 self._emit(
                     AgentEvent(
                         EventType.APPROVAL_REQUIRED,
                         plan.task_id,
                         DisplayCard("需要确认", self._approval_summary(step), step.reason, status="approval"),
                         safe_voice_line("这一步需要你确认后我再执行。", sprite="4"),
-                        {
-                            "policy": self.policy.public_payload(step),
-                            "risk": decision.risk.value,
-                            "approval": {
-                                "approval_id": pending.approval_id,
-                                "task_id": plan.task_id,
-                                "step_index": index,
-                                "tool": step.name,
-                                "arguments_hash": pending.arguments_hash,
-                            },
-                        },
+                        agent_state,
                     ),
                     plan.user_text,
                 )
@@ -221,29 +272,44 @@ class AgentCompanionApp:
                 pending_request = self._approval_request_from_result(result)
                 if pending_request is not None:
                     pending = self._make_pending_step(plan, index, pending_request, request_override=pending_request)
-                    self.pending_steps[pending.approval_id] = pending
+                    self._store_pending_step(pending)
+                    agent_state = {
+                        "tool": result.agent_state.get("tool"),
+                        "selection_id": result.agent_state.get("selection_id"),
+                        "policy": self.policy.public_payload(pending_request),
+                        "risk": result.risk.value,
+                        "approval": {
+                            "approval_id": pending.approval_id,
+                            "task_id": plan.task_id,
+                            "step_index": index,
+                            "tool": pending_request.name,
+                            "arguments_hash": pending.arguments_hash,
+                        },
+                        "selected_rank": result.agent_state.get("selected_rank"),
+                        "target_candidate": result.agent_state.get("target_candidate"),
+                        "target_candidates": result.agent_state.get("target_candidates"),
+                    }
+                    audit_entries = target_grounding_audit_events(plan.task_id, result, result.risk)
+                    if pending_request.name.startswith("computer."):
+                        audit_entries.append(
+                            computer_approval_audit_event(
+                                plan.task_id,
+                                pending_request,
+                                result.risk,
+                                pending.approval_id,
+                                "pending",
+                                "Approval is required before this Computer Use action can run.",
+                                result.display_card.artifacts,
+                            )
+                        )
+                    self._attach_audit_state(agent_state, audit_entries)
                     self._emit(
                         AgentEvent(
                             EventType.APPROVAL_REQUIRED,
                             plan.task_id,
                             DisplayCard("需要确认", result.display_card.summary, result.display_card.body, status="approval", artifacts=result.display_card.artifacts),
                             result.voice_line,
-                            {
-                                "tool": result.agent_state.get("tool"),
-                                "selection_id": result.agent_state.get("selection_id"),
-                                "policy": self.policy.public_payload(pending_request),
-                                "risk": result.risk.value,
-                                "approval": {
-                                    "approval_id": pending.approval_id,
-                                    "task_id": plan.task_id,
-                                    "step_index": index,
-                                    "tool": pending_request.name,
-                                    "arguments_hash": pending.arguments_hash,
-                                },
-                                "selected_rank": result.agent_state.get("selected_rank"),
-                                "target_candidate": result.agent_state.get("target_candidate"),
-                                "target_candidates": result.agent_state.get("target_candidates"),
-                            },
+                            agent_state,
                         ),
                         plan.user_text,
                     )
@@ -251,6 +317,7 @@ class AgentCompanionApp:
                     pending_approval = True
                     break
             self._record_semantic_selection(plan, result)
+            self._attach_result_audit(plan, step, result)
             self._emit_result(plan.task_id, result, plan.user_text)
             self._record_watch_context(plan, step, result)
             final_ok = final_ok and result.ok
@@ -446,7 +513,15 @@ class AgentCompanionApp:
             tool=step.name,
             arguments_hash=_arguments_hash(step.arguments),
             request_override=request_override,
+            created_at=time.time(),
         )
+
+    def _store_pending_step(self, pending: PendingStep) -> None:
+        self.pending_steps[pending.approval_id] = pending
+        self.approval_history[pending.approval_id] = pending
+
+    def _pending_step_expired(self, pending: PendingStep) -> bool:
+        return time.time() - pending.created_at > self.approval_ttl_seconds
 
     def _pending_step_matches(self, pending: PendingStep) -> bool:
         if pending.index < 0 or pending.index >= len(pending.plan.steps):
@@ -536,6 +611,59 @@ class AgentCompanionApp:
         if isinstance(target_candidate, dict):
             target_candidate["selection_id"] = selection.selection_id
         state["target_candidates"] = selection.target_candidates
+
+    def _attach_result_audit(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
+        entries = target_grounding_audit_events(plan.task_id, result, result.risk)
+        action_entry = computer_action_audit_event(plan.task_id, result, result.risk)
+        if action_entry is not None:
+            entries.append(action_entry)
+        self._attach_audit_state(result.agent_state, entries)
+
+    @staticmethod
+    def _attach_audit_state(state: dict, entries: list[ComputerUseAuditEvent]) -> None:
+        if not entries:
+            return
+        existing = state.get(COMPUTER_AUDIT_STATE_KEY)
+        rows = existing if isinstance(existing, list) else []
+        state[COMPUTER_AUDIT_STATE_KEY] = [*rows, *audit_state(entries)]
+
+    def _approval_lifecycle_audit(self, pending: PendingStep, status: str, summary: str) -> ComputerUseAuditEvent:
+        request = pending.request_override or pending.plan.steps[pending.index]
+        risk = RiskLevel.MEDIUM if request.name.startswith("computer.") else RiskLevel.LOW
+        return computer_approval_audit_event(
+            pending.plan.task_id,
+            request,
+            risk,
+            pending.approval_id,
+            status,
+            summary,
+        )
+
+    def _emit_duplicate_approval_audit(self, approval_id: str) -> None:
+        pending = self.approval_history.get(approval_id)
+        if pending is None or not self._is_computer_pending(pending):
+            return
+        self._emit_computer_audit([self._approval_lifecycle_audit(pending, "duplicate", "Duplicate approval response was ignored.")], pending.plan.user_text)
+
+    def _emit_computer_audit(self, entries: list[ComputerUseAuditEvent], user_text: str = "") -> None:
+        for entry in entries:
+            if not entry.tool_name.startswith("computer.") and not entry.event_type.startswith(("target_", "observe")):
+                continue
+            self._emit(
+                AgentEvent(
+                    EventType.AUDIT_EVENT,
+                    entry.task_id,
+                    DisplayCard("Computer Use 审计", entry.sanitized_summary, status="info"),
+                    safe_voice_line("审计记录已更新。", sprite="3"),
+                    {COMPUTER_AUDIT_STATE_KEY: [entry.to_agent_state()]},
+                ),
+                user_text,
+            )
+
+    @staticmethod
+    def _is_computer_pending(pending: PendingStep) -> bool:
+        request = pending.request_override or pending.plan.steps[pending.index]
+        return request.name.startswith("computer.")
 
 
 def _arguments_hash(arguments: dict) -> str:

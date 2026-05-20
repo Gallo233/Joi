@@ -1,0 +1,57 @@
+[
+  {
+    "id": "image_diff_large_panel_change",
+    "before_image": "large_panel_before.ppm",
+    "after_image": "large_panel_after.ppm",
+    "expected_image_changed": true,
+    "expected_verification_status": "changed",
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "image_diff_subtle_visible_change",
+    "before_image": "subtle_button_before.ppm",
+    "after_image": "subtle_button_after.ppm",
+    "expected_image_changed": true,
+    "expected_verification_status": "changed",
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "image_diff_identical_frame",
+    "before_image": "identical_before.ppm",
+    "after_image": "identical_after.ppm",
+    "expected_image_changed": false,
+    "expected_verification_status": "likely_noop",
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "image_diff_tiny_compression_noise",
+    "before_image": "noise_before.ppm",
+    "after_image": "noise_after.ppm",
+    "expected_image_changed": false,
+    "expected_verification_status": "likely_noop",
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "image_diff_unreadable_after",
+    "before_image": "unreadable_before.ppm",
+    "after_image": "unreadable_after.ppm",
+    "expected_image_changed": null,
+    "expected_verification_status": "likely_noop",
+    "image_size": [
+      400,
+      225
+    ]
+  }
+]

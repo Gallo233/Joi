@@ -7,6 +7,7 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "visual_detector"
+IMAGE_DIFF_DIR = ROOT / "tests" / "fixtures" / "image_verification"
 WIDTH = 400
 HEIGHT = 225
 
@@ -130,9 +131,60 @@ CASES: list[dict] = [
     },
 ]
 
+IMAGE_DIFF_CASES: list[dict] = [
+    {
+        "id": "image_diff_large_panel_change",
+        "before_image": "large_panel_before.ppm",
+        "after_image": "large_panel_after.ppm",
+        "before_shapes": [(60, 62, 240, 94, (58, 64, 82))],
+        "after_shapes": [(60, 62, 240, 94, (58, 64, 82)), (250, 132, 92, 34, (214, 126, 74))],
+        "expected_image_changed": True,
+        "expected_verification_status": "changed",
+    },
+    {
+        "id": "image_diff_subtle_visible_change",
+        "before_image": "subtle_button_before.ppm",
+        "after_image": "subtle_button_after.ppm",
+        "before_shapes": [(144, 92, 112, 36, (66, 72, 94))],
+        "after_shapes": [(144, 92, 112, 36, (66, 72, 94)), (184, 134, 28, 18, (218, 184, 78))],
+        "expected_image_changed": True,
+        "expected_verification_status": "changed",
+    },
+    {
+        "id": "image_diff_identical_frame",
+        "before_image": "identical_before.ppm",
+        "after_image": "identical_after.ppm",
+        "before_shapes": [(120, 76, 160, 62, (72, 120, 180))],
+        "after_shapes": [(120, 76, 160, 62, (72, 120, 180))],
+        "expected_image_changed": False,
+        "expected_verification_status": "likely_noop",
+    },
+    {
+        "id": "image_diff_tiny_compression_noise",
+        "before_image": "noise_before.ppm",
+        "after_image": "noise_after.ppm",
+        "base_color": (34, 38, 50),
+        "after_base_color": (38, 42, 54),
+        "before_shapes": [(120, 76, 160, 62, (72, 120, 180))],
+        "after_shapes": [(120, 76, 160, 62, (76, 124, 184))],
+        "expected_image_changed": False,
+        "expected_verification_status": "likely_noop",
+    },
+    {
+        "id": "image_diff_unreadable_after",
+        "before_image": "unreadable_before.ppm",
+        "after_image": "unreadable_after.ppm",
+        "before_shapes": [(120, 76, 160, 62, (72, 120, 180))],
+        "after_unreadable": True,
+        "expected_image_changed": None,
+        "expected_verification_status": "likely_noop",
+    },
+]
+
 
 def main() -> int:
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    IMAGE_DIFF_DIR.mkdir(parents=True, exist_ok=True)
     manifest: list[dict] = []
     for case in CASES:
         image_name = str(case["image"])
@@ -141,17 +193,57 @@ def main() -> int:
         row["image_size"] = [WIDTH, HEIGHT]
         manifest.append(row)
     (FIXTURE_DIR / "visual_cases.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    image_manifest: list[dict] = []
+    for case in IMAGE_DIFF_CASES:
+        before_name = str(case["before_image"])
+        after_name = str(case["after_image"])
+        write_ppm(
+            IMAGE_DIFF_DIR / before_name,
+            WIDTH,
+            HEIGHT,
+            case.get("before_shapes") or [],
+            base_color=tuple(case.get("base_color") or (22, 26, 38)),
+        )
+        if case.get("after_unreadable"):
+            (IMAGE_DIFF_DIR / after_name).write_text("not an image\n", encoding="utf-8")
+        else:
+            write_ppm(
+                IMAGE_DIFF_DIR / after_name,
+                WIDTH,
+                HEIGHT,
+                case.get("after_shapes") or [],
+                base_color=tuple(case.get("after_base_color") or case.get("base_color") or (22, 26, 38)),
+            )
+        row = {
+            key: value
+            for key, value in case.items()
+            if key
+            not in {
+                "before_shapes",
+                "after_shapes",
+                "base_color",
+                "after_base_color",
+                "after_unreadable",
+            }
+        }
+        row["image_size"] = [WIDTH, HEIGHT]
+        image_manifest.append(row)
+    (IMAGE_DIFF_DIR / "image_diff_cases.json").write_text(json.dumps(image_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"generated {len(manifest)} visual detector fixtures in {FIXTURE_DIR}")
+    print(f"generated {len(image_manifest)} image verification fixtures in {IMAGE_DIFF_DIR}")
     return 0
 
 
-def write_ppm(path: Path, width: int, height: int, shapes: Iterable[Shape]) -> None:
+def write_ppm(path: Path, width: int, height: int, shapes: Iterable[Shape], base_color: tuple[int, int, int] | None = None) -> None:
     shape_rows = list(shapes)
     pixels = bytearray()
     for y in range(height):
         for x in range(width):
-            base = 22 + int(18 * (x / width)) + int(12 * (y / height))
-            red, green, blue = base, base + 4, base + 12
+            if base_color is None:
+                base = 22 + int(18 * (x / width)) + int(12 * (y / height))
+                red, green, blue = base, base + 4, base + 12
+            else:
+                red, green, blue = base_color
             for sx, sy, sw, sh, color in shape_rows:
                 if sx <= x < sx + sw and sy <= y < sy + sh:
                     border = x in (sx, sx + sw - 1) or y in (sy, sy + sh - 1)

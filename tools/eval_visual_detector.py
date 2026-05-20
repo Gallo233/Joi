@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from agent_companion.core.computer_use import verify_post_action
 from agent_companion.core.computer_use.schemas import ComputerAction, ComputerObservation, ComputerUseResult
 from agent_companion.core.schemas import ToolRequest
 from agent_companion.core.tools.targeting import SemanticTargetTool
@@ -20,8 +21,11 @@ from agent_companion.core.vision.visual_detector import HeuristicVisualDetector,
 
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "visual_detector"
 CASE_FILE = FIXTURE_DIR / "visual_cases.json"
+IMAGE_DIFF_DIR = ROOT / "tests" / "fixtures" / "image_verification"
+IMAGE_DIFF_CASE_FILE = IMAGE_DIFF_DIR / "image_diff_cases.json"
 LOCAL_FIXTURE_DIR = ROOT / "data" / "local_visual_eval"
 LOCAL_CASE_FILE = LOCAL_FIXTURE_DIR / "visual_cases.local.json"
+LOCAL_IMAGE_DIFF_CASE_FILE = LOCAL_FIXTURE_DIR / "image_diff_cases.local.json"
 
 
 @dataclass
@@ -65,19 +69,34 @@ def run_eval(root: Path = ROOT, verbose: bool = True) -> int:
     local_skipped = not LOCAL_CASE_FILE.exists()
     if not local_skipped:
         local_results = _run_suite(root, "local_private", LOCAL_CASE_FILE, LOCAL_FIXTURE_DIR)
+    synthetic_image_results = _run_image_diff_suite(root, "synthetic_image_diff", IMAGE_DIFF_CASE_FILE, IMAGE_DIFF_DIR)
+    local_image_results: list[CaseResult] = []
+    local_image_skipped = not LOCAL_IMAGE_DIFF_CASE_FILE.exists()
+    if not local_image_skipped:
+        local_image_results = _run_image_diff_suite(root, "local_private_image_diff", LOCAL_IMAGE_DIFF_CASE_FILE, LOCAL_FIXTURE_DIR)
     if verbose:
         _print_results("committed synthetic visual detector eval", synthetic_results)
         if local_skipped:
             print(f"local private visual detector eval: skipped ({_rel(root, LOCAL_CASE_FILE)} not found)")
         else:
             _print_results("local private visual detector eval", local_results)
-    all_results = [*synthetic_results, *local_results]
+        _print_results("committed synthetic image verification eval", synthetic_image_results)
+        if local_image_skipped:
+            print(f"local private image verification eval: skipped ({_rel(root, LOCAL_IMAGE_DIFF_CASE_FILE)} not found)")
+        else:
+            _print_results("local private image verification eval", local_image_results)
+    all_results = [*synthetic_results, *local_results, *synthetic_image_results, *local_image_results]
     return 0 if all(result.passed for result in all_results) else 1
 
 
 def _run_suite(root: Path, suite: str, case_file: Path, base_dir: Path) -> list[CaseResult]:
     cases = json.loads(case_file.read_text(encoding="utf-8"))
     return [_run_case(root, suite, base_dir, case) for case in cases]
+
+
+def _run_image_diff_suite(root: Path, suite: str, case_file: Path, base_dir: Path) -> list[CaseResult]:
+    cases = json.loads(case_file.read_text(encoding="utf-8"))
+    return [_run_image_diff_case(root, suite, base_dir, case) for case in cases]
 
 
 def _print_results(label: str, results: list[CaseResult]) -> None:
@@ -157,6 +176,59 @@ def _run_case(root: Path, suite: str, base_dir: Path, case: dict[str, Any]) -> C
         failures.append("voice_line leaked technical visual detector details")
 
     return CaseResult(suite, case_id, not failures, failures, [_candidate_summary(candidate) for candidate in candidates[:3]])
+
+
+def _run_image_diff_case(root: Path, suite: str, base_dir: Path, case: dict[str, Any]) -> CaseResult:
+    case_id = str(case.get("id") or "unknown")
+    failures: list[str] = []
+    before_path = _resolve_image_path(base_dir, str(case["before_image"]))
+    after_path = _resolve_image_path(base_dir, str(case["after_image"]))
+    width, height = _image_size(case)
+    before = ComputerObservation(
+        target="active_window",
+        screenshot_path=before_path,
+        screenshot_rel=_rel(root, before_path),
+        width=width,
+        height=height,
+        title="Image verification fixture",
+        window_handle=0,
+        capture_rect=CaptureRect(0, 0, width, height),
+        query=str(case.get("query") or "image diff"),
+        ocr={"status": "success", "text_blocks": [{"text": "stable", "bbox": [0, 0, 10, 10], "confidence": 1.0}]},
+    )
+    after = ComputerObservation(
+        target="active_window",
+        screenshot_path=after_path,
+        screenshot_rel=_rel(root, after_path),
+        width=width,
+        height=height,
+        title="Image verification fixture",
+        window_handle=0,
+        capture_rect=CaptureRect(0, 0, width, height),
+        query=str(case.get("query") or "image diff"),
+        ocr={"status": "success", "text_blocks": [{"text": "stable", "bbox": [0, 0, 10, 10], "confidence": 1.0}]},
+    )
+    verification = verify_post_action(before, after)
+    expected_changed = case.get("expected_image_changed")
+    expected_status = str(case.get("expected_verification_status") or "")
+    if expected_changed is True and verification.signals.image_changed is not True:
+        failures.append(f"expected image_changed=True, got {verification.signals.image_changed}")
+    if expected_changed is False and verification.signals.image_changed is not False:
+        failures.append(f"expected image_changed=False, got {verification.signals.image_changed}")
+    if expected_changed is None and verification.signals.image_changed is not None:
+        failures.append(f"expected image_changed=None, got {verification.signals.image_changed}")
+    if expected_status and verification.status != expected_status:
+        failures.append(f"expected verification status {expected_status}, got {verification.status}")
+    forbidden = ["{", "}", str(case.get("before_image") or ""), str(case.get("after_image") or ""), _rel(root, before_path), _rel(root, after_path)]
+    voice_line = "操作后画面有变化。" if verification.status == "changed" else "操作执行了，但画面变化不明显。"
+    if any(fragment and fragment in voice_line for fragment in forbidden):
+        failures.append("verification voice leaked image details")
+    summary = [
+        f"status={verification.status}",
+        f"image_changed={verification.signals.image_changed}",
+        f"artifact_changed={verification.signals.artifact_changed}",
+    ]
+    return CaseResult(suite, case_id, not failures, failures, summary)
 
 
 def _image_size(case: dict[str, Any]) -> tuple[int, int]:

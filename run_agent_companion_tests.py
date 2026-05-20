@@ -6,12 +6,12 @@ import tempfile
 from pathlib import Path
 
 from agent_companion.core.app import AgentCompanionApp
-from agent_companion.core.computer_use import ComputerAction, ComputerObservation, ComputerUseResult, verify_post_action
+from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, ComputerAction, ComputerObservation, ComputerUseResult, computer_action_audit_event, verify_post_action
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouter, load_app_config
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
-from agent_companion.core.schemas import EventType, ToolRequest
+from agent_companion.core.schemas import DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.server import JsonRpcBridge
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
 from agent_companion.core.tools.computer import ComputerActionTool
@@ -27,6 +27,7 @@ from agent_companion.core.vision.targeting import resolve_target_candidates
 from agent_companion.core.vision.visual_detector import UnavailableVisualDetector, VisualCandidate, VisualDetectionResult
 from agent_companion.core.voice import safe_voice_line
 from agent_companion.core.watch import WatchFrame
+from tools.eval_visual_detector import run_eval as run_visual_detector_eval
 
 
 def assert_true(value: bool, message: str) -> None:
@@ -171,6 +172,22 @@ def _fake_action_summary(action_type: str) -> str:
     }.get(action_type, "完成了电脑操作。")
 
 
+def _write_ppm(path: Path, width: int, height: int, color: tuple[int, int, int], patch: tuple[int, int, int, int, tuple[int, int, int]] | None = None) -> None:
+    rows = bytearray()
+    patch_left = patch_top = patch_width = patch_height = 0
+    patch_color = color
+    if patch is not None:
+        patch_left, patch_top, patch_width, patch_height, patch_color = patch
+    for y in range(height):
+        for x in range(width):
+            if patch is not None and patch_left <= x < patch_left + patch_width and patch_top <= y < patch_top + patch_height:
+                rows.extend(patch_color)
+            else:
+                rows.extend(color)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(rows))
+
+
 class FakeWatchAnswerer:
     last_used_model = True
 
@@ -206,6 +223,15 @@ def _approval_payload(events) -> dict:
             if isinstance(approval, dict):
                 return approval
     return {}
+
+
+def _audit_rows(events) -> list[dict]:
+    rows: list[dict] = []
+    for event in events:
+        audit = event.agent_state.get(COMPUTER_AUDIT_STATE_KEY)
+        if isinstance(audit, list):
+            rows.extend(row for row in audit if isinstance(row, dict))
+    return rows
 
 
 def _selection_id(events) -> str:
@@ -249,6 +275,8 @@ def main() -> int:
     assert_true("codex.run" not in blocked_tool_name.text, "voice leaked raw tool name")
     blocked_coordinate = safe_voice_line("我点击了 100,200")
     assert_true("100,200" not in blocked_coordinate.text, "voice leaked coordinates")
+    blocked_approval = safe_voice_line("approval-abcdef123456 已确认，截图 sample.png")
+    assert_true("approval-" not in blocked_approval.text and "sample.png" not in blocked_approval.text, "voice leaked approval id or screenshot filename")
 
     memory_dir = Path(tempfile.mkdtemp())
     try:
@@ -916,6 +944,56 @@ def main() -> int:
     unavailable_verification = verify_post_action(None, _fake_computer_observation(workspace))
     assert_true(unavailable_verification.status == "unavailable", "missing before observation should be unavailable")
 
+    image_test_dir = Path(tempfile.mkdtemp())
+    try:
+        image_before = image_test_dir / "before.ppm"
+        image_after = image_test_dir / "after.ppm"
+        image_same = image_test_dir / "same.ppm"
+        image_unreadable = image_test_dir / "broken.ppm"
+        _write_ppm(image_before, 80, 60, (20, 20, 20))
+        _write_ppm(image_after, 80, 60, (20, 20, 20), patch=(8, 8, 34, 28, (235, 235, 235)))
+        _write_ppm(image_same, 80, 60, (20, 20, 20))
+        image_unreadable.write_text("not an image", encoding="utf-8")
+        image_changed_before = _fake_computer_observation(workspace, rel="data/agent_companion/vision/hash-before.ppm", title="Same", ocr_text=["一样"], width=80, height=60)
+        image_changed_after = _fake_computer_observation(workspace, rel="data/agent_companion/vision/hash-after.ppm", title="Same", ocr_text=["一样"], width=80, height=60)
+        image_changed_before = ComputerObservation(**{**image_changed_before.__dict__, "screenshot_path": image_before})
+        image_changed_after = ComputerObservation(**{**image_changed_after.__dict__, "screenshot_path": image_after})
+        image_changed = verify_post_action(image_changed_before, image_changed_after)
+        assert_true(image_changed.status == "changed", "pixel-different screenshots should verify as changed")
+        assert_true(image_changed.signals.screenshot_changed is True and image_changed.signals.image_changed is True, "image diff signal should be positive")
+        image_audit = computer_action_audit_event(
+            "task-image-audit",
+            ToolResult(
+                ok=True,
+                agent_state={
+                    "tool": "computer.click",
+                    "computer_use": {"action": {"type": "click", "x": 12, "y": 34}, "before_artifact": "data/agent_companion/vision/hash-before.ppm", "after_artifact": "data/agent_companion/vision/hash-after.ppm"},
+                    "post_action_verification": image_changed.to_agent_state(),
+                },
+                display_card=DisplayCard("电脑操作", "操作后画面有变化。", status="success"),
+                voice_line=safe_voice_line("操作后画面有变化。"),
+                risk=RiskLevel.MEDIUM,
+            ),
+        )
+        assert_true(image_audit is not None and image_audit.verification_result["signals"].get("image_changed") == "changed", "audit should include sanitized image verification signal")
+        assert_true("12" not in str(image_audit.sanitized_arguments) and "34" not in str(image_audit.sanitized_arguments), "image audit should not leak coordinates")
+
+        image_same_before = _fake_computer_observation(workspace, rel="data/agent_companion/vision/hash-same-before.ppm", title="Same", ocr_text=["一样"], width=80, height=60)
+        image_same_after = _fake_computer_observation(workspace, rel="data/agent_companion/vision/hash-same-after.ppm", title="Same", ocr_text=["一样"], width=80, height=60)
+        image_same_before = ComputerObservation(**{**image_same_before.__dict__, "screenshot_path": image_same})
+        image_same_after = ComputerObservation(**{**image_same_after.__dict__, "screenshot_path": image_same})
+        image_same_verification = verify_post_action(image_same_before, image_same_after)
+        assert_true(image_same_verification.status == "likely_noop", "identical screenshots should be likely_noop when other signals are unchanged")
+        assert_true(image_same_verification.signals.screenshot_changed is False, "identical screenshots should expose unchanged image signal")
+
+        unreadable_before = ComputerObservation(**{**image_same_before.__dict__, "screenshot_path": image_unreadable})
+        unreadable_after = ComputerObservation(**{**image_same_after.__dict__, "screenshot_path": image_after})
+        unreadable_verification = verify_post_action(unreadable_before, unreadable_after)
+        assert_true(unreadable_verification.signals.screenshot_changed is None and unreadable_verification.signals.image_changed is None, "unreadable screenshots should fall back safely")
+    finally:
+        import shutil
+        shutil.rmtree(image_test_dir, ignore_errors=True)
+
     fake_backend = FakeComputerBackend(workspace)
     click_tool = ComputerActionTool(workspace, "computer.click", "click", fake_backend, post_action_settle_ms=0)
     click_result = click_tool.run(ToolRequest("computer.click", {"x": 100, "y": 200}))
@@ -1000,7 +1078,22 @@ def main() -> int:
     no_ocr_result = ComputerActionTool(workspace, "computer.click", "click", no_ocr_backend, post_action_settle_ms=0).run(ToolRequest("computer.click", {"x": 88, "y": 99}))
     assert_true(no_ocr_result.agent_state["post_action_verification"]["status"] == "likely_noop", "test-only OCR should not mask missing production OCR wiring")
     assert_true("ocr" not in no_ocr_result.agent_state["computer_use"]["observation"], "computer observation should only include OCR when extractor is wired")
-    forbidden_computer_voice = ["10", "20", "88", "99", "Ctrl", "hello", "data/", ".png", "{", "task-", "完成", "相同", "提交", "新增内容"]
+    inconclusive_audit = computer_action_audit_event(
+        "task-audit-test",
+        ToolResult(
+            ok=True,
+            agent_state={
+                "tool": "computer.click",
+                "computer_use": {"action": {"type": "click", "x": 88, "y": 99}, "before_artifact": "data/agent_companion/vision/inconclusive-before.png", "after_artifact": "data/agent_companion/vision/inconclusive-after.png"},
+                "post_action_verification": {"status": "inconclusive", "summary": "操作已执行，但变化不确定。", "signals": {"ocr_changed": None}},
+            },
+            display_card=DisplayCard("电脑操作", "操作已执行，但变化不确定。", status="info"),
+            voice_line=safe_voice_line("操作执行了，暂时判断不了画面变化。"),
+            risk=RiskLevel.MEDIUM,
+        ),
+    )
+    assert_true(inconclusive_audit is not None and inconclusive_audit.event_type == "verification_inconclusive", "inconclusive verification should have a clear audit type")
+    forbidden_computer_voice = ["10", "20", "88", "99", "Ctrl", "hello", "data/", ".png", ".ppm", "{", "task-", "完成", "相同", "提交", "新增内容"]
     computer_voice_lines = [changed_click.voice_line.text, artifact_only.voice_line.text, unavailable_action.voice_line.text, production_style.voice_line.text, no_ocr_result.voice_line.text]
     assert_true(all(not any(fragment in line for fragment in forbidden_computer_voice) for line in computer_voice_lines), "computer verification voice leaked technical details")
 
@@ -1274,6 +1367,14 @@ def main() -> int:
     computer_events = app.handle_user_text("点击 100,200")
     assert_true(any(event.type == EventType.APPROVAL_REQUIRED for event in computer_events), "computer action should require approval")
     computer_approval = _approval_payload(computer_events)
+    computer_audit = _audit_rows(computer_events)
+    assert_true(any(row.get("event_type") == "approval_pending" for row in computer_audit), "computer approval should create an audit event")
+    approval_audit = [row for row in computer_audit if row.get("event_type") == "approval_pending"][-1]
+    for field in ("task_id", "event_type", "timestamp", "sanitized_summary", "risk_level", "approval_id", "approval_status", "tool_name", "action_name", "sanitized_arguments", "before_artifacts", "after_artifacts", "verification_result"):
+        assert_true(field in approval_audit, f"audit event missing stable field: {field}")
+    assert_true(approval_audit["risk_level"] == "medium", "computer approval audit should preserve risk")
+    assert_true(approval_audit["sanitized_arguments"].get("target") == "screen_position", "click audit should sanitize target coordinates")
+    assert_true("100" not in str(approval_audit["sanitized_arguments"]) and "200" not in str(approval_audit["sanitized_arguments"]), "click audit leaked raw coordinates")
     assert_true(str(computer_approval.get("approval_id", "")).startswith("approval-"), "computer approval should include approval_id")
     assert_true(computer_approval.get("tool") == "computer.click", "computer approval should bind tool")
     assert_true(computer_approval.get("task_id") in {event.task_id for event in computer_events}, "computer approval should bind task_id")
@@ -1283,8 +1384,56 @@ def main() -> int:
     assert_true(not bypass, "task_id must not work as approval id")
     refused = app.resolve_approval(str(computer_approval["approval_id"]), approved=False)
     assert_true(any(event.type == EventType.TASK_FAILED for event in refused), "approval refusal should cancel computer action")
+    assert_true(any(row.get("event_type") == "approval_denied" for row in _audit_rows(refused)), "approval denial should create an audit entry")
     reused = app.resolve_approval(str(computer_approval["approval_id"]), approved=True)
-    assert_true(not reused, "approval id should be single-use")
+    assert_true(any(event.type == EventType.AUDIT_EVENT for event in reused), "duplicate computer approval should create a clear audit entry")
+    assert_true(any(row.get("event_type") == "approval_duplicate" for row in _audit_rows(reused)), "duplicate computer approval audit missing")
+
+    type_audit_app = AgentCompanionApp(workspace)
+    type_audit_events = type_audit_app.handle_user_text("输入文字：hello secret token")
+    type_audit = _audit_rows(type_audit_events)
+    assert_true(any(row.get("tool_name") == "computer.type_text" and row.get("sanitized_arguments", {}).get("input") == "typed_text_hidden" for row in type_audit), "type audit should hide raw typed text")
+    assert_true("hello secret token" not in str(type_audit), "type audit leaked raw typed text")
+
+    expired_approval_app = AgentCompanionApp(workspace)
+    expired_approval_events = expired_approval_app.handle_user_text("点击 100,200")
+    expired_approval = _approval_payload(expired_approval_events)
+    expired_approval_app.approval_ttl_seconds = -1
+    expired_approval_result = expired_approval_app.resolve_approval(str(expired_approval["approval_id"]), approved=True)
+    assert_true(any(event.type == EventType.TASK_FAILED for event in expired_approval_result), "expired approval should fail safely")
+    assert_true(any(row.get("event_type") == "approval_expired" for row in _audit_rows(expired_approval_result)), "expired approval should create an audit entry")
+    assert_true(not any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("tool") == "computer.click" for event in expired_approval_result), "expired approval must not run the action")
+
+    action_audit_app = AgentCompanionApp(workspace)
+    action_audit_app.tools.register(ComputerActionTool(workspace, "computer.click", "click", FakeComputerBackend(workspace), post_action_settle_ms=0))
+    action_audit_events = action_audit_app.handle_user_text("点击 100,200")
+    action_audit_approval = _approval_payload(action_audit_events)
+    action_audit_result = action_audit_app.resolve_approval(str(action_audit_approval["approval_id"]), approved=True)
+    action_rows = _audit_rows(action_audit_events + action_audit_result)
+    assert_true(any(row.get("event_type") == "approval_approved" for row in action_rows), "approved action should record approval lifecycle")
+    noop_rows = [row for row in action_rows if row.get("event_type") == "verification_noop"]
+    assert_true(noop_rows, "likely no-op verification should create an audit entry")
+    assert_true(noop_rows[-1].get("verification_result", {}).get("status") == "likely_noop", "no-op audit should preserve verification status")
+    assert_true(noop_rows[-1].get("before_artifacts") and noop_rows[-1].get("after_artifacts"), "confirmed action audit should include before/after screenshots")
+    assert_true(not any(event.type == EventType.AUDIT_EVENT and event.voice_line.text for event in action_audit_result if "approval-" in event.voice_line.text), "audit events should not speak approval ids")
+
+    unavailable_audit_app = AgentCompanionApp(workspace)
+    unavailable_audit_app.tools.register(
+        ComputerActionTool(
+            workspace,
+            "computer.hotkey",
+            "hotkey",
+            FakeComputerBackend(workspace, observations=[_fake_computer_observation(workspace, rel="data/agent_companion/vision/audit-after-hotkey.png")], fail_on_observe_calls={1}),
+            post_action_settle_ms=0,
+        )
+    )
+    unavailable_events = unavailable_audit_app.handle_user_text("按下 Ctrl+L 快捷键")
+    unavailable_approval = _approval_payload(unavailable_events)
+    unavailable_result = unavailable_audit_app.resolve_approval(str(unavailable_approval["approval_id"]), approved=True)
+    assert_true(any(row.get("event_type") == "verification_unavailable" for row in _audit_rows(unavailable_events + unavailable_result)), "unavailable verification should create an audit entry")
+    computer_voice_forbidden = ["100", "200", "approval-", "task-", "data/", ".png", ".ppm", "{", "hello secret token", "Ctrl"]
+    computer_voice_events = computer_events + refused + reused + expired_approval_result + action_audit_result + unavailable_result + type_audit_events
+    assert_true(all(not any(fragment in event.voice_line.text for fragment in computer_voice_forbidden) for event in computer_voice_events), "computer audit lifecycle voice leaked raw machine details")
 
     app = AgentCompanionApp(workspace)
     approval_events = app.handle_user_text("帮我刷鸣潮日常")
@@ -1375,6 +1524,16 @@ def main() -> int:
     assert_true("selectTargetCandidate" in app_vue_source and "selectSemanticTarget" in app_vue_source, "Shell candidate cards should continue semantic target selection through explicit RPC")
     assert_true("currentSemanticSelectionId" in app_vue_source and "selectionExpired" in app_vue_source, "Shell should disable stale or expired semantic target candidates")
     assert_true("选 ${rank}" not in app_vue_source, "Shell candidate buttons should not send natural-language selection text")
+    assert_true("audit-panel" in app_vue_source and "auditEventsForTask" in app_vue_source, "Shell developer mode should render Computer Use audit timeline")
+    assert_true("auditArgumentRows" in app_vue_source and "auditArtifacts" in app_vue_source, "Shell audit view should show sanitized arguments and before/after artifacts")
+    assert_true("auditSignalRows" in app_vue_source and "image_changed" in app_vue_source, "Shell audit view should show sanitized image verification signals")
+    visual_fixture_manifest = (workspace / "tests" / "fixtures" / "visual_detector" / "visual_cases.json").read_text(encoding="utf-8")
+    image_fixture_manifest = (workspace / "tests" / "fixtures" / "image_verification" / "image_diff_cases.json").read_text(encoding="utf-8")
+    assert_true("video_canvas_controls" in visual_fixture_manifest and "canvas_button_cluster" in visual_fixture_manifest, "committed visual detector regression fixtures should be present")
+    assert_true("image_diff_subtle_visible_change" in image_fixture_manifest and "image_diff_tiny_compression_noise" in image_fixture_manifest, "committed image-diff regression fixtures should be present")
+    eval_source = (workspace / "tools" / "eval_visual_detector.py").read_text(encoding="utf-8")
+    assert_true("local private image verification eval: skipped" in eval_source and "image_diff_cases.local.json" in eval_source, "local private image-diff eval should skip when missing")
+    assert_true(run_visual_detector_eval(workspace, verbose=False) == 0, "visual/image verification eval should pass and skip missing local private suites")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")

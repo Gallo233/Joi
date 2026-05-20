@@ -9,6 +9,7 @@ The current repository is intentionally focused on the Joi main line.
 - Python Agent Core: planner, policy gate, event bus, memory store, character harness, tool registry.
 - Tool adapters: Codex, browser observation/search queue, OK-WW game skill, MCP discovery, safe file reads.
 - Tauri/Vue Shell: product UI, character stage, chat stream, task cards, approval actions, developer event view.
+- Computer Use audit: developer mode shows sanitized observe/target/approval/action/verification timelines with before/after screenshots and local image-change verification for confirmed local computer actions.
 - Voice path: optional GPT-SoVITS bridge through local `config.yaml`; no fallback to system TTS unless explicitly implemented later.
 
 ## Project Docs
@@ -47,16 +48,16 @@ Optional OCR support for visible text grounding:
 
 OCR also needs the Tesseract executable installed on the system. Joi does not bundle Tesseract or its language packs. For Chinese OCR, install the appropriate Tesseract language data when you configure OCR for Chinese screenshots. If OCR is not installed or times out, Joi still saves screenshots and continues Watch Together with the available visual summary.
 
-The lightweight visual detector uses Pillow for real PNG/JPEG screenshots. If you only install the base requirements, this detector safely reports unavailable instead of blocking OCR/UIA grounding. The checked-in fixture eval uses synthetic PPM images so the regression suite can run without private screenshots.
+The lightweight visual detector and Computer Use image-diff verifier use local screenshot data only. Pillow is used for real PNG/JPEG screenshots when installed; synthetic PPM fixtures keep the committed regression suite dependency-light and reproducible.
 
-Visual detector fixture workflow:
+Visual detector and image verification fixture workflow:
 
 ```powershell
 .\.venv\Scripts\python.exe tools\generate_visual_fixtures.py
 .\.venv\Scripts\python.exe tools\eval_visual_detector.py
 ```
 
-Local private visual evals can live in `data/local_visual_eval/visual_cases.local.json` with images next to that file. This directory is ignored by Git and should be used for real game/browser screenshots that may contain private account or browsing data.
+Local private visual evals can live in `data/local_visual_eval/visual_cases.local.json`, and local private Computer Use image-diff evals can live in `data/local_visual_eval/image_diff_cases.local.json`, with images next to those files. This directory is ignored by Git and should be used for real game/browser screenshots that may contain private account or browsing data. If either local manifest is missing, the eval reports it as skipped instead of failing.
 
 Optional Windows accessibility-tree support for UI control grounding:
 

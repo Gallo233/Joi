@@ -42,6 +42,12 @@
 - Added a lightweight visual detector fallback for sparse canvas/game UI screens, with visual candidates shown in selection cards and kept behind explicit click approval.
 - Added synthetic fixture evals for the visual detector, including deterministic HUD/canvas cases, candidate-count checks, preview validation, and sanitized voice-line regression checks.
 - Expanded visual detector fixture evals with generated game HUD, modal, radial menu, button-cluster, and video-control layouts plus a skipped-by-default local private screenshot eval path.
+- Added a Computer Use audit event model and developer-mode audit timeline for observe, target-candidate, approval, action, and verification lifecycle entries with sanitized arguments and before/after screenshot links.
+- Hardened Computer Use audit/voice separation so approval ids, task ids, coordinates, raw typed text, screenshot filenames, JSON, logs, and command-like details stay out of spoken lines while remaining inspectable in task details.
+- Added local deterministic pixel/image comparison to Computer Use post-action verification so visible screenshot changes can verify actions even when title and OCR text stay stable.
+- Exposed sanitized image-change verification signals in the Computer Use audit timeline without adding any external model dependency.
+- Added a local-only visual and image-verification calibration workflow: committed synthetic detector/image-diff fixtures run by default, while private real screenshot manifests under `data/local_visual_eval/` are reported separately and skipped when absent.
+- Added synthetic image-diff regressions for large visible changes, subtle visible changes, identical frames, tiny compression-like noise, and unreadable screenshots.
 
 ## 2026-05-14
 
