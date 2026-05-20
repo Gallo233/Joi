@@ -91,10 +91,12 @@ The current observation, first action layer, approval hardening, watch loop, and
 - OCR runtime status now probes Pillow, `pytesseract`, the system `tesseract` executable, and a safe version check before reporting ready.
 - A local private visual calibration pass has started under ignored `data/local_visual_eval/`. Safe abstract conclusions were promoted into committed synthetic fixtures for sparse page controls, mixed right/bottom HUD controls, low-contrast modal actions, thin progress/small badge visual changes, and cursor-blink no-op verification. Do not commit local screenshots, local manifests, local case ids, real text, URLs, account data, window titles, or paths.
 - Local private eval output is sanitized to show only suite counts, `local_private_case_*` placeholders, and abstract failure categories.
+- Semantic target grounding calibration now has committed synthetic coverage for UIA/OCR disagreement, static UIA text, disabled UIA controls, visual-only selection gates, close low-confidence candidates, and no-candidate clarification. Visual-only candidates still require explicit selection first, then a separate click approval.
+- Visual/OCR/UIA ranking now preserves existing ambiguity labels during visual merge so close-score and low-confidence gates survive cross-source reranking.
 
 Next task options, in priority order:
 
-1. Continue local private visual/image calibration with more real browser and game screenshots, then convert only safe lessons into generated synthetic fixtures.
+1. Continue local private semantic calibration against denser real browser, desktop, and game layouts, then convert only safe failure categories into generated synthetic fixtures.
 2. Add safe runtime provider mutation later only after the config writer can preserve secrets and validate changes.
 3. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
 4. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, screenshot filenames, approval ids, and task ids.

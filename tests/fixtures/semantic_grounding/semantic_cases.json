@@ -1,0 +1,185 @@
+[
+  {
+    "id": "semantic_uia_ocr_disagreement_selection",
+    "image": "semantic_uia_ocr_disagreement.ppm",
+    "query": "点目标甲",
+    "ocr_blocks": [
+      {
+        "text": "目标甲",
+        "bbox": [
+          40,
+          82,
+          76,
+          28
+        ],
+        "confidence": 0.95
+      }
+    ],
+    "accessibility_elements": [
+      {
+        "name": "目标甲",
+        "role": "ButtonControl",
+        "bounds": [
+          310,
+          82,
+          76,
+          28
+        ],
+        "enabled": true,
+        "clickable": true,
+        "confidence": 0.92
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_ambiguity": "close_score",
+      "min_candidates": 2
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_static_uia_text_selection",
+    "image": "semantic_static_uia_text.ppm",
+    "query": "点目标甲",
+    "accessibility_elements": [
+      {
+        "name": "目标甲",
+        "role": "TextControl",
+        "bounds": [
+          170,
+          82,
+          76,
+          28
+        ],
+        "enabled": true,
+        "clickable": false,
+        "confidence": 0.92
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "accessibility",
+      "top_role": "TextControl"
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_disabled_uia_button_selection",
+    "image": "semantic_disabled_uia_button.ppm",
+    "query": "点目标甲",
+    "accessibility_elements": [
+      {
+        "name": "目标甲",
+        "role": "ButtonControl",
+        "bounds": [
+          170,
+          82,
+          76,
+          28
+        ],
+        "enabled": false,
+        "clickable": true,
+        "confidence": 0.92
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "accessibility",
+      "top_enabled": false
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_visual_only_selection",
+    "image": "semantic_visual_only.ppm",
+    "query": "点开始任务",
+    "visual_candidates": [
+      {
+        "label": "开始任务",
+        "bbox": [
+          136,
+          176,
+          128,
+          22
+        ],
+        "confidence": 0.66,
+        "reason": "底部操作块",
+        "region": "bottom_controls"
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_source": "visual"
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_close_low_confidence_selection",
+    "image": "semantic_close_low_confidence.ppm",
+    "query": "点目标乙",
+    "ocr_blocks": [
+      {
+        "text": "目标乙",
+        "bbox": [
+          128,
+          82,
+          72,
+          28
+        ],
+        "confidence": 0.35
+      },
+      {
+        "text": "目标乙",
+        "bbox": [
+          220,
+          82,
+          72,
+          28
+        ],
+        "confidence": 0.34
+      }
+    ],
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": true,
+      "top_ambiguity": "close_score",
+      "max_top_confidence": 0.72,
+      "min_candidates": 2
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  },
+  {
+    "id": "semantic_no_candidate_clarification",
+    "image": "semantic_no_candidate.ppm",
+    "query": "点目标甲",
+    "expected": {
+      "requires_approval": false,
+      "candidate_selection_required": false,
+      "needs_clarification": true,
+      "max_candidates": 0
+    },
+    "image_size": [
+      400,
+      225
+    ]
+  }
+]

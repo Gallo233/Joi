@@ -14,18 +14,22 @@ from agent_companion.core.computer_use import verify_post_action
 from agent_companion.core.computer_use.schemas import ComputerAction, ComputerObservation, ComputerUseResult
 from agent_companion.core.schemas import ToolRequest
 from agent_companion.core.tools.targeting import SemanticTargetTool
-from agent_companion.core.vision import CaptureRect, UnavailableAccessibilityObserver
-from agent_companion.core.vision.ocr import OcrResult
+from agent_companion.core.vision import AccessibilitySnapshot, AccessibleElement, CaptureRect, UnavailableAccessibilityObserver
+from agent_companion.core.vision.ocr import OcrResult, OcrTextBlock
 from agent_companion.core.vision.visual_detector import HeuristicVisualDetector, VisualDetectionResult
+from agent_companion.core.vision.visual_detector import VisualCandidate
 
 
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "visual_detector"
 CASE_FILE = FIXTURE_DIR / "visual_cases.json"
 IMAGE_DIFF_DIR = ROOT / "tests" / "fixtures" / "image_verification"
 IMAGE_DIFF_CASE_FILE = IMAGE_DIFF_DIR / "image_diff_cases.json"
+SEMANTIC_DIR = ROOT / "tests" / "fixtures" / "semantic_grounding"
+SEMANTIC_CASE_FILE = SEMANTIC_DIR / "semantic_cases.json"
 LOCAL_FIXTURE_DIR = ROOT / "data" / "local_visual_eval"
 LOCAL_CASE_FILE = LOCAL_FIXTURE_DIR / "visual_cases.local.json"
 LOCAL_IMAGE_DIFF_CASE_FILE = LOCAL_FIXTURE_DIR / "image_diff_cases.local.json"
+LOCAL_SEMANTIC_CASE_FILE = LOCAL_FIXTURE_DIR / "semantic_cases.local.json"
 
 
 @dataclass
@@ -40,6 +44,22 @@ class CaseResult:
 class _EmptyOcrExtractor:
     def extract(self, image_path: Path) -> OcrResult:
         return OcrResult("success", "没有识别到清晰文字。", [])
+
+
+class _CaseOcrExtractor:
+    def __init__(self, result: OcrResult) -> None:
+        self.result = result
+
+    def extract(self, image_path: Path) -> OcrResult:
+        return self.result
+
+
+class _CaseAccessibilityObserver:
+    def __init__(self, snapshot: AccessibilitySnapshot) -> None:
+        self.snapshot = snapshot
+
+    def observe(self, window_handle: int | None = None, title: str = "") -> AccessibilitySnapshot:
+        return self.snapshot
 
 
 class _StaticComputerBackend:
@@ -74,6 +94,11 @@ def run_eval(root: Path = ROOT, verbose: bool = True) -> int:
     local_image_skipped = not LOCAL_IMAGE_DIFF_CASE_FILE.exists()
     if not local_image_skipped:
         local_image_results = _run_image_diff_suite(root, "local_private_image_diff", LOCAL_IMAGE_DIFF_CASE_FILE, LOCAL_FIXTURE_DIR)
+    semantic_results = _run_semantic_suite(root, "synthetic_semantic", SEMANTIC_CASE_FILE, SEMANTIC_DIR)
+    local_semantic_results: list[CaseResult] = []
+    local_semantic_skipped = not LOCAL_SEMANTIC_CASE_FILE.exists()
+    if not local_semantic_skipped:
+        local_semantic_results = _run_semantic_suite(root, "local_private_semantic", LOCAL_SEMANTIC_CASE_FILE, LOCAL_FIXTURE_DIR)
     if verbose:
         _print_results("committed synthetic visual detector eval", synthetic_results)
         if local_skipped:
@@ -85,7 +110,12 @@ def run_eval(root: Path = ROOT, verbose: bool = True) -> int:
             print(f"local private image verification eval: skipped ({_rel(root, LOCAL_IMAGE_DIFF_CASE_FILE)} not found)")
         else:
             _print_private_results("local private image verification eval", local_image_results)
-    all_results = [*synthetic_results, *local_results, *synthetic_image_results, *local_image_results]
+        _print_results("committed synthetic semantic grounding eval", semantic_results)
+        if local_semantic_skipped:
+            print(f"local private semantic grounding eval: skipped ({_rel(root, LOCAL_SEMANTIC_CASE_FILE)} not found)")
+        else:
+            _print_private_results("local private semantic grounding eval", local_semantic_results)
+    all_results = [*synthetic_results, *local_results, *synthetic_image_results, *local_image_results, *semantic_results, *local_semantic_results]
     return 0 if all(result.passed for result in all_results) else 1
 
 
@@ -97,6 +127,11 @@ def _run_suite(root: Path, suite: str, case_file: Path, base_dir: Path) -> list[
 def _run_image_diff_suite(root: Path, suite: str, case_file: Path, base_dir: Path) -> list[CaseResult]:
     cases = json.loads(case_file.read_text(encoding="utf-8"))
     return [_run_image_diff_case(root, suite, base_dir, case) for case in cases]
+
+
+def _run_semantic_suite(root: Path, suite: str, case_file: Path, base_dir: Path) -> list[CaseResult]:
+    cases = json.loads(case_file.read_text(encoding="utf-8"))
+    return [_run_semantic_case(root, suite, base_dir, case) for case in cases]
 
 
 def _print_results(label: str, results: list[CaseResult]) -> None:
@@ -240,6 +275,144 @@ def _run_image_diff_case(root: Path, suite: str, base_dir: Path, case: dict[str,
         f"artifact_changed={verification.signals.artifact_changed}",
     ]
     return CaseResult(suite, case_id, not failures, failures, summary)
+
+
+def _run_semantic_case(root: Path, suite: str, base_dir: Path, case: dict[str, Any]) -> CaseResult:
+    case_id = str(case.get("id") or "unknown")
+    failures: list[str] = []
+    image_path = _resolve_image_path(base_dir, str(case["image"]))
+    width, height = _image_size(case)
+    observation = ComputerObservation(
+        target="active_window",
+        screenshot_path=image_path,
+        screenshot_rel=_rel(root, image_path),
+        width=width,
+        height=height,
+        title="Synthetic semantic grounding fixture",
+        window_handle=0,
+        capture_rect=CaptureRect(0, 0, width, height),
+        query=str(case.get("query") or ""),
+    )
+    tool_result = SemanticTargetTool(
+        root,
+        computer_backend=_StaticComputerBackend(observation),
+        ocr=_CaseOcrExtractor(_ocr_from_case(case)),
+        accessibility=_CaseAccessibilityObserver(_accessibility_from_case(case)),
+        visual_detector=_StaticVisualDetector(_visual_from_case(case)),
+    ).run(ToolRequest("vision.resolve_target", {"query": str(case.get("query") or "")}))
+    expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+    if "requires_approval" in expected and bool(tool_result.requires_approval) != bool(expected.get("requires_approval")):
+        failures.append(f"expected requires_approval={bool(expected.get('requires_approval'))}, got {bool(tool_result.requires_approval)}")
+    if "candidate_selection_required" in expected and bool(tool_result.agent_state.get("candidate_selection_required")) != bool(expected.get("candidate_selection_required")):
+        failures.append(f"expected candidate_selection_required={bool(expected.get('candidate_selection_required'))}, got {bool(tool_result.agent_state.get('candidate_selection_required'))}")
+    if "needs_clarification" in expected and bool(tool_result.agent_state.get("needs_clarification")) != bool(expected.get("needs_clarification")):
+        failures.append(f"expected needs_clarification={bool(expected.get('needs_clarification'))}, got {bool(tool_result.agent_state.get('needs_clarification'))}")
+    candidates = tool_result.agent_state.get("target_candidates")
+    candidate_rows = candidates if isinstance(candidates, list) else []
+    min_candidates = expected.get("min_candidates")
+    if min_candidates is not None and len(candidate_rows) < int(min_candidates):
+        failures.append(f"expected at least {int(min_candidates)} semantic candidates, got {len(candidate_rows)}")
+    max_candidates = expected.get("max_candidates")
+    if max_candidates is not None and len(candidate_rows) > int(max_candidates):
+        failures.append(f"expected at most {int(max_candidates)} semantic candidates, got {len(candidate_rows)}")
+    top = tool_result.agent_state.get("target_candidate")
+    if isinstance(top, dict):
+        for key, expected_key in (
+            ("source", "top_source"),
+            ("ambiguity", "top_ambiguity"),
+            ("role", "top_role"),
+            ("enabled", "top_enabled"),
+        ):
+            if expected_key in expected and top.get(key) != expected[expected_key]:
+                failures.append(f"expected {key}={expected[expected_key]}, got {top.get(key)}")
+        max_confidence = expected.get("max_top_confidence")
+        if max_confidence is not None and float(top.get("confidence") or 0) > float(max_confidence):
+            failures.append(f"expected top confidence <= {float(max_confidence)}, got {top.get('confidence')}")
+        preview = top.get("preview")
+        if candidate_rows and (not isinstance(preview, dict) or not preview.get("bbox") or not preview.get("artifact")):
+            failures.append("semantic target preview is not renderable")
+    elif candidate_rows:
+        failures.append("semantic candidates exist but top candidate state is missing")
+    forbidden = ["{", "}", "bbox", "source", str(case.get("image") or ""), ".ppm", "data/"]
+    forbidden.extend(_case_visible_terms(case))
+    if any(fragment and fragment in tool_result.voice_line.text for fragment in forbidden):
+        failures.append("voice_line leaked semantic grounding details")
+    summary = [
+        f"approval={bool(tool_result.requires_approval)}",
+        f"selection={bool(tool_result.agent_state.get('candidate_selection_required'))}",
+        f"candidates={len(candidate_rows)}",
+    ]
+    if isinstance(top, dict):
+        summary.append(f"top={top.get('source', 'none')}:{top.get('ambiguity', 'none')}")
+    return CaseResult(suite, case_id, not failures, failures, summary)
+
+
+def _ocr_from_case(case: dict[str, Any]) -> OcrResult:
+    blocks = []
+    for row in case.get("ocr_blocks") or []:
+        if not isinstance(row, dict):
+            continue
+        bbox = _bbox(row.get("bbox"))
+        if bbox is None:
+            continue
+        blocks.append(OcrTextBlock(str(row.get("text") or ""), bbox, float(row.get("confidence", 0.9))))
+    return OcrResult("success", "synthetic OCR", blocks)
+
+
+def _accessibility_from_case(case: dict[str, Any]) -> AccessibilitySnapshot:
+    elements = []
+    for row in case.get("accessibility_elements") or []:
+        if not isinstance(row, dict):
+            continue
+        bounds = _bbox(row.get("bounds"))
+        if bounds is None:
+            continue
+        elements.append(
+            AccessibleElement(
+                str(row.get("name") or ""),
+                str(row.get("role") or ""),
+                bounds,
+                enabled=bool(row.get("enabled", True)),
+                clickable=bool(row.get("clickable", False)),
+                confidence=float(row.get("confidence", 0.78)),
+            )
+        )
+    return AccessibilitySnapshot("success", title="Synthetic semantic grounding fixture", window_handle=0, elements=elements)
+
+
+def _visual_from_case(case: dict[str, Any]) -> VisualDetectionResult:
+    candidates = []
+    for row in case.get("visual_candidates") or []:
+        if not isinstance(row, dict):
+            continue
+        bbox = _bbox(row.get("bbox"))
+        if bbox is None:
+            continue
+        candidates.append(
+            VisualCandidate(
+                str(row.get("label") or "目标"),
+                bbox,
+                float(row.get("confidence", 0.6)),
+                str(row.get("reason") or "视觉候选"),
+                region=str(row.get("region") or "main_content"),
+            )
+        )
+    return VisualDetectionResult("success", "synthetic visual candidates", candidates)
+
+
+def _case_visible_terms(case: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    for row in case.get("ocr_blocks") or []:
+        if isinstance(row, dict):
+            terms.append(str(row.get("text") or ""))
+    for row in case.get("accessibility_elements") or []:
+        if isinstance(row, dict):
+            terms.append(str(row.get("name") or ""))
+            terms.append(str(row.get("role") or ""))
+    for row in case.get("visual_candidates") or []:
+        if isinstance(row, dict):
+            terms.append(str(row.get("label") or ""))
+    return [term for term in terms if term]
 
 
 def _image_size(case: dict[str, Any]) -> tuple[int, int]:

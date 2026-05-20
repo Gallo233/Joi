@@ -8,6 +8,7 @@ from typing import Iterable
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "visual_detector"
 IMAGE_DIFF_DIR = ROOT / "tests" / "fixtures" / "image_verification"
+SEMANTIC_DIR = ROOT / "tests" / "fixtures" / "semantic_grounding"
 WIDTH = 400
 HEIGHT = 225
 
@@ -252,10 +253,109 @@ IMAGE_DIFF_CASES: list[dict] = [
     },
 ]
 
+SEMANTIC_CASES: list[dict] = [
+    {
+        "id": "semantic_uia_ocr_disagreement_selection",
+        "image": "semantic_uia_ocr_disagreement.ppm",
+        "query": "点目标甲",
+        "shapes": [
+            (40, 82, 76, 28, (68, 132, 204)),
+            (310, 82, 76, 28, (206, 142, 72)),
+        ],
+        "ocr_blocks": [{"text": "目标甲", "bbox": [40, 82, 76, 28], "confidence": 0.95}],
+        "accessibility_elements": [
+            {"name": "目标甲", "role": "ButtonControl", "bounds": [310, 82, 76, 28], "enabled": True, "clickable": True, "confidence": 0.92}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_ambiguity": "close_score",
+            "min_candidates": 2,
+        },
+    },
+    {
+        "id": "semantic_static_uia_text_selection",
+        "image": "semantic_static_uia_text.ppm",
+        "query": "点目标甲",
+        "shapes": [(170, 82, 76, 28, (96, 118, 150))],
+        "accessibility_elements": [
+            {"name": "目标甲", "role": "TextControl", "bounds": [170, 82, 76, 28], "enabled": True, "clickable": False, "confidence": 0.92}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "accessibility",
+            "top_role": "TextControl",
+        },
+    },
+    {
+        "id": "semantic_disabled_uia_button_selection",
+        "image": "semantic_disabled_uia_button.ppm",
+        "query": "点目标甲",
+        "shapes": [(170, 82, 76, 28, (116, 122, 136))],
+        "accessibility_elements": [
+            {"name": "目标甲", "role": "ButtonControl", "bounds": [170, 82, 76, 28], "enabled": False, "clickable": True, "confidence": 0.92}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "accessibility",
+            "top_enabled": False,
+        },
+    },
+    {
+        "id": "semantic_visual_only_selection",
+        "image": "semantic_visual_only.ppm",
+        "query": "点开始任务",
+        "shapes": [(136, 176, 128, 22, (60, 126, 220))],
+        "visual_candidates": [
+            {"label": "开始任务", "bbox": [136, 176, 128, 22], "confidence": 0.66, "reason": "底部操作块", "region": "bottom_controls"}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "visual",
+        },
+    },
+    {
+        "id": "semantic_close_low_confidence_selection",
+        "image": "semantic_close_low_confidence.ppm",
+        "query": "点目标乙",
+        "shapes": [
+            (128, 82, 72, 28, (74, 118, 190)),
+            (220, 82, 72, 28, (78, 124, 196)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标乙", "bbox": [128, 82, 72, 28], "confidence": 0.35},
+            {"text": "目标乙", "bbox": [220, 82, 72, 28], "confidence": 0.34},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_ambiguity": "close_score",
+            "max_top_confidence": 0.72,
+            "min_candidates": 2,
+        },
+    },
+    {
+        "id": "semantic_no_candidate_clarification",
+        "image": "semantic_no_candidate.ppm",
+        "query": "点目标甲",
+        "shapes": [(140, 78, 120, 48, (74, 88, 112))],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "max_candidates": 0,
+        },
+    },
+]
+
 
 def main() -> int:
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
     IMAGE_DIFF_DIR.mkdir(parents=True, exist_ok=True)
+    SEMANTIC_DIR.mkdir(parents=True, exist_ok=True)
     manifest: list[dict] = []
     for case in CASES:
         image_name = str(case["image"])
@@ -300,8 +400,17 @@ def main() -> int:
         row["image_size"] = [WIDTH, HEIGHT]
         image_manifest.append(row)
     (IMAGE_DIFF_DIR / "image_diff_cases.json").write_text(json.dumps(image_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    semantic_manifest: list[dict] = []
+    for case in SEMANTIC_CASES:
+        image_name = str(case["image"])
+        write_ppm(SEMANTIC_DIR / image_name, WIDTH, HEIGHT, case.get("shapes") or [])
+        row = {key: value for key, value in case.items() if key != "shapes"}
+        row["image_size"] = [WIDTH, HEIGHT]
+        semantic_manifest.append(row)
+    (SEMANTIC_DIR / "semantic_cases.json").write_text(json.dumps(semantic_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"generated {len(manifest)} visual detector fixtures in {FIXTURE_DIR}")
     print(f"generated {len(image_manifest)} image verification fixtures in {IMAGE_DIFF_DIR}")
+    print(f"generated {len(semantic_manifest)} semantic grounding fixtures in {SEMANTIC_DIR}")
     return 0
 
 

@@ -52,6 +52,8 @@
 - Tightened OCR runtime status so it only reports ready after Pillow, `pytesseract`, the system `tesseract` executable, and a sanitized version probe are available.
 - Promoted local private visual calibration lessons into committed synthetic fixtures for sparse page controls, right/bottom HUD controls, low-contrast modal actions, thin progress changes, small badge changes, and cursor-blink no-op verification.
 - Sanitized local private visual eval output so it reports suite counts and abstract failure categories without printing private case ids, screenshot filenames, paths, text, account data, URLs, or window titles.
+- Added synthetic semantic grounding regression coverage for UIA/OCR disagreement, static UIA text, disabled UIA controls, visual-only candidates, close low-confidence candidates, and no-candidate clarification.
+- Preserved upstream ambiguity labels when visual candidates are merged with OCR/UIA semantic target candidates.
 
 ## 2026-05-14
 

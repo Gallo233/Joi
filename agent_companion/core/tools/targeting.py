@@ -553,10 +553,10 @@ def _rank_merged_candidates(candidates: list[TargetCandidate]) -> list[TargetCan
     close = bool(second and abs(sorted_candidates[0].confidence - second.confidence) <= 0.08)
     rows: list[TargetCandidate] = []
     for index, candidate in enumerate(sorted_candidates, start=1):
-        ambiguity = "none"
+        ambiguity = candidate.ambiguity if candidate.ambiguity != "none" else "none"
         if index <= 2 and close:
             ambiguity = "close_score"
-        elif candidate.confidence < 0.7:
+        elif ambiguity == "none" and candidate.confidence < 0.7:
             ambiguity = "low_confidence"
         rows.append(
             TargetCandidate(
