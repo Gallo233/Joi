@@ -29,15 +29,19 @@ class Check:
 
 
 def _run(args: Sequence[str], *, cwd: Path = ROOT, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(args),
-        cwd=cwd,
-        input=input_text,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    command = list(args)
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            input=input_text,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(command, 126, "", f"{exc.__class__.__name__}: {exc}")
 
 
 def _git(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
