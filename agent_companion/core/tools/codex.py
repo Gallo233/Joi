@@ -60,8 +60,16 @@ class CodexTool(ToolAdapter):
             env["AGENT_COMPANION_CODEX_RESUME_TOKEN"] = resume_token
         if permission_hash:
             env["AGENT_COMPANION_CODEX_PERMISSION_HASH"] = permission_hash
-        with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-            result = subprocess.run(command, cwd=str(self.workspace), stdout=stdout, stderr=stderr, text=True, env=env)
+        try:
+            with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+                result = subprocess.run(command, cwd=str(self.workspace), stdout=stdout, stderr=stderr, text=True, env=env)
+        except OSError:
+            return self._failed(
+                "本地 Codex 没有启动成功。请确认 Codex CLI 已安装，并且配置指向可执行程序。",
+                {"error": "codex_launch_failed"},
+                status="not_available",
+                voice_text="我没能启动本地 Codex，先停在这里。",
+            )
         elapsed = time.time() - started
         artifacts = [self._rel(stdout_path), self._rel(stderr_path), self._rel(final_path)]
         codex_run, permission = build_codex_run_state(
@@ -124,7 +132,7 @@ class CodexTool(ToolAdapter):
             voice_line=safe_voice_line("写码任务完成了。" if ok else "写码任务没有跑通，细节在卡片里。", sprite="5" if ok else "4"),
         )
 
-    def _failed(self, message: str, state: dict, status: str) -> ToolResult:
+    def _failed(self, message: str, state: dict, status: str, voice_text: str = "写码能力还没有准备好。") -> ToolResult:
         return ToolResult(
             ok=False,
             agent_state={
@@ -141,7 +149,7 @@ class CodexTool(ToolAdapter):
                 },
             },
             display_card=DisplayCard("Codex 任务", message, status="failed"),
-            voice_line=safe_voice_line("写码能力还没有准备好。", sprite="4"),
+            voice_line=safe_voice_line(voice_text, sprite="4"),
         )
 
     @staticmethod

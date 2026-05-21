@@ -1065,7 +1065,7 @@ def main() -> int:
             base_color=tuple(case.get("base_color") or (22, 26, 38)),
         )
         if case.get("after_unreadable"):
-            (IMAGE_DIFF_DIR / after_name).write_text("not an image\n", encoding="utf-8")
+            (IMAGE_DIFF_DIR / after_name).write_bytes(b"not an image\n")
         else:
             write_ppm(
                 IMAGE_DIFF_DIR / after_name,

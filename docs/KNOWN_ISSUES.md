@@ -48,3 +48,4 @@
 - Computer Use audit entries include sanitized image-change signals for post-action verification.
 - Visual detector and image-diff evals now report committed synthetic suites separately from skipped or locally run private suites.
 - Coding tasks now expose sanitized Codex run status, event timeline, permission-required state, denial/expiry handling, and safe artifact labels without speaking raw commands, paths, JSONL, stderr, task ids, approval ids, or tokens.
+- Codex runner startup failures now fail closed when the configured executable is missing, inaccessible, or not launchable on the current OS.

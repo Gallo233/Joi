@@ -5,6 +5,9 @@ import json
 import os
 import inspect
 import re
+import shutil
+import shlex
+import sys
 import tempfile
 from pathlib import Path
 
@@ -354,9 +357,10 @@ def _audit_rows(events) -> list[dict]:
     return rows
 
 
-def _write_fake_codex_executable(path: Path) -> None:
-    path.write_text(
-        """#!/usr/bin/env python3
+def _write_fake_codex_executable(directory: Path) -> Path:
+    script_path = directory / "fake_codex.py"
+    script_path.write_text(
+        """
 import json
 import os
 import sys
@@ -414,7 +418,14 @@ raise SystemExit(0)
 """,
         encoding="utf-8",
     )
-    os.chmod(path, 0o755)
+    if os.name == "nt":
+        shim_path = directory / "codex.cmd"
+        shim_path.write_text(f'@echo off\r\n"{sys.executable}" "{script_path}" %*\r\n', encoding="utf-8")
+    else:
+        shim_path = directory / "codex"
+        shim_path.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(script_path))} \"$@\"\n", encoding="utf-8")
+        os.chmod(shim_path, 0o755)
+    return shim_path
 
 
 def _assert_no_codex_voice_leaks(events_or_results, message: str) -> None:
@@ -2006,9 +2017,32 @@ asr:
         else:
             os.environ["AGENT_COMPANION_CODEX_BIN"] = previous
 
+    invalid_codex_dir = Path(tempfile.mkdtemp())
+    invalid_codex = invalid_codex_dir / ("codex-invalid.exe" if os.name == "nt" else "codex-invalid")
+    invalid_codex.write_text("this file exists but is not a valid executable\nC:\\secret\\codex.exe --token sk-test\n", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(invalid_codex, 0o755)
+    previous_invalid_bin = os.environ.get("AGENT_COMPANION_CODEX_BIN")
+    try:
+        os.environ["AGENT_COMPANION_CODEX_BIN"] = str(invalid_codex)
+        invalid_result = CodexTool(workspace).run(ToolRequest("codex.run", {"goal": "修复 bug"}))
+        assert_true(not invalid_result.ok, "invalid Codex executable should fail closed")
+        assert_true(not invalid_result.requires_approval, "invalid Codex executable must not request approval")
+        assert_true("approval_request" not in invalid_result.agent_state, "invalid Codex executable must not create approval state")
+        assert_true(invalid_result.agent_state["codex_run"]["status"] == "not_available", "invalid Codex executable should expose not_available status")
+        _assert_no_codex_safe_text_leaks(invalid_result.agent_state["codex_run"], "invalid Codex state leaked raw launch details")
+        _assert_no_codex_safe_text_leaks(invalid_result.display_card.summary, "invalid Codex card leaked raw launch details")
+        _assert_no_codex_safe_text_leaks(invalid_result.display_card.body, "invalid Codex card body leaked raw launch details")
+        _assert_no_codex_voice_leaks([invalid_result], "invalid Codex voice leaked raw machine detail")
+    finally:
+        if previous_invalid_bin is None:
+            os.environ.pop("AGENT_COMPANION_CODEX_BIN", None)
+        else:
+            os.environ["AGENT_COMPANION_CODEX_BIN"] = previous_invalid_bin
+        shutil.rmtree(invalid_codex_dir, ignore_errors=True)
+
     fake_codex_dir = Path(tempfile.mkdtemp())
-    fake_codex = fake_codex_dir / "codex"
-    _write_fake_codex_executable(fake_codex)
+    fake_codex = _write_fake_codex_executable(fake_codex_dir)
     previous_bin = os.environ.get("AGENT_COMPANION_CODEX_BIN")
     previous_mode = os.environ.get("JOI_FAKE_CODEX_MODE")
     try:

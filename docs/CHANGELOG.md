@@ -66,6 +66,7 @@
 - Added a Core safe runtime config mutation foundation with allowlisted non-secret provider fields, dry-run summaries, validation, atomic writes, `secrets.yaml` preservation, and approval-gated `runtime.update_config` plumbing without enabling a full settings UI.
 - Added developer-mode runtime settings dry-run/apply controls for safe non-secret fields, with sanitized previews, Joi approval before writes, runtime status refresh after apply, and continued exclusion of provider secrets, endpoints, base URLs, local paths, and model/audio filenames.
 - Fixed the runtime settings apply JSON-RPC contract so invalid and no-op updates return sanitized precheck results synchronously, while only changed valid updates create approval cards.
+- Hardened the Codex runner so missing, inaccessible, or invalid local Codex executables fail closed with sanitized task cards instead of crashing, and made fake Codex tests portable across Windows/macOS/Linux.
 
 ## 2026-05-14
 
