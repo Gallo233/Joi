@@ -22,6 +22,12 @@ AUTOPILOT_LOG = DOCS / "AUTOPILOT_LOG.md"
 DEFAULT_MODEL = os.environ.get("JOI_AUTOPILOT_MODEL", "gpt-5.4")
 SAFE_BRANCH_PREFIXES = ("codex/", "joi-autopilot/", "autopilot/")
 CODEX_BIN_ENV_VARS = ("JOI_AUTOPILOT_CODEX_BIN", "AGENT_COMPANION_CODEX_BIN")
+DOCS_ONLY_ALLOWED_PATHS = {
+    "docs/AUTOPILOT_LOG.md",
+    "docs/REVIEW_HANDOFF.md",
+    "docs/AUTOPILOT_SANDBOX_TEST.md",
+}
+DOCS_ONLY_ALLOWED_PREFIXES = ("docs/AUTOPILOT_",)
 
 
 @dataclass(frozen=True)
@@ -328,6 +334,62 @@ def _has_unexpected_dirty_entries() -> bool:
     return False
 
 
+def _changed_paths_since(base_head: str) -> set[str]:
+    paths: set[str] = set()
+    commands = [
+        ["diff", "--name-only", f"{base_head}..HEAD"],
+        ["diff", "--name-only"],
+        ["diff", "--name-only", "--cached"],
+    ]
+    for command in commands:
+        result = _git(command)
+        if result.returncode != 0:
+            paths.add("<git diff unavailable>")
+            continue
+        for line in result.stdout.splitlines():
+            path = line.strip().replace("\\", "/")
+            if path:
+                paths.add(path)
+
+    status = _git(["status", "--short"])
+    if status.returncode != 0:
+        paths.add("<git status unavailable>")
+        return paths
+    for line in status.stdout.splitlines():
+        if not line:
+            continue
+        path = line[3:] if len(line) > 3 else line
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip().replace("\\", "/")
+        if path:
+            paths.add(path)
+    return paths
+
+
+def _docs_only_allowed(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return normalized in DOCS_ONLY_ALLOWED_PATHS or any(normalized.startswith(prefix) for prefix in DOCS_ONLY_ALLOWED_PREFIXES)
+
+
+def _docs_only_scope_violations(base_head: str) -> list[str]:
+    paths = sorted(_changed_paths_since(base_head))
+    return [path for path in paths if not _docs_only_allowed(path)]
+
+
+def _check_docs_only_scope(base_head: str, label: str) -> bool:
+    violations = _docs_only_scope_violations(base_head)
+    if not violations:
+        return True
+    preview = ", ".join(violations[:8])
+    if len(violations) > 8:
+        preview += f", ... (+{len(violations) - 8} more)"
+    message = f"{label} stopped: docs-only scope violation: {preview}"
+    print(f"[joi-autopilot] {message}", file=sys.stderr)
+    _append_log(message)
+    return False
+
+
 def preflight(*, strict: bool = False) -> int:
     branch = _current_branch()
     codex_probes = _codex_probes()
@@ -394,6 +456,7 @@ def _base_prompt(role: str) -> str:
         - Stop if credentials, network, or elevated permissions are required.
         - Update docs/REVIEW_HANDOFF.md and docs/AUTOPILOT_LOG.md with concise results.
         - Keep voice/persona/private path leaks out of committed files.
+        - P0 smoke runs are docs-only: do not edit application code, tests, fixtures, tools other than this autopilot runner, or non-autopilot docs.
         """
     ).strip()
 
@@ -430,9 +493,16 @@ def _codex_exec(prompt: str, *, model: str, label: str) -> int:
 def run_once(*, model: str) -> int:
     if preflight(strict=True) != 0:
         return 1
+    base = _git(["rev-parse", "HEAD"])
+    if base.returncode != 0:
+        print("[joi-autopilot] failed to read base HEAD", file=sys.stderr)
+        return 1
+    base_head = base.stdout.strip()
     _append_log("Codex-only autopilot run starting")
     for role in ("Developer", "Tester", "Reviewer"):
         code = _codex_exec(_role_prompt(role), model=model, label=role.lower())
+        if not _check_docs_only_scope(base_head, role.lower()):
+            return 1
         if code != 0:
             return code
     _append_log("Codex-only autopilot run finished")
