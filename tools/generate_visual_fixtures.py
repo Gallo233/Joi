@@ -1038,6 +1038,158 @@ SEMANTIC_CASES: list[dict] = [
             "min_candidates": 3,
         },
     },
+    {
+        "id": "semantic_focus_churn_current_vs_stale_selection",
+        "image": "semantic_focus_churn_current_vs_stale.ppm",
+        "query": "点目标继续",
+        "shapes": [
+            (0, 0, 400, 225, (34, 40, 58)),
+            (236, 132, 80, 28, (74, 136, 206)),
+            (28, 24, 120, 72, (48, 56, 76)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标继续", "bbox": [236, 132, 80, 28], "confidence": 0.92}
+        ],
+        "accessibility_elements": [
+            {"name": "目标继续", "role": "ButtonControl", "bounds": [640, 420, 82, 28], "enabled": True, "clickable": True, "confidence": 0.95}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "accessibility",
+            "top_ambiguity": "close_score",
+            "min_candidates": 2,
+            "preview_required": False,
+            "selection": {"rank": 1, "requires_approval": False, "coordinate_untrusted": True, "no_approval_request": True},
+        },
+    },
+    {
+        "id": "semantic_focus_churn_old_window_geometry_clarification",
+        "image": "semantic_focus_churn_old_window_geometry.ppm",
+        "query": "点目标提交",
+        "capture_rect": {"screen_x": 860, "screen_y": 180, "width": 320, "height": 180, "scale_x": 1.0, "scale_y": 1.0},
+        "shapes": [
+            (0, 0, 400, 225, (36, 42, 60)),
+            (42, 36, 128, 70, (50, 58, 78)),
+            (246, 142, 84, 28, (78, 126, 188)),
+        ],
+        "accessibility_elements": [
+            {"name": "目标提交", "role": "ButtonControl", "bounds": [128, 220, 84, 28], "enabled": True, "clickable": True, "confidence": 0.96}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "no_approval_request": True,
+            "top_source": "accessibility",
+            "top_ambiguity": "none",
+            "preview_required": False,
+        },
+    },
+    {
+        "id": "semantic_cross_monitor_drag_stale_geometry_clarification",
+        "image": "semantic_cross_monitor_drag_stale_geometry.ppm",
+        "query": "点目标拖放",
+        "capture_rect": {"screen_x": -1280, "screen_y": 80, "width": 400, "height": 225, "scale_x": 1.0, "scale_y": 1.0},
+        "shapes": [
+            (0, 0, 400, 225, (38, 44, 62)),
+            (286, 118, 82, 30, (78, 130, 194)),
+        ],
+        "accessibility_elements": [
+            {"name": "目标拖放", "role": "ButtonControl", "bounds": [2200, 142, 88, 30], "enabled": True, "clickable": True, "confidence": 0.97}
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": False,
+            "needs_clarification": True,
+            "no_approval_request": True,
+            "top_source": "accessibility",
+            "top_ambiguity": "none",
+            "preview_required": False,
+        },
+    },
+    {
+        "id": "semantic_dense_browser_topbar_repeated_actions_selection",
+        "image": "semantic_dense_browser_topbar_repeated_actions.ppm",
+        "query": "点目标操作",
+        "shapes": [
+            (0, 0, 400, 225, (238, 242, 246)),
+            (18, 16, 74, 24, (74, 128, 204)),
+            (112, 16, 74, 24, (76, 130, 206)),
+            (206, 16, 74, 24, (78, 132, 208)),
+            (300, 16, 74, 24, (80, 134, 210)),
+            (42, 78, 316, 108, (224, 228, 236)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标操作", "bbox": [18, 16, 74, 24], "confidence": 0.94},
+            {"text": "目标操作", "bbox": [112, 16, 74, 24], "confidence": 0.93},
+            {"text": "目标操作", "bbox": [206, 16, 74, 24], "confidence": 0.92},
+            {"text": "目标操作", "bbox": [300, 16, 74, 24], "confidence": 0.91},
+        ],
+        "accessibility_elements": [
+            {"name": "目标操作", "role": "ButtonControl", "bounds": [18, 16, 74, 24], "enabled": True, "clickable": True, "confidence": 0.94},
+            {"name": "目标操作", "role": "ButtonControl", "bounds": [112, 16, 74, 24], "enabled": True, "clickable": True, "confidence": 0.93},
+            {"name": "目标操作", "role": "ButtonControl", "bounds": [206, 16, 74, 24], "enabled": True, "clickable": True, "confidence": 0.92},
+            {"name": "目标操作", "role": "ButtonControl", "bounds": [300, 16, 74, 24], "enabled": True, "clickable": True, "confidence": 0.91},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "fused",
+            "top_ambiguity": "close_score",
+            "min_candidates": 3,
+        },
+    },
+    {
+        "id": "semantic_game_canvas_hud_sparse_visual_cluster_selection",
+        "image": "semantic_game_canvas_hud_sparse_visual_cluster.ppm",
+        "query": "点技能按钮",
+        "shapes": [
+            (0, 0, 400, 225, (26, 30, 46)),
+            (92, 172, 42, 34, (66, 126, 218)),
+            (146, 170, 44, 36, (72, 132, 224)),
+            (200, 172, 42, 34, (210, 146, 72)),
+            (308, 74, 56, 48, (86, 96, 126)),
+        ],
+        "visual_candidates": [
+            {"label": "技能按钮", "bbox": [92, 172, 42, 34], "confidence": 0.69, "reason": "底部 HUD 技能块", "region": "bottom_controls"},
+            {"label": "技能按钮", "bbox": [146, 170, 44, 36], "confidence": 0.68, "reason": "底部 HUD 技能块", "region": "bottom_controls"},
+            {"label": "技能按钮", "bbox": [200, 172, 42, 34], "confidence": 0.67, "reason": "底部 HUD 技能块", "region": "bottom_controls"},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "visual",
+            "top_ambiguity": "close_score",
+            "min_candidates": 3,
+            "selection": {"rank": 2, "requires_approval": True},
+        },
+    },
+    {
+        "id": "semantic_modal_popover_background_competing_selection",
+        "image": "semantic_modal_popover_background_competing.ppm",
+        "query": "点目标确认",
+        "shapes": [
+            (24, 30, 90, 28, (76, 126, 190)),
+            (168, 46, 188, 134, (50, 58, 78)),
+            (236, 132, 90, 28, (210, 146, 72)),
+        ],
+        "ocr_blocks": [
+            {"text": "目标确认", "bbox": [24, 30, 90, 28], "confidence": 0.94},
+            {"text": "目标确认", "bbox": [236, 132, 90, 28], "confidence": 0.93},
+        ],
+        "accessibility_elements": [
+            {"name": "目标确认", "role": "ButtonControl", "bounds": [24, 30, 90, 28], "enabled": True, "clickable": True, "confidence": 0.94},
+            {"name": "目标确认", "role": "ButtonControl", "bounds": [236, 132, 90, 28], "enabled": True, "clickable": True, "confidence": 0.93},
+        ],
+        "expected": {
+            "requires_approval": False,
+            "candidate_selection_required": True,
+            "top_source": "fused",
+            "top_ambiguity": "close_score",
+            "min_candidates": 2,
+        },
+    },
 ]
 
 

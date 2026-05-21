@@ -67,6 +67,7 @@
 - Added developer-mode runtime settings dry-run/apply controls for safe non-secret fields, with sanitized previews, Joi approval before writes, runtime status refresh after apply, and continued exclusion of provider secrets, endpoints, base URLs, local paths, and model/audio filenames.
 - Fixed the runtime settings apply JSON-RPC contract so invalid and no-op updates return sanitized precheck results synchronously, while only changed valid updates create approval cards.
 - Hardened the Codex runner so missing, inaccessible, or invalid local Codex executables fail closed with sanitized task cards instead of crashing, and made fake Codex tests portable across Windows/macOS/Linux.
+- Expanded semantic grounding calibration with generated real-layout-derived focus churn, cross-monitor stale geometry, repeated browser top-bar actions, sparse game HUD visual clusters, and modal/popover competition cases without committing private screenshots.
 
 ## 2026-05-14
 
