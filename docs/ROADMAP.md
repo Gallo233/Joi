@@ -2,6 +2,8 @@
 
 Joi 的目标是一个角色人格包裹的多模态 Agent 伴侣：能陪看网页/视频/游戏画面，能执行游戏技能，也能通过 Codex/MCP/本地工具推进工程任务。
 
+OpenHuman-inspired direction is recorded in `docs/OPENHUMAN_INSIGHTS.md`. The key update is that Joi should become an embodied personal agent companion, not a generic integration dashboard: after P4, prioritize local memory, tool-result compression, model routing, skill manifests, and a constrained background companion loop.
+
 ## P0 Project Discipline
 
 Status: in progress
@@ -72,15 +74,35 @@ Status: in progress
 - Game: OK-WW dry-run, approval, launch, status callback.
 - Coding: Codex approval, execution, task card, result summary.
 
-## P5 Model Router
+## P5 Memory Core
+
+Status: planned
+
+- Add local SQLite storage for user preferences, project summaries, game habits, recent task outcomes, and companion relationship notes.
+- Add human-readable Markdown summaries for durable handoff, similar to a local memory vault.
+- Keep screen observations, raw OCR, screenshots, logs, local paths, and secrets out of long-term memory by default.
+- Add explicit UI actions for remember, forget, delete, and disable memory.
+- Emit `memory_candidate` records from Codex, browser/watch, game skill, and normal chat flows, but save only after policy allows it.
+
+## P6 JoiJuice Tool Compression
+
+Status: planned
+
+- Centralize tool-result splitting into `agent_state`, `display_card`, `voice_line`, `memory_candidate`, and `audit_log`.
+- Compress large tool outputs before they reach planner/model context.
+- Keep `voice_line` free of JSON, ids, raw commands, paths, tokens, logs, coordinates, screenshots, provider names, and inflated results.
+- Add tests for Codex logs, browser/OCR output, Computer Use events, ASR/TTS errors, and game-skill results.
+
+## P7 Model Router
 
 Status: in progress
 
 - Route chat, coding, vision, and expression to different models.
 - Record provider, model, latency, and fallback reason.
 - Show current model usage in settings.
+- Keep stable route labels: `fast`, `reasoning`, `vision`, `code`, `summarize`, and `voice_style`.
 
-## P6 Voice and Expression
+## P8 Voice, Expression, And Skill Manifest
 
 Status: in progress
 
@@ -93,8 +115,10 @@ Status: in progress
 - Match voice audio by event identity, including timestamp, to avoid collisions from repeated task lines.
 - Show sanitized ASR/TTS runtime status in developer mode.
 - Avoid speaking logs, JSON, paths, commands, tool ids, and inflated results.
+- Formalize native Joi skills with manifest, input schema, result schema, permission level, dry-run support, local capability checks, state policy, and tests.
+- Treat Codex, Browser/Computer Use, OK-WW, Memory, ASR, and TTS as native core skills before chasing broad third-party integrations.
 
-## P7 Policy and Audit
+## P9 Policy, Audit, And Background Companion Loop
 
 Status: in progress
 
@@ -102,17 +126,11 @@ Status: in progress
 - Medium risk actions require task-level confirmation.
 - High risk actions require step-by-step confirmation.
 - Persist audit records for tool actions and approvals.
+- Add constrained background observation only for user-approved windows, projects, and games.
+- Summarize approved context without recording video by default.
+- Let users inspect, clear, or disable background context.
 
-## P8 Memory
-
-Status: planned
-
-- Store local user preferences, project context, game habits, and task summaries.
-- Add UI controls to view, delete, and disable memory.
-- Mark memory entries as ephemeral/sensitive so screen observations do not become long-term memory by default.
-- Keep sensitive content out of long-term memory unless explicitly saved.
-
-## P9 Packaging
+## P10 Packaging
 
 Status: planned
 

@@ -19,6 +19,7 @@ The current repository is intentionally focused on the Joi main line.
 - [Changelog](docs/CHANGELOG.md)
 - [Known Issues](docs/KNOWN_ISSUES.md)
 - [Feedback Log](docs/FEEDBACK_LOG.md)
+- [OpenHuman-Inspired Plan](docs/OPENHUMAN_INSIGHTS.md)
 - [Hermes Handoff](docs/HERMES_TASKS.md)
 - [Private Semantic Calibration](docs/SEMANTIC_CALIBRATION.md)
 - [Architecture](agent_companion/docs/architecture.md)

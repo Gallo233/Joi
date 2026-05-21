@@ -235,6 +235,21 @@ Priority order:
 7. Full provider/secret runtime settings UI remains deferred.
 8. Non-Windows Computer Use remains deferred until Windows-first loop is reliable.
 
+## OpenHuman-Inspired Direction
+
+On 2026-05-21, `tinyhumansai/openhuman` and `tinyhumansai/openhuman-skills` were reviewed for product/architecture inspiration. The useful lesson is not to copy a generic Personal AI OS, but to strengthen Joi's embodied agent-companion layer.
+
+After P4 reaches a stable Computer Use / Watch grounding收口体验, the preferred post-P4 order is:
+
+1. P5 Memory Core: local SQLite plus human-readable Markdown summaries, explicit save/delete controls, and no automatic sensitive memory.
+2. P6 JoiJuice: central tool-result compression into planner state, UI cards, voice-safe lines, memory candidates, and audit logs.
+3. P7 Model Router: stable model routes for `fast`, `reasoning`, `vision`, `code`, `summarize`, and `voice_style`.
+4. P8 Skill Manifest V1: make Codex, Browser/Computer Use, OK-WW, Memory, ASR, and TTS auditable native skills before chasing broad integrations.
+5. P9 Background Companion Loop: constrained observation/summarization for user-approved windows, projects, and games.
+6. P10 Packaging / RC: Windows-first setup, privacy panel, provider checks, and demo scripts.
+
+Do not let this direction distract from the current P4 closeout. OpenHuman is a reference for memory, model routing, native tools, and skill packaging; Joi's differentiator remains character presence plus auditable high-capability action.
+
 ## Required Review/Verification Pattern
 
 For semantic grounding changes:

@@ -70,6 +70,7 @@
 - Expanded semantic grounding calibration with generated real-layout-derived focus churn, cross-monitor stale geometry, repeated browser top-bar actions, sparse game HUD visual clusters, and modal/popover competition cases without committing private screenshots.
 - Added a local-only semantic grounding calibration runner that reuses the semantic eval path, can capture active-window private cases under ignored local data, and reports only sanitized counts plus abstract failure categories.
 - Hardened the private semantic calibration runner so malformed local manifests fail with sanitized `missing`/`invalid` reports, added stable category listing, and documented the private-to-synthetic promotion workflow.
+- Added an OpenHuman-inspired product plan that refines Joi's post-P4 direction around local memory, JoiJuice tool compression, model routing, native skills, and a constrained background companion loop.
 
 ## 2026-05-14
 
