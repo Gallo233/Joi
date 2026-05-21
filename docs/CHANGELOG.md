@@ -68,6 +68,7 @@
 - Fixed the runtime settings apply JSON-RPC contract so invalid and no-op updates return sanitized precheck results synchronously, while only changed valid updates create approval cards.
 - Hardened the Codex runner so missing, inaccessible, or invalid local Codex executables fail closed with sanitized task cards instead of crashing, and made fake Codex tests portable across Windows/macOS/Linux.
 - Expanded semantic grounding calibration with generated real-layout-derived focus churn, cross-monitor stale geometry, repeated browser top-bar actions, sparse game HUD visual clusters, and modal/popover competition cases without committing private screenshots.
+- Added a local-only semantic grounding calibration runner that reuses the semantic eval path, can capture active-window private cases under ignored local data, and reports only sanitized counts plus abstract failure categories.
 
 ## 2026-05-14
 

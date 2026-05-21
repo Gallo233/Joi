@@ -20,6 +20,7 @@ The current repository is intentionally focused on the Joi main line.
 - [Known Issues](docs/KNOWN_ISSUES.md)
 - [Feedback Log](docs/FEEDBACK_LOG.md)
 - [Hermes Handoff](docs/HERMES_TASKS.md)
+- [Private Semantic Calibration](docs/SEMANTIC_CALIBRATION.md)
 - [Architecture](agent_companion/docs/architecture.md)
 - [Windows Toolchain and Bridge](agent_companion/docs/windows_toolchain_and_bridge.md)
 
@@ -61,6 +62,20 @@ Visual detector and image verification fixture workflow:
 ```
 
 Local private visual evals can live in `data/local_visual_eval/visual_cases.local.json`, and local private Computer Use image-diff evals can live in `data/local_visual_eval/image_diff_cases.local.json`, with images next to those files. This directory is ignored by Git and should be used for real game/browser screenshots that may contain private account or browsing data. If either local manifest is missing, the eval reports it as skipped instead of failing.
+
+Local private semantic grounding calibration can live in `data/local_visual_eval/semantic_cases.local.json`. Use the sanitized runner when testing real Windows layouts:
+
+```powershell
+.\.venv\Scripts\python.exe tools\calibrate_semantic_grounding.py
+```
+
+The runner prints only counts and abstract failure categories. To capture a private active-window case into the ignored local manifest, run:
+
+```powershell
+.\.venv\Scripts\python.exe tools\calibrate_semantic_grounding.py --capture-active-window --query "点目标按钮"
+```
+
+Do not commit real screenshots, OCR text, window titles, URLs, account data, local paths, or private labels. Promote only abstract findings into generated synthetic fixtures.
 
 Optional Windows accessibility-tree support for UI control grounding:
 

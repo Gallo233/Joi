@@ -30,6 +30,16 @@ LOCAL_FIXTURE_DIR = ROOT / "data" / "local_visual_eval"
 LOCAL_CASE_FILE = LOCAL_FIXTURE_DIR / "visual_cases.local.json"
 LOCAL_IMAGE_DIFF_CASE_FILE = LOCAL_FIXTURE_DIR / "image_diff_cases.local.json"
 LOCAL_SEMANTIC_CASE_FILE = LOCAL_FIXTURE_DIR / "semantic_cases.local.json"
+SEMANTIC_CALIBRATION_FAILURE_CATEGORIES = (
+    "stale_accessibility_geometry",
+    "ambiguous_repeated_label",
+    "visual_only_low_confidence",
+    "capture_rect_untrusted",
+    "screen_center_outside_capture",
+    "modal_background_conflict",
+    "sparse_canvas_no_uia",
+    "unexpected_direct_approval",
+)
 
 
 @dataclass
@@ -119,19 +129,51 @@ def run_eval(root: Path = ROOT, verbose: bool = True) -> int:
     return 0 if all(result.passed for result in all_results) else 1
 
 
+def run_local_semantic_calibration(
+    root: Path = ROOT,
+    case_file: Path = LOCAL_SEMANTIC_CASE_FILE,
+    base_dir: Path = LOCAL_FIXTURE_DIR,
+) -> tuple[bool, list[CaseResult], dict[str, int], bool]:
+    if not case_file.exists():
+        return True, [], {}, True
+    cases = _load_cases(case_file)
+    results = [_run_semantic_case(root, "local_private_semantic", base_dir, case) for case in cases]
+    categories = semantic_calibration_category_counts(results, cases)
+    return all(result.passed for result in results), results, categories, False
+
+
+def semantic_calibration_category_counts(results: list[CaseResult], cases: list[dict[str, Any]] | None = None) -> dict[str, int]:
+    rows: dict[str, int] = {category: 0 for category in SEMANTIC_CALIBRATION_FAILURE_CATEGORIES}
+    cases = cases or []
+    for index, result in enumerate(results):
+        if result.passed:
+            continue
+        case = cases[index] if index < len(cases) and isinstance(cases[index], dict) else {}
+        for category in _semantic_calibration_categories(result, case):
+            rows[category] = rows.get(category, 0) + 1
+    return {category: count for category, count in rows.items() if count}
+
+
 def _run_suite(root: Path, suite: str, case_file: Path, base_dir: Path) -> list[CaseResult]:
-    cases = json.loads(case_file.read_text(encoding="utf-8"))
+    cases = _load_cases(case_file)
     return [_run_case(root, suite, base_dir, case) for case in cases]
 
 
 def _run_image_diff_suite(root: Path, suite: str, case_file: Path, base_dir: Path) -> list[CaseResult]:
-    cases = json.loads(case_file.read_text(encoding="utf-8"))
+    cases = _load_cases(case_file)
     return [_run_image_diff_case(root, suite, base_dir, case) for case in cases]
 
 
 def _run_semantic_suite(root: Path, suite: str, case_file: Path, base_dir: Path) -> list[CaseResult]:
-    cases = json.loads(case_file.read_text(encoding="utf-8"))
+    cases = _load_cases(case_file)
     return [_run_semantic_case(root, suite, base_dir, case) for case in cases]
+
+
+def _load_cases(case_file: Path) -> list[dict[str, Any]]:
+    payload = json.loads(case_file.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("eval manifest must be a list")
+    return [case for case in payload if isinstance(case, dict)]
 
 
 def _print_results(label: str, results: list[CaseResult]) -> None:
@@ -544,6 +586,61 @@ def _failure_category(failure: str) -> str:
     if "image_changed=false" in text:
         return "image_change_false_positive"
     return "calibration_failure"
+
+
+def _semantic_calibration_categories(result: CaseResult, case: dict[str, Any]) -> set[str]:
+    declared = _declared_semantic_categories(case)
+    if declared:
+        return declared
+    categories: set[str] = set()
+    for failure in result.failures:
+        categories.add(_semantic_failure_category(failure, result, case))
+    return {category for category in categories if category in SEMANTIC_CALIBRATION_FAILURE_CATEGORIES}
+
+
+def _declared_semantic_categories(case: dict[str, Any]) -> set[str]:
+    raw = case.get("calibration_categories") or case.get("failure_categories") or case.get("failure_category")
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = [str(value) for value in raw]
+    else:
+        values = []
+    allowed = set(SEMANTIC_CALIBRATION_FAILURE_CATEGORIES)
+    return {value for value in values if value in allowed}
+
+
+def _semantic_failure_category(failure: str, result: CaseResult, case: dict[str, Any]) -> str:
+    text = failure.casefold()
+    case_text = " ".join(
+        str(value or "")
+        for value in (
+            case.get("id"),
+            case.get("query"),
+            case.get("layout"),
+            case.get("scenario"),
+        )
+    ).casefold()
+    joined = f"{text} {case_text}"
+    if "expected requires_approval=false, got true" in joined or "direct approval" in joined:
+        return "unexpected_direct_approval"
+    if "coordinate_untrusted" in joined or "screen center" in joined or "center outside" in joined:
+        return "screen_center_outside_capture"
+    if "capture_rect" in joined or "capture rect" in joined or "scale" in joined or "approval_request" in joined:
+        return "capture_rect_untrusted"
+    if "stale" in joined or "focus" in joined or "window moved" in joined:
+        return "stale_accessibility_geometry"
+    if "modal" in joined or "popover" in joined or "background" in joined:
+        return "modal_background_conflict"
+    if "visual" in joined or "low_confidence" in joined:
+        return "visual_only_low_confidence"
+    if "canvas" in joined or "hud" in joined or "no_uia" in joined or "sparse" in joined:
+        return "sparse_canvas_no_uia"
+    if "candidate_selection_required" in joined or "candidate" in joined or "repeated" in joined or "label" in joined:
+        return "ambiguous_repeated_label"
+    if result.top_candidates and any("visual" in row.casefold() for row in result.top_candidates):
+        return "visual_only_low_confidence"
+    return "ambiguous_repeated_label"
 
 
 def _rel(root: Path, path: Path) -> str:

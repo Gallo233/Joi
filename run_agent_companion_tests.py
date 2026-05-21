@@ -7,6 +7,7 @@ import inspect
 import re
 import shutil
 import shlex
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -40,7 +41,7 @@ from agent_companion.core.vision.targeting import resolve_target_candidates
 from agent_companion.core.vision.visual_detector import UnavailableVisualDetector, VisualCandidate, VisualDetectionResult
 from agent_companion.core.voice import safe_voice_line
 from agent_companion.core.watch import WatchFrame
-from tools.eval_visual_detector import run_eval as run_visual_detector_eval
+from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, run_eval as run_visual_detector_eval, run_local_semantic_calibration
 
 
 def assert_true(value: bool, message: str) -> None:
@@ -2544,6 +2545,42 @@ llm:
     assert_true("_print_private_results" in eval_source and "failure_category" in eval_source and "local_private_case_" in eval_source, "local private eval output should be sanitized")
     assert_true("local private semantic grounding eval: skipped" in eval_source and "semantic_cases.local.json" in eval_source, "local private semantic eval should skip when missing")
     assert_true("approval_tool" in eval_source and "_capture_rect_from_case" in eval_source and "SemanticTargetSelectionTool" in eval_source, "semantic eval should cover approval, selection, and capture-rect grounding paths")
+    expected_semantic_categories = {
+        "stale_accessibility_geometry",
+        "ambiguous_repeated_label",
+        "visual_only_low_confidence",
+        "capture_rect_untrusted",
+        "screen_center_outside_capture",
+        "modal_background_conflict",
+        "sparse_canvas_no_uia",
+        "unexpected_direct_approval",
+    }
+    assert_true(set(SEMANTIC_CALIBRATION_FAILURE_CATEGORIES) == expected_semantic_categories, "semantic calibration categories should stay stable")
+    local_semantic_ok, local_semantic_results, local_semantic_categories, local_semantic_skipped = run_local_semantic_calibration(
+        workspace,
+        workspace / "data" / "local_visual_eval" / "semantic_cases.test-missing.local.json",
+        workspace / "data" / "local_visual_eval",
+    )
+    assert_true(local_semantic_ok and local_semantic_skipped and not local_semantic_results and not local_semantic_categories, "missing local semantic calibration manifest should skip safely")
+    calibration_source = (workspace / "tools" / "calibrate_semantic_grounding.py").read_text(encoding="utf-8")
+    assert_true("run_local_semantic_calibration" in calibration_source and "SEMANTIC_CALIBRATION_FAILURE_CATEGORIES" in calibration_source, "semantic calibration runner should reuse eval logic and stable categories")
+    assert_true("LOCAL_SEMANTIC_CASE_FILE" in calibration_source and "data/local_visual_eval" not in calibration_source, "calibration runner should use shared local manifest constants without printing private paths")
+    calibration_probe = subprocess.run(
+        [
+            sys.executable,
+            str(workspace / "tools" / "calibrate_semantic_grounding.py"),
+            "--manifest",
+            str(workspace / "data" / "local_visual_eval" / "semantic_cases.test-missing.local.json"),
+        ],
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert_true(calibration_probe.returncode == 0, "missing local semantic calibration manifest should exit successfully")
+    calibration_output = f"{calibration_probe.stdout}\n{calibration_probe.stderr}"
+    forbidden_calibration_output = ["data/", "local_visual_eval", "semantic_cases", ".png", ".ppm", "http", "C:\\", "/Users/", "目标", "账号"]
+    assert_true(all(fragment not in calibration_output for fragment in forbidden_calibration_output), "semantic calibration runner output leaked private manifest details")
     assert_true(run_visual_detector_eval(workspace, verbose=False) == 0, "visual/image verification eval should pass committed suites and skip or run local private suites safely")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
