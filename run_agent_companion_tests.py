@@ -487,6 +487,55 @@ def _selection_id(events) -> str:
     return ""
 
 
+_FORBIDDEN_PRIVATE_CALIBRATION_OUTPUT = [
+    "data/",
+    "local_visual_eval",
+    ".png",
+    ".ppm",
+    "C:\\",
+    "/Users/",
+    "http",
+    "example",
+    "Traceback",
+    "账号",
+    "真实目标",
+    "Alice",
+]
+
+
+def _run_private_semantic_calibration_probe(workspace: Path, name: str, payload: object, *, expect_success: bool = False) -> str:
+    manifest_dir = workspace / "data" / "local_visual_eval"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest = manifest_dir / name
+    if isinstance(payload, str):
+        manifest.write_text(payload, encoding="utf-8")
+    else:
+        manifest.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    try:
+        probe = subprocess.run(
+            [
+                sys.executable,
+                str(workspace / "tools" / "calibrate_semantic_grounding.py"),
+                "--manifest",
+                str(manifest),
+            ],
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        manifest.unlink(missing_ok=True)
+    output = f"{probe.stdout}\n{probe.stderr}"
+    expected_returncode = 0 if expect_success else 1
+    assert_true(probe.returncode == expected_returncode, f"private calibration probe should exit {expected_returncode}")
+    assert_true(
+        all(fragment not in output for fragment in _FORBIDDEN_PRIVATE_CALIBRATION_OUTPUT),
+        "malformed private calibration output leaked private manifest details",
+    )
+    return output
+
+
 def main() -> int:
     workspace = Path(__file__).resolve().parent
     os.environ["AGENT_COMPANION_DISABLE_LLM"] = "1"
@@ -2581,6 +2630,69 @@ llm:
     calibration_output = f"{calibration_probe.stdout}\n{calibration_probe.stderr}"
     forbidden_calibration_output = ["data/", "local_visual_eval", "semantic_cases", ".png", ".ppm", "http", "C:\\", "/Users/", "目标", "账号"]
     assert_true(all(fragment not in calibration_output for fragment in forbidden_calibration_output), "semantic calibration runner output leaked private manifest details")
+    categories_probe = subprocess.run(
+        [
+            sys.executable,
+            str(workspace / "tools" / "calibrate_semantic_grounding.py"),
+            "--list-categories",
+        ],
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    listed_categories = {line.strip() for line in categories_probe.stdout.splitlines() if line.strip()}
+    assert_true(categories_probe.returncode == 0 and listed_categories == expected_semantic_categories, "calibration runner should list only stable categories")
+    assert_true(not categories_probe.stderr, "calibration category listing should not emit errors")
+    invalid_json_output = _run_private_semantic_calibration_probe(workspace, "semantic_cases.invalid-json.local.json", '{"broken":')
+    assert_true("local semantic calibration: failed" in invalid_json_output and "private manifest: invalid" in invalid_json_output, "invalid JSON manifest should fail with sanitized invalid report")
+    not_list_output = _run_private_semantic_calibration_probe(workspace, "semantic_cases.not-list.local.json", {"image": "C:\\Users\\Alice\\Desktop\\账号.png", "ocr": "账号 https://private.example"})
+    assert_true("private manifest: invalid" in not_list_output, "non-list manifest should fail with sanitized invalid report")
+    missing_image_size_output = _run_private_semantic_calibration_probe(
+        workspace,
+        "semantic_cases.missing-size.local.json",
+        [
+            {
+                "id": "private_case_missing_size",
+                "image": "C:\\Users\\Alice\\Pictures\\账号按钮.png",
+                "query": "点真实目标",
+                "ocr_blocks": [{"text": "账号 Alice https://private.example/login", "bbox": [10, 10, 80, 24], "confidence": 0.9}],
+            }
+        ],
+    )
+    assert_true("private manifest: invalid" in missing_image_size_output, "missing image_size case should fail with sanitized invalid report")
+    private_path_output = _run_private_semantic_calibration_probe(
+        workspace,
+        "semantic_cases.private-path.local.json",
+        [
+            {
+                "id": "private_case_path",
+                "image": "C:\\Users\\Alice\\Pictures\\账号按钮.png",
+                "query": "点真实目标",
+                "image_size": [400, 225],
+                "ocr_blocks": [],
+                "expected": {"requires_approval": True},
+                "calibration_categories": ["capture_rect_untrusted"],
+            }
+        ],
+    )
+    assert_true("failure_categories:" in private_path_output and "capture_rect_untrusted" in private_path_output, "private path failure should report only abstract categories")
+    private_text_output = _run_private_semantic_calibration_probe(
+        workspace,
+        "semantic_cases.private-text.local.json",
+        [
+            {
+                "id": "private_case_text",
+                "image": "/Users/Alice/private/账号按钮.ppm",
+                "query": "点真实目标",
+                "image_size": [400, 225],
+                "ocr_blocks": [{"text": "账号 Alice https://private.example/account", "bbox": [20, 20, 120, 28], "confidence": 0.92}],
+                "expected": {"requires_approval": True},
+                "calibration_categories": ["ambiguous_repeated_label"],
+            }
+        ],
+    )
+    assert_true("failure_categories:" in private_text_output and "ambiguous_repeated_label" in private_text_output, "private OCR text failure should report only abstract categories")
     assert_true(run_visual_detector_eval(workspace, verbose=False) == 0, "visual/image verification eval should pass committed suites and skip or run local private suites safely")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")

@@ -27,23 +27,29 @@ from tools.eval_visual_detector import (
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run sanitized local semantic grounding calibration.")
     parser.add_argument("--manifest", type=Path, default=LOCAL_SEMANTIC_CASE_FILE)
+    parser.add_argument("--list-categories", action="store_true", help="Print stable abstract calibration categories and exit.")
     parser.add_argument("--capture-active-window", action="store_true", help="Capture the current active window into the ignored local manifest.")
     parser.add_argument("--query", default="", help="Private local target query to save with a captured case.")
     parser.add_argument("--target", default="active_window", choices=("active_window", "fullscreen"))
     args = parser.parse_args()
+
+    if args.list_categories:
+        for category in SEMANTIC_CALIBRATION_FAILURE_CATEGORIES:
+            print(category)
+        return 0
 
     manifest = args.manifest if args.manifest.is_absolute() else (ROOT / args.manifest)
     base_dir = manifest.parent
     if args.capture_active_window:
         captured = _capture_private_case(base_dir, manifest, args.query, args.target)
         if not captured:
-            print("local semantic calibration capture: unavailable")
-            print("failure_categories:")
-            print("  capture_rect_untrusted: 1")
-            return 1
+            return _print_invalid_manifest_report()
         print("local semantic calibration capture: saved 1 private case")
 
-    ok, results, categories, skipped = run_local_semantic_calibration(ROOT, manifest, base_dir)
+    try:
+        ok, results, categories, skipped = run_local_semantic_calibration(ROOT, manifest, base_dir)
+    except Exception:
+        return _print_invalid_manifest_report()
     return _print_sanitized_report(ok, results, categories, skipped)
 
 
@@ -63,6 +69,14 @@ def _print_sanitized_report(ok: bool, results: list[Any], categories: dict[str, 
     else:
         print("  none: 0")
     return 0 if ok else 1
+
+
+def _print_invalid_manifest_report() -> int:
+    print("local semantic calibration: failed")
+    print("private manifest: invalid")
+    print("failure_categories:")
+    print("  capture_rect_untrusted: 1")
+    return 1
 
 
 def _capture_private_case(base_dir: Path, manifest: Path, query: str, target: str) -> bool:

@@ -60,7 +60,41 @@ Use these categories when summarizing local findings:
 - `sparse_canvas_no_uia`
 - `unexpected_direct_approval`
 
-## Promoting Findings
+You can print the stable category list without reading a manifest:
+
+```powershell
+.\.venv\Scripts\python.exe tools\calibrate_semantic_grounding.py --list-categories
+```
+
+## Promotion Guide
+
+Use this workflow when a private real-layout run reveals a useful product lesson:
+
+1. Run local calibration:
+
+   ```powershell
+   .\.venv\Scripts\python.exe tools\calibrate_semantic_grounding.py
+   ```
+
+2. Inspect `data/local_visual_eval/semantic_cases.local.json` locally only. Do not paste or commit real screenshots, filenames, OCR text, UIA names, URLs, account data, window titles, local paths, or app-specific labels.
+3. Summarize the finding only as one of the abstract failure categories above, plus a generic layout shape such as "repeated top-bar labels", "modal over background controls", or "stale window geometry".
+4. Create a generic generated fixture in `tools/generate_visual_fixtures.py`. Use synthetic geometry, generic labels, and generated PPM/PNG assets only.
+5. Regenerate fixtures:
+
+   ```powershell
+   .\.venv\Scripts\python.exe tools\generate_visual_fixtures.py
+   ```
+
+6. Run evals:
+
+   ```powershell
+   .\.venv\Scripts\python.exe tools\eval_visual_detector.py
+   .\.venv\Scripts\python.exe run_agent_companion_tests.py
+   ```
+
+7. Commit only the generated synthetic fixture/code/docs changes. Private screenshots and private local manifests stay under ignored local data.
+
+## Short Version
 
 Only promote abstract lessons into committed synthetic fixtures. Translate the private finding into generated geometry and generic labels in `tools/generate_visual_fixtures.py`, then regenerate fixtures and run:
 
