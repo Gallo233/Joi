@@ -1,12 +1,12 @@
 # Joi Review Handoff
 
-Status: Blocked on Codex CLI preflight
+Status: Ready for Safe Branch Autopilot Smoke
 Updated: 2026-05-21
 Runtime: Codex CLI with ChatGPT subscription login
 
 ## Review Status
 
-P0 Codex-only autopilot skeleton has passed the docs-only write smoke, but Windows preflight cannot read the current Codex CLI login state because the discovered WindowsApps `codex.exe` returns `PermissionError`. The runner now fails closed instead of crashing. This file is the shared state mailbox between the developer, tester, and reviewer roles. The default runtime intentionally avoids OpenAI API keys so it can use the existing Codex/ChatGPT subscription login.
+P0.1 Codex CLI preflight accessibility is implemented. Windows preflight now discovers an accessible Codex CLI from the local Codex sandbox bin, sets the existing `CODEX_HOME`, verifies ChatGPT subscription login without requiring OpenAI API keys, and checks that `codex exec` can run with a non-interactive approval policy. The WindowsApps Codex shim can remain inaccessible; the runner selects the accessible ChatGPT-authenticated CLI and still fails strict preflight on unsafe branches.
 
 ## Current Guardrails
 
@@ -22,9 +22,9 @@ P0 Codex-only autopilot skeleton has passed the docs-only write smoke, but Windo
 
 ## Next Task
 
-P0.1 Codex CLI Preflight Accessibility
+P0.2 Safe Branch Docs-Only Autopilot Run
 
-Resolve the local Codex CLI login-status probe so `tools/joi_autopilot.py --preflight` can report a real ChatGPT login state without requiring OpenAI API keys. Keep the runner fail-closed if the command is missing, inaccessible, or API-key authenticated.
+Create or switch to a dedicated branch whose name starts with `codex/`, `joi-autopilot/`, or `autopilot/`, then run one docs-only `tools/joi_autopilot.py --run-once` loop. Keep the task small, do not push, do not merge, and stop if credentials, network, permissions, or repeated test failures appear.
 
 ## Acceptance Commands
 
@@ -32,21 +32,22 @@ Resolve the local Codex CLI login-status probe so `tools/joi_autopilot.py --pref
 PYTHONPYCACHEPREFIX=/private/tmp/joi-pycache python3 -m compileall -q tools/joi_autopilot.py
 PYTHONPYCACHEPREFIX=/private/tmp/joi-pycache python3 tools/joi_autopilot.py --preflight
 PYTHONPYCACHEPREFIX=/private/tmp/joi-pycache python3 tools/joi_autopilot.py --preflight --strict
-git diff -- tools/joi_autopilot.py docs/REVIEW_HANDOFF.md docs/AUTOPILOT_LOG.md
+PYTHONPYCACHEPREFIX=/private/tmp/joi-pycache python3 tools/joi_autopilot.py --run-once
+git diff -- docs/REVIEW_HANDOFF.md docs/AUTOPILOT_LOG.md
 git status --short
 ```
 
 ## Worker Result
 
-Implemented P0 docs-only smoke by adding `docs/AUTOPILOT_SANDBOX_TEST.md`.
+Implemented P0.1 Codex CLI preflight accessibility.
 
-Hardened `tools/joi_autopilot.py` so subprocess launch failures return a preflight check result instead of a Python traceback.
+The runner now discovers multiple Codex CLI candidates, including the local Codex sandbox bin, probes each candidate with `--version` and `login status`, sets `CODEX_HOME` for the probe and execution path, selects a ChatGPT-authenticated CLI, checks the `codex exec` interface, and redacts local paths from probe detail output. It no longer depends on the inaccessible WindowsApps shim. Older Codex CLI builds that lack `--ask-for-approval` use the config override path for `approval_policy=never`.
 
 Validation:
 
 - `python -m compileall -q tools/joi_autopilot.py`: passed.
-- `python tools/joi_autopilot.py --preflight`: failed closed with `codex ChatGPT login: PermissionError`.
-- Elevated Windows preflight produced the same fail-closed result.
+- `python tools/joi_autopilot.py --preflight`: passed with ChatGPT subscription login via local Codex sandbox bin and exec approval-policy config support.
+- `python tools/joi_autopilot.py --preflight --strict`: failed only on `safe branch` because the current branch is `main`.
 
 ## Reviewer Result
 

@@ -12,3 +12,4 @@
 - Added `docs/AUTOPILOT_SANDBOX_TEST.md` as the P0 docs-only smoke change.
 - Hardened `tools/joi_autopilot.py` so inaccessible local commands produce fail-closed preflight output instead of a Python traceback.
 - Windows preflight currently finds the WindowsApps Codex executable, but `codex login status` returns `PermissionError`; autonomous runs remain blocked until a usable ChatGPT-authenticated Codex CLI path is available.
+- Implemented P0.1 Codex CLI preflight accessibility: the runner now discovers the local Codex sandbox-bin executable, sets `CODEX_HOME`, verifies ChatGPT subscription login, checks the `codex exec` interface, adapts approval-policy arguments for older CLI builds, redacts local probe details, and reserves strict failure for unsafe branch or dirty-worktree guardrails.
