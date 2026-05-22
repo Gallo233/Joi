@@ -348,16 +348,27 @@ input {
   margin-top: 12px;
 }
 
-.target-list div {
+.target-row {
   display: grid;
-  grid-template-columns: minmax(96px, 1fr) auto auto auto auto;
-  gap: 8px;
-  align-items: center;
+  gap: 7px;
   border-radius: 8px;
   padding: 8px 10px;
   background: #f7f9fc;
   color: #4f5d70;
   font-size: 12px;
+}
+
+.target-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.target-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .target-list strong {
@@ -372,15 +383,23 @@ input {
   font-weight: 700;
 }
 
+.target-list .source-chip {
+  background: #ffe8f0;
+  color: #bd4268;
+}
+
 .target-list p {
-  grid-column: 1 / -2;
+  margin: 0;
   color: #697589;
   font-size: 12px;
 }
 
+.target-list small {
+  color: #8390a3;
+  font-size: 11px;
+}
+
 .target-list button {
-  grid-column: -2 / -1;
-  justify-self: end;
   border: 0;
   border-radius: 8px;
   padding: 5px 10px;
@@ -460,6 +479,7 @@ input {
 .audit-meta,
 .audit-args,
 .audit-signals,
+.audit-evidence,
 .audit-artifacts {
   display: flex;
   flex-wrap: wrap;
@@ -470,6 +490,7 @@ input {
 .audit-meta span,
 .audit-args span,
 .audit-signals span,
+.audit-evidence span,
 .audit-artifacts button {
   border: 1px solid #dfe5ee;
   border-radius: 8px;
@@ -488,6 +509,11 @@ input {
 .audit-signals strong {
   margin-right: 4px;
   color: #177247;
+}
+
+.audit-evidence span {
+  background: #fff5f8;
+  color: #9f3f61;
 }
 
 .audit-artifacts button {

@@ -36,6 +36,7 @@ class ComputerUseAuditEvent:
     before_artifacts: list[ComputerUseAuditArtifact] = field(default_factory=list)
     after_artifacts: list[ComputerUseAuditArtifact] = field(default_factory=list)
     verification_result: dict[str, Any] = field(default_factory=dict)
+    candidate_evidence: list[dict[str, Any]] = field(default_factory=list)
 
     def to_agent_state(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -143,6 +144,7 @@ def target_grounding_audit_events(task_id: str, result: ToolResult, risk: RiskLe
                 action_name="target_candidate",
                 sanitized_arguments=_target_arguments(state, candidates, candidate),
                 before_artifacts=_artifact_list(artifacts, "before"),
+                candidate_evidence=_target_evidence(candidates, candidate),
             )
         )
     if state.get("selection_expired") or state.get("selection_missing") or state.get("selection_not_current"):
@@ -251,7 +253,7 @@ def _target_arguments(state: dict[str, Any], candidates: list[Any], candidate: d
         "requires_selection": bool(state.get("candidate_selection_required")),
         "requires_approval": bool(state.get("approval_request")),
     }
-    for key in ("source", "ambiguity", "role"):
+    for key in ("source", "ambiguity"):
         value = _safe_token(top.get(key)) if isinstance(top, dict) else ""
         if value:
             payload[key] = value
@@ -262,6 +264,44 @@ def _target_arguments(state: dict[str, Any], candidates: list[Any], candidate: d
     if isinstance(selected_rank, int) and selected_rank > 0:
         payload["selected_rank"] = selected_rank
     return payload
+
+
+def _target_evidence(candidates: list[Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = candidates if candidates else [candidate] if candidate else []
+    evidence_rows: list[dict[str, Any]] = []
+    for row in rows[:5]:
+        if not isinstance(row, dict):
+            continue
+        evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+        if not evidence:
+            continue
+        sanitized = {
+            "rank": _safe_rank(evidence.get("rank") or row.get("rank")),
+            "source": _safe_choice(evidence.get("source"), {"ocr", "accessibility", "visual", "fused", "unknown"}, "unknown"),
+            "confidence_band": _safe_choice(evidence.get("confidence_band"), {"high", "medium", "low"}, "low"),
+            "ambiguity_reason": _safe_choice(evidence.get("ambiguity_reason"), {"none", "close_score", "low_confidence"}, "none"),
+            "actionability": _safe_choice(
+                evidence.get("actionability"),
+                {"actionable", "disabled", "static_text", "visual_only", "ocr_text", "ocr_uia_fused", "unknown"},
+                "unknown",
+            ),
+            "capture_trust": _safe_choice(evidence.get("capture_trust"), {"trusted", "untrusted", "unavailable"}, "unavailable"),
+        }
+        evidence_rows.append(sanitized)
+    return evidence_rows
+
+
+def _safe_rank(value: Any) -> int:
+    try:
+        rank = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return rank if 0 <= rank <= 99 else 0
+
+
+def _safe_choice(value: Any, allowed: set[str], fallback: str) -> str:
+    text = str(value or "").strip().casefold()
+    return text if text in allowed else fallback
 
 
 def _action_name(tool_name: str) -> str:

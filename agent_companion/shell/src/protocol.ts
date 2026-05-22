@@ -48,6 +48,7 @@ export interface ComputerUseAuditEvent {
     summary?: string
     signals?: Record<string, string>
   }
+  candidate_evidence?: Array<Record<string, unknown>>
 }
 
 export interface AgentEvent {

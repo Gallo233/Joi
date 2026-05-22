@@ -505,6 +505,7 @@ def _candidate_state(
             "source": candidate.source,
         }
     screen_center = click_args or _click_arguments(candidate, observation)
+    state["evidence"] = _candidate_evidence(candidate, observation, screen_center is not None)
     if screen_center is not None:
         state["screen_center"] = [screen_center["x"], screen_center["y"]]
     return state
@@ -803,6 +804,90 @@ def _candidate_list_body(candidates: list[TargetCandidate]) -> str:
             f"{candidate.rank or len(rows)}. {candidate.label} / {_friendly_source(candidate.source)} / {_friendly_region(candidate.region_label)} / {confidence}% / {ambiguity} / {reason}"
         )
     return "\n".join(rows)
+
+
+def _candidate_evidence(candidate: TargetCandidate, observation: ComputerObservation, has_trusted_click: bool) -> dict[str, Any]:
+    confidence_band, confidence_label = _confidence_band(candidate.confidence)
+    ambiguity_reason, ambiguity_label = _ambiguity_evidence(candidate.ambiguity)
+    actionability, actionability_label = _actionability_evidence(candidate)
+    capture_trust, capture_label = _capture_trust_evidence(candidate, observation, has_trusted_click)
+    return {
+        "rank": int(candidate.rank or 0),
+        "source": _evidence_source(candidate.source),
+        "source_label": _friendly_source(candidate.source),
+        "confidence_band": confidence_band,
+        "confidence_label": confidence_label,
+        "confidence_percent": max(0, min(100, round(float(candidate.confidence) * 100))),
+        "ambiguity_reason": ambiguity_reason,
+        "ambiguity_label": ambiguity_label,
+        "actionability": actionability,
+        "actionability_label": actionability_label,
+        "capture_trust": capture_trust,
+        "capture_trust_label": capture_label,
+        "confirmation_reason": _confirmation_reason(ambiguity_reason, actionability, capture_trust),
+    }
+
+
+def _confidence_band(confidence: float) -> tuple[str, str]:
+    if confidence >= 0.82:
+        return "high", "置信较高"
+    if confidence >= 0.7:
+        return "medium", "置信中等"
+    return "low", "置信偏低"
+
+
+def _ambiguity_evidence(ambiguity: str) -> tuple[str, str]:
+    value = ambiguity or "none"
+    return value, _friendly_ambiguity(value)
+
+
+def _actionability_evidence(candidate: TargetCandidate) -> tuple[str, str]:
+    if candidate.enabled is False:
+        return "disabled", "当前未启用"
+    if candidate.source == "visual":
+        return "visual_only", "仅视觉候选"
+    if candidate.source == "fused":
+        if candidate.clickable or _role_is_actionable(candidate.role):
+            return "actionable", "可操作证据"
+        return "ocr_uia_fused", "文字与控件重合"
+    if candidate.source == "accessibility":
+        if candidate.clickable or _role_is_actionable(candidate.role):
+            return "actionable", "可操作控件"
+        return "static_text", "静态文字"
+    if candidate.source == "ocr":
+        return "ocr_text", "文字匹配"
+    return "unknown", "可操作性未知"
+
+
+def _capture_trust_evidence(candidate: TargetCandidate, observation: ComputerObservation, has_trusted_click: bool) -> tuple[str, str]:
+    if candidate.bbox is None and candidate.screen_bbox is None:
+        return "unavailable", "缺少位置证据"
+    if observation.capture_rect is None:
+        return "untrusted", "坐标未校准"
+    if has_trusted_click:
+        return "trusted", "位置可信"
+    return "untrusted", "位置需复核"
+
+
+def _confirmation_reason(ambiguity_reason: str, actionability: str, capture_trust: str) -> str:
+    if actionability == "disabled":
+        return "这个候选当前未启用，不能直接操作。"
+    if actionability == "static_text":
+        return "它像静态文字，不像可点击控件。"
+    if actionability == "visual_only":
+        return "它只来自视觉检测，需要你确认确实是目标。"
+    if capture_trust != "trusted":
+        return "截图位置到屏幕坐标不够可靠，需要你复核。"
+    if ambiguity_reason == "close_score":
+        return "有多个候选分数接近，需要你选择。"
+    if ambiguity_reason == "low_confidence":
+        return "置信度偏低，需要你确认。"
+    return "这是一次电脑点击，执行前需要你确认。"
+
+
+def _evidence_source(source: str) -> str:
+    value = str(source or "").strip().casefold()
+    return value if value in {"ocr", "accessibility", "visual", "fused"} else "unknown"
 
 
 def _horizontal_bucket(bbox: tuple[int, int, int, int], image_width: int) -> str:

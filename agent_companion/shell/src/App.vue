@@ -315,6 +315,24 @@ function auditSignalRows(row: ComputerUseAuditEvent) {
     .map(([key, value]) => [signalLabel(key), signalValue(String(value || 'unknown'))])
 }
 
+function auditEvidenceRows(row: ComputerUseAuditEvent) {
+  const rows = Array.isArray(row.candidate_evidence) ? row.candidate_evidence : []
+  return rows.slice(0, 5).map((item) => {
+    const evidence = asRecord(item)
+    const rank = Number(evidence.rank || 0)
+    return [
+      rank > 0 ? `第 ${rank} 项` : '候选',
+      evidenceSourceLabel(stringValue(evidence.source)),
+      evidenceConfidenceLabel(stringValue(evidence.confidence_band)),
+      evidenceAmbiguityLabel(stringValue(evidence.ambiguity_reason)),
+      evidenceActionabilityLabel(stringValue(evidence.actionability)),
+      evidenceCaptureTrustLabel(stringValue(evidence.capture_trust)),
+    ]
+      .filter(Boolean)
+      .join(' · ')
+  })
+}
+
 function auditActionLabel(row: ComputerUseAuditEvent) {
   if (row.tool_name?.startsWith('computer.')) return computerActionLabel(row.tool_name)
   const labels: Record<string, string> = {
@@ -418,6 +436,57 @@ function argumentValue(value: unknown) {
     unknown: '未知',
   }
   return labels[text] || trimText(text, 28)
+}
+
+function evidenceSourceLabel(value: string) {
+  const labels: Record<string, string> = {
+    accessibility: 'UI控件',
+    ocr: 'OCR',
+    fused: '融合',
+    visual: '视觉',
+    unknown: '来源未知',
+  }
+  return labels[value] || '来源未知'
+}
+
+function evidenceConfidenceLabel(value: string) {
+  const labels: Record<string, string> = {
+    high: '置信较高',
+    medium: '置信中等',
+    low: '置信偏低',
+  }
+  return labels[value] || '置信未知'
+}
+
+function evidenceAmbiguityLabel(value: string) {
+  const labels: Record<string, string> = {
+    none: '较明确',
+    close_score: '分数接近',
+    low_confidence: '置信偏低',
+  }
+  return labels[value] || '需要确认'
+}
+
+function evidenceActionabilityLabel(value: string) {
+  const labels: Record<string, string> = {
+    actionable: '可操作',
+    disabled: '未启用',
+    static_text: '静态文字',
+    visual_only: '仅视觉',
+    ocr_text: '文字匹配',
+    ocr_uia_fused: '融合证据',
+    unknown: '可操作性未知',
+  }
+  return labels[value] || '可操作性未知'
+}
+
+function evidenceCaptureTrustLabel(value: string) {
+  const labels: Record<string, string> = {
+    trusted: '位置可信',
+    untrusted: '位置待复核',
+    unavailable: '缺少位置',
+  }
+  return labels[value] || '位置待确认'
 }
 
 function auditArtifacts(row: ComputerUseAuditEvent) {
@@ -604,7 +673,14 @@ function targetConfidence(candidate: Record<string, unknown>) {
   return `${Math.round(value * 100)}%`
 }
 
+function targetEvidence(candidate: Record<string, unknown>) {
+  return asRecord(candidate.evidence)
+}
+
 function targetSource(candidate: Record<string, unknown>) {
+  const evidence = targetEvidence(candidate)
+  const sourceLabel = stringValue(evidence.source_label)
+  if (sourceLabel) return sourceLabel
   const preview = asRecord(candidate.preview)
   const source = stringValue(preview.source) || stringValue(candidate.source)
   const labels: Record<string, string> = {
@@ -628,6 +704,42 @@ function targetAmbiguity(candidate: Record<string, unknown>) {
   }
   const value = stringValue(candidate.ambiguity)
   return labels[value] || '需要确认'
+}
+
+function targetConfidenceChip(candidate: Record<string, unknown>) {
+  const evidence = targetEvidence(candidate)
+  const label = stringValue(evidence.confidence_label)
+  if (label) return label
+  const confidence = targetConfidence(candidate)
+  return confidence ? `置信 ${confidence}` : '置信未知'
+}
+
+function targetRiskChip(event: AgentEvent | undefined, candidate: Record<string, unknown>) {
+  const evidence = targetEvidence(candidate)
+  const actionability = stringValue(evidence.actionability)
+  const ambiguity = stringValue(evidence.ambiguity_reason)
+  if (event?.type === 'approval_required') return '中风险确认'
+  if (actionability === 'disabled' || actionability === 'static_text' || actionability === 'visual_only') return '需人工判断'
+  if (ambiguity && ambiguity !== 'none') return '存在歧义'
+  return '需确认'
+}
+
+function targetActionability(candidate: Record<string, unknown>) {
+  const evidence = targetEvidence(candidate)
+  return stringValue(evidence.actionability_label) || '可操作性未知'
+}
+
+function targetCaptureTrust(candidate: Record<string, unknown>) {
+  const evidence = targetEvidence(candidate)
+  return stringValue(evidence.capture_trust_label) || '位置待确认'
+}
+
+function targetConfirmationReason(candidate: Record<string, unknown>, event?: AgentEvent) {
+  const evidence = targetEvidence(candidate)
+  const reason = stringValue(evidence.confirmation_reason)
+  if (reason) return reason
+  if (event?.type === 'approval_required') return '这是一次电脑操作，执行前需要你确认。'
+  return '候选目标还需要你确认后才能继续。'
 }
 
 function canSelectTargetCandidate(event: AgentEvent | undefined, candidate: Record<string, unknown>) {
@@ -1245,14 +1357,23 @@ onBeforeUnmount(() => {
               <div
                 v-for="(candidate, candidateIndex) in targetCandidates(task.latest).slice(0, 5)"
                 :key="`candidate-${task.taskId}-${candidateIndex}`"
+                class="target-row"
               >
-                <strong>{{ targetRank(candidate, candidateIndex) }}. {{ targetLabel(candidate) }}</strong>
-                <span>{{ targetSource(candidate) }}</span>
-                <span>{{ targetRegion(candidate) }}</span>
-                <span>{{ targetConfidence(candidate) }}</span>
-                <span>{{ targetAmbiguity(candidate) }}</span>
-                <p>{{ targetReason(candidate) }}</p>
-                <button type="button" :disabled="!canSelectTargetCandidate(task.latest, candidate)" @click="selectTargetCandidate(task.latest, candidate, candidateIndex)">选择</button>
+                <div class="target-row-head">
+                  <strong>{{ targetRank(candidate, candidateIndex) }}. {{ targetLabel(candidate) }}</strong>
+                  <button type="button" :disabled="!canSelectTargetCandidate(task.latest, candidate)" @click="selectTargetCandidate(task.latest, candidate, candidateIndex)">选择</button>
+                </div>
+                <div class="target-chip-row">
+                  <span class="source-chip">{{ targetSource(candidate) }}</span>
+                  <span>{{ targetConfidenceChip(candidate) }}</span>
+                  <span>{{ targetRiskChip(task.latest, candidate) }}</span>
+                  <span>{{ targetAmbiguity(candidate) }}</span>
+                  <span>{{ targetActionability(candidate) }}</span>
+                  <span>{{ targetCaptureTrust(candidate) }}</span>
+                  <span>{{ targetRegion(candidate) }}</span>
+                </div>
+                <p>{{ targetConfirmationReason(candidate, task.latest) }}</p>
+                <small>{{ targetReason(candidate) }}</small>
               </div>
             </div>
           </details>
@@ -1281,6 +1402,9 @@ onBeforeUnmount(() => {
                     <span v-for="[key, value] in auditArgumentRows(row)" :key="`${row.timestamp}-${key}`">
                       <strong>{{ key }}</strong>{{ value }}
                     </span>
+                  </div>
+                  <div class="audit-evidence" v-if="auditEvidenceRows(row).length">
+                    <span v-for="item in auditEvidenceRows(row)" :key="`${row.timestamp}-evidence-${item}`">{{ item }}</span>
                   </div>
                   <div class="audit-signals" v-if="auditSignalRows(row).length">
                     <span v-for="[key, value] in auditSignalRows(row)" :key="`${row.timestamp}-signal-${key}`">

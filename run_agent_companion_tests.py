@@ -686,9 +686,13 @@ def main() -> int:
     assert_true(click_args["x"] == 990 and click_args["y"] == 242, "semantic target click should convert relative bbox to absolute screen coordinates")
     assert_true(target_result.agent_state["target_candidate"]["rank"] == 1 and target_result.agent_state["target_candidate"]["ambiguity"] == "none", "high-confidence single target should be unambiguous")
     assert_true(target_result.agent_state["target_candidate"]["preview"]["bbox"] == [860, 30, 60, 24], "semantic target card should keep relative preview bbox")
+    target_evidence = target_result.agent_state["target_candidate"].get("evidence", {})
+    assert_true(target_evidence.get("source") == "ocr" and target_evidence.get("confidence_band") in {"medium", "high"}, "OCR target should expose sanitized source and confidence evidence")
+    assert_true(target_evidence.get("actionability") == "ocr_text" and target_evidence.get("capture_trust") == "trusted", "OCR target evidence should expose actionability and capture trust")
+    assert_true("confirmation_reason" in target_evidence and "bbox" not in str(target_evidence) and "data/" not in str(target_evidence), "target evidence should stay display-safe")
     assert_true(len(target_result.agent_state["target_candidates"]) >= 1, "semantic target approval should preserve candidate previews")
     assert_true("登录" in target_result.display_card.summary, "semantic target card should name the friendly target")
-    forbidden_target_voice = ["登录", "860", "30", "data/", ".png", "{", "vision.resolve_target", "computer.click"]
+    forbidden_target_voice = ["登录", "860", "30", "data/", ".png", "{", "vision.resolve_target", "computer.click", "source", "bbox", "task-", "approval-", ".log"]
     assert_true(not any(fragment in target_result.voice_line.text for fragment in forbidden_target_voice), "semantic target voice leaked technical details")
 
     ambiguous_target = SemanticTargetTool(
@@ -712,6 +716,8 @@ def main() -> int:
     assert_true("approval_request" not in ambiguous_target.agent_state, "ambiguous semantic target should not synthesize click arguments")
     assert_true(ambiguous_target.agent_state["candidate_selection_required"], "ambiguous semantic target should ask for candidate selection")
     assert_true(ambiguous_target.agent_state["target_candidate"]["ambiguity"] == "close_score", "ambiguous target state should explain close score")
+    ambiguous_evidence = ambiguous_target.agent_state["target_candidate"].get("evidence", {})
+    assert_true(ambiguous_evidence.get("ambiguity_reason") == "close_score" and ambiguous_evidence.get("confirmation_reason"), "close-score target evidence should explain why selection is needed")
     assert_true(not any(fragment in ambiguous_target.voice_line.text for fragment in forbidden_target_voice), "ambiguous target voice leaked technical details")
 
     assert_true(_looks_clickable("ButtonControl", FakeInvokeControl()), "UIA clickable should require a real invoke pattern")
@@ -743,6 +749,8 @@ def main() -> int:
     ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(accessibility_target.requires_approval, "accessibility button should create approval-gated click candidate")
     assert_true(accessibility_target.agent_state["target_candidate"]["source"] == "accessibility", "accessibility target should preserve source")
+    accessibility_evidence = accessibility_target.agent_state["target_candidate"].get("evidence", {})
+    assert_true(accessibility_evidence.get("source") == "accessibility" and accessibility_evidence.get("actionability") == "actionable", "UIA button evidence should mark actionable source")
     accessibility_click_args = accessibility_target.agent_state["approval_request"]["arguments"]
     assert_true(accessibility_click_args["x"] == 990 and accessibility_click_args["y"] == 245, "accessibility bounds should click by absolute screen center")
     assert_true(accessibility_target.agent_state["target_candidate"]["preview"]["bbox"] == [860, 30, 60, 30], "accessibility candidate should have screenshot-relative preview bbox")
@@ -866,6 +874,8 @@ def main() -> int:
     assert_true("approval_request" not in disabled_button_target.agent_state, "disabled UIA button must not synthesize click arguments")
     assert_true(disabled_button_target.agent_state["candidate_selection_required"], "disabled UIA button should stay as a confirmable candidate")
     assert_true("不可操作" in disabled_button_target.display_card.summary or "未启用" in disabled_button_target.display_card.summary, "disabled target card should explain unavailable actionability")
+    disabled_evidence = disabled_button_target.agent_state["target_candidate"].get("evidence", {})
+    assert_true(disabled_evidence.get("actionability") == "disabled" and disabled_evidence.get("source") == "accessibility", "disabled UIA evidence should expose disabled actionability")
 
     static_text_snapshot = AccessibilitySnapshot(
         "success",
@@ -894,6 +904,8 @@ def main() -> int:
     assert_true(static_text_target.agent_state["candidate_selection_required"], "static UIA text should ask for clarification or selection")
     assert_true(static_text_target.agent_state["target_candidate"]["source"] == "accessibility", "static UIA text should remain visible as a candidate")
     assert_true(static_text_target.agent_state["target_candidate"].get("role") == "TextControl", "static UIA candidate should keep role")
+    static_evidence = static_text_target.agent_state["target_candidate"].get("evidence", {})
+    assert_true(static_evidence.get("actionability") == "static_text", "static UIA evidence should explain static text gate")
 
     fused_target = SemanticTargetTool(
         workspace,
@@ -958,6 +970,8 @@ def main() -> int:
     assert_true(not conflict_target.requires_approval, "conflicting OCR/accessibility candidates should not click directly")
     assert_true(conflict_target.agent_state["candidate_selection_required"], "conflicting OCR/accessibility candidates should ask for selection")
     assert_true(conflict_target.agent_state["target_candidate"]["ambiguity"] == "close_score", "conflicting target should be marked ambiguous")
+    conflict_evidence = conflict_target.agent_state["target_candidate"].get("evidence", {})
+    assert_true(conflict_evidence.get("ambiguity_reason") == "close_score" and conflict_evidence.get("capture_trust") == "trusted", "OCR/UIA conflict evidence should keep close-score and capture trust state")
 
     ocr_fallback_target = SemanticTargetTool(
         workspace,
@@ -1030,6 +1044,8 @@ def main() -> int:
     assert_true(visual_target.agent_state["target_candidate"]["source"] == "visual", "visual fallback should expose visual source")
     assert_true(visual_target.agent_state["visual_detection"]["status"] == "success", "visual detection state should be attached")
     assert_true(visual_target.agent_state["target_candidate"]["preview"]["bbox"] == [420, 760, 160, 70], "visual candidate should keep preview bbox")
+    visual_evidence = visual_target.agent_state["target_candidate"].get("evidence", {})
+    assert_true(visual_evidence.get("actionability") == "visual_only" and visual_evidence.get("confidence_band") == "low", "visual-only target evidence should explain visual gate and confidence band")
     forbidden_visual_voice = forbidden_target_voice + ["visual", "420", "760", "source", "bbox", "data/"]
     assert_true(not any(fragment in visual_target.voice_line.text for fragment in forbidden_visual_voice), "visual target voice leaked technical details")
 
@@ -1126,6 +1142,9 @@ def main() -> int:
     clipped_uia_selected_events = clipped_uia_selection_app.select_semantic_target(clipped_uia_selection_id, 1)
     assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in clipped_uia_selected_events), "selected clipped UIA candidate outside capture rect must not create click approval")
     assert_true(any(event.agent_state.get("coordinate_untrusted") for event in clipped_uia_selected_events), "selected clipped UIA candidate should report untrusted coordinates")
+    clipped_selection_card = [event for event in clipped_uia_selected_events if event.agent_state.get("coordinate_untrusted")][-1]
+    clipped_evidence = clipped_selection_card.agent_state.get("target_candidate", {}).get("evidence", {})
+    assert_true(clipped_evidence.get("capture_trust") == "untrusted", "untrusted selected candidate evidence should survive continuation")
     assert_true(all(not any(fragment in event.voice_line.text for fragment in forbidden_uia_voice + ["280", "130", "selection-uia-clipped.png"]) for event in clipped_uia_selected_events), "clipped UIA selection voice leaked technical details")
 
     selection_app = AgentCompanionApp(workspace)
@@ -1294,6 +1313,8 @@ def main() -> int:
     ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
     assert_true(not missing_rect_target.requires_approval, "semantic target should not approve clicks without capture rect")
     assert_true(missing_rect_target.agent_state["needs_clarification"], "missing capture rect should ask for clarification")
+    missing_rect_evidence = missing_rect_target.agent_state["target_candidate"].get("evidence", {})
+    assert_true(missing_rect_evidence.get("capture_trust") == "untrusted", "missing capture rect evidence should fail closed")
 
     unclear_target = SemanticTargetTool(
         workspace,
@@ -2215,6 +2236,13 @@ asr:
     assert_true(any("登录" in event.display_card.summary for event in semantic_events if event.type == EventType.APPROVAL_REQUIRED), "semantic approval card should name target")
     semantic_approval_event = [event for event in semantic_events if event.type == EventType.APPROVAL_REQUIRED][-1]
     assert_true("target_candidates" in semantic_approval_event.agent_state, "semantic approval event should preserve target candidates")
+    semantic_candidate = semantic_approval_event.agent_state["target_candidate"]
+    assert_true(isinstance(semantic_candidate.get("evidence"), dict), "semantic approval event should preserve candidate evidence")
+    semantic_audit = _audit_rows(semantic_events)
+    evidence_audit_rows = [row for row in semantic_audit if row.get("event_type") == "target_candidates"]
+    assert_true(evidence_audit_rows and evidence_audit_rows[-1].get("candidate_evidence"), "semantic audit should record sanitized candidate evidence")
+    audit_evidence_text = str(evidence_audit_rows[-1].get("candidate_evidence"))
+    assert_true(not any(fragment in audit_evidence_text for fragment in ["bbox", "screen_center", "data/", ".png", "approval-", "task-", "ButtonControl", "TextControl"]), "semantic audit evidence leaked raw target details")
     assert_true(all("登录" not in event.voice_line.text and "semantic-app.png" not in event.voice_line.text for event in semantic_events), "semantic approval voice should stay immersive")
     semantic_refused = app.resolve_approval(str(semantic_approval["approval_id"]), approved=False)
     assert_true(any(event.type == EventType.TASK_FAILED for event in semantic_refused), "semantic target refusal should cancel action")
@@ -2551,6 +2579,8 @@ llm:
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
     assert_true("targetSource" in app_vue_source and "UI控件" in app_vue_source and "融合" in app_vue_source and "视觉" in app_vue_source, "Shell should show semantic target candidate source")
+    assert_true("targetConfidenceChip" in app_vue_source and "targetRiskChip" in app_vue_source and "targetConfirmationReason" in app_vue_source, "Shell should show semantic target evidence chips and confirmation reason")
+    assert_true("auditEvidenceRows" in app_vue_source and "candidate_evidence" in app_vue_source, "Shell audit timeline should render candidate evidence")
     assert_true("selectTargetCandidate" in app_vue_source and "selectSemanticTarget" in app_vue_source, "Shell candidate cards should continue semantic target selection through explicit RPC")
     assert_true("currentSemanticSelectionId" in app_vue_source and "selectionExpired" in app_vue_source, "Shell should disable stale or expired semantic target candidates")
     assert_true("选 ${rank}" not in app_vue_source, "Shell candidate buttons should not send natural-language selection text")
