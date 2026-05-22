@@ -53,6 +53,8 @@ The current observation, first action layer, approval hardening, watch loop, and
 - Semantic target candidates now expose rank, confidence, reason, source, and ambiguity; OCR/accessibility conflicts, low-confidence targets, non-actionable UIA text, or disabled UIA controls ask for clarification instead of synthesizing click approvals.
 - Semantic target candidates now also expose sanitized evidence summaries: source, confidence band, ambiguity reason, actionability gate, capture trust, and a user-facing confirmation reason. The shell renders these as evidence chips while preserving existing overlay boxes.
 - Pending semantic target selections are session-only with a short TTL; "选 2" resumes the latest saved candidates as a fallback, while candidate-card buttons use explicit `semantic_target.select` with `selection_id` and rank before creating a one-time `computer.click` approval.
+- P4.32 closeout preparation is now documented in `docs/P4_CLOSEOUT_EXPERIENCE.md`. It is a reproducible real-experience pass for browser target clicks, Watch Together, canvas/video controls, and game/HUD dry-run flows, with local-only sanitized reporting.
+- `tools/p4_closeout_report.py` writes only scene/status/category/note rows to ignored `data/local_visual_eval/p4_closeout_report.local.md` and rejects obvious private paths, URLs, OCR/account text, ids, and file names.
 - `computer.type_text` uses clipboard paste on Windows for reliable Chinese input instead of per-character key events.
 - `agent_companion/core/watch.py` keeps recent watch context in the current app session.
 - `agent_companion/core/tools/watch.py` exposes `watch.recall` for follow-up questions.
@@ -116,11 +118,12 @@ The current observation, first action layer, approval hardening, watch loop, and
 
 Next task options, in priority order:
 
-1. Run a manual P4 closeout pass on real browser/video/game windows: verify evidence cards are understandable, confirmation reasons are clear, and visual-only/UIA-disabled/static-text cases remain gated.
+1. Run the P4 closeout scripts in `docs/P4_CLOSEOUT_EXPERIENCE.md`, record sanitized outcomes with `tools/p4_closeout_report.py`, and fix only blocking P4 regressions.
 2. Re-test real Codex CLI permission JSONL only when a documented permission-specific resume contract is available; keep fail-closed behavior until then.
-3. Expand runtime settings only after a secret-safe config writer/UI contract exists for provider endpoints and credentials; keep the current safe controls approval-gated.
-4. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
-5. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, screenshot filenames, approval ids, and task ids.
+3. After P4 closeout passes, enter OpenHuman-inspired P5 Memory Core: local SQLite plus human-readable summaries, explicit save/delete controls, and no automatic sensitive memory.
+4. Expand runtime settings only after a secret-safe config writer/UI contract exists for provider endpoints and credentials; keep the current safe controls approval-gated.
+5. Extend Computer Use beyond Windows only after the Windows-first loop feels reliable.
+6. Keep `voice_line` free of coordinates, raw typed text, JSON, command lines, paths, model names, tokens, logs, screenshot filenames, approval ids, and task ids.
 
 ## Suggested First Task
 

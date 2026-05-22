@@ -536,6 +536,20 @@ def _run_private_semantic_calibration_probe(workspace: Path, name: str, payload:
     return output
 
 
+def _run_p4_closeout_report_tool(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(workspace / "tools" / "p4_closeout_report.py"),
+            *args,
+        ],
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def main() -> int:
     workspace = Path(__file__).resolve().parent
     os.environ["AGENT_COMPANION_DISABLE_LLM"] = "1"
@@ -2723,6 +2737,42 @@ llm:
         ],
     )
     assert_true("failure_categories:" in private_text_output and "ambiguous_repeated_label" in private_text_output, "private OCR text failure should report only abstract categories")
+    closeout_doc = (workspace / "docs" / "P4_CLOSEOUT_EXPERIENCE.md").read_text(encoding="utf-8")
+    for scene in ("browser_click", "watch_page_video", "canvas_video_controls", "game_hud"):
+        assert_true(scene in closeout_doc, f"P4 closeout doc should include scene: {scene}")
+    for heading in ("用户要说的自然语言", "预期任务卡表现", "预期候选 evidence chips", "预期语音表现", "通过标准", "失败时记录什么", "隐私注意事项"):
+        assert_true(closeout_doc.count(heading) >= 4, f"P4 closeout doc should include heading for every script: {heading}")
+    assert_true(
+        all(fragment in closeout_doc for fragment in ("不提交截图", "OCR", "窗口标题", "账号", "URL", "路径", "approval ids")),
+        "P4 closeout doc should state privacy boundaries",
+    )
+    closeout_tool_source = (workspace / "tools" / "p4_closeout_report.py").read_text(encoding="utf-8")
+    assert_true("p4_closeout_report.local.md" in closeout_tool_source and '"data" / "local_visual_eval"' in closeout_tool_source, "P4 report tool should write under ignored local_visual_eval")
+    report_path = workspace / "data" / "local_visual_eval" / "p4_closeout_report.local.md"
+    report_path.unlink(missing_ok=True)
+    closeout_init = _run_p4_closeout_report_tool(workspace, "--init")
+    assert_true(closeout_init.returncode == 0 and report_path.is_file(), "P4 closeout report init should create local report")
+    closeout_add = _run_p4_closeout_report_tool(workspace, "--add", "browser_click", "--status", "pass", "--category", "ok", "--note", "候选说明清楚")
+    assert_true(closeout_add.returncode == 0, "P4 closeout report add should accept sanitized notes")
+    report_text = report_path.read_text(encoding="utf-8")
+    assert_true("| browser_click | pass | ok | 候选说明清楚 |" in report_text, "P4 closeout report should record scene/status/category/note")
+    forbidden_report_text = ["C:\\", "/Users/", "http", "example", "data/", "local_visual_eval", ".png", ".ppm", "task-", "approval-", "账号", "OCR 原文"]
+    assert_true(all(fragment not in report_text for fragment in forbidden_report_text), "P4 closeout report leaked private fields")
+    rejected_report = _run_p4_closeout_report_tool(
+        workspace,
+        "--add",
+        "browser_click",
+        "--status",
+        "fail",
+        "--category",
+        "voice_leak",
+        "--note",
+        "账号 https://example.com C:\\secret\\screen.png task-private",
+    )
+    rejected_output = f"{rejected_report.stdout}\n{rejected_report.stderr}"
+    assert_true(rejected_report.returncode == 2 and "rejected" in rejected_output, "P4 closeout report should reject obvious private notes")
+    assert_true(all(fragment not in rejected_output for fragment in forbidden_report_text), "P4 closeout report rejection leaked private input")
+    report_path.unlink(missing_ok=True)
     assert_true(run_visual_detector_eval(workspace, verbose=False) == 0, "visual/image verification eval should pass committed suites and skip or run local private suites safely")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")

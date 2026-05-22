@@ -214,26 +214,34 @@ Commit: `ddb624b Add Codex-only autopilot skeleton`
 
 ## Current State
 
-As of commit `ddb624b`:
+As of P4.32:
 
 - Mainline has strong P4 Computer Use / Watch / semantic target grounding foundations.
-- The semantic grounding suite is documented at 38 committed synthetic cases after P4.26.
+- The semantic grounding suite is documented at 44 committed synthetic cases after the P4.28 real-layout-derived calibration pass.
+- Semantic target evidence cards exist: candidates expose source, confidence band, ambiguity/actionability gates, capture trust, and a plain confirmation reason in the shell.
+- P4 closeout is now prepared as a real-experience harness in `docs/P4_CLOSEOUT_EXPERIENCE.md`, covering browser button targeting, Watch Together, canvas/video controls, and game/HUD dry-run flows.
+- Local closeout reports must use `tools/p4_closeout_report.py` and stay under ignored `data/local_visual_eval/p4_closeout_report.local.md`.
 - Runtime settings have safe non-secret preview/apply support.
 - Codex task audit is sanitized and fail-closed for unresumable permission prompts.
-- Codex-only autopilot skeleton exists but is not yet proven on Windows.
+- Codex-only autopilot skeleton exists but is not the active product branch.
 
 ## Known Open Work
 
 Priority order:
 
-1. Formal `review4.26`.
-2. Run Windows preflight for `tools/joi_autopilot.py`.
-3. Test a docs-only autopilot loop on a safe branch such as `codex/nightly-autopilot`.
-4. Continue local private semantic calibration for larger dense browser/desktop/game layouts, especially focus churn, cross-monitor drag/drop states, and dense game/canvas HUD overlays.
-5. Keep real screenshots/manifests private and promote only safe synthetic fixtures.
-6. Revisit real Codex permission resume only if a documented permission-specific resume contract appears.
-7. Full provider/secret runtime settings UI remains deferred.
-8. Non-Windows Computer Use remains deferred until Windows-first loop is reliable.
+1. Run the P4 closeout experience scripts and record only sanitized scene/status/category/note rows.
+2. Fix only blocking P4 regressions found by the closeout report.
+3. After P4 closeout passes, start P5 Memory Core.
+4. Keep real screenshots/manifests private and promote only safe synthetic fixtures.
+5. Revisit real Codex permission resume only if a documented permission-specific resume contract appears.
+6. Full provider/secret runtime settings UI remains deferred.
+7. Non-Windows Computer Use remains deferred until Windows-first loop is reliable.
+
+Remaining P4 closeout risks:
+
+- UIA quality depends on the target program.
+- Canvas/game target discovery still uses lightweight heuristics.
+- Overlay/capture trust needs real multi-monitor and display-scaling validation.
 
 ## OpenHuman-Inspired Direction
 

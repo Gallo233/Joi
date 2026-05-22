@@ -4,6 +4,8 @@ Joi 的目标是一个角色人格包裹的多模态 Agent 伴侣：能陪看网
 
 OpenHuman-inspired direction is recorded in `docs/OPENHUMAN_INSIGHTS.md`. The key update is that Joi should become an embodied personal agent companion, not a generic integration dashboard: after P4, prioritize local memory, tool-result compression, model routing, skill manifests, and a constrained background companion loop.
 
+P4.32 is the closeout experience-prep milestone: it adds a reproducible real-task demo checklist and local-only sanitized report path. It is not a new capability expansion. After the closeout pass, move to P5 Memory Core unless the report shows a blocking P4 regression.
+
 ## P0 Project Discipline
 
 Status: in progress
@@ -63,7 +65,7 @@ Status: in progress
 
 ## P4 Watch Together Loop
 
-Status: in progress
+Status: closeout prep
 
 - Watch together: observe visible content, summarize, and discuss. Screen capture and optional visual model summarization are connected.
 - Keep recent watch context in the session: user question, window title, summary, screenshot artifact, and model status.
@@ -75,6 +77,13 @@ Status: in progress
 - If the vision model is unavailable, save the screenshot and clearly tell the user that vision configuration is needed for summaries.
 - Game: OK-WW dry-run, approval, launch, status callback.
 - Coding: Codex approval, execution, task card, result summary.
+- Closeout harness: `docs/P4_CLOSEOUT_EXPERIENCE.md` defines four real experience scripts for browser buttons, Watch Together, canvas/video controls, and game/HUD. Local results go to ignored `data/local_visual_eval/p4_closeout_report.local.md`.
+
+Remaining P4 closeout risks:
+
+- UIA quality depends on the target program.
+- Canvas/game target discovery still uses lightweight heuristics.
+- Overlay/capture trust needs real multi-monitor and display-scaling validation.
 
 ## P5 Memory Core
 

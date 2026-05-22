@@ -72,6 +72,7 @@
 - Hardened the private semantic calibration runner so malformed local manifests fail with sanitized `missing`/`invalid` reports, added stable category listing, and documented the private-to-synthetic promotion workflow.
 - Added an OpenHuman-inspired product plan that refines Joi's post-P4 direction around local memory, JoiJuice tool compression, model routing, native skills, and a constrained background companion loop.
 - Added semantic target evidence cards: candidates now expose sanitized source/confidence/ambiguity/actionability/capture-trust summaries, the shell renders evidence chips plus confirmation reasons, and Computer Use audit records candidate evidence without raw bbox/path/id details.
+- Added a P4 closeout experience harness with four real-task scripts and a local-only sanitized report tool for browser target clicks, Watch Together, canvas/video controls, and game/HUD dry-run flows.
 
 ## 2026-05-14
 
