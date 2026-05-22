@@ -44,6 +44,11 @@ asr:
 
 ocr:
   timeout_seconds: 5
+  language: chi_sim+eng+jpn
+  # Optional absolute path when Tesseract is installed outside PATH.
+  tesseract_cmd: ""
+  # Optional absolute path for local traineddata files.
+  tessdata_dir: ""
 
 computer_use:
   # Wait briefly before the post-action screenshot so Windows/UI updates can settle.

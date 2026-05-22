@@ -59,6 +59,7 @@ export interface AgentEvent {
   agent_state?: {
     voice_audio_path?: string
     voice_audio_rel?: string
+    voice_audio_data_url?: string
     voice_audio_error?: string
     policy?: {
       tool?: string
@@ -85,7 +86,16 @@ export interface VoiceAudioPayload {
   voice_text?: string
   voice_audio_path?: string
   voice_audio_rel?: string
+  voice_audio_data_url?: string
   voice_audio_error?: string
+}
+
+export interface ArtifactReadResult {
+  ok?: boolean
+  artifact?: string
+  mime?: string
+  data_url?: string
+  error?: string
 }
 
 export interface RuntimeProviderStatus {

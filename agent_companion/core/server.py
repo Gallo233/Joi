@@ -5,6 +5,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -140,6 +141,11 @@ class JsonRpcBridge:
                 result = await asyncio.to_thread(self.transcribe_and_submit, audio_base64, mime_type)
                 await websocket.send(self._result(request_id, result))
                 return
+            if method == "artifact.read":
+                artifact = str(params.get("artifact") or "")
+                result = await asyncio.to_thread(self.read_artifact_command, artifact)
+                await websocket.send(self._result(request_id, result))
+                return
             if method == "core.ping":
                 await websocket.send(self._result(request_id, {"ok": True}))
                 return
@@ -173,6 +179,10 @@ class JsonRpcBridge:
             "voice_text": event.voice_line.text,
             **audio,
         }
+        data_url = self._voice_audio_data_url(audio.get("voice_audio_path", ""))
+        if data_url:
+            payload["voice_audio_data_url"] = data_url
+        self._play_voice_audio_locally(audio.get("voice_audio_path", ""))
         message = json.dumps({"jsonrpc": "2.0", "method": "agent.voice_audio", "params": payload}, ensure_ascii=False)
         await self._broadcast(message)
 
@@ -232,6 +242,60 @@ class JsonRpcBridge:
             return {"ok": True, "submitted": False, "preview": preview.to_agent_state()}
         sequence, events = self._run_serial("runtime.config.apply", lambda: self.app.request_runtime_config_update(updates))
         return {"ok": True, "submitted": True, "preview": preview.to_agent_state(), "sequence": sequence, "events": [event.to_dict() for event in events]}
+
+    def read_artifact_command(self, artifact: str) -> dict[str, Any]:
+        path = self._resolve_artifact_path(artifact)
+        if path is None or not path.is_file():
+            return {"ok": False, "error": "artifact_not_found"}
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            return {"ok": False, "error": "unsupported_artifact_type"}
+        if path.stat().st_size > 8 * 1024 * 1024:
+            return {"ok": False, "error": "artifact_too_large"}
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return {"ok": True, "artifact": artifact, "mime": mime, "data_url": f"data:{mime};base64,{encoded}"}
+
+    def _resolve_artifact_path(self, artifact: str) -> Path | None:
+        value = (artifact or "").strip()
+        if not value or "\x00" in value:
+            return None
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = self.workspace / value
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(self.workspace)
+        except Exception:
+            return None
+        return resolved
+
+    @staticmethod
+    def _voice_audio_data_url(path_text: str) -> str:
+        if not path_text:
+            return ""
+        path = Path(path_text)
+        try:
+            if not path.is_file() or path.suffix.lower() != ".wav" or path.stat().st_size > 5 * 1024 * 1024:
+                return ""
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            return f"data:audio/wav;base64,{encoded}"
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _play_voice_audio_locally(path_text: str) -> None:
+        if sys.platform != "win32" or not path_text:
+            return
+        path = Path(path_text)
+        if not path.is_file() or path.suffix.lower() != ".wav":
+            return
+        try:
+            import winsound
+
+            winsound.PlaySound(None, winsound.SND_PURGE)
+            winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception:
+            return
 
     def _run_serial(self, label: str, callback: Callable[[], list[AgentEvent]]) -> tuple[int, list[AgentEvent]]:
         with self._command_lock:
@@ -426,6 +490,7 @@ def _safe_runtime_settings(config: Any) -> dict[str, Any]:
         },
         "ocr": {
             "timeout_seconds": max(1, int(config.ocr.timeout_seconds or 1)),
+            "language": str(config.ocr.language or "chi_sim+eng"),
         },
         "llm": {
             "temperature": float(config.llm.temperature),

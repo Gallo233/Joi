@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 from pathlib import Path
 import platform
+import os
 import shutil
 import sys
 from typing import Any
@@ -100,15 +101,18 @@ def _tts_status(payload: dict[str, Any]) -> RuntimeProviderStatus:
 def _ocr_status(config: AppConfig | None) -> RuntimeProviderStatus:
     has_pillow = importlib.util.find_spec("PIL") is not None
     has_pytesseract = importlib.util.find_spec("pytesseract") is not None
-    has_tesseract_executable = shutil.which("tesseract") is not None
+    tesseract_cmd = _resolve_tesseract_cmd(config)
+    has_tesseract_executable = bool(tesseract_cmd)
     version_ok = False
     if has_pillow and has_pytesseract and has_tesseract_executable:
         try:
-            version_ok = _probe_tesseract_version()
+            version_ok = _probe_tesseract_version(tesseract_cmd)
         except Exception:
             version_ok = False
     configured = has_pillow and has_pytesseract and has_tesseract_executable and version_ok
     timeout = config.ocr.timeout_seconds if config else 5
+    language = config.ocr.language if config else "chi_sim+eng"
+    tessdata_dir = _resolve_tessdata_dir(config)
     missing = []
     if not has_pillow:
         missing.append("pillow_missing")
@@ -128,13 +132,30 @@ def _ocr_status(config: AppConfig | None) -> RuntimeProviderStatus:
         summary="可用" if configured else "依赖或本地运行时不可用",
         timeout_seconds=max(1, int(timeout or 5)),
         last_error=_safe_error(";".join(missing)),
-        notes=["version probe ok"] if configured else [],
+        notes=[f"lang {language}", "version probe ok", "custom tessdata"] if configured and tessdata_dir else [f"lang {language}", "version probe ok"] if configured else [f"lang {language}"],
     )
 
 
-def _probe_tesseract_version() -> bool:
+def _resolve_tesseract_cmd(config: AppConfig | None) -> str:
+    configured = (config.ocr.tesseract_cmd if config else "").strip()
+    if configured and Path(os.path.expandvars(configured)).is_file():
+        return str(Path(os.path.expandvars(configured)))
+    found = shutil.which("tesseract")
+    return found or ""
+
+
+def _resolve_tessdata_dir(config: AppConfig | None) -> str:
+    configured = (config.ocr.tessdata_dir if config else "").strip()
+    if configured and Path(os.path.expandvars(configured)).is_dir():
+        return str(Path(os.path.expandvars(configured)))
+    return ""
+
+
+def _probe_tesseract_version(tesseract_cmd: str = "") -> bool:
     try:
         pytesseract = importlib.import_module("pytesseract")
+        if tesseract_cmd:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
         version_probe = getattr(pytesseract, "get_tesseract_version", None)
         if not callable(version_probe):
             return False

@@ -562,7 +562,12 @@ class AgentCompanionApp:
         config = config or self._load_runtime_config()
         if config is None:
             return PytesseractOcrExtractor()
-        return PytesseractOcrExtractor(timeout_seconds=config.ocr.timeout_seconds)
+        return PytesseractOcrExtractor(
+            timeout_seconds=config.ocr.timeout_seconds,
+            language=config.ocr.language,
+            tesseract_cmd=config.ocr.tesseract_cmd,
+            tessdata_dir=config.ocr.tessdata_dir,
+        )
 
     def _make_pending_step(self, plan: AgentPlan, index: int, step: ToolRequest, request_override: ToolRequest | None = None) -> PendingStep:
         return PendingStep(

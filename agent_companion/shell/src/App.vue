@@ -2,7 +2,7 @@
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload } from './protocol'
+import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -23,6 +23,8 @@ const runtimeDraftDirty = ref(false)
 const runtimePreview = ref<RuntimeConfigMutationResult | null>(null)
 const runtimePreviewLoading = ref(false)
 const runtimeApplyLoading = ref(false)
+const artifactDataUrls = ref<Record<string, string>>({})
+const artifactLoadFailed = ref<Record<string, boolean>>({})
 let mediaRecorder: MediaRecorder | null = null
 let mediaStream: MediaStream | null = null
 let audioChunks: Blob[] = []
@@ -39,6 +41,7 @@ const client = new CoreClient({
   onEvent: (event) => {
     rememberVoiceEventEpoch(event)
     events.value.push(event)
+    preloadImageArtifacts(event)
   },
   onReady: (payload) => {
     ready.value = payload
@@ -193,7 +196,15 @@ function isTaskCardEvent(event: AgentEvent) {
 
 function isSpeakableEvent(event: AgentEvent) {
   if (event.type === 'user_message' || event.type === 'plan_created' || event.type === 'tool_started' || event.type === 'audit_event') return false
-  const text = event.voice_line?.text || ''
+  return isSafeVoiceText(event.voice_line?.text || '')
+}
+
+function isPlayableVoiceEvent(event: AgentEvent) {
+  if (event.type === 'user_message' || event.type === 'plan_created' || event.type === 'audit_event') return false
+  return isSafeVoiceText(event.voice_line?.text || '')
+}
+
+function isSafeVoiceText(text: string) {
   return !/[{}[\]"=]|task-|approval-|selection-|codex-|sk-|\/(?:Users|home|private|tmp|var|Volumes)\/|\.png|\.jpg|\.jpeg|\.webp|\.bmp|\.gif|\.ppm|\.json|\.jsonl|\.log|\.txt|\.yaml|\.yml|\.gguf|\.safetensors|\.ckpt|\.pth|\.onnx|\.bin|[A-Z]:\\/.test(text)
 }
 
@@ -593,10 +604,11 @@ function artifactPath(artifact: string) {
 }
 
 function artifactSrc(artifact: string) {
-  return convertFileSrc(artifactPath(artifact))
+  return artifactDataUrls.value[artifact] || convertFileSrc(artifactPath(artifact))
 }
 
 function openArtifactPreview(artifact: string, event: AgentEvent) {
+  void loadArtifactData(artifact)
   previewArtifact.value = artifact
   previewArtifactEvent.value = event
 }
@@ -604,6 +616,26 @@ function openArtifactPreview(artifact: string, event: AgentEvent) {
 function closeArtifactPreview() {
   previewArtifact.value = ''
   previewArtifactEvent.value = null
+}
+
+function preloadImageArtifacts(event: AgentEvent) {
+  for (const artifact of event.display_card.artifacts || []) {
+    if (isImageArtifact(artifact)) void loadArtifactData(artifact)
+  }
+}
+
+async function loadArtifactData(artifact: string) {
+  if (!artifact || artifactDataUrls.value[artifact] || artifactLoadFailed.value[artifact]) return
+  try {
+    const result = (await client.readArtifact(artifact)) as ArtifactReadResult
+    if (result.ok && result.data_url) {
+      artifactDataUrls.value = { ...artifactDataUrls.value, [artifact]: result.data_url }
+      return
+    }
+  } catch {
+    // Fall back to Tauri asset URLs; failures are reflected by the image element.
+  }
+  artifactLoadFailed.value = { ...artifactLoadFailed.value, [artifact]: true }
 }
 
 function targetCandidates(event?: AgentEvent): Record<string, unknown>[] {
@@ -821,21 +853,22 @@ function approvalIdFor(event: AgentEvent) {
   return stringValue(approval.approval_id)
 }
 
-async function playAudioPath(path?: string) {
-  if (!path) return
+async function playAudioPath(path?: string, dataUrl?: string) {
+  const source = dataUrl || path
+  if (!source) return
   let audio: HTMLAudioElement | null = null
   try {
     stopSpokenAudio()
-    const url = convertFileSrc(path)
+    const url = source.startsWith('data:') ? source : convertFileSrc(source)
     audio = new Audio(url)
     currentAudio = audio
     audio.onended = () => {
       if (currentAudio === audio) currentAudio = null
     }
     await audio.play()
-  } catch {
+  } catch (error) {
     if (audio && currentAudio === audio) currentAudio = null
-    // Text remains visible when local audio is unavailable.
+    lastTtsError.value = error instanceof Error ? error.name || 'audio_play_failed' : 'audio_play_failed'
   }
 }
 
@@ -845,7 +878,7 @@ function playVoiceAudio(payload: VoiceAudioPayload) {
   }
   const eventEpoch = voiceEventEpochs.get(voiceAudioKey(payload))
   if (!shouldPlayVoiceAudio(eventEpoch, voiceEpoch)) return
-  void playAudioPath(payload.voice_audio_path)
+  void playAudioPath(payload.voice_audio_path, payload.voice_audio_data_url)
 }
 
 function rememberVoiceEventEpoch(event: AgentEvent) {
@@ -859,7 +892,7 @@ function rememberVoiceEventEpoch(event: AgentEvent) {
     eventEpoch = voiceEpoch
     taskVoiceEpochs.set(event.task_id, eventEpoch)
   }
-  if (event.voice_line?.text && isSpeakableEvent(event)) {
+  if (event.voice_line?.text && isPlayableVoiceEvent(event)) {
     voiceEventEpochs.set(
       voiceAudioKey({
         task_id: event.task_id,
@@ -1327,7 +1360,7 @@ onBeforeUnmount(() => {
                 @click="openArtifactPreview(artifact, task.latest)"
               >
                 <div class="artifact-image-frame" :style="artifactFrameStyle(task.latest, artifact)">
-                  <img :src="artifactSrc(artifact)" alt="" />
+                  <img :src="artifactSrc(artifact)" alt="" @error="loadArtifactData(artifact)" />
                   <div class="target-overlays" v-if="targetPreviews(task.latest, artifact).length">
                     <div
                       v-for="(candidate, candidateIndex) in targetPreviews(task.latest, artifact)"
@@ -1629,7 +1662,7 @@ onBeforeUnmount(() => {
       <div class="artifact-modal-body">
         <button type="button" class="modal-close" @click="closeArtifactPreview">关闭</button>
         <div class="artifact-modal-image-frame">
-          <img :src="previewArtifactSrc" alt="" />
+          <img :src="previewArtifactSrc" alt="" @error="loadArtifactData(previewArtifact)" />
           <div class="target-overlays" v-if="targetPreviews(previewArtifactEvent || undefined, previewArtifact).length">
             <div
               v-for="(candidate, candidateIndex) in targetPreviews(previewArtifactEvent || undefined, previewArtifact)"

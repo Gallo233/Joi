@@ -224,6 +224,9 @@ class AsrConfig:
 @dataclass(frozen=True)
 class OcrConfig:
     timeout_seconds: int = 5
+    language: str = "chi_sim+eng"
+    tesseract_cmd: str = ""
+    tessdata_dir: str = ""
 
 
 @dataclass(frozen=True)
@@ -312,6 +315,9 @@ def load_app_config(path: Path) -> AppConfig:
         ),
         ocr=OcrConfig(
             timeout_seconds=max(1, int(ocr_raw.get("timeout_seconds", 5) or 5)),
+            language=str(ocr_raw.get("language", "chi_sim+eng") or "chi_sim+eng"),
+            tesseract_cmd=str(ocr_raw.get("tesseract_cmd", "") or ""),
+            tessdata_dir=str(ocr_raw.get("tessdata_dir", "") or ""),
         ),
         computer_use=ComputerUseConfig(
             post_action_settle_ms=max(0, int(computer_use_raw.get("post_action_settle_ms", 200) or 0)),

@@ -78,7 +78,24 @@ def _is_game_task(text: str) -> bool:
 
 
 def _is_watch_task(text: str) -> bool:
-    return any(token in text for token in ("陪我看", "看电影", "看视频", "一起看", "当前画面", "当前窗口", "这段剧情"))
+    return any(
+        token in text
+        for token in (
+            "陪我看",
+            "看电影",
+            "看视频",
+            "一起看",
+            "当前画面",
+            "当前窗口",
+            "当前页面",
+            "当前网页",
+            "浏览器页面",
+            "这个页面",
+            "这段剧情",
+            "B站",
+            "b站",
+        )
+    )
 
 
 def _is_watch_followup(text: str) -> bool:

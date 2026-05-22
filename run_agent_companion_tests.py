@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import inspect
@@ -73,7 +74,7 @@ def _runtime_with_ocr_probe(
             return tesseract_path
         return original_which(command, *args, **kwargs)
 
-    def fake_probe() -> bool:
+    def fake_probe(*args: object, **kwargs: object) -> bool:
         if isinstance(version_probe, Exception):
             raise version_probe
         return bool(version_probe)
@@ -550,15 +551,57 @@ def _run_p4_closeout_report_tool(workspace: Path, *args: str) -> subprocess.Comp
     )
 
 
+def _assert_vision_summary_empty_retry(workspace: Path) -> None:
+    image_path = workspace / "data" / "agent_companion" / "vision" / "summarizer-fallback-test.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"not-a-real-png-but-good-enough-for-base64")
+
+    class EmptyThenSummary(OpenAIVisionSummarizer):
+        def __init__(self) -> None:
+            super().__init__("https://unused.invalid/v1", "mimo-test", "test-key")
+            self.prompts: list[str] = []
+
+        def _request_summary(self, b64: str, prompt: str) -> VisionSummary:
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return VisionSummary(text="", model=self.model)
+            return VisionSummary(text="这是可见画面的摘要。", model=self.model)
+
+    try:
+        summarizer = EmptyThenSummary()
+        result = summarizer.summarize(
+            VisionObservation(
+                target="active_window",
+                screenshot_path=image_path,
+                screenshot_rel="data/agent_companion/vision/summarizer-fallback-test.png",
+                width=640,
+                height=360,
+                title="Bilibili",
+                window_handle=123,
+                capture_rect=CaptureRect(0, 0, 640, 360),
+                query="陪我看这个视频",
+            ),
+            "陪我看这个视频",
+        )
+        assert_true(result.text == "这是可见画面的摘要。", "vision summarizer should retry once when the first provider response is empty")
+        assert_true(len(summarizer.prompts) == 2, "vision summarizer should issue exactly one fallback request after an empty response")
+        assert_true("不要输出 JSON" in summarizer.prompts[1], "vision fallback prompt should stay user-facing and machine-text free")
+    finally:
+        image_path.unlink(missing_ok=True)
+
+
 def main() -> int:
     workspace = Path(__file__).resolve().parent
     os.environ["AGENT_COMPANION_DISABLE_LLM"] = "1"
     os.environ["AGENT_COMPANION_BROWSER_STUB"] = "1"
+    _assert_vision_summary_empty_retry(workspace)
     assert_true("approved" not in inspect.signature(AgentCompanionApp.handle_user_text).parameters, "user message should not accept approval bypass")
     assert_true(build_plan("修复这个项目 bug 并跑测试").intent == "coding", "coding route failed")
     watch_plan = build_plan("陪我看这个视频")
     assert_true(watch_plan.intent == "watch_together", "watch route failed")
     assert_true(watch_plan.steps[0].name == "observe.screen", "watch route should use screen observation")
+    current_page_plan = build_plan("看看当前页面")
+    assert_true(current_page_plan.intent == "watch_together" and current_page_plan.steps[0].name == "observe.screen", "current browser page should use screen observation")
     watch_followup_plan = build_plan("你看到了什么")
     assert_true(watch_followup_plan.intent == "watch_followup", "watch follow-up route failed")
     assert_true(watch_followup_plan.steps[0].name == "watch.recall", "watch follow-up should reuse context")
@@ -1283,6 +1326,12 @@ def main() -> int:
     rpc_events = rpc_result.get("events", [])
     assert_true(rpc_result.get("ok") is True and rpc_result.get("submitted") is True, "semantic_target.select command should return submitted result")
     assert_true(any(event.get("type") == "approval_required" and event.get("agent_state", {}).get("approval", {}).get("tool") == "computer.click" for event in rpc_events), "semantic_target.select should create approval_required")
+    artifact_path = workspace / "data" / "agent_companion" / "vision" / "artifact-read-test.png"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/l2YqJwAAAABJRU5ErkJggg=="))
+    artifact_result = bridge.read_artifact_command("data/agent_companion/vision/artifact-read-test.png")
+    assert_true(artifact_result.get("ok") is True and str(artifact_result.get("data_url", "")).startswith("data:image/png;base64,"), "artifact.read should return a data URL for workspace images")
+    assert_true(bridge.read_artifact_command("../secret.png").get("error") == "artifact_not_found", "artifact.read must not read outside the workspace")
 
     expired_app = AgentCompanionApp(workspace)
     expired_app.tools.register(
@@ -2584,6 +2633,8 @@ llm:
     app_vue_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
     assert_true("beginNewVoiceIntent()" in app_vue_source and "voiceEventEpochs.get" in app_vue_source, "Shell should bump and compare voice epochs")
     assert_true("event_created_at: event.created_at" in app_vue_source, "Shell should key voice audio by event timestamp")
+    assert_true("isPlayableVoiceEvent" in app_vue_source and "voice_audio_data_url" in app_vue_source, "Shell should register playable tool-start voice events and prefer inline voice audio")
+    assert_true("lastTtsError.value = error instanceof Error" in app_vue_source, "Shell should surface audio playback failures instead of swallowing them")
     assert_true("runtimeStatusRows" in app_vue_source and "provider-card" in app_vue_source and "运行设置" in app_vue_source, "Shell developer mode should expose runtime provider settings/status view")
     assert_true("providerMeta" in app_vue_source and "providerErrorLabel" in app_vue_source, "Shell runtime status view should render sanitized provider details")
     assert_true("tesseract_missing" in app_vue_source and "tesseract_unavailable" in app_vue_source, "Shell runtime status view should label Tesseract runtime probe failures")
@@ -2774,8 +2825,14 @@ llm:
     assert_true(all(fragment not in rejected_output for fragment in forbidden_report_text), "P4 closeout report rejection leaked private input")
     report_path.unlink(missing_ok=True)
     assert_true(run_visual_detector_eval(workspace, verbose=False) == 0, "visual/image verification eval should pass committed suites and skip or run local private suites safely")
+    windows_focus_source = (workspace / "agent_companion" / "core" / "windows_focus.py").read_text(encoding="utf-8")
+    assert_true("WindowFromPoint" in windows_focus_source and "GetAncestor" in windows_focus_source, "Windows focus helper should resolve the window underneath hidden Joi")
+    windows_observer_source = (workspace / "agent_companion" / "core" / "vision" / "windows.py").read_text(encoding="utf-8")
+    assert_true("window_from_point" in windows_observer_source and "hide_foreground_companion_window" in windows_observer_source, "Screen observe should hide Joi and capture the underlying content window")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
+    assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
+    assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
 

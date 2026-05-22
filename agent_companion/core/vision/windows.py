@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 from agent_companion.core.vision.schemas import CaptureRect, VisionObservation
+from agent_companion.core.windows_focus import foreground_window, hide_foreground_companion_window, is_companion_window, is_visible_window, restore_window, window_from_point, window_title
 
 
 class _RECT(ctypes.Structure):
@@ -36,25 +37,26 @@ class WindowsScreenObserver:
         if screen is None:
             raise RuntimeError("no primary screen is available")
 
-        hwnd = self._foreground_window() if target == "active_window" else 0
-        title = self._window_title(hwnd) if hwnd else ""
-        screen_rect = self._window_rect(hwnd) if hwnd else self._screen_rect(screen)
-        pixmap = screen.grabWindow(hwnd)
-        if pixmap.isNull():
-            raise RuntimeError("screen capture returned an empty image")
-        capture_rect = self._capture_rect(screen_rect, pixmap.width(), pixmap.height())
-
+        original_hwnd = foreground_window() if target == "active_window" else 0
+        original_rect = self._window_rect(original_hwnd) if original_hwnd else None
+        hidden_hwnd = hide_foreground_companion_window(settle_seconds=0.28)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.output_dir / f"{target}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
-        if not pixmap.save(str(output_path), "PNG"):
-            raise RuntimeError("failed to save screen capture")
+        try:
+            hwnd = self._capture_window_handle(target, hidden_hwnd, original_rect)
+            title = window_title(hwnd) if hwnd else ""
+            screen_rect = self._window_rect(hwnd) if hwnd else self._screen_rect(screen)
+            width, height = self._save_screen_capture(output_path, screen_rect, screen)
+            capture_rect = self._capture_rect(screen_rect, width, height)
+        finally:
+            restore_window(hidden_hwnd)
 
         return VisionObservation(
             target=target,
             screenshot_path=output_path,
             screenshot_rel=self._rel(output_path),
-            width=pixmap.width(),
-            height=pixmap.height(),
+            width=width,
+            height=height,
             title=title,
             window_handle=hwnd or None,
             capture_rect=capture_rect,
@@ -69,20 +71,18 @@ class WindowsScreenObserver:
         return "active_window"
 
     @staticmethod
-    def _foreground_window() -> int:
-        return int(ctypes.windll.user32.GetForegroundWindow())
-
-    @staticmethod
-    def _window_title(hwnd: int) -> str:
-        if not hwnd:
-            return ""
-        user32 = ctypes.windll.user32
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length <= 0:
-            return ""
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buffer, length + 1)
-        return buffer.value
+    def _capture_window_handle(target: str, hidden_hwnd: int | None, original_rect: tuple[int, int, int, int] | None) -> int:
+        if target != "active_window":
+            return 0
+        if hidden_hwnd and original_rect is not None:
+            left, top, width, height = original_rect
+            hwnd = window_from_point(left + max(1, width // 2), top + max(1, height // 2))
+            if hwnd and not is_companion_window(hwnd) and is_visible_window(hwnd):
+                return hwnd
+        hwnd = foreground_window()
+        if hwnd and not is_companion_window(hwnd) and is_visible_window(hwnd):
+            return hwnd
+        return 0
 
     @staticmethod
     def _window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
@@ -109,6 +109,32 @@ class WindowsScreenObserver:
         except Exception:
             return None
         return None
+
+    @staticmethod
+    def _save_screen_capture(output_path: Path, rect: tuple[int, int, int, int] | None, screen: object) -> tuple[int, int]:
+        try:
+            from PIL import ImageGrab
+
+            bbox = None
+            if rect is not None:
+                left, top, width, height = rect
+                if width > 0 and height > 0:
+                    bbox = (left, top, left + width, top + height)
+            image = ImageGrab.grab(bbox=bbox, all_screens=True)
+            if image.width <= 0 or image.height <= 0:
+                raise RuntimeError("empty Pillow capture")
+            image.save(output_path, "PNG")
+            return int(image.width), int(image.height)
+        except Exception:
+            hwnd = 0
+            if rect is not None:
+                hwnd = foreground_window()
+            pixmap = screen.grabWindow(hwnd)
+            if pixmap.isNull():
+                raise RuntimeError("screen capture returned an empty image")
+            if not pixmap.save(str(output_path), "PNG"):
+                raise RuntimeError("failed to save screen capture")
+            return int(pixmap.width()), int(pixmap.height())
 
     @staticmethod
     def _screen_rect(screen: object) -> tuple[int, int, int, int] | None:

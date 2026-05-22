@@ -73,8 +73,17 @@ class UnavailableOcrExtractor:
 
 
 class PytesseractOcrExtractor:
-    def __init__(self, timeout_seconds: int = 5) -> None:
+    def __init__(
+        self,
+        timeout_seconds: int = 5,
+        language: str = "chi_sim+eng",
+        tesseract_cmd: str = "",
+        tessdata_dir: str = "",
+    ) -> None:
         self.timeout_seconds = max(1, int(timeout_seconds or 5))
+        self.language = (language or "").strip() or "chi_sim+eng"
+        self.tesseract_cmd = (tesseract_cmd or "").strip()
+        self.tessdata_dir = (tessdata_dir or "").strip()
 
     def extract(self, image_path: Path) -> OcrResult:
         try:
@@ -85,9 +94,13 @@ class PytesseractOcrExtractor:
         if not image_path.is_file():
             return OcrResult("failed", "截图文件不存在，OCR 没有执行。", error="screenshot_not_found")
         try:
+            if self.tesseract_cmd:
+                pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
             image = Image.open(image_path)
             data = pytesseract.image_to_data(
                 image,
+                lang=self.language,
+                config=f"--tessdata-dir {self.tessdata_dir}" if self.tessdata_dir else "",
                 output_type=pytesseract.Output.DICT,
                 timeout=self.timeout_seconds,
             )

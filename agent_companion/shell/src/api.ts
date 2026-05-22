@@ -76,6 +76,10 @@ export class CoreClient {
     )
   }
 
+  readArtifact(artifact: string) {
+    return this.send('artifact.read', { artifact })
+  }
+
   private send(method: string, params: Record<string, unknown>, options?: { timeoutMs?: number; timeoutMessage?: string }) {
     const payload = { jsonrpc: '2.0', id: `ui-${this.nextId++}`, method, params }
     if (this.socket?.readyState === WebSocket.OPEN) {

@@ -7,6 +7,7 @@ import time
 
 from agent_companion.core.computer_use.schemas import ComputerAction, ComputerObservation, ComputerUseResult
 from agent_companion.core.vision import VisionObserver, WindowsScreenObserver
+from agent_companion.core.windows_focus import hide_foreground_companion_window, restore_window
 
 
 class WindowsComputerUseBackend:
@@ -20,6 +21,7 @@ class WindowsComputerUseBackend:
     def perform(self, action: ComputerAction) -> ComputerUseResult:
         if sys.platform != "win32":
             return ComputerUseResult(False, action=action, error="computer use actions are currently implemented for Windows only")
+        hidden_hwnd = hide_foreground_companion_window()
         try:
             if action.action_type == "click":
                 return self._click(action)
@@ -32,6 +34,8 @@ class WindowsComputerUseBackend:
             return ComputerUseResult(False, action=action, error=f"unsupported action: {action.action_type}")
         except Exception as exc:
             return ComputerUseResult(False, action=action, error=f"{type(exc).__name__}: {exc}")
+        finally:
+            restore_window(hidden_hwnd)
 
     def _click(self, action: ComputerAction) -> ComputerUseResult:
         if action.x is None or action.y is None:

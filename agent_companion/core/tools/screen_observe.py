@@ -61,12 +61,17 @@ class ScreenObserveTool(ToolAdapter):
                 summary_error = f"{type(exc).__name__}: {exc}"
                 model_status = "error"
 
-        body = observation.detail_text()
+        detail_lines = [
+            f"窗口：{observation.title or ('全屏' if observation.target == 'fullscreen' else '当前内容窗口')}",
+            f"尺寸：{observation.width}x{observation.height}",
+            f"截图：{observation.screenshot_rel}",
+        ]
+        body = "\n".join(detail_lines)
         body = f"{body}\n\n{ocr_result.detail_text()}"
         body = f"{body}\n{region_summary}"
         card_summary = self._summary(observation)
         if summary_text:
-            body = f"{body}\n\n视觉摘要：{summary_text}"
+            body = f"视觉摘要：{summary_text}\n\n{body}"
             card_summary = summary_text
         elif self.summarizer is None:
             body = f"{body}\n\n视觉摘要：未配置视觉模型，截图已保存。"
