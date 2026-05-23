@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { convertFileSrc } from '@tauri-apps/api/core'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
 import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
@@ -14,6 +15,47 @@ const ready = ref<CoreReadyPayload | null>(null)
 const failedImageSrc = ref('')
 const previewArtifact = ref('')
 const previewArtifactEvent = ref<AgentEvent | null>(null)
+const activeCabin = ref<'workspace' | 'chat' | 'inspector'>('workspace')
+const artifactDialog = ref<HTMLDialogElement | null>(null)
+
+const isCompactMode = ref(false)
+const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
+const miniSpeechActive = ref(false)
+const miniDashboardActive = ref(false)
+
+async function toggleCompactMode() {
+  isCompactMode.value = !isCompactMode.value
+  try {
+    const appWindow = getCurrentWindow()
+    if (isCompactMode.value) {
+      document.body.classList.add('transparent-active')
+      await appWindow.setSize(new LogicalSize(580, 480))
+    } else {
+      document.body.classList.remove('transparent-active')
+      await appWindow.setSize(new LogicalSize(1080, 780))
+    }
+  } catch (e) {
+    // Standard web fallback
+  }
+}
+
+function toggleAccessory(acc: 'hat' | 'glasses' | 'ears') {
+  equippedAccessories.value[acc] = !equippedAccessories.value[acc]
+}
+
+function handleMascotClick() {
+  if (!isCompactMode.value) return
+  miniDashboardActive.value = !miniDashboardActive.value
+}
+
+watch(previewArtifact, (newVal) => {
+  if (newVal) {
+    artifactDialog.value?.showModal()
+  } else {
+    artifactDialog.value?.close()
+  }
+})
+
 const voiceState = ref<'idle' | 'recording' | 'transcribing'>('idle')
 const lastTranscript = ref('')
 const lastTtsError = ref('')
@@ -107,6 +149,15 @@ const latestSpeech = computed(() => {
     .reverse()
     .find((event) => event.voice_line?.text && isSpeakableEvent(event))
   return latest?.voice_line.text || '我在。要看、要玩、要写代码，都可以直接告诉我。'
+})
+
+watch(latestSpeech, (newVal) => {
+  if (newVal) {
+    miniSpeechActive.value = true
+    setTimeout(() => {
+      miniSpeechActive.value = false
+    }, 8000)
+  }
 })
 
 const activeSpriteId = computed(() => {
@@ -616,6 +667,19 @@ function openArtifactPreview(artifact: string, event: AgentEvent) {
 function closeArtifactPreview() {
   previewArtifact.value = ''
   previewArtifactEvent.value = null
+}
+
+function handleDialogClick(event: MouseEvent) {
+  if (!artifactDialog.value) return
+  const rect = artifactDialog.value.getBoundingClientRect()
+  if (
+    event.clientX < rect.left ||
+    event.clientX > rect.right ||
+    event.clientY < rect.top ||
+    event.clientY > rect.bottom
+  ) {
+    closeArtifactPreview()
+  }
 }
 
 function preloadImageArtifacts(event: AgentEvent) {
@@ -1304,7 +1368,35 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="shell">
+  <main class="shell" :class="{ 'compact-active': isCompactMode }">
+    <!-- Custom overlay close button in compact mode -->
+    <button type="button" class="exit-compact-btn" @click="toggleCompactMode" title="退出微缩模式">
+      ✕
+    </button>
+
+    <!-- Header Titlebar -->
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="traffic-lights">
+        <div class="light close" title="关闭"></div>
+        <div class="light minimize" title="最小化"></div>
+        <div class="light zoom" title="缩放"></div>
+      </div>
+      <div class="window-title">Joi Desktop</div>
+      
+      <!-- Actions panel on right header -->
+      <div class="topbar-actions">
+        <!-- Speak replies -->
+        <div class="speak-replies-wrapper" :class="{ checked: runtimeDraft.tts_enabled }" @click="runtimeDraft.tts_enabled = !runtimeDraft.tts_enabled; markRuntimeDraftDirty(); applyRuntimeSettings()">
+          <div class="checkbox-custom"></div>
+          <span>Speak replies</span>
+        </div>
+        <!-- Compact Mode Switcher -->
+        <button class="compact-toggle-btn" @click="toggleCompactMode" title="切换到微缩挂件模式">
+          🗜️ 微缩模式
+        </button>
+      </div>
+    </header>
+
     <section class="workspace">
       <div class="topbar">
         <div>
@@ -1312,8 +1404,8 @@ onBeforeUnmount(() => {
           <span class="mode">{{ currentMode }}</span>
         </div>
         <div class="top-actions">
-          <button type="button" class="ghost-button" @click="developerMode = !developerMode">
-            {{ developerMode ? '隐藏调试' : '开发者' }}
+          <button type="button" class="ghost-button" @click="developerMode = !developerMode" v-if="activeCabin === 'workspace'">
+            {{ developerMode ? '隐藏审计' : '显示审计' }}
           </button>
           <span class="status" :class="{ online: connected }">{{ connectionLabel }}</span>
         </div>
@@ -1321,13 +1413,13 @@ onBeforeUnmount(() => {
 
       <p class="error" v-if="errorText">{{ errorText }}</p>
 
-      <section class="hero-panel" v-if="!taskRows.length && !chatRows.length">
+      <section class="hero-panel" v-if="activeCabin === 'workspace' && !taskRows.length">
         <p class="eyebrow">Joi Agent</p>
         <h1>把任务直接交给角色。</h1>
         <p>当前优先打通写码、陪看和游戏三条闭环。你说目标，Joi 会用任务卡展示执行结果，语音只播报自然短句。</p>
       </section>
 
-      <section class="task-section" v-if="taskRows.length">
+      <section class="task-section" v-if="activeCabin === 'workspace' && taskRows.length">
         <div class="section-title">
           <h2>任务</h2>
           <span>{{ taskRows.length }} 个</span>
@@ -1494,25 +1586,91 @@ onBeforeUnmount(() => {
         </article>
       </section>
 
-      <section class="chat-section" v-if="chatRows.length">
+      <section class="chat-section" v-if="activeCabin === 'chat'">
         <div class="section-title">
-          <h2>对话</h2>
-          <span>最近 {{ Math.min(chatRows.length, 8) }} 条</span>
+          <h2>对话舱</h2>
+          <span v-if="chatRows.length">最近 {{ Math.min(chatRows.length, 8) }} 条</span>
+          <span v-else>暂无记录</span>
         </div>
-        <div class="chat-list">
+        <div class="chat-scroll-area" v-if="chatRows.length">
           <div
             v-for="event in chatRows.slice(-8)"
             :key="`${event.task_id}-${event.created_at}`"
-            class="chat-row"
-            :class="{ user: event.type === 'user_message' }"
+            class="message-row"
+            :class="{ human: event.type === 'user_message', joi: event.type !== 'user_message' }"
           >
             <span class="chat-name">{{ event.type === 'user_message' ? '你' : 'Joi' }}</span>
-            <p>{{ event.display_card.summary }}</p>
+            <div class="message-bubble">{{ event.display_card.summary }}</div>
           </div>
         </div>
+        <div class="chat-placeholder" v-else>
+          <p>和 Joi 的交流舱已就绪</p>
+          <small>输入你的问题，或点击下方麦克风开始语音对话</small>
+        </div>
+        
+        <!-- Bottom Vocal Box & Keyboard Composer Input -->
+        <form class="chat-composer-area" @submit.prevent="submit">
+          <button
+            type="button"
+            class="composer-mic-btn"
+            :class="{ recording: voiceState === 'recording' }"
+            :disabled="!connected || !asrConfigured || voiceState === 'transcribing'"
+            @click="toggleVoiceInput"
+            title="语音说话"
+          >
+            <svg viewBox="0 0 24 24">
+              <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>
+            </svg>
+          </button>
+          <div class="composer-input-wrapper">
+            <input
+              v-model="input"
+              class="composer-text-input"
+              :disabled="!connected"
+              placeholder="给 Joi 发送指令或直接与她聊天..."
+            />
+            <button class="composer-send-btn" :disabled="!connected" title="发送消息">
+              <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+          </div>
+        </form>
       </section>
 
-      <section class="debug-section" v-if="developerMode">
+      <section class="debug-section" v-if="activeCabin === 'inspector'">
+        <!-- Closet Wardrobe -->
+        <div class="runtime-settings" style="margin-bottom: 20px;">
+          <div class="runtime-settings-head">
+            <strong>个性化装扮 (Cosplay Closet)</strong>
+            <span>点击进行穿戴</span>
+          </div>
+          <div class="closet-grid">
+            <button
+              type="button"
+              class="accessory-card"
+              :class="{ equipped: equippedAccessories.hat }"
+              @click="toggleAccessory('hat')"
+            >
+              🎓 巫师帽
+            </button>
+            <button
+              type="button"
+              class="accessory-card"
+              :class="{ equipped: equippedAccessories.glasses }"
+              @click="toggleAccessory('glasses')"
+            >
+              🕶️ 酷墨镜
+            </button>
+            <button
+              type="button"
+              class="accessory-card"
+              :class="{ equipped: equippedAccessories.ears }"
+              @click="toggleAccessory('ears')"
+            >
+              🐰 兔耳朵
+            </button>
+          </div>
+        </div>
+
         <div class="section-title">
           <h2>运行设置</h2>
           <span>{{ ready?.runtime?.read_only ? '只读' : '状态' }}</span>
@@ -1627,38 +1785,121 @@ onBeforeUnmount(() => {
         <strong>{{ activeTask?.latest.display_card.status || currentMode }}</strong>
       </div>
       <div class="scene-line"></div>
-      <div class="character">
+      
+      <!-- Mascot Container circles -->
+      <div class="character" @click="handleMascotClick" title="点击召唤微缩面板">
         <img
           v-if="characterImageSrc && failedImageSrc !== characterImageSrc"
           class="character-art"
           :src="characterImageSrc"
-          alt=""
+          alt="Joi Mascot Digital Companion"
           @load="failedImageSrc = ''"
           @error="failedImageSrc = characterImageSrc"
         />
         <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
+        
+        <!-- Customizable Cosplay Accessories overlays -->
+        <!-- 1. Wizard hat -->
+        <svg class="accessory-item wizard-hat" :style="{ display: equippedAccessories.hat ? 'block' : 'none' }" viewBox="0 0 140 100" fill="none">
+          <path d="M70 10 L40 65 L100 65 Z" fill="#4f46e5"/>
+          <ellipse cx="70" cy="70" rx="60" ry="12" fill="#312e81"/>
+          <path d="M48 50 Q70 45 92 50 L89 56 Q70 51 51 56 Z" fill="#facc15"/>
+          <polygon points="70,18 73,26 81,26 74,31 77,39 70,34 63,39 66,31 59,26 67,26" fill="#facc15"/>
+        </svg>
+        
+        <!-- 2. Pixel glasses -->
+        <svg class="accessory-item glasses" :style="{ display: equippedAccessories.glasses ? 'block' : 'none' }" viewBox="0 0 100 30" fill="none">
+          <rect x="10" y="5" width="30" height="20" rx="3" fill="#111827"/>
+          <rect x="60" y="5" width="30" height="20" rx="3" fill="#111827"/>
+          <rect x="40" y="12" width="20" height="6" fill="#111827"/>
+          <rect x="15" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
+          <rect x="65" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
+        </svg>
+        
+        <!-- 3. Cute bunny ears -->
+        <svg class="accessory-item bunny-ears" :style="{ display: equippedAccessories.ears ? 'block' : 'none' }" viewBox="0 0 130 80" fill="none">
+          <ellipse cx="40" cy="40" rx="14" ry="35" transform="rotate(-15 40 40)" fill="#fbcfe8"/>
+          <ellipse cx="38" cy="40" rx="8" ry="25" transform="rotate(-15 38 40)" fill="#f472b6"/>
+          <ellipse cx="90" cy="40" rx="14" ry="35" transform="rotate(15 90 40)" fill="#fbcfe8"/>
+          <ellipse cx="92" cy="40" rx="8" ry="25" transform="rotate(15 92 40)" fill="#f472b6"/>
+        </svg>
+
+        <div class="character-shadow"></div>
       </div>
+
+      <!-- Large Speech bubble (Hidden in compact mode) -->
       <div class="speech">
         <strong>{{ characterName }}</strong>
         <span>{{ latestSpeech }}</span>
       </div>
+
+      <!-- Voice Status Text -->
       <div class="voice-status" v-if="voiceStatusText">{{ voiceStatusText }}</div>
-      <form class="composer" @submit.prevent="submit">
-        <button
-          type="button"
-          class="mic-button"
-          :class="{ recording: voiceState === 'recording' }"
-          :disabled="!connected || !asrConfigured || voiceState === 'transcribing'"
-          @click="toggleVoiceInput"
-        >
-          {{ voiceButtonLabel }}
-        </button>
-        <input v-model="input" :disabled="!connected" placeholder="输入：帮我刷鸣潮日常 / 陪我看当前视频 / 修复项目 bug" />
-        <button :disabled="!connected">发送</button>
-      </form>
+
+      <!-- Floating Comic Speech Bubble (Only compact mode) -->
+      <div class="mini-speech-bubble" :class="{ active: miniSpeechActive && isCompactMode }">
+        {{ latestSpeech }}
+      </div>
+
+      <!-- Compact Mode Mini Control Dashboard -->
+      <div class="mini-control-dashboard" :class="{ active: isCompactMode && miniDashboardActive }">
+        <div class="mini-status-row">
+          <div class="mini-task-pulse">
+            <div class="mini-pulse-dot" :style="{ backgroundColor: connected ? 'var(--color-primary)' : 'var(--color-error)' }"></div>
+            <span>{{ connected ? 'Joi online' : 'Core offline' }}</span>
+          </div>
+          <span style="color:var(--color-pink); font-size:10px; font-weight:700;">ACTIVE</span>
+        </div>
+        <form class="mini-composer" @submit.prevent="submit">
+          <button
+            type="button"
+            class="mini-mic-btn"
+            :class="{ recording: voiceState === 'recording' }"
+            :disabled="!connected || !asrConfigured || voiceState === 'transcribing'"
+            @click="toggleVoiceInput"
+            title="语音说话"
+          >
+            🎤
+          </button>
+          <input
+            v-model="input"
+            type="text"
+            class="mini-input"
+            :disabled="!connected"
+            placeholder="给 Joi 下达指令..."
+          />
+        </form>
+        <div style="font-size: 10px; color:#9ca3af; text-align:center; font-weight:600; margin-top:2px;">
+          点击角色可展开/折叠此控制台
+        </div>
+      </div>
+
+      <!-- Bottom Capsule Dock (Navigation Bar) -->
+      <div class="floating-dock-container">
+        <nav class="floating-dock">
+          <button type="button" class="dock-btn" :class="{ active: activeCabin === 'chat' }" @click="activeCabin = 'chat'">
+            <svg viewBox="0 0 24 24">
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+            </svg>
+            <span>对话舱</span>
+          </button>
+          <button type="button" class="dock-btn" :class="{ active: activeCabin === 'workspace' }" @click="activeCabin = 'workspace'">
+            <svg viewBox="0 0 24 24">
+              <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
+            </svg>
+            <span>任务流</span>
+          </button>
+          <button type="button" class="dock-btn" :class="{ active: activeCabin === 'inspector' }" @click="activeCabin = 'inspector'">
+            <svg viewBox="0 0 24 24">
+              <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+            </svg>
+            <span>配置舱</span>
+          </button>
+        </nav>
+      </div>
     </aside>
 
-    <div class="artifact-modal" v-if="previewArtifact" @click.self="closeArtifactPreview">
+    <dialog ref="artifactDialog" class="artifact-modal" @click="handleDialogClick">
       <div class="artifact-modal-body">
         <button type="button" class="modal-close" @click="closeArtifactPreview">关闭</button>
         <div class="artifact-modal-image-frame">
@@ -1675,6 +1916,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
-    </div>
+    </dialog>
   </main>
 </template>

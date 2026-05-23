@@ -1,0 +1,1738 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Joi Companion - macOS Desktop Native Redesign</title>
+  <meta name="description" content="Joi Companion - Full Premium OpenHuman-Style macOS Native Redesign Preview. Elegant, minimal, interactive with Compact Mode and Accessories.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <style>
+    /* ========================================== */
+    /* Design System & Visual Tokens              */
+    /* ========================================== */
+    :root {
+      --mac-bg-gradient: radial-gradient(circle at 50% 50%, #f6f8fc 0%, #e9edf5 100%);
+      --glass-panel-bg: rgba(255, 255, 255, 0.72);
+      --glass-border: rgba(255, 255, 255, 0.8);
+      --glass-inner-border: rgba(0, 0, 0, 0.06);
+      --glass-shadow: 0 24px 64px rgba(25, 35, 55, 0.12), 0 4px 16px rgba(25, 35, 55, 0.04);
+      --font-sans: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      
+      --color-primary: #2563eb;
+      --color-primary-glow: rgba(37, 99, 235, 0.25);
+      --color-primary-hover: #1d4ed8;
+      
+      --color-joi-bubble: #f3f4f6;
+      --color-joi-text: #1f2937;
+      
+      --color-success: #10b981;
+      --color-success-bg: rgba(16, 185, 129, 0.1);
+      
+      --color-pink: #ff4d8d;
+      --color-pink-glow: rgba(255, 77, 141, 0.25);
+      
+      /* Animation Variable for proportional scale floating */
+      --float-height: -16px;
+    }
+
+    * {
+      box-sizing: border-box;
+      outline: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #0e1014;
+      font-family: var(--font-sans);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      transition: background 0.5s ease;
+    }
+
+    body.transparent-active {
+      background: transparent !important;
+    }
+
+    /* ========================================== */
+    /* macOS Premium App Window Container         */
+    /* ========================================== */
+    .app-window {
+      width: 1080px;
+      height: 780px;
+      background: var(--mac-bg-gradient);
+      border-radius: 18px;
+      box-shadow: 0 50px 100px rgba(0, 0, 0, 0.6), 0 0 1px rgba(255, 255, 255, 0.2);
+      border: 1px solid rgba(0, 0, 0, 0.15);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      font-size: 14px;
+      color: #374151;
+      transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* Native-feeling Titlebar */
+    .titlebar {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 10;
+      transition: all 0.3s ease;
+    }
+
+    .traffic-lights {
+      display: flex;
+      gap: 8px;
+    }
+
+    .light {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      position: relative;
+    }
+
+    .light.close { background-color: #ff5f56; border: 0.5px solid #e0443e; }
+    .light.minimize { background-color: #ffbd2e; border: 0.5px solid #dfa123; }
+    .light.zoom { background-color: #27c93f; border: 0.5px solid #1aab29; }
+
+    .window-title {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 13px;
+      font-weight: 600;
+      color: #6b7280;
+      letter-spacing: 0.3px;
+    }
+
+    .topbar-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    /* Speak replies toggler */
+    .speak-replies-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255, 255, 255, 0.6);
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      padding: 6px 14px;
+      border-radius: 20px;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .speak-replies-wrapper:hover {
+      background: rgba(255, 255, 255, 0.85);
+    }
+
+    .checkbox-custom {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+      border: 1px solid #d1d5db;
+      background: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    }
+
+    .checkbox-custom::after {
+      content: "";
+      width: 8px;
+      height: 5px;
+      border-left: 2px solid white;
+      border-bottom: 2px solid white;
+      transform: rotate(-45deg) translate(1px, -1px);
+      opacity: 0;
+      transition: all 0.1s ease;
+    }
+
+    .speak-replies-wrapper.checked .checkbox-custom {
+      background-color: var(--color-primary);
+      border-color: var(--color-primary);
+    }
+
+    .speak-replies-wrapper.checked .checkbox-custom::after {
+      opacity: 1;
+    }
+
+    .speak-replies-wrapper span {
+      font-size: 12px;
+      font-weight: 500;
+      color: #4b5563;
+    }
+
+    /* Compact mode button */
+    .compact-toggle-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 77, 141, 0.1);
+      border: 1px solid rgba(255, 77, 141, 0.2);
+      color: var(--color-pink);
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 6px rgba(255, 77, 141, 0.05);
+    }
+
+    .compact-toggle-btn:hover {
+      background: var(--color-pink);
+      color: #ffffff;
+      box-shadow: 0 4px 12px rgba(255, 77, 141, 0.25);
+    }
+
+    /* ========================================== */
+    /* Layout Framework                           */
+    /* ========================================== */
+    .main-container {
+      flex: 1;
+      margin-top: 48px;
+      display: grid;
+      grid-template-columns: 1fr 480px;
+      padding: 24px;
+      gap: 24px;
+      height: calc(100% - 48px);
+      position: relative;
+      transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* ========================================== */
+    /* Left stage: Mascot display space          */
+    /* ========================================== */
+    .companion-stage {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      height: 100%;
+      padding-bottom: 50px;
+      transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .character-container {
+      position: relative;
+      width: 320px;
+      height: 320px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 24px;
+      
+      /* Circular holographic frame mask - solves checkerboard issue beautifully! */
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(255, 255, 255, 0.95) 0%, rgba(243, 244, 246, 0.7) 100%);
+      border: 3px solid rgba(255, 255, 255, 0.9);
+      box-shadow: 0 16px 42px rgba(25, 35, 55, 0.08), inset 0 0 20px rgba(255, 77, 141, 0.05);
+      overflow: hidden;
+      padding: 20px;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      cursor: pointer;
+    }
+
+    .character-container:hover {
+      transform: scale(1.03);
+      border-color: var(--color-pink);
+      box-shadow: 0 20px 48px rgba(255, 77, 141, 0.12), inset 0 0 24px rgba(255, 77, 141, 0.08);
+    }
+
+    .joi-mascot {
+      width: 250px;
+      height: 250px;
+      object-fit: contain;
+      animation: floatBreath 5s ease-in-out infinite;
+      z-index: 2;
+    }
+
+    /* Accessory items overlays */
+    .accessory-item {
+      position: absolute;
+      z-index: 5;
+      display: none;
+      pointer-events: none;
+    }
+
+    /* Accessory Sizing and Positioning - 100% Percentage Relative (Solves scaling bug!) */
+    .accessory-item.wizard-hat {
+      width: 43.75%; /* 140px / 320px */
+      top: 4.68%;   /* 15px / 320px */
+      left: 50%;
+      transform: translateX(-52%);
+      animation: floatBreathHat 5s ease-in-out infinite;
+    }
+
+    .accessory-item.glasses {
+      width: 31.25%; /* 100px / 320px */
+      top: 37.5%;   /* 120px / 320px */
+      left: 50%;
+      transform: translateX(-50%);
+      animation: floatBreathGlasses 5s ease-in-out infinite;
+    }
+
+    .accessory-item.bunny-ears {
+      width: 40.625%; /* 130px / 320px */
+      top: 5.625%;   /* 18px / 320px */
+      left: 50%;
+      transform: translateX(-50%);
+      animation: floatBreathEars 5s ease-in-out infinite;
+    }
+
+    /* Animation frames mapping breath state with CSS Var float height */
+    @keyframes floatBreathHat {
+      0% { transform: translateX(-52%) translateY(0px); }
+      50% { transform: translateX(-52%) translateY(var(--float-height)); }
+      100% { transform: translateX(-52%) translateY(0px); }
+    }
+    @keyframes floatBreathGlasses {
+      0% { transform: translateX(-50%) translateY(0px); }
+      50% { transform: translateX(-50%) translateY(var(--float-height)); }
+      100% { transform: translateX(-50%) translateY(0px); }
+    }
+    @keyframes floatBreathEars {
+      0% { transform: translateX(-50%) translateY(0px); }
+      50% { transform: translateX(-50%) translateY(var(--float-height)); }
+      100% { transform: translateX(-50%) translateY(0px); }
+    }
+
+    /* Soft floating shadow below Joi */
+    .character-shadow {
+      position: absolute;
+      bottom: -15px;
+      width: 140px;
+      height: 12px;
+      background: radial-gradient(ellipse at center, rgba(31, 41, 55, 0.1) 0%, rgba(31, 41, 55, 0.0) 70%);
+      border-radius: 50%;
+      animation: shadowPulse 5s ease-in-out infinite;
+      z-index: 1;
+    }
+
+    @keyframes floatBreath {
+      0% { transform: translateY(0px) rotate(0deg); }
+      50% { transform: translateY(var(--float-height)) rotate(0.5deg); }
+      100% { transform: translateY(0px) rotate(0deg); }
+    }
+
+    @keyframes shadowPulse {
+      0% { transform: scale(1); opacity: 0.8; }
+      50% { transform: scale(0.75); opacity: 0.3; }
+      100% { transform: scale(1); opacity: 0.8; }
+    }
+
+    /* ========================================== */
+    /* Right column: Glassmorphic panel          */
+    /* ========================================== */
+    .interactive-panel {
+      background: var(--glass-panel-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 22px;
+      box-shadow: var(--glass-shadow);
+      backdrop-filter: blur(28px) saturate(110%);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      height: 100%;
+      position: relative;
+      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* Floating cabins wrappers */
+    .cabin-container {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+      height: 100%;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .cabin-container.active {
+      display: flex;
+      animation: cabinFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    @keyframes cabinFadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0px); }
+    }
+
+    /* ========================================== */
+    /* 1. CHAT CABIN                              */
+    /* ========================================== */
+    .chat-scroll-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      padding-bottom: 20px; /* Secure space for chat input box */
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      scrollbar-width: none;
+    }
+    
+    .chat-scroll-area::-webkit-scrollbar {
+      display: none;
+    }
+
+    .message-row {
+      display: flex;
+      flex-direction: column;
+      max-width: 85%;
+    }
+
+    .message-row.human {
+      align-self: flex-end;
+      align-items: flex-end;
+    }
+
+    .message-row.joi {
+      align-self: flex-start;
+      align-items: flex-start;
+    }
+
+    .message-bubble {
+      padding: 12px 18px;
+      border-radius: 18px;
+      font-size: 14.5px;
+      line-height: 1.5;
+      font-weight: 450;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+    }
+
+    .message-row.human .message-bubble {
+      background: var(--color-primary);
+      color: #ffffff;
+      border-bottom-right-radius: 4px;
+    }
+
+    .message-row.joi .message-bubble {
+      background: var(--color-joi-bubble);
+      color: var(--color-joi-text);
+      border: 1px solid rgba(0, 0, 0, 0.03);
+      border-bottom-left-radius: 4px;
+    }
+
+    /* Connections audit list */
+    .audit-logs {
+      align-self: flex-start;
+      margin: 4px 0 4px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      border-left: 2px solid #e5e7eb;
+      padding-left: 14px;
+    }
+
+    .audit-log-title {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #9ca3af;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status-pill {
+      font-size: 9.5px;
+      font-weight: 700;
+      color: var(--color-success);
+      background: var(--color-success-bg);
+      padding: 1px 6px;
+      border-radius: 99px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    .audit-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12.5px;
+      color: #4b5563;
+      font-weight: 500;
+    }
+
+    .audit-bullet {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--color-success);
+    }
+
+    /* Voice speaking state indicator */
+    .speaking-indicator {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: 24px;
+      margin-bottom: 8px;
+      opacity: 0.75;
+    }
+
+    .speaking-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: var(--color-pink);
+      animation: audioPulseDot 1s infinite alternate;
+    }
+    .speaking-dot:nth-child(2) { animation-delay: 0.2s; }
+    .speaking-dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes audioPulseDot {
+      from { transform: scale(0.8); opacity: 0.4; }
+      to { transform: scale(1.4); opacity: 1; }
+    }
+
+    /* ========================================== */
+    /* Integrated Text & Voice Composer          */
+    /* ========================================== */
+    .chat-composer-area {
+      border-top: 1px solid rgba(0, 0, 0, 0.05);
+      background: rgba(255, 255, 255, 0.5);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 80px;
+    }
+
+    .composer-mic-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: var(--color-primary);
+      border: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      position: relative;
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      flex-shrink: 0;
+    }
+
+    .composer-mic-btn:hover {
+      transform: scale(1.06);
+      background-color: var(--color-primary-hover);
+    }
+
+    .composer-mic-btn svg {
+      width: 20px;
+      height: 20px;
+      fill: #ffffff;
+    }
+
+    .composer-mic-btn.recording {
+      background-color: var(--color-pink) !important;
+      box-shadow: 0 4px 12px rgba(255, 77, 141, 0.3) !important;
+    }
+
+    .composer-mic-btn.recording::before {
+      content: "";
+      position: absolute;
+      border: 1px solid var(--color-pink);
+      left: -6px; right: -6px; top: -6px; bottom: -6px;
+      border-radius: 50%;
+      animation: voiceRipple 1.4s linear infinite;
+      opacity: 0;
+    }
+
+    .composer-input-wrapper {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .composer-text-input {
+      width: 100%;
+      height: 44px;
+      border-radius: 22px;
+      background: #ffffff;
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      padding: 0 48px 0 20px;
+      font-size: 14px;
+      font-weight: 500;
+      color: #1f2937;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.015);
+      transition: all 0.2s ease;
+    }
+
+    .composer-text-input:focus {
+      border-color: var(--color-primary);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12), 0 2px 8px rgba(0, 0, 0, 0.015);
+      background: #ffffff;
+    }
+
+    .composer-send-btn {
+      position: absolute;
+      right: 6px;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: transparent;
+      border: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: #9ca3af;
+      transition: all 0.2s ease;
+    }
+
+    .composer-send-btn:hover {
+      color: var(--color-primary);
+      background: rgba(37, 99, 235, 0.08);
+    }
+
+    .composer-send-btn svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+    }
+
+    /* ========================================== */
+    /* 2. TASK / CONNECTIONS CABIN --> 100% Safe  */
+    /* ========================================== */
+    .task-container {
+      padding: 24px;
+      overflow-y: auto;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      scrollbar-width: none;
+    }
+
+    .task-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .task-header h3 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .task-badge {
+      font-size: 12px;
+      font-weight: 600;
+      background: rgba(0, 0, 0, 0.05);
+      padding: 4px 10px;
+      border-radius: 12px;
+      color: #4b5563;
+    }
+
+    .mac-card {
+      background: #ffffff;
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.015);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .mac-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.03);
+    }
+
+    .card-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .card-title {
+      font-size: 14.5px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .card-desc {
+      font-size: 13.5px;
+      color: #4b5563;
+      margin: 0;
+      line-height: 1.45;
+    }
+
+    .card-time {
+      font-size: 11px;
+      color: #9ca3af;
+      font-weight: 500;
+      align-self: flex-start;
+    }
+
+    .task-progress-flow {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      border-top: 1px dashed rgba(0, 0, 0, 0.06);
+      padding-top: 12px;
+    }
+
+    .progress-step {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12.5px;
+      color: #4b5563;
+    }
+
+    .step-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 500;
+    }
+
+    .step-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--color-success);
+    }
+
+    .step-dot.active {
+      background: var(--color-primary);
+      box-shadow: 0 0 6px var(--color-primary);
+      animation: activeStepPulse 1.2s infinite alternate;
+    }
+
+    @keyframes activeStepPulse {
+      from { transform: scale(0.8); opacity: 0.5; }
+      to { transform: scale(1.3); opacity: 1; }
+    }
+
+    /* ========================================== */
+    /* 3. SYSTEM SETTINGS CABIN                          */
+    /* ========================================== */
+    .settings-container {
+      padding: 24px;
+      overflow-y: auto;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .settings-section-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #1f2937;
+      border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+      padding-bottom: 8px;
+      margin-bottom: 4px;
+    }
+
+    .setting-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .setting-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      max-width: 75%;
+    }
+
+    .setting-title {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .setting-desc {
+      font-size: 11.5px;
+      color: #6b7280;
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #e5e7eb;
+      transition: .3s cubic-bezier(0.16, 1, 0.3, 1);
+      border-radius: 34px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .3s cubic-bezier(0.16, 1, 0.3, 1);
+      border-radius: 50%;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    input:checked + .slider {
+      background-color: var(--color-primary);
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(20px);
+    }
+
+    .range-slider-wrapper {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      width: 100%;
+    }
+
+    .range-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      font-weight: 500;
+      color: #4b5563;
+    }
+
+    .range-input {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 4px;
+      border-radius: 2px;
+      background: #e5e7eb;
+      outline: none;
+    }
+
+    .range-input::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #ffffff;
+      border: 1px solid rgba(0, 0, 0, 0.15);
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+
+    .range-input::-webkit-slider-thumb:hover {
+      transform: scale(1.15);
+    }
+
+    /* Accessory Closet Selector */
+    .closet-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .accessory-card {
+      background: #ffffff;
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      border-radius: 10px;
+      padding: 8px;
+      text-align: center;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      color: #4b5563;
+      transition: all 0.2s;
+    }
+
+    .accessory-card:hover {
+      border-color: var(--color-pink);
+      color: var(--color-pink);
+      background: rgba(255, 77, 141, 0.02);
+    }
+
+    .accessory-card.equipped {
+      background: var(--color-pink);
+      color: #ffffff;
+      border-color: var(--color-pink);
+      box-shadow: 0 4px 12px rgba(255, 77, 141, 0.2);
+    }
+
+    /* ========================================== */
+    /* Floating Capsule Dock (Navigation)         */
+    /* ========================================== */
+    
+    /* MOVED INSIDE THE COMPANION STAGE HTML CONTAINER FOR 100% DOCK-OVERLAP PREVENTION */
+    .floating-dock-container {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100;
+      pointer-events: none;
+      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .floating-dock {
+      background: rgba(255, 255, 255, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      border-radius: 24px;
+      padding: 6px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      box-shadow: 0 16px 36px rgba(25, 35, 55, 0.08), 0 2px 8px rgba(25, 35, 55, 0.03), inset 0 0 12px rgba(255, 255, 255, 0.2);
+      backdrop-filter: blur(20px);
+      pointer-events: auto;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .floating-dock:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 20px 48px rgba(25, 35, 55, 0.12), inset 0 0 12px rgba(255, 255, 255, 0.4);
+    }
+
+    .dock-btn {
+      border: 0;
+      background: transparent;
+      padding: 8px 16px;
+      border-radius: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #6b7280;
+      font-size: 13.5px;
+      font-weight: 600;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .dock-btn svg {
+      width: 18px;
+      height: 18px;
+      fill: currentColor;
+      transition: transform 0.2s;
+    }
+
+    .dock-btn:hover {
+      color: #111827;
+      background: rgba(0, 0, 0, 0.035);
+    }
+
+    .dock-btn:hover svg {
+      transform: scale(1.08);
+    }
+
+    .dock-btn.active {
+      color: #111827;
+      background: #ffffff;
+      box-shadow: 0 3px 8px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.02);
+      border: 0.5px solid rgba(0, 0, 0, 0.03);
+    }
+
+    /* ========================================== */
+    /* COMPACT MODE / 微缩模式 (DESKTOP MASSIVE VIBE) */
+    /* ========================================== */
+    
+    /* 1. Floating Comic Comic Bubble next to Joi */
+    .mini-speech-bubble {
+      position: absolute;
+      left: 310px;
+      top: 60px;
+      width: 240px;
+      background: #ffffff;
+      border: 1px solid rgba(255, 77, 141, 0.25);
+      box-shadow: 0 12px 32px rgba(255, 77, 141, 0.12), 0 4px 12px rgba(0, 0, 0, 0.05);
+      border-radius: 16px;
+      padding: 12px 16px;
+      z-index: 50;
+      display: none; /* Only visible in compact mode when speaking */
+      opacity: 0;
+      transform: scale(0.9) translateY(10px);
+      transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+      color: #1f2937;
+      font-size: 13.5px;
+      line-height: 1.5;
+      font-weight: 500;
+    }
+
+    .mini-speech-bubble::before {
+      content: "";
+      position: absolute;
+      left: -8px;
+      top: 30px;
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+      border-right: 8px solid #ffffff;
+      z-index: 2;
+    }
+
+    .mini-speech-bubble::after {
+      content: "";
+      position: absolute;
+      left: -10px;
+      top: 29px;
+      border-top: 9px solid transparent;
+      border-bottom: 9px solid transparent;
+      border-right: 9px solid rgba(255, 77, 141, 0.25);
+      z-index: 1;
+    }
+
+    .mini-speech-bubble.active {
+      display: block;
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+
+    /* 2. Mini Popover control UI (微缩控制台) */
+    .mini-control-dashboard {
+      position: absolute;
+      left: 50%;
+      top: 340px;
+      transform: translateX(-50%) translateY(20px);
+      width: 320px;
+      background: rgba(255, 255, 255, 0.94);
+      border: 1px solid rgba(255, 77, 141, 0.2);
+      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.15);
+      border-radius: 20px;
+      backdrop-filter: blur(20px);
+      padding: 12px;
+      z-index: 40;
+      display: none;
+      opacity: 0;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .mini-control-dashboard.active {
+      display: flex;
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .mini-composer {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .mini-input {
+      flex: 1;
+      height: 36px;
+      border-radius: 18px;
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      padding: 0 12px;
+      font-size: 13px;
+      background: #ffffff;
+    }
+
+    .mini-mic-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--color-primary);
+      border: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: white;
+    }
+
+    .mini-mic-btn.recording {
+      background: var(--color-pink);
+      animation: miniMicPulse 1s infinite alternate;
+    }
+
+    @keyframes miniMicPulse {
+      from { box-shadow: 0 0 2px var(--color-pink); }
+      to { box-shadow: 0 0 12px var(--color-pink); }
+    }
+
+    .mini-status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11.5px;
+      color: #6b7280;
+      font-weight: 600;
+      padding: 0 4px;
+    }
+
+    .mini-task-pulse {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .mini-pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--color-primary);
+      box-shadow: 0 0 8px var(--color-primary);
+      animation: activeStepPulse 1s infinite alternate;
+    }
+
+    /* COMPACT MODE STATE MAPPINGS IN WINDOW CSS */
+    .app-window.compact-active {
+      width: 580px;
+      height: 480px;
+      background: transparent;
+      border-color: transparent;
+      box-shadow: none;
+      --float-height: -10px; /* Overrides floating translation distance proportionally inside compact window */
+    }
+
+    .app-window.compact-active .titlebar {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .app-window.compact-active .main-container {
+      grid-template-columns: 1fr;
+      margin-top: 0;
+      padding: 0;
+    }
+
+    .app-window.compact-active .interactive-panel {
+      display: none;
+    }
+
+    .app-window.compact-active .floating-dock-container {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(-50%) translateY(40px);
+    }
+
+    .app-window.compact-active .companion-stage {
+      padding-bottom: 0;
+    }
+
+    .app-window.compact-active .character-container {
+      width: 250px;
+      height: 250px;
+      transform: translateY(-20px);
+    }
+
+    .app-window.compact-active .joi-mascot {
+      width: 200px;
+      height: 200px;
+    }
+
+    /* Custom overlay exit indicator button inside compact Joi mode */
+    .exit-compact-btn {
+      position: absolute;
+      top: 15px;
+      right: 15px;
+      background: rgba(255, 255, 255, 0.9);
+      border: 1px solid rgba(0,0,0,0.06);
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+      z-index: 100;
+      transition: all 0.2s;
+    }
+
+    .exit-compact-btn:hover {
+      background: var(--color-pink);
+      color: white;
+      transform: scale(1.08);
+    }
+
+    .app-window.compact-active .exit-compact-btn {
+      display: flex;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- macOS Window Frame Simulation -->
+  <div class="app-window" id="appWindow">
+    
+    <!-- Custom overlay close button in compact mode -->
+    <button type="button" class="exit-compact-btn" id="exitCompactBtn" onclick="toggleCompactMode()" title="退出微缩模式">
+      ✕
+    </button>
+
+    <!-- Header Titlebar -->
+    <header class="titlebar" id="titlebar">
+      <div class="traffic-lights">
+        <div class="light close" title="关闭"></div>
+        <div class="light minimize" title="最小化"></div>
+        <div class="light zoom" title="缩放"></div>
+      </div>
+      <div class="window-title">Joi Desktop</div>
+      
+      <!-- Actions panel on right header -->
+      <div class="topbar-actions">
+        <!-- Speak replies -->
+        <div class="speak-replies-wrapper checked" id="speakToggler">
+          <div class="checkbox-custom"></div>
+          <span>Speak replies</span>
+        </div>
+        <!-- Compact Mode Switcher -->
+        <button class="compact-toggle-btn" onclick="toggleCompactMode()" title="切换到微缩挂件模式">
+          🗜️ 微缩模式
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Container -->
+    <main class="main-container">
+      
+      <!-- Left Stage: Animated Joi Space & Dock -->
+      <section class="companion-stage" id="companionStage">
+        
+        <!-- Companion Interactive Avatar Circle Box -->
+        <div class="character-container" onclick="handleMascotClick()" title="点击召唤微缩面板">
+          <img src="joi_mascot.png" class="joi-mascot" id="joiMascot" alt="Joi Mascot Digital Companion">
+          
+          <!-- Customizable Cosplay Accessories overlay -->
+          <!-- 1. Pixel glasses -->
+          <svg class="accessory-item glasses" id="accGlasses" viewBox="0 0 100 30" fill="none">
+            <rect x="10" y="5" width="30" height="20" rx="3" fill="#111827"/>
+            <rect x="60" y="5" width="30" height="20" rx="3" fill="#111827"/>
+            <rect x="40" y="12" width="20" height="6" fill="#111827"/>
+            <rect x="15" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
+            <rect x="65" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
+          </svg>
+          <!-- 2. Wizard hat -->
+          <svg class="accessory-item wizard-hat" id="accHat" viewBox="0 0 140 100" fill="none">
+            <path d="M70 10 L40 65 L100 65 Z" fill="#4f46e5"/>
+            <ellipse cx="70" cy="70" rx="60" ry="12" fill="#312e81"/>
+            <path d="M48 50 Q70 45 92 50 L89 56 Q70 51 51 56 Z" fill="#facc15"/>
+            <polygon points="70,18 73,26 81,26 74,31 77,39 70,34 63,39 66,31 59,26 67,26" fill="#facc15"/>
+          </svg>
+          <!-- 3. Cute bunny ears -->
+          <svg class="accessory-item bunny-ears" id="accEars" viewBox="0 0 130 80" fill="none">
+            <ellipse cx="40" cy="40" rx="14" ry="35" transform="rotate(-15 40 40)" fill="#fbcfe8"/>
+            <ellipse cx="38" cy="40" rx="8" ry="25" transform="rotate(-15 38 40)" fill="#f472b6"/>
+            <ellipse cx="90" cy="40" rx="14" ry="35" transform="rotate(15 90 40)" fill="#fbcfe8"/>
+            <ellipse cx="92" cy="40" rx="8" ry="25" transform="rotate(15 92 40)" fill="#f472b6"/>
+          </svg>
+
+          <div class="character-shadow"></div>
+        </div>
+
+        <!-- Floating speech bubble (Only compact mode) -->
+        <div class="mini-speech-bubble" id="miniSpeechBubble">
+          这里是 Zillow 的房源订阅。
+        </div>
+
+        <!-- Compact Mode Mini Control Dashboard -->
+        <div class="mini-control-dashboard" id="miniControlDashboard">
+          <div class="mini-status-row">
+            <div class="mini-task-pulse">
+              <div class="mini-pulse-dot"></div>
+              <span>Joi: 整理日程中...</span>
+            </div>
+            <span style="color:var(--color-pink); font-size:10px; font-weight:700;">ACTIVE</span>
+          </div>
+          <div class="mini-composer">
+            <button class="mini-mic-btn" id="miniMicBtn" onclick="toggleMiniMic()" title="语音说话">
+              🎤
+            </button>
+            <input type="text" class="mini-input" id="miniComposerInput" placeholder="给 Joi 下达指令..." onkeydown="handleMiniInputSubmit(event)">
+          </div>
+          <div style="font-size: 10px; color:#9ca3af; text-align:center; font-weight:600; margin-top:2px;">
+            点击角色可展开/折叠此控制台
+          </div>
+        </div>
+
+        <!-- Bottom Capsule Dock (Navigation Bar) - NESTED IN STAGE TO ELIMINATE OVERLAP BLOCKING COMPOSER INPUT -->
+        <div class="floating-dock-container" id="floatingDock">
+          <nav class="floating-dock">
+            <button type="button" class="dock-btn active" id="dockChat" onclick="switchCabin('chat')">
+              <svg viewBox="0 0 24 24">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+              </svg>
+              <span>对话舱</span>
+            </button>
+            <button type="button" class="dock-btn" id="dockTasks" onclick="switchCabin('task')">
+              <svg viewBox="0 0 24 24">
+                <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
+              </svg>
+              <span>任务流</span>
+            </button>
+            <button type="button" class="dock-btn" id="dockSettings" onclick="switchCabin('settings')">
+              <svg viewBox="0 0 24 24">
+                <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+              </svg>
+              <span>配置舱</span>
+            </button>
+          </nav>
+        </div>
+
+      </section>
+
+      <!-- Right Column: Interactive Tabbed Panel -->
+      <section class="interactive-panel" id="interactivePanel">
+        
+        <!-- 1. CHAT CABIN (Default Active) -->
+        <div class="cabin-container active" id="chatCabin">
+          
+          <!-- Chats list scroll block -->
+          <div class="chat-scroll-area" id="chatList">
+            
+            <div class="message-row human">
+              <div class="message-bubble">hey tiny. whats up?</div>
+            </div>
+            
+            <div class="message-row joi">
+              <div class="message-bubble">not much, just hanging out. what's on your mind?</div>
+            </div>
+            
+            <div class="message-row human">
+              <div class="message-bubble">Can you check my new emails for me?</div>
+            </div>
+            
+            <!-- Audit connections flows standard OpenHuman style -->
+            <div class="audit-logs">
+              <div class="audit-log-title">
+                Viewing Your Connections <span class="status-pill">success</span>
+              </div>
+              <div class="audit-item">
+                <div class="audit-bullet"></div>
+                Making requests to your Gmail account <span class="status-pill">success</span>
+              </div>
+              <div class="audit-item">
+                <div class="audit-bullet"></div>
+                Making requests to your Gmail account <span class="status-pill">success</span>
+              </div>
+            </div>
+
+            <div class="message-row joi">
+              <div class="message-bubble">here's what's fresh in your inbox today:</div>
+            </div>
+
+            <div class="message-row joi">
+              <div class="message-bubble">
+                • 3 uber receipts (totaling ~$49)<br>
+                • spotify premium order confirmation<br>
+                • zillow rental alert for sf 94117<br>
+                • slack warning about auto-deleting old messages in 30 days
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Interactive Speaking Indicator -->
+          <div class="speaking-indicator" id="speakingIndicator" style="display: none;">
+            <div class="speaking-dot"></div>
+            <div class="speaking-dot"></div>
+            <div class="speaking-dot"></div>
+            <span style="font-size: 11px; font-weight: 600; color: var(--color-pink); margin-left: 4px;">Joi is speaking...</span>
+          </div>
+
+          <!-- Bottom Vocal Box & Keyboard Composer Input -->
+          <div class="chat-composer-area">
+            <button class="composer-mic-btn" id="composerMicBtn" onclick="toggleComposerMic()" title="语音说话">
+              <!-- Mic SVG Icon -->
+              <svg viewBox="0 0 24 24">
+                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>
+              </svg>
+            </button>
+            <div class="composer-input-wrapper">
+              <input type="text" class="composer-text-input" id="composerTextInput" placeholder="给 Joi 发送指令或直接与她聊天..." onkeydown="handleTextInputSubmit(event)">
+              <button class="composer-send-btn" onclick="submitComposerText()" title="发送消息">
+                <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+              </button>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- 2. TASK / CONNECTIONS CABIN -->
+        <div class="cabin-container" id="taskCabin">
+          <div class="task-container">
+            <div class="task-header">
+              <h3>智能体运行流</h3>
+              <span class="task-badge">1个活跃任务</span>
+            </div>
+            
+            <div class="mac-card">
+              <div class="card-title-row">
+                <span class="card-title">Codex 自动化工程任务</span>
+                <span class="status-pill">执行中</span>
+              </div>
+              <p class="card-desc">正在扫描 workspace 目录并自动编写符合 accessibility-standards 的 Vue 对话卡片代码...</p>
+              <div class="task-progress-flow">
+                <div class="progress-step">
+                  <div class="step-label">
+                    <div class="step-dot"></div>
+                    读取 Joi-shell 项目源码结构
+                  </div>
+                  <span style="color:#10b981; font-weight:600;">完成</span>
+                </div>
+                <div class="progress-step">
+                  <div class="step-label">
+                    <div class="step-dot active"></div>
+                    微调 App.vue 主界面布局
+                  </div>
+                  <span style="color:#2563eb; font-weight:600; animation: pulseText 1s infinite alternate;">进行中</span>
+                </div>
+                <div class="progress-step">
+                  <div class="step-label">
+                    <div class="step-dot" style="background:#d1d5db;"></div>
+                    打包测试并进行 accessibility 自动化核验
+                  </div>
+                  <span style="color:#9ca3af;">等待</span>
+                </div>
+              </div>
+              <span class="card-time">启动于 3 分钟前</span>
+            </div>
+
+            <div class="mac-card" style="opacity: 0.75;">
+              <div class="card-title-row">
+                <span class="card-title">陪看模式：鸣潮攻略总结</span>
+                <span class="status-pill" style="background:#e5e7eb; color:#4b5563;">已完成</span>
+              </div>
+              <p class="card-desc">成功抓取并总结 Bilibili 游戏视频，完成了“声骸全收集路线”数据节点的提取并保存至内存中。</p>
+              <span class="card-time">完成于 今天 14:24</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. SYSTEM SETTINGS CABIN -->
+        <div class="cabin-container" id="settingsCabin">
+          <div class="settings-container">
+            
+            <div class="settings-section-title">个性化装扮 (Cosplay Closet)</div>
+            <div class="closet-grid">
+              <button class="accessory-card" id="closetHat" onclick="toggleAccessory('hat')">🎓 巫师帽</button>
+              <button class="accessory-card" id="closetGlasses" onclick="toggleAccessory('glasses')">🕶️ 酷墨镜</button>
+              <button class="accessory-card" id="closetEars" onclick="toggleAccessory('ears')">🐰 兔耳朵</button>
+            </div>
+
+            <div class="settings-section-title" style="margin-top: 12px;">对话 & 声音配置</div>
+            
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-title">ASR 语音输入监听</span>
+                <span class="setting-desc">开启高精度麦克风收音，支持连续对话模式</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" checked>
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-title">TTS 语音合成输出</span>
+                <span class="setting-desc">Joi 将通过高拟真神经网络克隆音色发声</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" checked id="ttsToggle">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="range-slider-wrapper">
+              <div class="range-labels">
+                <span>TTS 播放速度 (Speed Factor)</span>
+                <span id="speedValue">1.0x</span>
+              </div>
+              <input type="range" class="range-input" id="speedSlider" min="0.5" max="2.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="settings-section-title" style="margin-top: 12px;">模型与代理服务</div>
+            
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-title">大语言模型 (LLM)</span>
+                <span class="setting-desc">默认使用 DeepSeek-V3 高速思考通道</span>
+              </div>
+              <select style="border: 1px solid rgba(0,0,0,0.1); border-radius: 6px; padding: 4px 8px; background: #fff; font-weight:600; font-size:12.5px;">
+                <option>DeepSeek-V3 (高速)</option>
+                <option>Gemini-1.5-Pro (深度推理)</option>
+                <option>Claude-3.5-Sonnet</option>
+              </select>
+            </div>
+
+          </div>
+        </div>
+
+      </section>
+
+    </main>
+
+  </div>
+
+  <!-- Interactive Logic to simulate silky smooth app behaviour -->
+  <script>
+    // 1. Tab Switching Actions with visual animations
+    function switchCabin(cabinName) {
+      document.querySelectorAll('.dock-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.cabin-container').forEach(cab => cab.classList.remove('active'));
+      
+      if (cabinName === 'chat') {
+        document.getElementById('dockChat').classList.add('active');
+        document.getElementById('chatCabin').classList.add('active');
+      } else if (cabinName === 'task') {
+        document.getElementById('dockTasks').classList.add('active');
+        document.getElementById('taskCabin').classList.add('active');
+      } else if (cabinName === 'settings') {
+        document.getElementById('dockSettings').classList.add('active');
+        document.getElementById('settingsCabin').classList.add('active');
+      }
+    }
+
+    // 2. Speak Replies Checkbox Toggle
+    const speakToggler = document.getElementById('speakToggler');
+    speakToggler.addEventListener('click', () => {
+      speakToggler.classList.toggle('checked');
+    });
+
+    // 3. Text & Voice Composer Integrations
+    const composerTextInput = document.getElementById('composerTextInput');
+    const chatList = document.getElementById('chatList');
+    const speakingIndicator = document.getElementById('speakingIndicator');
+    const composerMicBtn = document.getElementById('composerMicBtn');
+    
+    let isRecording = false;
+
+    // A. Voice mic toggle inside large composer
+    function toggleComposerMic() {
+      if (isCompactMode) return;
+      
+      if (!isRecording) {
+        isRecording = true;
+        composerMicBtn.classList.add('recording');
+        composerTextInput.value = "";
+        composerTextInput.placeholder = "Listening... Speak now to Joi";
+      } else {
+        isRecording = false;
+        composerMicBtn.classList.remove('recording');
+        composerTextInput.placeholder = "给 Joi 发送指令或直接与她聊天...";
+        simulateUserSpeech("Where is the rental alert located?");
+      }
+    }
+
+    // B. Text input submission handler
+    function handleTextInputSubmit(event) {
+      if (event.key === 'Enter') {
+        submitComposerText();
+      }
+    }
+
+    // C. Submit Composer message
+    function submitComposerText() {
+      const text = composerTextInput.value.trim();
+      if (!text) return;
+      
+      composerTextInput.value = "";
+      appendMessage(text, "human");
+      
+      // Simulate Joi typing and responding
+      setTimeout(() => {
+        speakingIndicator.style.display = "flex";
+        chatList.scrollTop = chatList.scrollHeight;
+      }, 1000);
+
+      setTimeout(() => {
+        speakingIndicator.style.display = "none";
+        appendMessage("我已经帮您识别了该地址：旧金山 Haight-Ashbury 街区 94117 邮编。当前平均房租为 $3,200/月，已为您记录在备选清单中。需要我现在帮您规划去看房的路线吗？", "joi");
+      }, 3500);
+    }
+
+    function simulateUserSpeech(spokenText) {
+      appendMessage(spokenText, "human");
+      setTimeout(() => {
+        speakingIndicator.style.display = "flex";
+        chatList.scrollTop = chatList.scrollHeight;
+      }, 1000);
+
+      setTimeout(() => {
+        speakingIndicator.style.display = "none";
+        appendMessage("It's a Zillow rental alert for SF 94117 (San Francisco's Haight-Ashbury area). Shall I open the map details or retrieve pricing trends for this area?", "joi");
+      }, 3500);
+    }
+
+    function appendMessage(text, sender) {
+      const msgRow = document.createElement('div');
+      msgRow.className = `message-row ${sender}`;
+      msgRow.innerHTML = `<div class="message-bubble">${text}</div>`;
+      chatList.appendChild(msgRow);
+      chatList.scrollTop = chatList.scrollHeight;
+    }
+
+    // 4. Settings Slider Interactions
+    const speedSlider = document.getElementById('speedSlider');
+    const speedValue = document.getElementById('speedValue');
+    speedSlider.addEventListener('input', (e) => {
+      speedValue.textContent = e.target.value + 'x';
+    });
+
+    // ========================================== */
+    /* COMPACT MODE / 微缩模式 INTERACTIVE LOGIC   */
+    /* ========================================== */
+    let isCompactMode = false;
+    const appWindow = document.getElementById('appWindow');
+    const miniSpeechBubble = document.getElementById('miniSpeechBubble');
+    const miniControlDashboard = document.getElementById('miniControlDashboard');
+    const miniComposerInput = document.getElementById('miniComposerInput');
+    const miniMicBtn = document.getElementById('miniMicBtn');
+
+    function toggleCompactMode() {
+      isCompactMode = !isCompactMode;
+      
+      if (isCompactMode) {
+        appWindow.classList.add('compact-active');
+        document.body.classList.add('transparent-active');
+        miniSpeechBubble.classList.remove('active');
+        miniControlDashboard.classList.remove('active');
+      } else {
+        appWindow.classList.remove('compact-active');
+        document.body.classList.remove('transparent-active');
+        miniSpeechBubble.classList.remove('active');
+        miniControlDashboard.classList.remove('active');
+      }
+    }
+
+    // Mascot click inside compact mode toggles mini dashboard
+    function handleMascotClick() {
+      if (!isCompactMode) return;
+      miniControlDashboard.classList.toggle('active');
+    }
+
+    // A. Mini Microphone Trigger
+    let isMiniRecording = false;
+    function toggleMiniMic() {
+      if (!isMiniRecording) {
+        isMiniRecording = true;
+        miniMicBtn.classList.add('recording');
+        miniComposerInput.placeholder = "正在收音...";
+      } else {
+        isMiniRecording = false;
+        miniMicBtn.classList.remove('recording');
+        miniComposerInput.placeholder = "给 Joi 下达指令...";
+        simulateMiniResponse("打开今天的新邮件详情");
+      }
+    }
+
+    // B. Mini Text input handler
+    function handleMiniInputSubmit(event) {
+      if (event.key === 'Enter') {
+        const text = miniComposerInput.value.trim();
+        if (!text) return;
+        miniComposerInput.value = "";
+        simulateMiniResponse(text);
+      }
+    }
+
+    // C. Simulate Float speech bubble next to Joi
+    function simulateMiniResponse(userCommand) {
+      miniControlDashboard.classList.remove('active');
+      
+      // Simulate Joi speaking in mini speech bubble
+      setTimeout(() => {
+        miniSpeechBubble.textContent = "好的，收到指令：'" + userCommand + "'。正在帮您处理并加载邮件舱...";
+        miniSpeechBubble.classList.add('active');
+      }, 800);
+
+      setTimeout(() => {
+        miniSpeechBubble.textContent = "已为您提取出 3 封未读邮件：包含 Uber 收据 49 刀以及 Spotify 续费确认。";
+      }, 4200);
+
+      // Hide after complete
+      setTimeout(() => {
+        miniSpeechBubble.classList.remove('active');
+      }, 9500);
+    }
+
+    // ========================================== */
+    /* CUSTOM ACCESSORY CLOSET SYSTEM            */
+    /* ========================================== */
+    const equippedAccessories = {
+      hat: false,
+      glasses: false,
+      ears: false
+    };
+
+    function toggleAccessory(accName) {
+      equippedAccessories[accName] = !equippedAccessories[accName];
+      
+      // Update Mascot SVG visibility
+      const elementId = {
+        hat: 'accHat',
+        glasses: 'accGlasses',
+        ears: 'accEars'
+      }[accName];
+      
+      const closetId = {
+        hat: 'closetHat',
+        glasses: 'closetGlasses',
+        ears: 'closetEars'
+      }[accName];
+
+      const accElement = document.getElementById(elementId);
+      const closetElement = document.getElementById(closetId);
+
+      if (equippedAccessories[accName]) {
+        accElement.style.display = 'block';
+        closetElement.classList.add('equipped');
+      } else {
+        accElement.style.display = 'none';
+        closetElement.classList.remove('equipped');
+      }
+    }
+  </script>
+</body>
+</html>

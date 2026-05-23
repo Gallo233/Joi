@@ -15,7 +15,9 @@
         "title": "Joi",
         "width": 1120,
         "height": 760,
-        "resizable": true
+        "resizable": true,
+        "transparent": true,
+        "decorations": false
       }
     ]
   }
