@@ -8,7 +8,8 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-$ShellExe = Join-Path $ProjectRoot "agent_companion\shell\src-tauri\target\debug\joi-shell.exe"
+$ReleaseShellExe = Join-Path $ProjectRoot "agent_companion\shell\src-tauri\target\release\joi-shell.exe"
+$DebugShellExe = Join-Path $ProjectRoot "agent_companion\shell\src-tauri\target\debug\joi-shell.exe"
 $ShellDir = Join-Path $ProjectRoot "agent_companion\shell"
 $LogDir = Join-Path $ProjectRoot "logs"
 $NodeBin = "D:\codex游戏\toolchains\node"
@@ -105,8 +106,8 @@ if (-not (Test-LocalPort -PortToCheck $Port)) {
   }
 }
 
-if (Test-Path $ShellExe) {
-  Start-Process -FilePath $ShellExe -WorkingDirectory (Split-Path -Parent $ShellExe)
+if (Test-Path $ReleaseShellExe) {
+  Start-Process -FilePath $ReleaseShellExe -WorkingDirectory (Split-Path -Parent $ReleaseShellExe)
   exit 0
 }
 
@@ -114,6 +115,11 @@ if (Test-Path $Npm) {
   $env:Path = "$NodeBin;$CargoBin;$env:Path"
   Start-Process -FilePath $Npm -ArgumentList @("run", "tauri", "dev") -WorkingDirectory $ShellDir
   exit 0
+}
+
+if (Test-Path $DebugShellExe) {
+  Write-Host "Found a debug shell, but no npm was available to launch its dev server."
+  Write-Host "Build the release shell first so the desktop shortcut does not depend on 127.0.0.1:5173."
 }
 
 Write-Host "Missing built shell and npm. Build the shell first or install the Windows toolchain."

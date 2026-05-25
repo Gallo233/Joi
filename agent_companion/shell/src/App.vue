@@ -22,30 +22,166 @@ const isCompactMode = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
 const miniSpeechActive = ref(false)
 const miniDashboardActive = ref(false)
+let miniSpeechTimer: number | null = null
 
 async function toggleCompactMode() {
-  isCompactMode.value = !isCompactMode.value
+  const nextCompactMode = !isCompactMode.value
+  isCompactMode.value = nextCompactMode
+  clearMiniSpeechTimer()
+  miniSpeechActive.value = false
+  miniDashboardActive.value = false
+  document.body.classList.toggle('transparent-active', nextCompactMode)
+  await applyWindowShellMode(nextCompactMode)
+}
+
+async function applyWindowShellMode(compact: boolean) {
   try {
     const appWindow = getCurrentWindow()
-    if (isCompactMode.value) {
-      document.body.classList.add('transparent-active')
-      await appWindow.setSize(new LogicalSize(580, 480))
+    if (compact) {
+      await safeWindowCall(() => appWindow.setShadow(false))
+      await safeWindowCall(() => appWindow.setAlwaysOnTop(true))
+      await safeWindowCall(() => appWindow.setSkipTaskbar(true))
+      await safeWindowCall(() => appWindow.setResizable(false))
+      await safeWindowCall(() => appWindow.setSize(compactWindowSize()))
+      return
+    }
+    await safeWindowCall(() => appWindow.setSize(new LogicalSize(1080, 780)))
+    await safeWindowCall(() => appWindow.setResizable(true))
+    await safeWindowCall(() => appWindow.setSkipTaskbar(false))
+    await safeWindowCall(() => appWindow.setAlwaysOnTop(false))
+    await safeWindowCall(() => appWindow.setShadow(true))
+  } catch (e) {
+    // Browser preview fallback.
+  }
+}
+
+function compactWindowSize() {
+  if (miniDashboardActive.value && miniSpeechActive.value) return new LogicalSize(380, 520)
+  if (miniDashboardActive.value || miniSpeechActive.value) return new LogicalSize(360, 430)
+  return new LogicalSize(300, 340)
+}
+
+async function syncCompactWindowSize() {
+  if (!isCompactMode.value) return
+  await safeWindowCall(() => getCurrentWindow().setSize(compactWindowSize()))
+}
+
+async function safeWindowCall(action: () => Promise<void>) {
+  try {
+    await action()
+  } catch (e) {
+    // Some window APIs are unavailable in browser preview or unsupported platforms.
+  }
+}
+
+async function closeWindow() {
+  try {
+    await getCurrentWindow().close()
+  } catch (e) {
+    // Browser preview fallback: the button is decorative when no Tauri shell is present.
+  }
+}
+
+async function minimizeWindow() {
+  try {
+    await getCurrentWindow().minimize()
+  } catch (e) {
+    // Browser preview fallback.
+  }
+}
+
+async function toggleMaximizeWindow() {
+  try {
+    const appWindow = getCurrentWindow()
+    if (await appWindow.isMaximized()) {
+      await appWindow.unmaximize()
     } else {
-      document.body.classList.remove('transparent-active')
-      await appWindow.setSize(new LogicalSize(1080, 780))
+      await appWindow.maximize()
     }
   } catch (e) {
-    // Standard web fallback
+    // Browser preview fallback.
   }
+}
+
+async function startWindowDrag(event: MouseEvent) {
+  if (event.button !== 0) return
+  const target = event.target as HTMLElement | null
+  if (target?.closest('button, input, select, textarea, a, [role="button"], .topbar-actions, .traffic-lights')) return
+  try {
+    await getCurrentWindow().startDragging()
+  } catch (e) {
+    // Browser preview fallback.
+  }
+}
+
+function startMascotDrag(event: MouseEvent) {
+  if (!isCompactMode.value || event.button !== 0) return
+  if (event.detail >= 2) {
+    event.preventDefault()
+    event.stopPropagation()
+    clearMascotClickTimer()
+    void toggleCompactMode()
+    return
+  }
+  stopMascotDragWatch()
+  mascotDragMoved = false
+  mascotDragStart = { x: event.screenX, y: event.screenY }
+  window.addEventListener('mousemove', maybeStartMascotDrag)
+  window.addEventListener('mouseup', stopMascotDragWatch, { once: true })
+}
+
+async function maybeStartMascotDrag(event: MouseEvent) {
+  if (!mascotDragStart) return
+  const distance = Math.hypot(event.screenX - mascotDragStart.x, event.screenY - mascotDragStart.y)
+  if (distance < 6) return
+  event.preventDefault()
+  mascotDragMoved = true
+  stopMascotDragWatch()
+  try {
+    await getCurrentWindow().startDragging()
+  } catch (e) {
+    // Browser preview fallback.
+  }
+}
+
+function stopMascotDragWatch() {
+  mascotDragStart = null
+  window.removeEventListener('mousemove', maybeStartMascotDrag)
+}
+
+function handleMascotClick(event: MouseEvent) {
+  if (!isCompactMode.value) return
+  if (event.detail >= 2) {
+    clearMascotClickTimer()
+    void toggleCompactMode()
+    return
+  }
+  if (mascotDragMoved) {
+    mascotDragMoved = false
+    return
+  }
+  clearMascotClickTimer()
+  mascotClickTimer = window.setTimeout(() => {
+    mascotClickTimer = null
+    if (!isCompactMode.value) return
+    miniDashboardActive.value = !miniDashboardActive.value
+    void syncCompactWindowSize()
+  }, 220)
+}
+
+function handleMascotDoubleClick() {
+  clearMascotClickTimer()
+  if (isCompactMode.value) void toggleCompactMode()
+}
+
+function clearMascotClickTimer() {
+  if (mascotClickTimer === null) return
+  window.clearTimeout(mascotClickTimer)
+  mascotClickTimer = null
 }
 
 function toggleAccessory(acc: 'hat' | 'glasses' | 'ears') {
   equippedAccessories.value[acc] = !equippedAccessories.value[acc]
-}
-
-function handleMascotClick() {
-  if (!isCompactMode.value) return
-  miniDashboardActive.value = !miniDashboardActive.value
 }
 
 watch(previewArtifact, (newVal) => {
@@ -76,6 +212,10 @@ let currentAudio: HTMLAudioElement | null = null
 let voiceEpoch = 0
 const taskVoiceEpochs = new Map<string, number>()
 const voiceEventEpochs = new Map<string, number>()
+const playedVoiceAudioKeys = new Set<string>()
+let mascotDragStart: { x: number; y: number } | null = null
+let mascotDragMoved = false
+let mascotClickTimer: number | null = null
 
 const client = new CoreClient({
   url: 'ws://127.0.0.1:8765',
@@ -152,13 +292,25 @@ const latestSpeech = computed(() => {
 })
 
 watch(latestSpeech, (newVal) => {
-  if (newVal) {
-    miniSpeechActive.value = true
-    setTimeout(() => {
-      miniSpeechActive.value = false
-    }, 8000)
-  }
+  if (newVal) showMiniSpeech()
 })
+
+function showMiniSpeech() {
+  clearMiniSpeechTimer()
+  miniSpeechActive.value = true
+  void syncCompactWindowSize()
+  miniSpeechTimer = window.setTimeout(() => {
+    miniSpeechTimer = null
+    miniSpeechActive.value = false
+    void syncCompactWindowSize()
+  }, 8000)
+}
+
+function clearMiniSpeechTimer() {
+  if (miniSpeechTimer === null) return
+  window.clearTimeout(miniSpeechTimer)
+  miniSpeechTimer = null
+}
 
 const activeSpriteId = computed(() => {
   const latest = [...events.value]
@@ -940,9 +1092,19 @@ function playVoiceAudio(payload: VoiceAudioPayload) {
   if (payload.voice_audio_error) {
     lastTtsError.value = ttsErrorLabel(payload.voice_audio_error)
   }
-  const eventEpoch = voiceEventEpochs.get(voiceAudioKey(payload))
+  const audioKey = voiceAudioKey(payload)
+  const eventEpoch = voiceEventEpochs.get(audioKey)
   if (!shouldPlayVoiceAudio(eventEpoch, voiceEpoch)) return
+  if (playedVoiceAudioKeys.has(audioKey)) return
+  rememberPlayedVoiceAudioKey(audioKey)
   void playAudioPath(payload.voice_audio_path, payload.voice_audio_data_url)
+}
+
+function rememberPlayedVoiceAudioKey(key: string) {
+  playedVoiceAudioKeys.add(key)
+  if (playedVoiceAudioKeys.size <= 80) return
+  const oldest = playedVoiceAudioKeys.values().next().value
+  if (oldest) playedVoiceAudioKeys.delete(oldest)
 }
 
 function rememberVoiceEventEpoch(event: AgentEvent) {
@@ -1357,6 +1519,10 @@ onMounted(() => {
   }, 5000)
 })
 onBeforeUnmount(() => {
+  document.body.classList.remove('transparent-active')
+  stopMascotDragWatch()
+  clearMascotClickTimer()
+  clearMiniSpeechTimer()
   if (clockTimer !== null) {
     window.clearInterval(clockTimer)
     clockTimer = null
@@ -1368,18 +1534,20 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="shell" :class="{ 'compact-active': isCompactMode }">
-    <!-- Custom overlay close button in compact mode -->
-    <button type="button" class="exit-compact-btn" @click="toggleCompactMode" title="退出微缩模式">
-      ✕
-    </button>
-
+  <main
+    class="shell"
+    :class="{
+      'compact-active': isCompactMode,
+      'mini-dashboard-active': isCompactMode && miniDashboardActive,
+      'mini-speech-active': isCompactMode && miniSpeechActive,
+    }"
+  >
     <!-- Header Titlebar -->
-    <header class="titlebar" data-tauri-drag-region>
+    <header class="titlebar" @mousedown="startWindowDrag">
       <div class="traffic-lights">
-        <div class="light close" title="关闭"></div>
-        <div class="light minimize" title="最小化"></div>
-        <div class="light zoom" title="缩放"></div>
+        <button type="button" class="light close" title="关闭" aria-label="关闭窗口" @mousedown.stop @click.stop="closeWindow"></button>
+        <button type="button" class="light minimize" title="最小化" aria-label="最小化窗口" @mousedown.stop @click.stop="minimizeWindow"></button>
+        <button type="button" class="light zoom" title="缩放" aria-label="缩放窗口" @mousedown.stop @click.stop="toggleMaximizeWindow"></button>
       </div>
       <div class="window-title">Joi Desktop</div>
       
@@ -1397,7 +1565,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <section class="workspace">
+    <section class="workspace" :class="`cabin-${activeCabin}`">
       <div class="topbar">
         <div>
           <span class="brand">Joi</span>
@@ -1787,43 +1955,47 @@ onBeforeUnmount(() => {
       <div class="scene-line"></div>
       
       <!-- Mascot Container circles -->
-      <div class="character" @click="handleMascotClick" title="点击召唤微缩面板">
-        <img
-          v-if="characterImageSrc && failedImageSrc !== characterImageSrc"
-          class="character-art"
-          :src="characterImageSrc"
-          alt="Joi Mascot Digital Companion"
-          @load="failedImageSrc = ''"
-          @error="failedImageSrc = characterImageSrc"
-        />
-        <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
-        
-        <!-- Customizable Cosplay Accessories overlays -->
-        <!-- 1. Wizard hat -->
-        <svg class="accessory-item wizard-hat" :style="{ display: equippedAccessories.hat ? 'block' : 'none' }" viewBox="0 0 140 100" fill="none">
-          <path d="M70 10 L40 65 L100 65 Z" fill="#4f46e5"/>
-          <ellipse cx="70" cy="70" rx="60" ry="12" fill="#312e81"/>
-          <path d="M48 50 Q70 45 92 50 L89 56 Q70 51 51 56 Z" fill="#facc15"/>
-          <polygon points="70,18 73,26 81,26 74,31 77,39 70,34 63,39 66,31 59,26 67,26" fill="#facc15"/>
-        </svg>
-        
-        <!-- 2. Pixel glasses -->
-        <svg class="accessory-item glasses" :style="{ display: equippedAccessories.glasses ? 'block' : 'none' }" viewBox="0 0 100 30" fill="none">
-          <rect x="10" y="5" width="30" height="20" rx="3" fill="#111827"/>
-          <rect x="60" y="5" width="30" height="20" rx="3" fill="#111827"/>
-          <rect x="40" y="12" width="20" height="6" fill="#111827"/>
-          <rect x="15" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
-          <rect x="65" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
-        </svg>
-        
-        <!-- 3. Cute bunny ears -->
-        <svg class="accessory-item bunny-ears" :style="{ display: equippedAccessories.ears ? 'block' : 'none' }" viewBox="0 0 130 80" fill="none">
-          <ellipse cx="40" cy="40" rx="14" ry="35" transform="rotate(-15 40 40)" fill="#fbcfe8"/>
-          <ellipse cx="38" cy="40" rx="8" ry="25" transform="rotate(-15 38 40)" fill="#f472b6"/>
-          <ellipse cx="90" cy="40" rx="14" ry="35" transform="rotate(15 90 40)" fill="#fbcfe8"/>
-          <ellipse cx="92" cy="40" rx="8" ry="25" transform="rotate(15 92 40)" fill="#f472b6"/>
-        </svg>
-
+      <div
+        class="character"
+        :title="isCompactMode ? '拖拽移动，单击输入，双击恢复主界面' : 'Joi Companion'"
+        @mousedown="startMascotDrag"
+        @click.stop="handleMascotClick"
+        @dblclick.stop.prevent="handleMascotDoubleClick"
+      >
+        <div class="character-fit">
+          <img
+            v-if="characterImageSrc && failedImageSrc !== characterImageSrc"
+            class="character-art"
+            :src="characterImageSrc"
+            alt="Joi Mascot Digital Companion"
+            @load="failedImageSrc = ''"
+            @error="failedImageSrc = characterImageSrc"
+          />
+          <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
+          
+          <!-- Customizable Cosplay Accessories overlays -->
+          <svg class="accessory-item wizard-hat" :style="{ display: equippedAccessories.hat ? 'block' : 'none' }" viewBox="0 0 140 100" fill="none">
+            <path d="M70 10 L40 65 L100 65 Z" fill="#4f46e5"/>
+            <ellipse cx="70" cy="70" rx="60" ry="12" fill="#312e81"/>
+            <path d="M48 50 Q70 45 92 50 L89 56 Q70 51 51 56 Z" fill="#facc15"/>
+            <polygon points="70,18 73,26 81,26 74,31 77,39 70,34 63,39 66,31 59,26 67,26" fill="#facc15"/>
+          </svg>
+          
+          <svg class="accessory-item glasses" :style="{ display: equippedAccessories.glasses ? 'block' : 'none' }" viewBox="0 0 100 30" fill="none">
+            <rect x="10" y="5" width="30" height="20" rx="3" fill="#111827"/>
+            <rect x="60" y="5" width="30" height="20" rx="3" fill="#111827"/>
+            <rect x="40" y="12" width="20" height="6" fill="#111827"/>
+            <rect x="15" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
+            <rect x="65" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
+          </svg>
+          
+          <svg class="accessory-item bunny-ears" :style="{ display: equippedAccessories.ears ? 'block' : 'none' }" viewBox="0 0 130 80" fill="none">
+            <ellipse cx="40" cy="40" rx="14" ry="35" transform="rotate(-15 40 40)" fill="#fbcfe8"/>
+            <ellipse cx="38" cy="40" rx="8" ry="25" transform="rotate(-15 38 40)" fill="#f472b6"/>
+            <ellipse cx="90" cy="40" rx="14" ry="35" transform="rotate(15 90 40)" fill="#fbcfe8"/>
+            <ellipse cx="92" cy="40" rx="8" ry="25" transform="rotate(15 92 40)" fill="#f472b6"/>
+          </svg>
+        </div>
         <div class="character-shadow"></div>
       </div>
 
@@ -1848,7 +2020,7 @@ onBeforeUnmount(() => {
             <div class="mini-pulse-dot" :style="{ backgroundColor: connected ? 'var(--color-primary)' : 'var(--color-error)' }"></div>
             <span>{{ connected ? 'Joi online' : 'Core offline' }}</span>
           </div>
-          <span style="color:var(--color-pink); font-size:10px; font-weight:700;">ACTIVE</span>
+          <button type="button" class="mini-restore-btn" title="恢复主界面" @click="toggleCompactMode">还原</button>
         </div>
         <form class="mini-composer" @submit.prevent="submit">
           <button

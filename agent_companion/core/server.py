@@ -182,7 +182,6 @@ class JsonRpcBridge:
         data_url = self._voice_audio_data_url(audio.get("voice_audio_path", ""))
         if data_url:
             payload["voice_audio_data_url"] = data_url
-        self._play_voice_audio_locally(audio.get("voice_audio_path", ""))
         message = json.dumps({"jsonrpc": "2.0", "method": "agent.voice_audio", "params": payload}, ensure_ascii=False)
         await self._broadcast(message)
 
