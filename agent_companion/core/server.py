@@ -121,6 +121,10 @@ class JsonRpcBridge:
                 result = await asyncio.to_thread(self.watch_loop_configure_command, params)
                 await websocket.send(self._result(request_id, result))
                 return
+            if method == "watch.loop.refresh":
+                result = await asyncio.to_thread(self.watch_loop_refresh_command, params)
+                await websocket.send(self._result(request_id, result))
+                return
             if method == "watch.loop.status":
                 await websocket.send(self._result(request_id, self.watch_loop_status_command()))
                 return
@@ -269,13 +273,21 @@ class JsonRpcBridge:
             "transcribe": True,
             "proactive_enabled": current.proactive_enabled,
             "commentary_interval_seconds": current.commentary_interval_seconds or 30.0,
-            "vision_interval_ticks": current.vision_interval_ticks or 5,
+            "vision_interval_ticks": current.vision_interval_ticks,
         }
         if isinstance(params, dict):
             merged.update(params)
         snapshot = self.watch_loop.configure(self._watch_loop_options_from_params(merged))
         if not snapshot.proactive_enabled:
             self.watch_commentary.reset()
+        return {"ok": True, "watch_loop": snapshot.to_agent_state()}
+
+    def watch_loop_refresh_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        current = self.watch_loop.snapshot()
+        if not current.active:
+            return {"ok": False, "error": "watch_loop_inactive", "watch_loop": current.to_agent_state()}
+        force_visual = _safe_bool(params.get("force_visual_summary"), False) if isinstance(params, dict) else False
+        snapshot = self.watch_loop.refresh(force_visual_summary=force_visual)
         return {"ok": True, "watch_loop": snapshot.to_agent_state()}
 
     def watch_loop_status_command(self) -> dict[str, Any]:
@@ -321,6 +333,7 @@ class JsonRpcBridge:
     def _watch_loop_options_from_params(self, params: dict[str, Any]) -> WatchLoopOptions:
         query = str(params.get("query") or "陪我看当前视频").strip()
         sample_interval_ms = _safe_int(params.get("sample_interval_ms"))
+        vision_interval_ticks = _safe_int(params.get("vision_interval_ticks"))
         return WatchLoopOptions(
             query=query or "陪我看当前视频",
             interval_seconds=_safe_float(params.get("interval_seconds"), 6.0),
@@ -330,7 +343,7 @@ class JsonRpcBridge:
             transcribe=bool(params.get("transcribe", True)),
             proactive_enabled=_safe_bool(params.get("proactive_enabled"), True),
             commentary_interval_seconds=_safe_float(params.get("commentary_interval_seconds"), 30.0),
-            vision_interval_ticks=_safe_int(params.get("vision_interval_ticks")) or 5,
+            vision_interval_ticks=vision_interval_ticks if vision_interval_ticks is not None else 5,
         )
 
     def _watch_loop_tick(self, options: WatchLoopOptions) -> WatchLoopTick:

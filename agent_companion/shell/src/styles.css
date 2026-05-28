@@ -434,7 +434,10 @@ textarea {
 
 .watch-session-strip {
   display: grid;
-  grid-template-columns: minmax(170px, auto) minmax(0, 1fr) minmax(270px, auto) auto;
+  grid-template-columns: minmax(170px, auto) minmax(0, 1fr) auto;
+  grid-template-areas:
+    "main text action"
+    "controls controls controls";
   align-items: center;
   gap: 14px;
   padding: 12px 14px;
@@ -450,6 +453,7 @@ textarea {
 }
 
 .watch-session-main {
+  grid-area: main;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -488,6 +492,7 @@ textarea {
 }
 
 .watch-session-strip p {
+  grid-area: text;
   margin: 0;
   min-width: 0;
   overflow: hidden;
@@ -499,9 +504,11 @@ textarea {
 }
 
 .watch-session-controls {
+  grid-area: controls;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
 }
@@ -542,6 +549,27 @@ textarea {
   color: #94a3b8;
   font-size: 11px;
   font-weight: 700;
+}
+
+.watch-inline-button {
+  height: 28px;
+  border: 1px solid rgba(37, 99, 235, 0.16);
+  border-radius: 7px;
+  background: rgba(37, 99, 235, 0.08);
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.watch-inline-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.watch-session-stop {
+  grid-area: action;
 }
 
 /* ========================================== */

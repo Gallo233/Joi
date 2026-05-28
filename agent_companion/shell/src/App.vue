@@ -25,6 +25,7 @@ const miniDashboardActive = ref(false)
 const watchTranscriptSource = ref<'system_audio' | 'ocr_subtitle' | 'auto'>('system_audio')
 const watchProactiveEnabled = ref(true)
 const watchCommentaryInterval = ref(30)
+const watchVisionInterval = ref(5)
 let miniSpeechTimer: number | null = null
 
 async function toggleCompactMode() {
@@ -331,6 +332,8 @@ const watchLoopMeta = computed(() => {
   const windowSeconds = Number(status.transcript_window_seconds || 0)
   if (windowSeconds) pieces.push(`最近 ${Math.max(1, Math.round(windowSeconds / 60))} 分钟`)
   pieces.push(status.proactive_enabled === false ? '主动发言关闭' : '主动发言开启')
+  const visionInterval = Number(status.vision_interval_ticks ?? watchVisionInterval.value)
+  pieces.push(visionInterval <= 0 ? '视觉手动' : `视觉每 ${visionInterval} 轮`)
   if (status.transcript_source) {
     const configured = String(status.transcript_source)
     const active = String(status.active_transcript_source || configured)
@@ -356,6 +359,8 @@ watch(watchLoopStatus, (status) => {
   if (source === 'system_audio' || source === 'ocr_subtitle' || source === 'auto') watchTranscriptSource.value = source
   if (typeof status.proactive_enabled === 'boolean') watchProactiveEnabled.value = status.proactive_enabled
   if (status.commentary_interval_seconds) watchCommentaryInterval.value = Number(status.commentary_interval_seconds)
+  const visionInterval = Number(status.vision_interval_ticks)
+  if (Number.isFinite(visionInterval)) watchVisionInterval.value = Math.max(0, visionInterval)
 })
 
 const latestSpeech = computed(() => {
@@ -1247,6 +1252,7 @@ function startWatchLoop() {
     transcript_source: watchTranscriptSource.value,
     proactive_enabled: watchProactiveEnabled.value,
     commentary_interval_seconds: watchCommentaryInterval.value,
+    vision_interval_ticks: watchVisionInterval.value,
   }).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '实时陪看启动失败'
   })
@@ -1258,8 +1264,17 @@ function configureWatchLoop() {
     transcript_source: watchTranscriptSource.value,
     proactive_enabled: watchProactiveEnabled.value,
     commentary_interval_seconds: watchCommentaryInterval.value,
+    vision_interval_ticks: watchVisionInterval.value,
   }).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '实时陪看设置失败'
+  })
+}
+
+function refreshWatchVision() {
+  if (!watchLoopActive.value) return
+  errorText.value = ''
+  void client.watchLoopRefresh({ force_visual_summary: true }).catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '画面理解失败'
   })
 }
 
@@ -1871,9 +1886,21 @@ onBeforeUnmount(() => {
               <option :value="60">60s</option>
             </select>
           </label>
+          <label>
+            <span>视觉</span>
+            <select v-model.number="watchVisionInterval" @change="configureWatchLoop">
+              <option :value="0">手动</option>
+              <option :value="3">3轮</option>
+              <option :value="5">5轮</option>
+              <option :value="10">10轮</option>
+            </select>
+          </label>
+          <button type="button" class="watch-inline-button" :disabled="!watchLoopActive" title="立即理解当前画面" @click="refreshWatchVision">
+            立即理解
+          </button>
           <small v-if="watchLoopSourceHealth.length">{{ watchLoopSourceHealth.join(' / ') }}</small>
         </div>
-        <button type="button" class="ghost-button" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()">
+        <button type="button" class="ghost-button watch-session-stop" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()">
           {{ watchLoopActive ? '停止' : '重新开始' }}
         </button>
       </section>

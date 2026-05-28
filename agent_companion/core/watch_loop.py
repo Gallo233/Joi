@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import threading
 import time
 import uuid
@@ -180,6 +180,17 @@ class WatchLoopController:
         self._emit_event("实时陪看设置已更新。", status="info")
         return self.snapshot()
 
+    def refresh(self, *, force_visual_summary: bool = False) -> WatchLoopSnapshot:
+        with self._lock:
+            active = self._snapshot.active
+            session_id = self._snapshot.session_id
+            options = self._options
+        if not active or not session_id:
+            return self.snapshot()
+        override_options = replace(options, vision_interval_ticks=1) if force_visual_summary else None
+        self._tick_once(session_id, override_options=override_options)
+        return self.snapshot()
+
     def snapshot(self) -> WatchLoopSnapshot:
         with self._lock:
             snap = self._snapshot
@@ -223,11 +234,11 @@ class WatchLoopController:
                 return
             self._tick_once(session_id)
 
-    def _tick_once(self, session_id: str) -> None:
+    def _tick_once(self, session_id: str, *, override_options: WatchLoopOptions | None = None) -> None:
         if not self._is_current(session_id):
             return
         with self._lock:
-            options = self._options
+            options = override_options or self._options
         try:
             tick = self._tick(options)
         except Exception as exc:

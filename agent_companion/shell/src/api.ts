@@ -92,6 +92,14 @@ export class CoreClient {
     return this.send('watch.loop.configure', params)
   }
 
+  watchLoopRefresh(params: Record<string, unknown> = {}) {
+    return this.send(
+      'watch.loop.refresh',
+      params,
+      { timeoutMs: 60000, timeoutMessage: '画面理解耗时较久，我先停下，你可以再点一次。' },
+    )
+  }
+
   watchLoopStatus() {
     return this.send('watch.loop.status', {})
   }

@@ -2556,10 +2556,17 @@ asr:
         assert_true("active_transcript_source" in loop_config, "watch loop should distinguish configured and active transcript sources")
         loop_status = watch_loop_bridge.watch_loop_status_command()["watch_loop"]
         assert_true(loop_status["active"] is True and loop_status["transcript_status"], "watch loop status RPC should expose current state")
+        manual_visual = watch_loop_bridge.watch_loop_refresh_command({"force_visual_summary": True})["watch_loop"]
+        assert_true(manual_visual["iterations"] > loop_status["iterations"], "watch loop manual refresh should run an immediate sample")
+        assert_true(len(watch_loop_summarizer.sequence_calls) >= 2 and manual_visual["visual_status"] == "ok", "watch loop manual refresh should force a visual summary")
+        loop_manual_config = watch_loop_bridge.watch_loop_configure_command({"vision_interval_ticks": 0})["watch_loop"]
+        assert_true(loop_manual_config["vision_interval_ticks"] == 0, "watch loop should preserve manual-only visual summary mode")
         loop_recall = WatchRecallTool(workspace, watch_loop_bridge.app.watch_session.recent_with_transcript).run(ToolRequest("watch.recall", {"query": "刚才视频在讲什么"}))
         assert_true("这一条是小猫发的" in loop_recall.display_card.summary and "连续画面显示一只猫" in loop_recall.display_card.summary, "watch loop context should combine transcript and low-frequency vision summary")
         loop_stop = watch_loop_bridge.watch_loop_stop_command()["watch_loop"]
         assert_true(loop_stop["active"] is False, "watch loop stop should deactivate the session")
+        inactive_refresh = watch_loop_bridge.watch_loop_refresh_command({"force_visual_summary": True})
+        assert_true(inactive_refresh["ok"] is False and inactive_refresh["error"] == "watch_loop_inactive", "watch loop refresh should reject inactive sessions")
     finally:
         watch_loop_bridge.watch_loop.stop(emit=False)
 
@@ -3065,7 +3072,7 @@ llm:
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
-    assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source and "watch.loop.configure" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
+    assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source and "watch.loop.configure" in shell_api_source and "watch.loop.refresh" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
     assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
     assert_true("event_created_at" in voice_runtime_source, "voice runtime key should include event identity")
@@ -3273,8 +3280,9 @@ llm:
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
-    assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop_configure_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
+    assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop_configure_command" in server_source and "watch_loop_refresh_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
     assert_true("_watch_loop_should_summarize" in server_source and "skip_summary=not run_vision_summary" in server_source, "Core watch loop should run low-frequency visual summaries")
+    assert_true("force_visual_summary" in server_source and '"watch.loop.refresh"' in server_source, "Core watch loop should expose forced visual refresh")
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
@@ -3297,6 +3305,7 @@ llm:
     assert_true("rolling_transcript" in shell_source and "transcript_window_seconds" in shell_source and "active_transcript_source" in shell_source and "last_visual_summary" in shell_source, "Shell should display rolling transcript and visual state")
     assert_true("shouldSuppressProactiveVoice" in shell_source and "watch_commentary" in shell_source, "Shell should suppress proactive watch voice while the user is typing")
     assert_true("watchTranscriptSource" in shell_source and "configureWatchLoop" in shell_source and "watchProactiveEnabled" in shell_source, "Shell should expose realtime watch controls")
+    assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 
