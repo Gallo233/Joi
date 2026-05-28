@@ -21,7 +21,7 @@ class WatchRecallTool(ToolAdapter):
         question = str(request.arguments.get("query") or "").strip()
         frames = self._recent_frames(3)
         answer, status = self._answerer.answer(question, frames)
-        artifacts = [frame.artifact for frame in frames[:1] if frame.artifact]
+        artifacts = [frame.artifact for frame in frames if frame.artifact][:1]
         body_lines = [f"问题：{question or '追问'}", f"回答：{answer}"]
         if frames:
             body_lines.append("最近视觉上下文：")

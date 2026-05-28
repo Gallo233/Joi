@@ -570,7 +570,7 @@ class AgentCompanionApp:
         self.tools.register(
             WatchRecallTool(
                 self.workspace,
-                self.watch_session.recent,
+                self.watch_session.recent_with_transcript,
                 WatchAnswerer(self.workspace, self.character.name, self.character.persona),
             )
         )

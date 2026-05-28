@@ -159,6 +159,10 @@ export interface WatchLoopStatus {
   updated_at?: number
   last_summary?: string
   last_transcript?: string[]
+  rolling_summary?: string
+  rolling_transcript?: string[]
+  transcript_window_seconds?: number
+  source_health?: Record<string, unknown>
   last_error?: string
 }
 

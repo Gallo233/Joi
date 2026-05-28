@@ -323,12 +323,17 @@ class JsonRpcBridge:
         error = str(transcript.get("error") or "")
         if not result.ok and not error:
             error = str(state.get("error") or "watch_loop_failed")
+        rolling = self.app.watch_session.transcript_state()
         return WatchLoopTick(
             ok=result.ok,
             summary=result.display_card.summary,
             transcript_text=transcript_text,
             transcript_source=str(transcript.get("source") or options.transcript_source),
             transcript_status=str(transcript.get("status") or ""),
+            rolling_summary=str(rolling.get("summary") or ""),
+            rolling_transcript=[str(text) for text in rolling.get("recent_text", []) if str(text).strip()],
+            transcript_window_seconds=_safe_int(rolling.get("window_seconds")) or 0,
+            source_health=rolling.get("source_health") if isinstance(rolling.get("source_health"), dict) else {},
             error=error,
         )
 

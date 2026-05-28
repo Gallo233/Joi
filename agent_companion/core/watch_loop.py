@@ -26,6 +26,10 @@ class WatchLoopTick:
     transcript_text: list[str] = field(default_factory=list)
     transcript_source: str = ""
     transcript_status: str = ""
+    rolling_summary: str = ""
+    rolling_transcript: list[str] = field(default_factory=list)
+    transcript_window_seconds: int = 0
+    source_health: dict = field(default_factory=dict)
     error: str = ""
 
 
@@ -43,6 +47,10 @@ class WatchLoopSnapshot:
     updated_at: float = 0.0
     last_summary: str = ""
     last_transcript: list[str] = field(default_factory=list)
+    rolling_summary: str = ""
+    rolling_transcript: list[str] = field(default_factory=list)
+    transcript_window_seconds: int = 0
+    source_health: dict = field(default_factory=dict)
     last_error: str = ""
 
     def to_agent_state(self) -> dict:
@@ -59,6 +67,10 @@ class WatchLoopSnapshot:
             "updated_at": self.updated_at,
             "last_summary": self.last_summary[:300],
             "last_transcript": list(self.last_transcript[:8]),
+            "rolling_summary": self.rolling_summary[:500],
+            "rolling_transcript": list(self.rolling_transcript[:12]),
+            "transcript_window_seconds": int(self.transcript_window_seconds or 0),
+            "source_health": self.source_health,
             "last_error": self.last_error,
         }
 
@@ -136,6 +148,10 @@ class WatchLoopController:
                 updated_at=snap.updated_at,
                 last_summary=snap.last_summary,
                 last_transcript=list(snap.last_transcript),
+                rolling_summary=snap.rolling_summary,
+                rolling_transcript=list(snap.rolling_transcript),
+                transcript_window_seconds=snap.transcript_window_seconds,
+                source_health=dict(snap.source_health),
                 last_error=snap.last_error,
             )
 
@@ -166,6 +182,10 @@ class WatchLoopController:
             self._snapshot.updated_at = time.time()
             self._snapshot.last_summary = tick.summary
             self._snapshot.last_transcript = list(tick.transcript_text[:8])
+            self._snapshot.rolling_summary = tick.rolling_summary
+            self._snapshot.rolling_transcript = list(tick.rolling_transcript[:12])
+            self._snapshot.transcript_window_seconds = tick.transcript_window_seconds
+            self._snapshot.source_health = dict(tick.source_health)
             self._snapshot.transcript_source = tick.transcript_source or self._options.transcript_source
             self._snapshot.transcript_status = tick.transcript_status
             self._snapshot.last_error = tick.error
@@ -185,6 +205,8 @@ class WatchLoopController:
             body_lines.append(f"转写源：{snapshot.transcript_source}")
         if snapshot.last_transcript:
             body_lines.append("最近转写：" + " / ".join(snapshot.last_transcript[:4]))
+        if snapshot.rolling_summary:
+            body_lines.append(f"滚动摘要：{snapshot.rolling_summary}")
         if snapshot.last_error:
             body_lines.append(f"状态码：{snapshot.last_error}")
         self._emit(

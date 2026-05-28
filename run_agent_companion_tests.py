@@ -45,7 +45,7 @@ from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionS
 from agent_companion.core.vision.targeting import resolve_target_candidates
 from agent_companion.core.vision.visual_detector import UnavailableVisualDetector, VisualCandidate, VisualDetectionResult
 from agent_companion.core.voice import safe_voice_line, sprite_for_emotion, strip_emotion_token
-from agent_companion.core.watch import WatchFrame
+from agent_companion.core.watch import WatchFrame, WatchSession
 from agent_companion.core.watch_transcript import TranscriptResult, TranscriptSegment
 from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, run_eval as run_visual_detector_eval, run_local_semantic_calibration
 
@@ -2455,6 +2455,37 @@ asr:
     assert_true(live_video_backend.observe_calls == 4, "current video questions should refresh with four sampled frames")
     assert_true(live_video_frames and live_video_frames[0].sequence_size == 4, "current video refresh should store dense temporal context")
 
+    rolling_session = WatchSession(limit=2, transcript_limit=8, transcript_window_seconds=300)
+    for index, text in enumerate(
+        [
+            "第一段说小猫正在靠近实验道具。",
+            "第二段说小猫开始观察主人的动作。",
+            "第三段说小猫做出了反应。",
+            "第四段说实验结束，小猫很喜欢。",
+        ],
+        start=1,
+    ):
+        rolling_session.add(
+            WatchFrame(
+                user_question="陪我看这个视频",
+                summary=f"连续采样第 {index} 帧",
+                title="Bilibili Video",
+                artifact=f"data/agent_companion/vision/rolling-{index}.png",
+                model_status="skipped",
+                transcript_text=[text],
+                transcript_source="system_audio",
+                transcript_status="success",
+            )
+        )
+    rolling_state = rolling_session.transcript_state()
+    assert_true(len(rolling_session.recent(5)) == 2, "visual watch frames should stay bounded")
+    assert_true(rolling_state["segment_count"] == 4 and "第一段" in " ".join(rolling_state["recent_text"]), "rolling transcript memory should outlive the short frame buffer")
+    rolling_context = rolling_session.recent_with_transcript(3)
+    assert_true(rolling_context[0].model_status == "transcript_memory", "watch recall should receive a synthetic rolling transcript context frame")
+    rolling_recall = WatchRecallTool(workspace, rolling_session.recent_with_transcript).run(ToolRequest("watch.recall", {"query": "刚才视频在讲什么"}))
+    assert_true("第一段" in rolling_recall.display_card.summary and "第四段" in rolling_recall.display_card.body, "watch recall should answer from rolling transcript memory")
+    assert_true(rolling_recall.display_card.artifacts == ["data/agent_companion/vision/rolling-4.png"], "rolling transcript recall should still keep the latest visual artifact")
+
     watch_loop_bridge = JsonRpcBridge(workspace)
     watch_loop_bridge.app.tools.register(
         ScreenObserveTool(
@@ -2476,6 +2507,7 @@ asr:
         assert_true(loop_state["active"] is True and loop_state["iterations"] >= 1, "watch loop start should capture immediately")
         assert_true(watch_loop_bridge.app.watch_session.has_context(), "watch loop should refresh watch session context")
         assert_true("这一条是小猫发的" in " ".join(loop_state["last_transcript"]), "watch loop should expose latest transcript snippets")
+        assert_true("这一条是小猫发的" in " ".join(loop_state["rolling_transcript"]) and loop_state["rolling_summary"], "watch loop should expose rolling transcript memory")
         loop_events = watch_loop_bridge.app.bus.drain()
         assert_true(any(event.agent_state.get("tool") == "watch.loop" for event in loop_events), "watch loop should emit status events without task cards")
         loop_status = watch_loop_bridge.watch_loop_status_command()["watch_loop"]
@@ -3198,6 +3230,8 @@ llm:
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
     assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
+    watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
+    assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
     assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
@@ -3210,6 +3244,7 @@ llm:
     assert_true("preventNativeAssetDrag" in shell_source and "@dragstart.capture.prevent" in shell_source, "Compact mascot should block native asset dragging")
     assert_true("miniBubbleHasActions" in shell_source and "mini-approval-actions" in shell_source and "requestMiniChange" in shell_source, "Compact speech bubble should expose approval and change actions")
     assert_true("watchLoopStatus" in shell_source and "watch-session-strip" in shell_source and "stopWatchLoop" in shell_source, "Shell should show and control realtime watch loop state")
+    assert_true("rolling_transcript" in shell_source and "transcript_window_seconds" in shell_source, "Shell should display rolling transcript state")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 

@@ -313,7 +313,11 @@ const latestWatchLoopStatus = computed<WatchLoopStatus | undefined>(() => {
 const watchLoopStatus = computed<WatchLoopStatus>(() => latestWatchLoopStatus.value || ready.value?.watch_loop || {})
 const watchLoopActive = computed(() => Boolean(watchLoopStatus.value.active))
 const watchLoopTranscript = computed(() => {
-  const rows = Array.isArray(watchLoopStatus.value.last_transcript) ? watchLoopStatus.value.last_transcript : []
+  const rows = Array.isArray(watchLoopStatus.value.rolling_transcript) && watchLoopStatus.value.rolling_transcript.length
+    ? watchLoopStatus.value.rolling_transcript
+    : Array.isArray(watchLoopStatus.value.last_transcript)
+      ? watchLoopStatus.value.last_transcript
+      : []
   return rows.filter(Boolean).slice(0, 3).join(' / ')
 })
 const watchLoopMeta = computed(() => {
@@ -321,6 +325,8 @@ const watchLoopMeta = computed(() => {
   const pieces: string[] = []
   const iterations = Number(status.iterations || 0)
   if (iterations) pieces.push(`${iterations} 次采样`)
+  const windowSeconds = Number(status.transcript_window_seconds || 0)
+  if (windowSeconds) pieces.push(`最近 ${Math.max(1, Math.round(windowSeconds / 60))} 分钟`)
   if (status.transcript_source) pieces.push(String(status.transcript_source))
   if (status.transcript_status) pieces.push(String(status.transcript_status))
   return pieces.join(' · ') || '等待采样'
@@ -1771,7 +1777,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <p v-if="watchLoopTranscript">{{ watchLoopTranscript }}</p>
-        <p v-else>{{ watchLoopStatus.last_summary || '后台会持续捕获当前视频画面、字幕和系统音频转写上下文。' }}</p>
+        <p v-else>{{ watchLoopStatus.rolling_summary || watchLoopStatus.last_summary || '后台会持续捕获当前视频画面、字幕和系统音频转写上下文。' }}</p>
         <button type="button" class="ghost-button" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()">
           {{ watchLoopActive ? '停止' : '重新开始' }}
         </button>
