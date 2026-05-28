@@ -172,7 +172,7 @@ class ModelRouter:
                 model=self._llm.vision_model or self._llm.model,
                 api_key=self._llm.vision_api_key or self._llm.api_key,
             )
-        if use == "expression" and self._llm.is_expression_configured:
+        if use in {"expression", "voice_style"} and self._llm.is_expression_configured:
             return ModelEndpoint(
                 base_url=self._llm.expression_base_url or self._llm.base_url,
                 model=self._llm.expression_model or self._llm.model,

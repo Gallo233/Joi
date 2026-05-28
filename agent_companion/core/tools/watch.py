@@ -28,10 +28,16 @@ class WatchRecallTool(ToolAdapter):
             for index, frame in enumerate(frames, start=1):
                 title = frame.title or "未知窗口"
                 body_lines.append(f"{index}. {title} - {frame.summary}")
+                if frame.sequence_summary:
+                    body_lines.append(f"   连续画面：{frame.sequence_summary}")
+                if frame.sequence_size > 1:
+                    body_lines.append(f"   采样：第 {frame.frame_index}/{frame.sequence_size} 帧")
                 if frame.ocr_text:
                     body_lines.append(f"   可见文字：{' / '.join(frame.ocr_text[:6])}")
                 elif frame.ocr_summary:
                     body_lines.append(f"   OCR：{frame.ocr_summary}")
+                if frame.transcript_text:
+                    body_lines.append(f"   实时转写：{' / '.join(frame.transcript_text[:6])}")
                 if frame.ocr_regions:
                     labels = [str(region.get("label_name") or region.get("label") or "区域") for region in frame.ocr_regions[:4] if isinstance(region, dict)]
                     if labels:

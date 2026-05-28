@@ -5,7 +5,7 @@ import time
 from ctypes import wintypes
 
 
-COMPANION_WINDOW_TITLES = {"joi", "shinsekai mvp", "agent companion"}
+COMPANION_WINDOW_TITLES = {"joi", "joi desktop", "shinsekai mvp", "agent companion"}
 
 
 def foreground_window() -> int:

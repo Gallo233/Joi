@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
 import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
@@ -56,7 +56,9 @@ async function applyWindowShellMode(compact: boolean) {
 }
 
 function compactWindowSize() {
+  if (miniDashboardActive.value && miniSpeechActive.value && miniBubbleHasActions.value) return new LogicalSize(390, 540)
   if (miniDashboardActive.value && miniSpeechActive.value) return new LogicalSize(380, 520)
+  if (miniSpeechActive.value && miniBubbleHasActions.value) return new LogicalSize(360, 460)
   if (miniDashboardActive.value || miniSpeechActive.value) return new LogicalSize(360, 430)
   return new LogicalSize(300, 340)
 }
@@ -116,9 +118,10 @@ async function startWindowDrag(event: MouseEvent) {
 
 function startMascotDrag(event: MouseEvent) {
   if (!isCompactMode.value || event.button !== 0) return
+  if ((event.target as HTMLElement | null)?.closest('.mini-speech-bubble, .mini-control-dashboard')) return
+  event.preventDefault()
+  event.stopPropagation()
   if (event.detail >= 2) {
-    event.preventDefault()
-    event.stopPropagation()
     clearMascotClickTimer()
     void toggleCompactMode()
     return
@@ -135,6 +138,7 @@ async function maybeStartMascotDrag(event: MouseEvent) {
   const distance = Math.hypot(event.screenX - mascotDragStart.x, event.screenY - mascotDragStart.y)
   if (distance < 6) return
   event.preventDefault()
+  event.stopPropagation()
   mascotDragMoved = true
   stopMascotDragWatch()
   try {
@@ -178,6 +182,20 @@ function clearMascotClickTimer() {
   if (mascotClickTimer === null) return
   window.clearTimeout(mascotClickTimer)
   mascotClickTimer = null
+}
+
+function preventNativeAssetDrag(event: DragEvent) {
+  if ((event.target as HTMLElement | null)?.closest('.character, .stage')) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+}
+
+function preventCompactSelection(event: Event) {
+  if (!isCompactMode.value) return
+  if ((event.target as HTMLElement | null)?.closest('.character')) {
+    event.preventDefault()
+  }
 }
 
 function toggleAccessory(acc: 'hat' | 'glasses' | 'ears') {
@@ -291,14 +309,27 @@ const latestSpeech = computed(() => {
   return latest?.voice_line.text || '我在。要看、要玩、要写代码，都可以直接告诉我。'
 })
 
+const miniBubbleHasActions = computed(() => Boolean(isCompactMode.value && pendingApproval.value && approvalIdFor(pendingApproval.value)))
+
+const miniBubbleText = computed(() => {
+  const approval = pendingApproval.value
+  if (!approval) return latestSpeech.value
+  return approval.display_card.summary || latestSpeech.value
+})
+
 watch(latestSpeech, (newVal) => {
   if (newVal) showMiniSpeech()
+})
+
+watch(pendingApproval, (approval) => {
+  if (approval && isCompactMode.value) showMiniSpeech()
 })
 
 function showMiniSpeech() {
   clearMiniSpeechTimer()
   miniSpeechActive.value = true
   void syncCompactWindowSize()
+  if (pendingApproval.value) return
   miniSpeechTimer = window.setTimeout(() => {
     miniSpeechTimer = null
     miniSpeechActive.value = false
@@ -312,11 +343,77 @@ function clearMiniSpeechTimer() {
   miniSpeechTimer = null
 }
 
-const activeSpriteId = computed(() => {
-  const latest = [...events.value]
+const latestExpressionEvent = computed(() =>
+  [...events.value]
     .reverse()
-    .find((event) => event.voice_line?.sprite && isSpeakableEvent(event))
-  return latest?.voice_line.sprite || '1'
+    .find((event) => {
+      const sync = asRecord(event.agent_state?.expression_sync)
+      return isSpeakableEvent(event) && (event.voice_line?.sprite || event.voice_line?.emotion || sync.sprite || sync.emotion)
+    }),
+)
+
+const activeSpriteId = computed(() => {
+  const latest = latestExpressionEvent.value
+  const sync = asRecord(latest?.agent_state?.expression_sync)
+  return stringValue(sync.sprite) || latest?.voice_line?.sprite || '1'
+})
+
+const activeExpressionEmotion = computed(() => {
+  const latest = latestExpressionEvent.value
+  const sync = asRecord(latest?.agent_state?.expression_sync)
+  return expressionEmotionClass(stringValue(sync.emotion) || latest?.voice_line?.emotion || 'neutral')
+})
+
+const activeEmotionStatus = computed(() => ({
+  emotion: activeExpressionEmotion.value,
+  label: expressionEmotionLabel(activeExpressionEmotion.value),
+  sprite: activeSpriteId.value,
+}))
+
+const activeSpriteMeta = computed(() => {
+  const sprites = ready.value?.character?.sprites || []
+  return sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
+})
+
+const accessoryFitStyle = computed(() => {
+  const label = activeSpriteMeta.value?.label || ''
+  const emotion = activeExpressionEmotion.value
+  const hasHatAndEars = equippedAccessories.value.hat && equippedAccessories.value.ears
+  const style: Record<string, string> = {
+    '--acc-hat-top': '-14%',
+    '--acc-hat-left': '50%',
+    '--acc-hat-width': '42%',
+    '--acc-hat-rotate': '0deg',
+    '--acc-glasses-top': '35%',
+    '--acc-glasses-left': '50%',
+    '--acc-glasses-width': '34%',
+    '--acc-glasses-rotate': '0deg',
+    '--acc-ears-top': '-21%',
+    '--acc-ears-left': '50%',
+    '--acc-ears-width': '44%',
+    '--acc-ears-rotate': '0deg',
+  }
+  if (label.includes('歪头') || label.includes('好奇') || emotion === 'thinking') {
+    style['--acc-hat-left'] = '51.5%'
+    style['--acc-glasses-left'] = '51%'
+    style['--acc-glasses-top'] = '34%'
+    style['--acc-hat-rotate'] = '2deg'
+  }
+  if (label.includes('低头') || label.includes('困倦') || label.includes('疲')) {
+    style['--acc-hat-top'] = '-10%'
+    style['--acc-glasses-top'] = '38%'
+  }
+  if (label.includes('兴奋') || emotion === 'happy') {
+    style['--acc-ears-top'] = '-23%'
+    style['--acc-ears-width'] = '46%'
+  }
+  if (hasHatAndEars) {
+    style['--acc-hat-width'] = '38%'
+    style['--acc-hat-top'] = '-10%'
+    style['--acc-ears-width'] = '48%'
+    style['--acc-ears-top'] = '-24%'
+  }
+  return style
 })
 
 const characterName = computed(() => ready.value?.character?.name || 'Joi')
@@ -1025,6 +1122,22 @@ function stringValue(value: unknown) {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+function expressionEmotionClass(value: string) {
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, '_')
+  return ['happy', 'thinking', 'alert', 'worried', 'serious', 'neutral'].includes(normalized) ? normalized : 'neutral'
+}
+
+function expressionEmotionLabel(value: string) {
+  return {
+    happy: '开心',
+    thinking: '思考',
+    alert: '警觉',
+    worried: '担心',
+    serious: '专注',
+    neutral: '平静',
+  }[expressionEmotionClass(value)]
+}
+
 function trimText(value: string, max: number) {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value
 }
@@ -1049,8 +1162,22 @@ function resolveApproval(approved: boolean) {
   if (!approvalId) return
   const epoch = beginNewVoiceIntent()
   taskVoiceEpochs.set(pendingApproval.value.task_id, epoch)
+  clearMiniSpeechTimer()
+  miniSpeechActive.value = false
+  void syncCompactWindowSize()
   void client.resolveApproval(approvalId, approved).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '审批提交失败'
+  })
+}
+
+function requestMiniChange() {
+  if (pendingApproval.value) resolveApproval(false)
+  clearMiniSpeechTimer()
+  miniSpeechActive.value = false
+  miniDashboardActive.value = true
+  void syncCompactWindowSize()
+  void nextTick(() => {
+    document.querySelector<HTMLInputElement>('.mini-input')?.focus()
   })
 }
 
@@ -1517,9 +1644,13 @@ onMounted(() => {
   clockTimer = window.setInterval(() => {
     nowSeconds.value = Date.now() / 1000
   }, 5000)
+  window.addEventListener('dragstart', preventNativeAssetDrag, true)
+  window.addEventListener('selectstart', preventCompactSelection, true)
 })
 onBeforeUnmount(() => {
   document.body.classList.remove('transparent-active')
+  window.removeEventListener('dragstart', preventNativeAssetDrag, true)
+  window.removeEventListener('selectstart', preventCompactSelection, true)
   stopMascotDragWatch()
   clearMascotClickTimer()
   clearMiniSpeechTimer()
@@ -1541,6 +1672,8 @@ onBeforeUnmount(() => {
       'mini-dashboard-active': isCompactMode && miniDashboardActive,
       'mini-speech-active': isCompactMode && miniSpeechActive,
     }"
+    @dragstart.capture="preventNativeAssetDrag"
+    @drop.capture.prevent
   >
     <!-- Header Titlebar -->
     <header class="titlebar" @mousedown="startWindowDrag">
@@ -1760,6 +1893,14 @@ onBeforeUnmount(() => {
           <span v-if="chatRows.length">最近 {{ Math.min(chatRows.length, 8) }} 条</span>
           <span v-else>暂无记录</span>
         </div>
+        <div class="emotion-status-card" :class="`emotion-${activeEmotionStatus.emotion}`">
+          <div class="emotion-status-dot"></div>
+          <div class="emotion-status-copy">
+            <span>当前情绪</span>
+            <strong>{{ activeEmotionStatus.label }}</strong>
+          </div>
+          <span class="emotion-status-sprite">立绘 {{ activeEmotionStatus.sprite }}</span>
+        </div>
         <div class="chat-scroll-area" v-if="chatRows.length">
           <div
             v-for="event in chatRows.slice(-8)"
@@ -1950,38 +2091,44 @@ onBeforeUnmount(() => {
     <aside class="stage">
       <div class="stage-top">
         <span>Joi Companion</span>
+        <span class="stage-emotion-pill">情绪 {{ activeEmotionStatus.label }} · 立绘 {{ activeEmotionStatus.sprite }}</span>
         <strong>{{ activeTask?.latest.display_card.status || currentMode }}</strong>
       </div>
       <div class="scene-line"></div>
       
       <!-- Mascot Container circles -->
       <div
-        class="character"
+        :class="['character', `emotion-${activeExpressionEmotion}`]"
         :title="isCompactMode ? '拖拽移动，单击输入，双击恢复主界面' : 'Joi Companion'"
         @mousedown="startMascotDrag"
+        @dragstart.capture.prevent
+        @selectstart.prevent
         @click.stop="handleMascotClick"
         @dblclick.stop.prevent="handleMascotDoubleClick"
       >
-        <div class="character-fit">
+        <div class="character-fit" :style="accessoryFitStyle" @dragstart.capture.prevent @selectstart.prevent>
           <img
             v-if="characterImageSrc && failedImageSrc !== characterImageSrc"
             class="character-art"
             :src="characterImageSrc"
             alt="Joi Mascot Digital Companion"
+            draggable="false"
             @load="failedImageSrc = ''"
             @error="failedImageSrc = characterImageSrc"
+            @dragstart.prevent
+            @mousedown.prevent
           />
           <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
           
           <!-- Customizable Cosplay Accessories overlays -->
-          <svg class="accessory-item wizard-hat" :style="{ display: equippedAccessories.hat ? 'block' : 'none' }" viewBox="0 0 140 100" fill="none">
+          <svg class="accessory-item wizard-hat" :style="{ display: equippedAccessories.hat ? 'block' : 'none' }" viewBox="0 0 140 100" fill="none" draggable="false" aria-hidden="true">
             <path d="M70 10 L40 65 L100 65 Z" fill="#4f46e5"/>
             <ellipse cx="70" cy="70" rx="60" ry="12" fill="#312e81"/>
             <path d="M48 50 Q70 45 92 50 L89 56 Q70 51 51 56 Z" fill="#facc15"/>
             <polygon points="70,18 73,26 81,26 74,31 77,39 70,34 63,39 66,31 59,26 67,26" fill="#facc15"/>
           </svg>
           
-          <svg class="accessory-item glasses" :style="{ display: equippedAccessories.glasses ? 'block' : 'none' }" viewBox="0 0 100 30" fill="none">
+          <svg class="accessory-item glasses" :style="{ display: equippedAccessories.glasses ? 'block' : 'none' }" viewBox="0 0 100 30" fill="none" draggable="false" aria-hidden="true">
             <rect x="10" y="5" width="30" height="20" rx="3" fill="#111827"/>
             <rect x="60" y="5" width="30" height="20" rx="3" fill="#111827"/>
             <rect x="40" y="12" width="20" height="6" fill="#111827"/>
@@ -1989,7 +2136,7 @@ onBeforeUnmount(() => {
             <rect x="65" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
           </svg>
           
-          <svg class="accessory-item bunny-ears" :style="{ display: equippedAccessories.ears ? 'block' : 'none' }" viewBox="0 0 130 80" fill="none">
+          <svg class="accessory-item bunny-ears" :style="{ display: equippedAccessories.ears ? 'block' : 'none' }" viewBox="0 0 130 80" fill="none" draggable="false" aria-hidden="true">
             <ellipse cx="40" cy="40" rx="14" ry="35" transform="rotate(-15 40 40)" fill="#fbcfe8"/>
             <ellipse cx="38" cy="40" rx="8" ry="25" transform="rotate(-15 38 40)" fill="#f472b6"/>
             <ellipse cx="90" cy="40" rx="14" ry="35" transform="rotate(15 90 40)" fill="#fbcfe8"/>
@@ -2009,8 +2156,18 @@ onBeforeUnmount(() => {
       <div class="voice-status" v-if="voiceStatusText">{{ voiceStatusText }}</div>
 
       <!-- Floating Comic Speech Bubble (Only compact mode) -->
-      <div class="mini-speech-bubble" :class="{ active: miniSpeechActive && isCompactMode }">
-        {{ latestSpeech }}
+      <div
+        class="mini-speech-bubble"
+        :class="{ active: miniSpeechActive && isCompactMode, actionable: miniBubbleHasActions }"
+        @mousedown.stop
+        @click.stop
+      >
+        <div class="mini-speech-text">{{ miniBubbleText }}</div>
+        <div class="mini-approval-actions" v-if="miniBubbleHasActions">
+          <button type="button" @click="resolveApproval(true)">允许执行</button>
+          <button type="button" class="secondary" @click="requestMiniChange">改需求</button>
+          <button type="button" class="secondary" @click="resolveApproval(false)">停下</button>
+        </div>
       </div>
 
       <!-- Compact Mode Mini Control Dashboard -->

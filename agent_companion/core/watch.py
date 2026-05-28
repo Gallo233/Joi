@@ -18,6 +18,12 @@ class WatchFrame:
     ocr_summary: str = ""
     ocr_text: list[str] = field(default_factory=list)
     ocr_regions: list[dict[str, Any]] = field(default_factory=list)
+    transcript_text: list[str] = field(default_factory=list)
+    transcript_source: str = ""
+    transcript_status: str = ""
+    sequence_summary: str = ""
+    frame_index: int = 1
+    sequence_size: int = 1
     created_at: float = field(default_factory=time.time)
 
     def to_agent_state(self) -> dict[str, Any]:
@@ -30,6 +36,12 @@ class WatchFrame:
             "ocr_summary": self.ocr_summary,
             "ocr_text": list(self.ocr_text[:12]),
             "ocr_regions": list(self.ocr_regions[:8]),
+            "transcript_text": list(self.transcript_text[:12]),
+            "transcript_source": self.transcript_source,
+            "transcript_status": self.transcript_status,
+            "sequence_summary": self.sequence_summary,
+            "frame_index": self.frame_index,
+            "sequence_size": self.sequence_size,
             "created_at": self.created_at,
         }
 
@@ -62,10 +74,17 @@ def answer_from_recent_frames(question: str, frames: list[WatchFrame]) -> tuple[
     if latest.model_status == "error":
         return f"{title}的截图已经保存了，不过视觉摘要暂时没生成出来。", "vision_error"
     ocr_line = _ocr_line(latest)
+    transcript_line = _transcript_line(latest)
     question_hint = question or ""
     region_answer = _region_answer(question_hint, latest)
     if region_answer:
         return region_answer, "vision_context"
+    if transcript_line and _asks_video_content(question_hint):
+        prefix = f"从连续画面看，{latest.sequence_summary}" if latest.sequence_summary else "根据实时转写"
+        return f"{prefix}。转写里能读到/听到：{transcript_line}", "vision_context"
+    if latest.sequence_summary and _asks_video_content(question_hint):
+        suffix = f" 可见文字/弹幕线索包括：{ocr_line}" if ocr_line else ""
+        return f"从连续画面看，{latest.sequence_summary}{suffix}", "vision_context"
     if any(token in question_hint for token in ("写了什么", "文字", "按钮", "页面里", "标题", "label", "button")) and ocr_line:
         return f"{title}里我能读到这些可见文字：{ocr_line}", "vision_context"
     if len(frames) == 1:
@@ -111,6 +130,12 @@ class WatchAnswerer:
                     "ocr_summary": frame.ocr_summary,
                     "ocr_text": frame.ocr_text[:10],
                     "ocr_regions": frame.ocr_regions[:5],
+                    "transcript_text": frame.transcript_text[:10],
+                    "transcript_source": frame.transcript_source,
+                    "transcript_status": frame.transcript_status,
+                    "sequence_summary": frame.sequence_summary,
+                    "frame_index": frame.frame_index,
+                    "sequence_size": frame.sequence_size,
                     "user_question": frame.user_question,
                     "model_status": frame.model_status,
                     "age_seconds": int(time.time() - frame.created_at),
@@ -167,6 +192,18 @@ def _ocr_line(frame: WatchFrame) -> str:
     return frame.ocr_summary.strip()
 
 
+def _transcript_line(frame: WatchFrame) -> str:
+    snippets = [text.strip() for text in frame.transcript_text[:8] if text.strip()]
+    return "、".join(snippets)
+
+
+def _asks_video_content(question: str) -> bool:
+    return any(
+        token in (question or "")
+        for token in ("视频", "播放", "弹幕", "字幕", "讲什么", "讲了什么", "在讲", "内容", "关于什么", "发生了什么", "这一段", "这段", "讲到哪", "说了什么", "正在播放")
+    )
+
+
 def _region_answer(question: str, frame: WatchFrame) -> str:
     if not frame.ocr_regions:
         return ""
@@ -206,8 +243,18 @@ def _region_item_text(frame: WatchFrame, horizontal: str = "", vertical: str = "
 
 
 def _frame_context(frame: WatchFrame) -> str:
+    transcript = _transcript_line(frame)
+    if frame.sequence_summary:
+        base = frame.sequence_summary.strip()
+        ocr = _ocr_line(frame)
+        detail = transcript or ocr
+        return f"{base}；转写/文字：{detail}" if detail else base
     base = frame.summary.strip()
     ocr = _ocr_line(frame)
+    if base and transcript:
+        return f"{base}；转写：{transcript}"
     if base and ocr:
         return f"{base}；可见文字：{ocr}"
+    if transcript:
+        return f"转写：{transcript}"
     return base or f"可见文字：{ocr}"

@@ -28,7 +28,7 @@ class TtsBridge:
             and (self._config.tts.provider or "").lower() == "gpt-sovits"
         )
 
-    def synthesize(self, text: str, sprite_id: str = "1") -> dict[str, str]:
+    def synthesize(self, text: str, sprite_id: str = "1", emotion: str = "neutral") -> dict[str, str]:
         text = (text or "").strip()
         if not text or not self.enabled or self._config is None:
             return {}
@@ -37,7 +37,7 @@ class TtsBridge:
                 from agent_companion.core.gpt_sovits import GptSoVitsClient
 
                 self._client = GptSoVitsClient(self._config)
-            output = self._client.synthesize(text, self._config.primary_character, sprite_id)
+            output = self._client.synthesize(text, self._config.primary_character, sprite_id, emotion)
             resolved = output.resolve()
             payload = {"voice_audio_path": str(resolved)}
             try:

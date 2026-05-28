@@ -167,7 +167,7 @@ class JsonRpcBridge:
                 asyncio.create_task(self._synthesize_voice(event))
 
     async def _synthesize_voice(self, event: AgentEvent) -> None:
-        audio = await asyncio.to_thread(self.tts.synthesize, event.voice_line.text, event.voice_line.sprite)
+        audio = await asyncio.to_thread(self.tts.synthesize, event.voice_line.text, event.voice_line.sprite, event.voice_line.emotion)
         if not audio:
             return
         if not audio.get("voice_audio_path") and not audio.get("voice_audio_error"):
@@ -177,6 +177,8 @@ class JsonRpcBridge:
             "event_type": event.type.value,
             "event_created_at": event.created_at,
             "voice_text": event.voice_line.text,
+            "voice_emotion": event.voice_line.emotion,
+            "voice_sprite": event.voice_line.sprite,
             **audio,
         }
         data_url = self._voice_audio_data_url(audio.get("voice_audio_path", ""))

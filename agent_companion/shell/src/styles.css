@@ -951,6 +951,75 @@ details pre {
   flex: 0 0 auto;
 }
 
+.emotion-status-card {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 24px 10px;
+  padding: 9px 12px;
+  width: fit-content;
+  max-width: calc(100% - 48px);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(17, 24, 39, 0.06);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+}
+
+.emotion-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #9ca3af;
+  box-shadow: 0 0 0 4px rgba(156, 163, 175, 0.12);
+  flex: 0 0 auto;
+}
+
+.emotion-status-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.emotion-status-copy span {
+  color: #6b7280;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.emotion-status-copy strong {
+  color: #111827;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.emotion-status-sprite {
+  color: #9ca3af;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.emotion-status-card.emotion-happy .emotion-status-dot {
+  background: var(--color-pink);
+  box-shadow: 0 0 0 4px rgba(255, 77, 141, 0.13);
+}
+
+.emotion-status-card.emotion-thinking .emotion-status-dot,
+.emotion-status-card.emotion-serious .emotion-status-dot {
+  background: var(--color-primary);
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+}
+
+.emotion-status-card.emotion-alert .emotion-status-dot,
+.emotion-status-card.emotion-worried .emotion-status-dot {
+  background: var(--color-error);
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12);
+}
+
 .chat-scroll-area {
   flex: 1 1 auto;
   min-height: 0;
@@ -1503,6 +1572,16 @@ details pre {
   color: var(--color-pink);
 }
 
+.stage-emotion-pill {
+  justify-self: center;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(17, 24, 39, 0.06);
+  color: #4b5563 !important;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+}
+
 /* Companion Interactive Avatar Circle Box */
 .character {
   position: relative;
@@ -1523,6 +1602,16 @@ details pre {
   transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
   cursor: pointer;
   z-index: 5;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+
+.character,
+.character * {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 .character:hover {
@@ -1575,6 +1664,9 @@ details pre {
   place-items: center;
   animation: floatBreath 5s ease-in-out infinite;
   z-index: 3;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 .shell.compact-active .character-fit {
@@ -1589,12 +1681,58 @@ details pre {
   object-fit: contain;
   z-index: 2;
   filter: none;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 .shell.compact-active .character-art {
   width: 100%;
   height: 100%;
   filter: drop-shadow(0 18px 24px rgba(15, 23, 42, 0.18));
+}
+
+.character.emotion-happy .character-fit {
+  animation-duration: 4s;
+}
+
+.character.emotion-thinking .character-fit,
+.character.emotion-serious .character-fit {
+  animation-duration: 6.5s;
+}
+
+.character.emotion-alert .character-fit,
+.character.emotion-worried .character-fit {
+  animation-duration: 3.2s;
+}
+
+.character.emotion-happy .character-art {
+  filter: drop-shadow(0 14px 22px rgba(255, 77, 141, 0.2));
+}
+
+.character.emotion-thinking .character-art,
+.character.emotion-serious .character-art {
+  filter: drop-shadow(0 14px 20px rgba(37, 99, 235, 0.16));
+}
+
+.character.emotion-alert .character-art,
+.character.emotion-worried .character-art {
+  filter: drop-shadow(0 14px 22px rgba(239, 68, 68, 0.16));
+}
+
+.shell.compact-active .character.emotion-happy .character-art {
+  filter: drop-shadow(0 18px 24px rgba(15, 23, 42, 0.18)) drop-shadow(0 0 14px rgba(255, 77, 141, 0.2));
+}
+
+.shell.compact-active .character.emotion-thinking .character-art,
+.shell.compact-active .character.emotion-serious .character-art {
+  filter: drop-shadow(0 18px 24px rgba(15, 23, 42, 0.18)) drop-shadow(0 0 12px rgba(37, 99, 235, 0.18));
+}
+
+.shell.compact-active .character.emotion-alert .character-art,
+.shell.compact-active .character.emotion-worried .character-art {
+  filter: drop-shadow(0 18px 24px rgba(15, 23, 42, 0.18)) drop-shadow(0 0 12px rgba(239, 68, 68, 0.18));
 }
 
 .character-fallback {
@@ -1621,24 +1759,24 @@ details pre {
 }
 
 .accessory-item.wizard-hat {
-  width: 54%;
-  top: -7%;
-  left: 50%;
-  transform: translateX(-52%);
+  width: var(--acc-hat-width, 42%);
+  top: var(--acc-hat-top, -14%);
+  left: var(--acc-hat-left, 50%);
+  transform: translateX(-50%) rotate(var(--acc-hat-rotate, 0deg)) scale(var(--acc-hat-scale, 1));
 }
 
 .accessory-item.glasses {
-  width: 38%;
-  top: 31%;
-  left: 50%;
-  transform: translateX(-50%);
+  width: var(--acc-glasses-width, 34%);
+  top: var(--acc-glasses-top, 35%);
+  left: var(--acc-glasses-left, 50%);
+  transform: translateX(-50%) rotate(var(--acc-glasses-rotate, 0deg)) scale(var(--acc-glasses-scale, 1));
 }
 
 .accessory-item.bunny-ears {
-  width: 50%;
-  top: -11%;
-  left: 50%;
-  transform: translateX(-50%);
+  width: var(--acc-ears-width, 44%);
+  top: var(--acc-ears-top, -21%);
+  left: var(--acc-ears-left, 50%);
+  transform: translateX(-50%) rotate(var(--acc-ears-rotate, 0deg)) scale(var(--acc-ears-scale, 1));
 }
 
 /* Animation frames mapping breath state */
@@ -1803,11 +1941,60 @@ details pre {
   line-height: 1.45;
   transform: translateX(-50%) scale(0.94) translateY(-8px);
   pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.shell.compact-active .mini-speech-bubble.actionable {
+  max-height: 188px;
+  pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .shell.compact-active .mini-speech-bubble.active {
   display: block;
   transform: translateX(-50%) scale(1) translateY(0);
+}
+
+.mini-speech-text {
+  overflow-wrap: anywhere;
+}
+
+.mini-approval-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.mini-approval-actions button {
+  min-width: 0;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 8px;
+  background: var(--color-primary);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.16);
+}
+
+.mini-approval-actions button:hover {
+  background: var(--color-primary-hover);
+}
+
+.mini-approval-actions button.secondary {
+  background: #f3f4f6;
+  color: #374151;
+  box-shadow: none;
+  border: 1px solid rgba(17, 24, 39, 0.06);
+}
+
+.mini-approval-actions button.secondary:hover {
+  background: #e5e7eb;
 }
 
 .shell.compact-active .mini-speech-bubble::before {

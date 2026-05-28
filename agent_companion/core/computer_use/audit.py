@@ -185,6 +185,9 @@ def sanitize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[s
         keys = arguments.get("keys")
         key_count = len(keys) if isinstance(keys, (list, tuple)) else 1 if keys else 0
         return {"shortcut": "keys_hidden", "key_count": key_count}
+    if tool_name == "computer.workflow":
+        workflow = _safe_token(arguments.get("workflow")) or "desktop_sequence"
+        return {"workflow": workflow, "arguments": "hidden"}
     if tool_name in {"vision.resolve_target", "vision.select_target"}:
         return {"target_description": "hidden"}
     return {"arguments": "hidden"}
@@ -205,6 +208,13 @@ def sanitize_action_state(action: dict[str, Any]) -> dict[str, Any]:
     if action_type == "hotkey":
         keys = action.get("keys")
         return {"shortcut": "keys_hidden", "key_count": len(keys) if isinstance(keys, list) else 0}
+    if action_type == "workflow":
+        workflow = _safe_token(action.get("workflow")) or "desktop_sequence"
+        try:
+            step_count = max(0, int(action.get("step_count") or 0))
+        except (TypeError, ValueError):
+            step_count = 0
+        return {"workflow": workflow, "step_count": step_count}
     return {"action": action_type or "unknown"}
 
 

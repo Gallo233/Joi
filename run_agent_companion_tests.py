@@ -18,17 +18,21 @@ import yaml
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, ComputerAction, ComputerObservation, ComputerUseResult, computer_action_audit_event, verify_post_action
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouter, load_app_config
+from agent_companion.core.llm_planner import plan_from_llm_payload
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core import runtime_status as runtime_status_module
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update, update_runtime_config
 from agent_companion.core.runtime_status import build_runtime_status
-from agent_companion.core.schemas import DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
+from agent_companion.core.schemas import AgentEvent, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.server import JsonRpcBridge
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
+from agent_companion.core.tools.browser import BrowserTool
+from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.codex import CodexTool
+from agent_companion.core.tools.desktop_workflow import DesktopWorkflowTool
 from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import SemanticTargetTool, click_arguments_from_state
@@ -40,8 +44,9 @@ from agent_companion.core.vision.schemas import CaptureRect, VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummary
 from agent_companion.core.vision.targeting import resolve_target_candidates
 from agent_companion.core.vision.visual_detector import UnavailableVisualDetector, VisualCandidate, VisualDetectionResult
-from agent_companion.core.voice import safe_voice_line
+from agent_companion.core.voice import safe_voice_line, sprite_for_emotion, strip_emotion_token
 from agent_companion.core.watch import WatchFrame
+from agent_companion.core.watch_transcript import TranscriptResult, TranscriptSegment
 from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, run_eval as run_visual_detector_eval, run_local_semantic_calibration
 
 
@@ -216,6 +221,16 @@ class FakeOcrExtractor:
         return self.result
 
 
+class FakeLlmPlanner:
+    def __init__(self, plan: object | None = None) -> None:
+        self.plan_to_return = plan
+        self.calls: list[tuple[str, str]] = []
+
+    def plan(self, user_text: str, rule_plan: object) -> object | None:
+        self.calls.append((user_text, getattr(rule_plan, "intent", "")))
+        return self.plan_to_return
+
+
 class FakeAccessibilityObserver:
     def __init__(self, snapshot: AccessibilitySnapshot) -> None:
         self.snapshot = snapshot
@@ -291,6 +306,32 @@ class FakeWatchAnswerer:
     def answer(self, question: str, frames: list[WatchFrame]) -> tuple[str, str]:
         summary = frames[0].summary if frames else "没有画面"
         return f"自然回答会针对“{question}”：{summary}", "llm_answer"
+
+
+class SequenceSummarizer:
+    def __init__(self) -> None:
+        self.sequence_calls: list[tuple[int, str, list[str]]] = []
+
+    def summarize(self, observation: VisionObservation, query: str = "") -> VisionSummary:
+        return VisionSummary("单帧摘要不应用于视频采样。", model="fake")
+
+    def summarize_sequence(self, observations: list[VisionObservation], query: str = "", ocr_texts: list[str] | None = None) -> VisionSummary:
+        self.sequence_calls.append((len(observations), query, list(ocr_texts or [])))
+        return VisionSummary("连续画面显示一只猫在做亲身实验，弹幕和字幕都围绕猫的反应展开。", model="fake-sequence")
+
+
+class FakeAudioTranscriber:
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def transcribe(self, seconds: float = 5.0) -> TranscriptResult:
+        self.calls.append(seconds)
+        return TranscriptResult(
+            "success",
+            "system_audio",
+            [TranscriptSegment("系统音频说：小猫正在亲身实验。", 0, int(seconds * 1000), "system_audio", 0.91, 1, "audio")],
+            "识别到 1 段系统音频转写。",
+        )
 
 
 class FailingAsrProvider:
@@ -600,6 +641,15 @@ def main() -> int:
     watch_plan = build_plan("陪我看这个视频")
     assert_true(watch_plan.intent == "watch_together", "watch route failed")
     assert_true(watch_plan.steps[0].name == "observe.screen", "watch route should use screen observation")
+    live_video_plan = build_plan("这个视频在讲什么")
+    assert_true(live_video_plan.intent == "watch_together", "current video content questions should refresh screen observation")
+    assert_true(live_video_plan.steps[0].name == "observe.screen", "current video questions should observe the active video window")
+    assert_true(live_video_plan.steps[0].arguments.get("sample_count") == 4, "current video questions should request a denser temporal sample")
+    transcript_plan = build_plan("实时转写当前视频")
+    assert_true(transcript_plan.intent == "watch_together", "video transcription should use watch route")
+    assert_true(transcript_plan.steps[0].arguments.get("transcribe") is True and transcript_plan.steps[0].arguments.get("sample_count") == 8, "video transcription should request OCR subtitle transcript sampling")
+    audio_transcript_plan = build_plan("用系统音频听一下这个视频")
+    assert_true(audio_transcript_plan.steps[0].arguments.get("transcript_source") == "system_audio", "system audio requests should select audio transcript source")
     current_page_plan = build_plan("看看当前页面")
     assert_true(current_page_plan.intent == "watch_together" and current_page_plan.steps[0].name == "observe.screen", "current browser page should use screen observation")
     watch_followup_plan = build_plan("你看到了什么")
@@ -619,6 +669,112 @@ def main() -> int:
     assert_true(type_plan.steps[0].arguments.get("text") == "你好世界", "Chinese type text should be preserved")
     assert_true(build_plan("向下滚动").steps[0].name == "computer.scroll", "scroll route failed")
     assert_true(build_plan("按下 Ctrl+L 快捷键").steps[0].name == "computer.hotkey", "hotkey route failed")
+    open_codex_plan = build_plan("请帮我打开codex")
+    assert_true(open_codex_plan.intent == "desktop_workflow", "open app route should use desktop workflow")
+    assert_true(open_codex_plan.steps[0].name == "computer.workflow", "open app should use computer.workflow")
+    assert_true(open_codex_plan.steps[0].arguments.get("workflow") == "open_app", "open app workflow not parsed")
+    edge_bili_plan = build_plan("用edge打开bilibili并搜索猫视频")
+    assert_true(edge_bili_plan.intent == "desktop_workflow", "browser desktop workflow route failed")
+    assert_true(edge_bili_plan.steps[0].arguments.get("workflow") == "open_web_search", "browser workflow not parsed")
+    assert_true(edge_bili_plan.steps[0].arguments.get("site") == "bilibili", "bilibili site not parsed")
+    assert_true(edge_bili_plan.steps[0].arguments.get("query") == "猫视频", "site search query not parsed")
+    short_bili_search_plan = build_plan("打开b站搜猫猫视频")
+    assert_true(short_bili_search_plan.intent == "desktop_workflow", "short Bilibili search should use desktop workflow")
+    assert_true(short_bili_search_plan.steps[0].arguments.get("site") == "bilibili", "short Bilibili site not parsed")
+    assert_true(short_bili_search_plan.steps[0].arguments.get("query") == "猫猫视频", "short Bilibili search query not parsed")
+    explicit_site_search_plan = build_plan("在B站搜猫猫视频")
+    assert_true(explicit_site_search_plan.intent == "desktop_workflow", "site search without open verb should use desktop workflow")
+    assert_true(explicit_site_search_plan.steps[0].arguments.get("query") == "猫猫视频", "site search without open verb query not parsed")
+    open_bili_plan = build_plan("打开B站")
+    assert_true(open_bili_plan.steps[0].arguments.get("workflow") == "open_web_search", "site open should use browser workflow")
+    plain_search_plan = build_plan("搜索猫猫视频")
+    assert_true(plain_search_plan.intent == "browser" and plain_search_plan.steps[0].name == "browser.search", "generic search should still use browser route without desktop context")
+    plain_short_search_plan = build_plan("搜猫猫视频")
+    assert_true(plain_short_search_plan.intent == "browser" and plain_short_search_plan.steps[0].arguments.get("query") == "猫猫视频", "short generic search should still use browser route")
+    llm_bili_plan = plan_from_llm_payload(
+        "帮我在哔哩找猫猫视频",
+        {
+            "intent": "desktop_workflow",
+            "confidence": 0.91,
+            "action": "open_web_search",
+            "slots": {"browser": "edge", "site": "bilibili", "query": "猫猫视频"},
+        },
+        task_id="task-llm-bili",
+    )
+    assert_true(llm_bili_plan is not None and llm_bili_plan.intent == "desktop_workflow", "LLM planner should produce desktop workflow")
+    assert_true(llm_bili_plan.steps[0].name == "computer.workflow", "LLM desktop plan should use computer.workflow")
+    assert_true(llm_bili_plan.steps[0].arguments.get("site") == "bilibili" and llm_bili_plan.steps[0].arguments.get("query") == "猫猫视频", "LLM planner should preserve safe site search slots")
+    llm_video_plan = plan_from_llm_payload(
+        "这个视频在讲什么",
+        {"intent": "watch_together", "confidence": 0.88, "action": "observe_screen", "slots": {"query": "这个视频在讲什么"}},
+        task_id="task-llm-video",
+    )
+    assert_true(llm_video_plan is not None and llm_video_plan.steps[0].name == "observe.screen", "LLM video watch plan should observe screen")
+    assert_true(llm_video_plan.steps[0].arguments.get("sample_count") == 4, "LLM video watch plan should request temporal sampling")
+    llm_transcript_plan = plan_from_llm_payload(
+        "实时转写当前视频",
+        {"intent": "watch_together", "confidence": 0.88, "action": "observe_screen", "slots": {"query": "实时转写当前视频", "transcribe": True}},
+        task_id="task-llm-transcript",
+    )
+    assert_true(llm_transcript_plan is not None and llm_transcript_plan.steps[0].arguments.get("transcribe") is True, "LLM transcript plan should preserve transcript sampling")
+    llm_click_plan = plan_from_llm_payload(
+        "点右上角登录",
+        {"intent": "computer_use", "confidence": 0.86, "action": "click_target", "slots": {"query": "右上角登录"}},
+        task_id="task-llm-click",
+    )
+    assert_true(llm_click_plan is not None and llm_click_plan.intent == "semantic_target", "LLM click plan should route through semantic target grounding")
+    assert_true(llm_click_plan.steps[0].name == "vision.resolve_target" and "x" not in llm_click_plan.steps[0].arguments, "LLM planner must not create raw coordinate clicks")
+    assert_true(plan_from_llm_payload("危险动作", {"intent": "shell.run", "confidence": 0.99, "slots": {"command": "rm -rf ."}}) is None, "LLM planner should reject unsupported tools")
+    assert_true(plan_from_llm_payload("低置信度", {"intent": "desktop_workflow", "confidence": 0.2, "action": "open_app", "slots": {"app": "Codex"}}) is None, "LLM planner should reject low confidence")
+    fake_llm_plan = plan_from_llm_payload(
+        "帮我在哔哩找猫猫视频",
+        {"intent": "desktop_workflow", "confidence": 0.9, "action": "open_web_search", "slots": {"site": "bilibili", "query": "猫猫视频"}},
+        task_id="task-fake-llm",
+    )
+    fake_llm_app = AgentCompanionApp(workspace, llm_planner=FakeLlmPlanner(fake_llm_plan))
+    fake_llm_events = fake_llm_app.handle_user_text("帮我在哔哩找猫猫视频")
+    assert_true(any(event.type == EventType.PLAN_CREATED and event.agent_state.get("steps") == ["computer.workflow"] for event in fake_llm_events), "Agent app should use LLM planner fallback for ambiguous actionable text")
+    fake_llm_approval = _approval_payload(fake_llm_events)
+    assert_true(fake_llm_approval.get("tool") == "computer.workflow", "LLM-planned desktop workflow should still require approval")
+    fake_llm_pending = fake_llm_app.pending_steps[fake_llm_approval["approval_id"]]
+    fake_llm_args = fake_llm_pending.plan.steps[fake_llm_pending.index].arguments
+    assert_true(fake_llm_args.get("site") == "bilibili" and fake_llm_args.get("query") == "猫猫视频", "LLM-planned approval should keep validated slots")
+    desktop_context_app = AgentCompanionApp(workspace)
+    desktop_context_app._record_desktop_context(
+        open_bili_plan,
+        open_bili_plan.steps[0],
+        ToolResult(
+            ok=True,
+            agent_state={"tool": "computer.workflow"},
+            display_card=DisplayCard("电脑操作", "已打开 B站。", status="success"),
+            voice_line=safe_voice_line("打开了。"),
+            risk=RiskLevel.MEDIUM,
+        ),
+    )
+    rewritten_search_plan = desktop_context_app._rewrite_plan_for_desktop_context(plain_search_plan)
+    assert_true(rewritten_search_plan.intent == "desktop_workflow", "desktop site context should rewrite follow-up search to desktop workflow")
+    assert_true(rewritten_search_plan.steps[0].name == "computer.workflow", "follow-up site search should not use built-in browser")
+    assert_true(rewritten_search_plan.steps[0].arguments.get("site") == "bilibili", "follow-up site search should keep Bilibili context")
+    assert_true(rewritten_search_plan.steps[0].arguments.get("query") == "猫猫视频", "follow-up site search should preserve query")
+    desktop_search_events = desktop_context_app.handle_user_text("搜索猫猫视频")
+    assert_true(any(event.type == EventType.PLAN_CREATED and event.agent_state.get("steps") == ["computer.workflow"] for event in desktop_search_events), "follow-up site search should plan desktop workflow")
+    assert_true(not any(event.agent_state.get("tool") == "browser.search" for event in desktop_search_events), "follow-up site search should not start built-in browser search")
+    desktop_search_approval = _approval_payload(desktop_search_events)
+    assert_true(desktop_search_approval.get("tool") == "computer.workflow", "follow-up site search should require desktop workflow approval")
+    pending_desktop_search = desktop_context_app.pending_steps[desktop_search_approval["approval_id"]]
+    pending_desktop_args = pending_desktop_search.plan.steps[pending_desktop_search.index].arguments
+    assert_true(pending_desktop_args.get("site") == "bilibili" and pending_desktop_args.get("query") == "猫猫视频", "pending desktop workflow should target Bilibili search")
+    rewritten_short_search = desktop_context_app._rewrite_plan_for_desktop_context(plain_short_search_plan)
+    assert_true(rewritten_short_search.intent == "desktop_workflow", "short follow-up search should rewrite to desktop workflow")
+    assert_true(rewritten_short_search.steps[0].arguments.get("query") == "猫猫视频", "short follow-up search should preserve query")
+    browser_tmpdir = tempfile.mkdtemp()
+    try:
+        browser_tmp = Path(browser_tmpdir)
+        browser_result = BrowserTool(browser_tmp, "browser.search").run(ToolRequest("browser.search", {"query": "bilibili"}))
+        assert_true(browser_result.ok, "browser stub queue should succeed")
+        assert_true((browser_tmp / "data" / "agent_events" / "browser_requests.jsonl").is_file(), "browser stub should use executor request path")
+    finally:
+        shutil.rmtree(browser_tmpdir, ignore_errors=True)
     assert_true(build_plan("帮我刷鸣潮日常").intent == "game_assist", "game route failed")
     blocked = safe_voice_line('{"task_id":"codex2-abcdef1234","path":"data/app.log"}')
     assert_true("codex2-" not in blocked.text and "{" not in blocked.text, "voice sanitizer failed")
@@ -636,6 +792,36 @@ def main() -> int:
         and ".log" not in blocked_runtime_detail.text,
         "voice leaked provider secret, local model path, or log filename",
     )
+    token_text, token_emotion = strip_emotion_token("<emo: thinking> 我想一下。")
+    assert_true(token_text == "我想一下。" and token_emotion == "thinking", "emotion token should be stripped and normalized")
+    happy_voice = safe_voice_line("<emo: happy> 做完了。")
+    assert_true(happy_voice.text == "做完了。" and happy_voice.emotion == "happy" and happy_voice.sprite == "5", "emotion token should drive sprite sync")
+    alert_voice = safe_voice_line("<emo: alert> 需要你确认。")
+    assert_true(alert_voice.text == "需要你确认。" and alert_voice.emotion == "alert" and alert_voice.sprite == "4", "alert token should map to caution sprite")
+    explicit_sprite_voice = safe_voice_line("<emo: happy> 我在处理。", sprite="3")
+    assert_true(explicit_sprite_voice.emotion == "happy" and explicit_sprite_voice.sprite == "3", "explicit sprite should be preserved while token drives emotion")
+    happy_emotion_voice = safe_voice_line("做完了。", emotion="happy")
+    assert_true(happy_emotion_voice.sprite == "5", "non-neutral emotion should drive sprite even without inline token")
+    assert_true(sprite_for_emotion("thinking") == "3" and sprite_for_emotion("unknown") == "1", "emotion sprite map should be stable")
+
+    chat_emotion_result = CompanionChatTool(workspace).run(ToolRequest("companion.chat", {"text": "你现在开心吗"}))
+    assert_true(chat_emotion_result.voice_line.emotion == "happy", "chat fallback should infer happy emotion from user text")
+    assert_true(chat_emotion_result.voice_line.sprite != "1", "chat emotion should select a non-neutral sprite when available")
+    assert_true(chat_emotion_result.agent_state["expression_sync"]["emotion"] == "happy", "chat should expose expression sync state")
+
+    expression_sync_event = AgentCompanionApp(workspace).expression.express(
+        AgentEvent(
+            EventType.TOOL_COMPLETED,
+            "task-expression-sync",
+            DisplayCard("表达同步", "测试情绪 token", status="success"),
+            VoiceLine("<emo: alert> 需要确认。", "neutral", "1"),
+            {"tool": "browser.search"},
+        )
+    )
+    expression_sync = expression_sync_event.agent_state.get("expression_sync", {})
+    assert_true(expression_sync_event.voice_line.text == "需要确认。", "expression sync should strip emotion token before TTS")
+    assert_true(expression_sync_event.voice_line.emotion == "alert" and expression_sync_event.voice_line.sprite == "4", "expression sync should update voice emotion and sprite")
+    assert_true(expression_sync.get("voice_style") == "alert" and expression_sync.get("sprite") == "4", "expression sync state should be sent to frontend")
 
     memory_dir = Path(tempfile.mkdtemp())
     try:
@@ -646,7 +832,6 @@ def main() -> int:
         recent_memory = memory.recent(10)
         assert_true(len(recent_memory) == 1 and recent_memory[0]["text"] == "可长期保存", "ephemeral/sensitive memories should not be long-term by default")
     finally:
-        import shutil
         shutil.rmtree(memory_dir, ignore_errors=True)
 
     screen_tool = ScreenObserveTool(workspace, FakeVisionObserver(workspace), ocr=UnavailableOcrExtractor())
@@ -658,6 +843,43 @@ def main() -> int:
     assert_true("sample.png" not in screen_result.voice_line.text, "voice should not read screenshot path")
     assert_true(screen_result.agent_state["observation"]["ocr"]["status"] == "unavailable", "OCR should have safe unavailable fallback")
     assert_true("OCR：" in screen_result.display_card.body, "screen card should include OCR status")
+
+    video_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/video-frame-1.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/video-frame-2.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/video-frame-3.png", title="Bilibili Video"),
+        ],
+    )
+    sequence_summarizer = SequenceSummarizer()
+    video_ocr = OcrResult("success", "识别到字幕和弹幕。", [OcrTextBlock("这一条是小猫发的", (12, 80, 160, 24), 0.91), OcrTextBlock("666", (900, 30, 80, 22), 0.88)])
+    video_tool = ScreenObserveTool(workspace, computer_backend=video_backend, summarizer=sequence_summarizer, ocr=FakeOcrExtractor(video_ocr))
+    video_result = video_tool.run(ToolRequest("observe.screen", {"query": "陪我看这个视频", "sample_interval_ms": 0}))
+    assert_true(video_result.ok, "video watch observation should succeed")
+    assert_true(video_backend.observe_calls == 3, "video watch should capture multiple temporal frames")
+    assert_true(video_result.agent_state["temporal_observation"] is True, "video watch should mark temporal observation")
+    assert_true(len(video_result.agent_state["watch_frames"]) == 3, "video watch should expose sampled watch frames")
+    assert_true(len(video_result.display_card.artifacts) == 3, "video watch should expose multiple frame artifacts")
+    assert_true(sequence_summarizer.sequence_calls and sequence_summarizer.sequence_calls[0][0] == 3, "video watch should use sequence vision summarizer")
+    assert_true(any("实时转写" in row for row in sequence_summarizer.sequence_calls[0][2]), "video sequence summary should receive transcript text")
+    assert_true("连续画面显示一只猫" in video_result.agent_state["sequence_summary"], "video watch should preserve sequence summary")
+    assert_true("连续采样" in video_result.display_card.body and "连续帧文本线索" in video_result.display_card.body, "video card should explain temporal sampling")
+    assert_true(video_result.agent_state["transcript"]["status"] == "success", "video watch should expose OCR subtitle transcript state")
+    assert_true("这一条是小猫发的" in video_result.agent_state["transcript"]["segments"][0]["text"], "video transcript should include subtitle-like OCR text")
+    assert_true("实时转写" in video_result.display_card.body, "video card should show transcript snippets")
+
+    audio_transcriber = FakeAudioTranscriber()
+    audio_transcript_tool = ScreenObserveTool(
+        workspace,
+        computer_backend=FakeComputerBackend(workspace),
+        summarizer=SequenceSummarizer(),
+        ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+        audio_transcriber=audio_transcriber,
+    )
+    audio_transcript_result = audio_transcript_tool.run(ToolRequest("observe.screen", {"query": "用系统音频听一下这个视频", "sample_count": 2, "sample_interval_ms": 0, "transcribe": True, "transcript_source": "system_audio"}))
+    assert_true(audio_transcript_result.agent_state["transcript"]["source"] == "system_audio", "system audio transcript source should be exposed")
+    assert_true(audio_transcriber.calls, "system audio transcript provider should be invoked when requested")
 
     unavailable_ocr = UnavailableOcrExtractor("OCR 依赖未安装，暂时只能保存截图。")
     unavailable_result = unavailable_ocr.extract(workspace / "missing.png")
@@ -1418,6 +1640,8 @@ def main() -> int:
     click_decision = policy.classify(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true(click_decision.requires_approval, "computer.click should require approval")
     assert_true(policy.classify(ToolRequest("computer.click", {"x": 100, "y": 200}), approved=True).allowed, "approved computer.click should be allowed")
+    workflow_decision = policy.classify(ToolRequest("computer.workflow", {"workflow": "open_app", "app": "Codex"}))
+    assert_true(workflow_decision.requires_approval, "computer.workflow should require approval")
     public_payload = policy.public_payload(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true("100" not in str(public_payload), "policy preview should not expose raw click coordinates")
 
@@ -1506,7 +1730,6 @@ def main() -> int:
         unreadable_verification = verify_post_action(unreadable_before, unreadable_after)
         assert_true(unreadable_verification.signals.screenshot_changed is None and unreadable_verification.signals.image_changed is None, "unreadable screenshots should fall back safely")
     finally:
-        import shutil
         shutil.rmtree(image_test_dir, ignore_errors=True)
 
     fake_backend = FakeComputerBackend(workspace)
@@ -1622,6 +1845,37 @@ def main() -> int:
     assert_true(hotkey_result.ok, "computer.hotkey tool should succeed with fake backend")
     assert_true("Ctrl" not in hotkey_result.voice_line.text, "hotkey voice should not read key names")
 
+    workflow_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/workflow-before.png", title="Before"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/workflow-after.png", title="After"),
+        ],
+    )
+    workflow_tool = DesktopWorkflowTool(workspace, workflow_backend, post_action_settle_ms=0, sleep_fn=lambda seconds: None)
+    workflow_result = workflow_tool.run(ToolRequest("computer.workflow", {"workflow": "open_app", "app": "Codex"}))
+    assert_true(workflow_result.ok, "computer.workflow open_app should succeed with fake backend")
+    assert_true([action.action_type for action in workflow_backend.actions] == ["hotkey", "type_text", "hotkey"], "open_app workflow should use start search, typing, enter")
+    assert_true(workflow_backend.actions[1].text == "Codex", "open_app workflow should type app name")
+    assert_true(workflow_result.agent_state["computer_use"]["action"]["type"] == "workflow", "workflow action state should be recorded")
+    assert_true(workflow_result.agent_state["post_action_verification"]["status"] == "changed", "workflow should verify after observation")
+    workflow_audit = computer_action_audit_event("task-workflow", workflow_result)
+    assert_true(workflow_audit is not None and workflow_audit.sanitized_arguments.get("workflow") == "open_app", "workflow audit should be sanitized")
+    bili_workflow_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/bili-before.png", title="Before"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/bili-after.png", title="Bilibili Search"),
+        ],
+    )
+    bili_workflow_tool = DesktopWorkflowTool(workspace, bili_workflow_backend, post_action_settle_ms=0, sleep_fn=lambda seconds: None)
+    bili_workflow_result = bili_workflow_tool.run(ToolRequest("computer.workflow", {"workflow": "open_web_search", "browser": "edge", "site": "bilibili", "query": "猫猫视频"}))
+    typed_values = [action.text or "" for action in bili_workflow_backend.actions if action.action_type == "type_text"]
+    assert_true(bili_workflow_result.ok, "Bilibili desktop workflow search should succeed with fake backend")
+    assert_true(any(value == "Microsoft Edge" for value in typed_values), "Bilibili workflow should launch Edge")
+    assert_true(any(value.startswith("https://search.bilibili.com/all?keyword=") for value in typed_values), "Bilibili workflow should navigate to site search URL")
+    assert_true(not any(value == "https://www.bilibili.com" for value in typed_values), "Bilibili search workflow should not stop on homepage when a query exists")
+
     # VisionSummarizer: MockSummarizer
     mock_summarizer = MockSummarizer()
     mock_vs = mock_summarizer.summarize(FakeVisionObserver(workspace).observe())
@@ -1695,10 +1949,14 @@ def main() -> int:
     assert_true(expr_ep.base_url == "https://api.base.com/v1", "expression should fall back base_url")
     assert_true(expr_ep.model == "gpt-4.1-mini", "expression should use expression_model")
     assert_true(expr_ep.api_key == "sk-base", "expression should fall back api_key")
+    voice_style_ep = ModelRouter(expr_llm).resolve("voice_style")
+    assert_true(voice_style_ep.model == "gpt-4.1-mini", "voice_style route should use expression model")
 
     # ModelRouter: expression falls back when not enabled
     expr_ep2 = ModelRouter(base_llm).resolve("expression")
     assert_true(expr_ep2.model == "gpt-4", "unconfigured expression should fall back to base model")
+    voice_style_ep2 = ModelRouter(base_llm).resolve("voice_style")
+    assert_true(voice_style_ep2.model == "gpt-4", "unconfigured voice_style should fall back to base model")
 
     # Config path: _build_vision_summarizer reads from workspace / config.yaml
     tmpdir = tempfile.mkdtemp()
@@ -1763,8 +2021,9 @@ def main() -> int:
         tmp_click_tool = tmp_app.tools._tools.get("computer.click")
         assert_true(tmp_click_tool is not None and tmp_click_tool.ocr is observe_tool.ocr, "computer tool should reuse observe.screen OCR extractor")
         assert_true(tmp_click_tool.post_action_settle_ms == 0, "computer tool should use configured settle delay")
+        tmp_workflow_tool = tmp_app.tools._tools.get("computer.workflow")
+        assert_true(tmp_workflow_tool is not None and tmp_workflow_tool.ocr is observe_tool.ocr, "desktop workflow should reuse observe.screen OCR extractor")
     finally:
-        import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     mutation_tmpdir = tempfile.mkdtemp()
@@ -1904,8 +2163,6 @@ asr:
         assert_true(not invalid_mutation.ok, "invalid type/range config mutation should fail")
         assert_true(config_path.read_text(encoding="utf-8") == before_invalid, "invalid config mutation must not touch config.yaml")
     finally:
-        import shutil
-
         shutil.rmtree(mutation_tmpdir, ignore_errors=True)
 
     p4_20_tmpdir = tempfile.mkdtemp()
@@ -2069,8 +2326,6 @@ asr:
         _assert_config_mutation_payload_safe(applied_payload["events"], "approved runtime config events leaked sensitive detail")
         _assert_config_mutation_payload_safe(bridge.app.memory.recent(10), "runtime config memory leaked sensitive detail")
     finally:
-        import shutil
-
         shutil.rmtree(p4_20_tmpdir, ignore_errors=True)
 
     chat_app = AgentCompanionApp(workspace)
@@ -2083,6 +2338,30 @@ asr:
     assert_true(any(event.agent_state.get("tool") == "watch.recall" for event in empty_watch_events), "empty watch follow-up should use recall")
     assert_true(not any(event.type == EventType.TASK_FAILED for event in empty_watch_events), "empty watch follow-up should answer naturally, not fail")
     assert_true(not any(event.type == EventType.TASK_COMPLETED for event in empty_watch_events), "watch follow-up should not add generic task completion voice")
+
+    browser_watch_app = AgentCompanionApp(workspace)
+    browser_plan = build_plan("搜索 bilibili")
+    browser_watch_app._record_watch_context(
+        browser_plan,
+        browser_plan.steps[0],
+        ToolResult(
+            ok=True,
+            agent_state={
+                "tool": "browser.search",
+                "data": {
+                    "title": "Bilibili",
+                    "elements": [{"text": "搜索"}, {"text": "首页"}],
+                    "screenshot": "data/cache/browser/browser-smoke.png",
+                },
+            },
+            display_card=DisplayCard("网页搜索", "已观察到页面《Bilibili》。", status="success", artifacts=["data/cache/browser/browser-smoke.png"]),
+            voice_line=safe_voice_line("我看到页面内容了。"),
+            risk=RiskLevel.LOW,
+        ),
+    )
+    browser_watch_events = browser_watch_app.handle_user_text("你看到了什么")
+    assert_true(any(event.agent_state.get("tool") == "watch.recall" for event in browser_watch_events), "browser watch follow-up should use recall")
+    assert_true(any("Bilibili" in event.display_card.body for event in browser_watch_events if event.agent_state.get("tool") == "watch.recall"), "browser observation should be available to watch recall")
 
     answer_frames = [
         WatchFrame(
@@ -2126,6 +2405,55 @@ asr:
     assert_true(recall_cards[-1].agent_state["artifacts"] == ["data/agent_companion/vision/sample.png"], "watch recall should expose artifact preview data")
     assert_true(all("sample.png" not in event.voice_line.text for event in recall_events), "watch recall voice should not read artifact path")
     assert_true(watch_app.memory.recent(200) == before_watch_memory, "watch observations should not enter long-term memory by default")
+
+    video_watch_app = AgentCompanionApp(workspace)
+    video_watch_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-video-1.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-video-2.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-video-3.png", title="Bilibili Video"),
+        ],
+    )
+    video_watch_app.tools.register(
+        ScreenObserveTool(
+            workspace,
+            computer_backend=video_watch_backend,
+            summarizer=SequenceSummarizer(),
+            ocr=FakeOcrExtractor(video_ocr),
+        )
+    )
+    video_watch_app.handle_user_text("陪我看这个视频")
+    video_frames = video_watch_app.watch_session.recent(5)
+    assert_true(len(video_frames) >= 3 and video_frames[0].sequence_size == 3, "video watch session should keep sampled frames")
+    assert_true(video_frames[0].transcript_text and "这一条是小猫发的" in video_frames[0].transcript_text[0], "video watch session should keep transcript snippets")
+    video_recall_result = WatchRecallTool(workspace, video_watch_app.watch_session.recent).run(ToolRequest("watch.recall", {"query": "这个视频在讲什么"}))
+    assert_true("这一条是小猫发的" in video_recall_result.display_card.summary, "video recall should answer from transcript context")
+    assert_true("第 3/3 帧" in video_recall_result.display_card.body or "第 2/3 帧" in video_recall_result.display_card.body, "video recall should expose temporal frame context")
+    assert_true("实时转写" in video_recall_result.display_card.body, "video recall should expose transcript context")
+
+    live_video_watch_app = AgentCompanionApp(workspace)
+    live_video_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/live-video-1.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/live-video-2.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/live-video-3.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/live-video-4.png", title="Bilibili Video"),
+        ],
+    )
+    live_video_watch_app.tools.register(
+        ScreenObserveTool(
+            workspace,
+            computer_backend=live_video_backend,
+            summarizer=SequenceSummarizer(),
+            ocr=FakeOcrExtractor(video_ocr),
+        )
+    )
+    live_video_watch_app.handle_user_text("这个视频在讲什么")
+    live_video_frames = live_video_watch_app.watch_session.recent(5)
+    assert_true(live_video_backend.observe_calls == 4, "current video questions should refresh with four sampled frames")
+    assert_true(live_video_frames and live_video_frames[0].sequence_size == 4, "current video refresh should store dense temporal context")
 
     fallback_watch_app = AgentCompanionApp(workspace)
     fallback_watch_app.tools.register(ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=None))
@@ -2267,8 +2595,6 @@ asr:
             os.environ.pop("JOI_FAKE_CODEX_MODE", None)
         else:
             os.environ["JOI_FAKE_CODEX_MODE"] = previous_mode
-        import shutil
-
         shutil.rmtree(fake_codex_dir, ignore_errors=True)
 
     app = AgentCompanionApp(workspace)
@@ -2392,7 +2718,11 @@ asr:
     duplicate = app.resolve_approval(str(game_approval["approval_id"]), approved=False)
     assert_true(not duplicate, "duplicate approval responses should be ignored")
 
-    unconfigured_bridge = JsonRpcBridge(workspace)
+    unconfigured_bridge = JsonRpcBridge(
+        workspace,
+        asr_provider=FailingAsrProvider("asr_unconfigured"),
+        asr_state=AsrRuntimeState(False, False, "none", error="asr_unconfigured"),
+    )
     unconfigured_payload = unconfigured_bridge.transcribe_and_submit("", "audio/webm")
     assert_true(not unconfigured_payload["ok"] and unconfigured_payload["error"] == "asr_unconfigured", "unconfigured ASR should fail clearly")
     assert_true(not unconfigured_payload["submitted"], "unconfigured ASR should not submit user.message")
@@ -2827,6 +3157,7 @@ llm:
     assert_true(run_visual_detector_eval(workspace, verbose=False) == 0, "visual/image verification eval should pass committed suites and skip or run local private suites safely")
     windows_focus_source = (workspace / "agent_companion" / "core" / "windows_focus.py").read_text(encoding="utf-8")
     assert_true("WindowFromPoint" in windows_focus_source and "GetAncestor" in windows_focus_source, "Windows focus helper should resolve the window underneath hidden Joi")
+    assert_true("joi desktop" in windows_focus_source, "Windows focus helper should recognize the Tauri Joi Desktop title")
     windows_observer_source = (workspace / "agent_companion" / "core" / "vision" / "windows.py").read_text(encoding="utf-8")
     assert_true("window_from_point" in windows_observer_source and "hide_foreground_companion_window" in windows_observer_source, "Screen observe should hide Joi and capture the underlying content window")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
@@ -2835,6 +3166,16 @@ llm:
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
+    assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
+    shell_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
+    shell_style_source = (workspace / "agent_companion" / "shell" / "src" / "styles.css").read_text(encoding="utf-8")
+    assert_true("activeExpressionEmotion" in shell_source and "expression_sync" in shell_source and "emotion-${activeExpressionEmotion}" in shell_source, "Shell should bind expression sync to character emotion class")
+    assert_true("emotion-status-card" in shell_source and "当前情绪" in shell_source, "Chat cabin should expose a compact emotion status module")
+    assert_true("stage-emotion-pill" in shell_source and "情绪 {{ activeEmotionStatus.label }}" in shell_source, "Stage should surface current emotion outside the chat cabin")
+    assert_true("accessoryFitStyle" in shell_source and "--acc-hat-top" in shell_source and ":style=\"accessoryFitStyle\"" in shell_source, "Accessory overlays should use adaptive anchor variables")
+    assert_true("preventNativeAssetDrag" in shell_source and "@dragstart.capture.prevent" in shell_source, "Compact mascot should block native asset dragging")
+    assert_true("miniBubbleHasActions" in shell_source and "mini-approval-actions" in shell_source and "requestMiniChange" in shell_source, "Compact speech bubble should expose approval and change actions")
+    assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")

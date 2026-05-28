@@ -26,15 +26,18 @@ class ExpressionEngine:
         fallback = event.voice_line
         payload = self._llm_expression(event, user_text)
         if payload is None:
+            voice_line = safe_voice_line(fallback.text, emotion=fallback.emotion, sprite=fallback.sprite)
             return replace(
                 event,
-                voice_line=safe_voice_line(fallback.text, emotion=fallback.emotion, sprite=fallback.sprite),
+                voice_line=voice_line,
+                agent_state=_with_expression_sync(event.agent_state, voice_line),
             )
 
         voice_text = str(payload.get("voice_text") or fallback.text).strip()
         emotion = str(payload.get("emotion") or fallback.emotion or "neutral")
         sprite = str(payload.get("sprite") or fallback.sprite or "1")
-        return replace(event, voice_line=safe_voice_line(voice_text, emotion=emotion, sprite=sprite))
+        voice_line = safe_voice_line(voice_text, emotion=emotion, sprite=sprite)
+        return replace(event, voice_line=voice_line, agent_state=_with_expression_sync(event.agent_state, voice_line))
 
     def _llm_expression(self, event: AgentEvent, user_text: str) -> dict[str, Any] | None:
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
@@ -42,7 +45,7 @@ class ExpressionEngine:
         config = self._config
         if event.agent_state.get("tool") == "companion.chat":
             return None
-        if config is None or config.llm.use_mock or not config.llm.is_configured:
+        if config is None or config.llm.use_mock or not (config.llm.is_expression_configured or config.llm.is_configured):
             return None
         if event.type not in {
             EventType.APPROVAL_REQUIRED,
@@ -63,7 +66,7 @@ class ExpressionEngine:
             from agent_companion.core.config import ModelRouter
 
             router = ModelRouter(config.llm)
-            endpoint = router.resolve("expression")
+            endpoint = router.resolve("voice_style")
             if self._client is None or self._client.base_url != endpoint.base_url:
                 self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             character = config.primary_character if config.characters else None
@@ -87,8 +90,9 @@ class ExpressionEngine:
                         "content": (
                             f"你是{character_name}的表达层，只负责把 Agent 内部事件改写成角色自然短句。\n"
                             f"角色设定：{persona[:1600]}\n"
-                            "规则：只输出 JSON；格式为 {\"voice_text\":\"...\",\"emotion\":\"neutral|happy|worried|serious\",\"sprite\":\"1\"}。"
-                            "voice_text 必须短，适合朗读。禁止包含 JSON、task id、命令、路径、token、日志、退出码。"
+                            "规则：只输出 JSON；格式为 {\"voice_text\":\"<emo: happy>...\",\"emotion\":\"neutral|happy|thinking|alert|worried|serious\",\"sprite\":\"1\"}。"
+                            "voice_text 可以在开头带一个 <emo: happy|thinking|alert|worried|serious|neutral> token；Core 会剥离 token 并同步给 TTS 与前端。"
+                            "voice_text 必须短，适合朗读。禁止包含 JSON、task id、命令、路径、密钥 token、日志、退出码。"
                             "不要夸大工具结果：如果卡片只说已启动或已接收任务，不要说已经通关、完成日常或修好了。"
                             "如果 voice_lang 不是中文，voice_text 用该语言自然表达；不要解释。"
                         ),
@@ -114,3 +118,13 @@ class ExpressionEngine:
             return load_app_config(config_path)
         except Exception:
             return None
+
+
+def _with_expression_sync(state: dict[str, Any], voice_line: VoiceLine) -> dict[str, Any]:
+    next_state = dict(state or {})
+    next_state["expression_sync"] = {
+        "emotion": voice_line.emotion or "neutral",
+        "sprite": voice_line.sprite or "1",
+        "voice_style": voice_line.emotion or "neutral",
+    }
+    return next_state

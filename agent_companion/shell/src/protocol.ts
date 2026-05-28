@@ -61,6 +61,11 @@ export interface AgentEvent {
     voice_audio_rel?: string
     voice_audio_data_url?: string
     voice_audio_error?: string
+    expression_sync?: {
+      emotion?: string
+      sprite?: string
+      voice_style?: string
+    }
     policy?: {
       tool?: string
       reason?: string
@@ -84,6 +89,8 @@ export interface VoiceAudioPayload {
   event_type?: string
   event_created_at?: number
   voice_text?: string
+  voice_emotion?: string
+  voice_sprite?: string
   voice_audio_path?: string
   voice_audio_rel?: string
   voice_audio_data_url?: string

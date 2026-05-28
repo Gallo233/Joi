@@ -25,6 +25,7 @@ MEDIUM_RISK = {
     "computer.type_text",
     "computer.scroll",
     "computer.hotkey",
+    "computer.workflow",
     "game.ok_ww.run",
     "files.write_workspace",
     "runtime.update_config",
@@ -85,6 +86,8 @@ def _computer_preview(arguments: dict[str, Any]) -> dict[str, str]:
         preview["direction"] = str(arguments.get("direction"))
     if "keys" in arguments:
         preview["keys"] = " + ".join(str(key) for key in arguments.get("keys") or [])
+    if "workflow" in arguments:
+        preview["workflow"] = str(arguments.get("workflow") or "desktop_sequence")
     return preview
 
 

@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import time
 import uuid
 
@@ -20,14 +21,17 @@ from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
 from agent_companion.core.codex_events import codex_cancel_run_state
 from agent_companion.core.event_bus import EventBus
 from agent_companion.core.expression import ExpressionEngine
+from agent_companion.core.llm_planner import LlmPlanParser
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
+from agent_companion.core.speech_input import build_asr_provider
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.codex import CodexTool
 from agent_companion.core.tools.computer import ComputerActionTool
+from agent_companion.core.tools.desktop_workflow import DesktopWorkflowTool
 from agent_companion.core.tools.files import FileReadTool
 from agent_companion.core.tools.game_ok_ww import OkWwTool
 from agent_companion.core.tools.mcp import McpListTool
@@ -40,6 +44,7 @@ from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
 from agent_companion.core.watch import WatchAnswerer, WatchFrame, WatchSession
+from agent_companion.core.watch_transcript import SystemAudioTranscriptProvider
 
 
 @dataclass
@@ -53,8 +58,18 @@ class PendingStep:
     created_at: float = 0.0
 
 
+@dataclass
+class DesktopContext:
+    browser: str = ""
+    site: str = ""
+    url: str = ""
+    updated_at: float = 0.0
+
+
 class AgentCompanionApp:
-    def __init__(self, workspace: Path) -> None:
+    DESKTOP_CONTEXT_TTL_SECONDS = 600.0
+
+    def __init__(self, workspace: Path, llm_planner: LlmPlanParser | None = None) -> None:
         self.workspace = workspace.resolve()
         self.root = self.workspace / "agent_companion"
         self.character: CharacterHarness = load_character(self.root / "config" / "default_character.yaml")
@@ -65,6 +80,8 @@ class AgentCompanionApp:
         self.tools = ToolRegistry()
         self.watch_session = WatchSession()
         self.semantic_selection = SemanticTargetSelectionStore()
+        self.desktop_context = DesktopContext()
+        self.llm_planner = llm_planner or LlmPlanParser(self.workspace)
         self.pending_steps: dict[str, PendingStep] = {}
         self.approval_history: dict[str, PendingStep] = {}
         self.resolved_approval_ids: set[str] = set()
@@ -82,6 +99,8 @@ class AgentCompanionApp:
             )
         else:
             plan = build_plan(text)
+            plan = self._refine_plan_with_llm(text, plan)
+            plan = self._rewrite_plan_for_desktop_context(plan)
         self._emit(
             AgentEvent(
                 EventType.USER_MESSAGE,
@@ -374,6 +393,7 @@ class AgentCompanionApp:
             self._attach_result_audit(plan, step, result)
             self._emit_result(plan.task_id, result, plan.user_text)
             self._record_watch_context(plan, step, result)
+            self._record_desktop_context(plan, step, result)
             final_ok = final_ok and result.ok
             self.memory.remember(
                 "task_result",
@@ -439,6 +459,7 @@ class AgentCompanionApp:
             "computer.type_text": "电脑输入",
             "computer.scroll": "电脑滚动",
             "computer.hotkey": "快捷键",
+            "computer.workflow": "桌面自动操作",
             "mcp.list_tools": "工具清单",
             "files.read": "文件读取",
             "runtime.update_config": "运行设置",
@@ -455,6 +476,7 @@ class AgentCompanionApp:
             "watch_followup": "陪看追问",
             "browser": "浏览器",
             "computer_use": "电脑操作",
+            "desktop_workflow": "桌面自动操作",
             "semantic_target": "目标定位",
             "semantic_target_selection": "候选选择",
             "runtime_settings": "运行设置",
@@ -504,6 +526,7 @@ class AgentCompanionApp:
                 self.workspace,
                 summarizer=self._build_vision_summarizer(app_config),
                 ocr=ocr,
+                audio_transcriber=self._build_audio_transcriber(),
             )
         )
         self.tools.register(
@@ -530,6 +553,7 @@ class AgentCompanionApp:
                     post_action_settle_ms=post_action_settle_ms,
                 )
             )
+        self.tools.register(DesktopWorkflowTool(self.workspace, ocr=ocr, post_action_settle_ms=max(post_action_settle_ms, 600)))
         self.tools.register(OkWwTool(self.workspace))
         self.tools.register(McpListTool(self.workspace))
         self.tools.register(FileReadTool(self.workspace))
@@ -568,6 +592,10 @@ class AgentCompanionApp:
             tesseract_cmd=config.ocr.tesseract_cmd,
             tessdata_dir=config.ocr.tessdata_dir,
         )
+
+    def _build_audio_transcriber(self) -> SystemAudioTranscriptProvider:
+        asr, state = build_asr_provider(self.workspace)
+        return SystemAudioTranscriptProvider(asr, max_seconds=min(max(1, int(state.max_seconds or 8)), 10))
 
     def _make_pending_step(self, plan: AgentPlan, index: int, step: ToolRequest, request_override: ToolRequest | None = None) -> PendingStep:
         return PendingStep(
@@ -623,14 +651,146 @@ class AgentCompanionApp:
         reason = str(payload.get("reason") or result.display_card.summary or "")
         return ToolRequest(tool, arguments, reason)
 
+    def _refine_plan_with_llm(self, text: str, plan: AgentPlan) -> AgentPlan:
+        try:
+            llm_plan = self.llm_planner.plan(text, plan)
+        except Exception:
+            return plan
+        if llm_plan is None:
+            return plan
+        return llm_plan
+
+    def _rewrite_plan_for_desktop_context(self, plan: AgentPlan) -> AgentPlan:
+        context = self._active_desktop_context()
+        if context is None or not _looks_like_search_command(plan.user_text):
+            return plan
+        if not plan.steps:
+            return plan
+        step = plan.steps[0]
+        if step.name not in {"browser.search", "observe.screen"}:
+            return plan
+        if _requests_global_browser_search(plan.user_text):
+            return plan
+        query = _desktop_context_search_query(plan.user_text, step)
+        if not query:
+            return plan
+        return AgentPlan(
+            task_id=plan.task_id,
+            user_text=plan.user_text,
+            intent="desktop_workflow",
+            steps=[
+                ToolRequest(
+                    "computer.workflow",
+                    {
+                        "workflow": "open_web_search",
+                        "browser": context.browser or "edge",
+                        "site": context.site,
+                        "query": query,
+                    },
+                    "继续在当前桌面浏览器站点中搜索，需要确认。",
+                )
+            ],
+        )
+
+    def _active_desktop_context(self) -> DesktopContext | None:
+        if not self.desktop_context.site:
+            return None
+        if time.time() - self.desktop_context.updated_at > self.DESKTOP_CONTEXT_TTL_SECONDS:
+            self.desktop_context = DesktopContext()
+            return None
+        return self.desktop_context
+
+    def _record_desktop_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
+        if step.name != "computer.workflow":
+            return
+        if not result.ok:
+            return
+        workflow = str(step.arguments.get("workflow") or "").strip()
+        if workflow in {"open_web_search", "open_url"}:
+            raw_site = str(step.arguments.get("site") or "").strip()
+            url = str(step.arguments.get("url") or "").strip()
+            site = raw_site
+            if "://" in raw_site:
+                url = raw_site
+                site = _site_from_url(raw_site)
+            if not site and url:
+                site = _site_from_url(url)
+            self.desktop_context = DesktopContext(
+                browser=str(step.arguments.get("browser") or "edge").strip() or "edge",
+                site=site,
+                url=url,
+                updated_at=time.time(),
+            )
+            return
+        if workflow == "open_app":
+            self.desktop_context = DesktopContext()
+
     def _record_watch_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
-        if plan.intent != "watch_together" or step.name != "observe.screen" or not result.ok:
+        if not result.ok:
+            return
+        if plan.intent == "browser" and step.name in {"browser.search", "browser.observe"}:
+            state = result.agent_state if isinstance(result.agent_state, dict) else {}
+            data = state.get("data") if isinstance(state.get("data"), dict) else {}
+            elements = data.get("elements") if isinstance(data.get("elements"), list) else []
+            snippets: list[str] = []
+            for element in elements[:12]:
+                if not isinstance(element, dict):
+                    continue
+                text = str(element.get("text") or "").strip()
+                if text:
+                    snippets.append(text[:160])
+            artifacts = result.display_card.artifacts or []
+            frame = WatchFrame(
+                user_question=plan.user_text,
+                summary=str(result.display_card.summary or state.get("summary") or "").strip(),
+                title=str(data.get("title") or ""),
+                artifact=artifacts[0] if artifacts else str(data.get("screenshot") or ""),
+                model_status="browser",
+                ocr_summary="",
+                ocr_text=snippets,
+                ocr_regions=[],
+            )
+            self.watch_session.add(frame)
+            return
+        if plan.intent != "watch_together" or step.name != "observe.screen":
             return
         state = result.agent_state
         observation = state.get("observation") if isinstance(state.get("observation"), dict) else {}
         artifacts = result.display_card.artifacts or []
         summary = str(state.get("vision_summary") or result.display_card.summary or "").strip()
         model_status = str(state.get("model_status") or "unknown")
+        transcript = state.get("transcript") if isinstance(state.get("transcript"), dict) else {}
+        transcript_text = _transcript_text_from_state(transcript)
+        transcript_source = str(transcript.get("source") or "")
+        transcript_status = str(transcript.get("status") or "")
+        watch_frames = state.get("watch_frames") if isinstance(state.get("watch_frames"), list) else []
+        if watch_frames:
+            sequence_size = len([row for row in watch_frames if isinstance(row, dict)])
+            for index, frame_state in enumerate(watch_frames, start=1):
+                if not isinstance(frame_state, dict):
+                    continue
+                frame_ocr = frame_state.get("ocr") if isinstance(frame_state.get("ocr"), dict) else {}
+                frame_regions = frame_state.get("ocr_regions") if isinstance(frame_state.get("ocr_regions"), list) else []
+                frame_artifact = str(frame_state.get("screenshot_rel") or frame_state.get("screenshot") or "")
+                self.watch_session.add(
+                    WatchFrame(
+                        user_question=plan.user_text,
+                        summary=summary if index == sequence_size else f"连续采样第 {index} 帧",
+                        title=str(frame_state.get("title") or observation.get("title") or ""),
+                        artifact=frame_artifact,
+                        model_status=model_status,
+                        ocr_summary=str(frame_ocr.get("summary") or ""),
+                        ocr_text=_ocr_text_from_state(frame_ocr),
+                        ocr_regions=frame_regions,
+                        transcript_text=transcript_text,
+                        transcript_source=transcript_source,
+                        transcript_status=transcript_status,
+                        sequence_summary=str(frame_state.get("sequence_summary") or state.get("sequence_summary") or ""),
+                        frame_index=index,
+                        sequence_size=sequence_size,
+                    )
+                )
+            return
         ocr = observation.get("ocr") if isinstance(observation.get("ocr"), dict) else {}
         ocr_regions = observation.get("ocr_regions") if isinstance(observation.get("ocr_regions"), list) else []
         ocr_text = _ocr_text_from_state(ocr)
@@ -643,6 +803,9 @@ class AgentCompanionApp:
             ocr_summary=str(ocr.get("summary") or ""),
             ocr_text=ocr_text,
             ocr_regions=ocr_regions,
+            transcript_text=transcript_text,
+            transcript_source=transcript_source,
+            transcript_status=transcript_status,
         )
         self.watch_session.add(frame)
 
@@ -752,6 +915,45 @@ def _ocr_text_from_state(ocr: dict) -> list[str]:
         if text:
             rows.append(text[:160])
     return rows
+
+
+def _transcript_text_from_state(transcript: dict) -> list[str]:
+    rows: list[str] = []
+    segments = transcript.get("segments") if isinstance(transcript, dict) else []
+    if not isinstance(segments, list):
+        return rows
+    for segment in segments[:12]:
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text") or "").strip()
+        if text and text not in rows:
+            rows.append(text[:160])
+    return rows
+
+
+def _looks_like_search_command(text: str) -> bool:
+    return re.search(r"(?:搜索|搜一下|查找|搜(?!集))\s*\S+", text) is not None
+
+
+def _requests_global_browser_search(text: str) -> bool:
+    lowered = text.casefold()
+    return any(token in lowered for token in ("baidu", "google", "chrome")) or any(token in text for token in ("百度", "谷歌", "全网搜索"))
+
+
+def _desktop_context_search_query(user_text: str, step: ToolRequest) -> str:
+    query = str(step.arguments.get("query") or "").strip() if isinstance(step.arguments, dict) else ""
+    if not query:
+        query = " ".join((user_text or "").strip().split())
+    query = re.sub(r"^(?:帮我|请|麻烦)?(?:继续)?(?:在当前页面|在这个页面|在当前网站|在这里)?(?:搜索|搜一下|查找|搜(?!集))\s*", "", query).strip()
+    query = re.sub(r"[。！？!?]+$", "", query).strip(" ：:，,")
+    return query[:160]
+
+
+def _site_from_url(url: str) -> str:
+    lowered = url.casefold()
+    if "bilibili.com" in lowered:
+        return "bilibili"
+    return ""
 
 
 def _parse_candidate_selection(text: str) -> int | None:
