@@ -7,6 +7,7 @@ import uuid
 from typing import Callable
 
 from agent_companion.core.schemas import AgentEvent, DisplayCard, EventType, VoiceLine
+from agent_companion.core.voice import safe_voice_line
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,11 @@ class WatchLoopTick:
     rolling_transcript: list[str] = field(default_factory=list)
     transcript_window_seconds: int = 0
     source_health: dict = field(default_factory=dict)
+    proactive_reply: str = ""
+    proactive_voice_text: str = ""
+    proactive_emotion: str = "neutral"
+    proactive_sprite: str = "1"
+    proactive_reason: str = ""
     error: str = ""
 
 
@@ -51,6 +57,9 @@ class WatchLoopSnapshot:
     rolling_transcript: list[str] = field(default_factory=list)
     transcript_window_seconds: int = 0
     source_health: dict = field(default_factory=dict)
+    last_comment: str = ""
+    last_comment_at: float = 0.0
+    proactive_reason: str = ""
     last_error: str = ""
 
     def to_agent_state(self) -> dict:
@@ -71,6 +80,9 @@ class WatchLoopSnapshot:
             "rolling_transcript": list(self.rolling_transcript[:12]),
             "transcript_window_seconds": int(self.transcript_window_seconds or 0),
             "source_health": self.source_health,
+            "last_comment": self.last_comment[:240],
+            "last_comment_at": self.last_comment_at,
+            "proactive_reason": self.proactive_reason,
             "last_error": self.last_error,
         }
 
@@ -152,6 +164,9 @@ class WatchLoopController:
                 rolling_transcript=list(snap.rolling_transcript),
                 transcript_window_seconds=snap.transcript_window_seconds,
                 source_health=dict(snap.source_health),
+                last_comment=snap.last_comment,
+                last_comment_at=snap.last_comment_at,
+                proactive_reason=snap.proactive_reason,
                 last_error=snap.last_error,
             )
 
@@ -186,10 +201,16 @@ class WatchLoopController:
             self._snapshot.rolling_transcript = list(tick.rolling_transcript[:12])
             self._snapshot.transcript_window_seconds = tick.transcript_window_seconds
             self._snapshot.source_health = dict(tick.source_health)
+            if tick.proactive_reply:
+                self._snapshot.last_comment = tick.proactive_reply
+                self._snapshot.last_comment_at = time.time()
+                self._snapshot.proactive_reason = tick.proactive_reason
             self._snapshot.transcript_source = tick.transcript_source or self._options.transcript_source
             self._snapshot.transcript_status = tick.transcript_status
             self._snapshot.last_error = tick.error
         self._emit_event(tick.summary or "实时陪看上下文已更新。", status="success" if tick.ok else "failed")
+        if tick.proactive_reply:
+            self._emit_comment(tick)
 
     def _is_current(self, session_id: str) -> bool:
         with self._lock:
@@ -207,6 +228,8 @@ class WatchLoopController:
             body_lines.append("最近转写：" + " / ".join(snapshot.last_transcript[:4]))
         if snapshot.rolling_summary:
             body_lines.append(f"滚动摘要：{snapshot.rolling_summary}")
+        if snapshot.last_comment:
+            body_lines.append(f"最近主动评论：{snapshot.last_comment}")
         if snapshot.last_error:
             body_lines.append(f"状态码：{snapshot.last_error}")
         self._emit(
@@ -216,6 +239,38 @@ class WatchLoopController:
                 DisplayCard("实时陪看", summary or "实时陪看状态已更新。", "\n".join(body_lines), status=status),
                 VoiceLine(""),
                 {"tool": "watch.loop", "watch_loop": snapshot.to_agent_state()},
+            )
+        )
+
+    def _emit_comment(self, tick: WatchLoopTick) -> None:
+        snapshot = self.snapshot()
+        voice_line = safe_voice_line(
+            tick.proactive_voice_text or tick.proactive_reply,
+            fallback="这一段我记下来了。",
+            emotion=tick.proactive_emotion,
+            sprite=tick.proactive_sprite,
+        )
+        if not voice_line.text:
+            return
+        self._emit(
+            AgentEvent(
+                EventType.TOOL_COMPLETED,
+                snapshot.session_id or f"watch-{uuid.uuid4().hex[:8]}",
+                DisplayCard("对话", voice_line.text, status="success"),
+                voice_line,
+                {
+                    "tool": "companion.chat",
+                    "watch_commentary": {
+                        "proactive": True,
+                        "reason": tick.proactive_reason,
+                    },
+                    "watch_loop": snapshot.to_agent_state(),
+                    "expression_sync": {
+                        "emotion": voice_line.emotion,
+                        "sprite": voice_line.sprite,
+                        "voice_style": voice_line.emotion,
+                    },
+                },
             )
         )
 

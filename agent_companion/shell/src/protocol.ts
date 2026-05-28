@@ -88,6 +88,8 @@ export interface VoiceAudioPayload {
   task_id?: string
   event_type?: string
   event_created_at?: number
+  event_tool?: string
+  watch_commentary?: boolean
   voice_text?: string
   voice_emotion?: string
   voice_sprite?: string
@@ -163,6 +165,9 @@ export interface WatchLoopStatus {
   rolling_transcript?: string[]
   transcript_window_seconds?: number
   source_health?: Record<string, unknown>
+  last_comment?: string
+  last_comment_at?: number
+  proactive_reason?: string
   last_error?: string
 }
 

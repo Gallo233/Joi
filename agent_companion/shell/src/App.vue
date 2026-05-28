@@ -327,6 +327,7 @@ const watchLoopMeta = computed(() => {
   if (iterations) pieces.push(`${iterations} 次采样`)
   const windowSeconds = Number(status.transcript_window_seconds || 0)
   if (windowSeconds) pieces.push(`最近 ${Math.max(1, Math.round(windowSeconds / 60))} 分钟`)
+  if (status.last_comment_at) pieces.push('主动陪看已开启')
   if (status.transcript_source) pieces.push(String(status.transcript_source))
   if (status.transcript_status) pieces.push(String(status.transcript_status))
   return pieces.join(' · ') || '等待采样'
@@ -1270,12 +1271,20 @@ function playVoiceAudio(payload: VoiceAudioPayload) {
   if (payload.voice_audio_error) {
     lastTtsError.value = ttsErrorLabel(payload.voice_audio_error)
   }
+  if (shouldSuppressProactiveVoice(payload)) return
   const audioKey = voiceAudioKey(payload)
   const eventEpoch = voiceEventEpochs.get(audioKey)
   if (!shouldPlayVoiceAudio(eventEpoch, voiceEpoch)) return
   if (playedVoiceAudioKeys.has(audioKey)) return
   rememberPlayedVoiceAudioKey(audioKey)
   void playAudioPath(payload.voice_audio_path, payload.voice_audio_data_url)
+}
+
+function shouldSuppressProactiveVoice(payload: VoiceAudioPayload) {
+  if (!payload.watch_commentary) return false
+  if (input.value.trim()) return true
+  const active = document.activeElement
+  return active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
 }
 
 function rememberPlayedVoiceAudioKey(key: string) {

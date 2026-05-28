@@ -46,6 +46,7 @@ from agent_companion.core.vision.targeting import resolve_target_candidates
 from agent_companion.core.vision.visual_detector import UnavailableVisualDetector, VisualCandidate, VisualDetectionResult
 from agent_companion.core.voice import safe_voice_line, sprite_for_emotion, strip_emotion_token
 from agent_companion.core.watch import WatchFrame, WatchSession
+from agent_companion.core.watch_commentary import WatchCommentaryPlanner
 from agent_companion.core.watch_transcript import TranscriptResult, TranscriptSegment
 from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, run_eval as run_visual_detector_eval, run_local_semantic_calibration
 
@@ -2486,6 +2487,16 @@ asr:
     assert_true("第一段" in rolling_recall.display_card.summary and "第四段" in rolling_recall.display_card.body, "watch recall should answer from rolling transcript memory")
     assert_true(rolling_recall.display_card.artifacts == ["data/agent_companion/vision/rolling-4.png"], "rolling transcript recall should still keep the latest visual artifact")
 
+    commentary = WatchCommentaryPlanner(workspace, AgentCompanionApp(workspace).character, min_interval_seconds=5)
+    commentary.reset(now=100)
+    assert_true(commentary.maybe_comment({"recent_text": ["第一段说小猫正在靠近实验道具。"], "summary": "最近 5 分钟的转写线索：第一段"}, now=103) is None, "watch commentary should respect cooldown")
+    first_comment = commentary.maybe_comment({"recent_text": ["第一段说小猫正在靠近实验道具。"], "summary": "最近 5 分钟的转写线索：第一段"}, now=106)
+    assert_true(first_comment is not None and first_comment.voice_text and first_comment.emotion in {"neutral", "happy", "thinking", "alert", "worried", "serious"}, "watch commentary should produce a safe short proactive comment")
+    repeated_comment = commentary.maybe_comment({"recent_text": ["第一段说小猫正在靠近实验道具。"], "summary": "最近 5 分钟的转写线索：第一段"}, now=160)
+    assert_true(repeated_comment is None, "watch commentary should not repeat unchanged transcript")
+    next_comment = commentary.maybe_comment({"recent_text": ["第一段说小猫正在靠近实验道具。", "第二段说小猫开始观察主人的动作。"], "summary": "最近 5 分钟的转写线索：第一段 / 第二段"}, now=170)
+    assert_true(next_comment is not None and "{" not in next_comment.voice_text, "watch commentary should react only to new transcript content")
+
     watch_loop_bridge = JsonRpcBridge(workspace)
     watch_loop_bridge.app.tools.register(
         ScreenObserveTool(
@@ -3230,8 +3241,11 @@ llm:
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
     assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
+    assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
+    commentary_source = (workspace / "agent_companion" / "core" / "watch_commentary.py").read_text(encoding="utf-8")
+    assert_true("min_interval_seconds" in commentary_source and "maybe_comment" in commentary_source and "safe_voice_line" in commentary_source, "Watch commentary planner should enforce cooldown and safe voice output")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
     assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
@@ -3245,6 +3259,7 @@ llm:
     assert_true("miniBubbleHasActions" in shell_source and "mini-approval-actions" in shell_source and "requestMiniChange" in shell_source, "Compact speech bubble should expose approval and change actions")
     assert_true("watchLoopStatus" in shell_source and "watch-session-strip" in shell_source and "stopWatchLoop" in shell_source, "Shell should show and control realtime watch loop state")
     assert_true("rolling_transcript" in shell_source and "transcript_window_seconds" in shell_source, "Shell should display rolling transcript state")
+    assert_true("shouldSuppressProactiveVoice" in shell_source and "watch_commentary" in shell_source, "Shell should suppress proactive watch voice while the user is typing")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 

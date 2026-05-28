@@ -19,6 +19,7 @@ from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
 from agent_companion.core.voice import safe_voice_line
+from agent_companion.core.watch_commentary import WatchCommentaryPlanner
 from agent_companion.core.watch_loop import WatchLoopController, WatchLoopOptions, WatchLoopTick
 
 
@@ -47,6 +48,7 @@ class JsonRpcBridge:
         self.port = port
         self.app = AgentCompanionApp(self.workspace)
         self.tts = TtsBridge(self.workspace)
+        self.watch_commentary = WatchCommentaryPlanner(self.workspace, self.app.character)
         self.watch_loop = WatchLoopController(self._watch_loop_tick, self.app.bus.emit)
         if asr_provider is None:
             self.asr, self.asr_state = build_asr_provider(self.workspace, allow_mock=allow_mock_asr)
@@ -190,6 +192,8 @@ class JsonRpcBridge:
             "task_id": event.task_id,
             "event_type": event.type.value,
             "event_created_at": event.created_at,
+            "event_tool": str(event.agent_state.get("tool") or ""),
+            "watch_commentary": bool(event.agent_state.get("watch_commentary")),
             "voice_text": event.voice_line.text,
             "voice_emotion": event.voice_line.emotion,
             "voice_sprite": event.voice_line.sprite,
@@ -237,10 +241,12 @@ class JsonRpcBridge:
         sequence, events = self._run_serial("user.message", lambda: self.app.handle_user_text(text))
         payload: dict[str, Any] = {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
         if _looks_like_watch_loop_start(text):
+            self.watch_commentary.reset()
             payload["watch_loop"] = self.watch_loop.start(self._watch_loop_options_from_params({"query": text})).to_agent_state()
         return payload
 
     def watch_loop_start_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.watch_commentary.reset()
         snapshot = self.watch_loop.start(self._watch_loop_options_from_params(params if isinstance(params, dict) else {}))
         return {"ok": True, "watch_loop": snapshot.to_agent_state()}
 
@@ -324,6 +330,7 @@ class JsonRpcBridge:
         if not result.ok and not error:
             error = str(state.get("error") or "watch_loop_failed")
         rolling = self.app.watch_session.transcript_state()
+        comment = self.watch_commentary.maybe_comment(rolling)
         return WatchLoopTick(
             ok=result.ok,
             summary=result.display_card.summary,
@@ -334,6 +341,11 @@ class JsonRpcBridge:
             rolling_transcript=[str(text) for text in rolling.get("recent_text", []) if str(text).strip()],
             transcript_window_seconds=_safe_int(rolling.get("window_seconds")) or 0,
             source_health=rolling.get("source_health") if isinstance(rolling.get("source_health"), dict) else {},
+            proactive_reply=comment.reply if comment else "",
+            proactive_voice_text=comment.voice_text if comment else "",
+            proactive_emotion=comment.emotion if comment else "neutral",
+            proactive_sprite=comment.sprite if comment else "1",
+            proactive_reason=comment.reason if comment else "",
             error=error,
         )
 
@@ -474,6 +486,7 @@ class JsonRpcBridge:
     def _reload_runtime_after_config_change(self) -> None:
         self.asr, self.asr_state = build_asr_provider(self.workspace)
         self.tts.reload()
+        self.watch_commentary.reload()
 
     @staticmethod
     def _image_data_url(path: Path) -> str:
