@@ -150,6 +150,34 @@ class MemoryStore:
             ).fetchall()
         return [_memory_row(row) for row in rows]
 
+    def context(self, limit: int = 8) -> list[dict[str, Any]]:
+        if not self.enabled():
+            return []
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for note in self._manual_vault_notes(limit=limit):
+            cleaned = _clean_memory_text(note)
+            if not cleaned or _rejection_reason(cleaned) or cleaned in seen:
+                continue
+            rows.append({"kind": "vault", "text": cleaned[:400], "source": "vault"})
+            seen.add(cleaned)
+        for memory in self.recent(limit):
+            text = str(memory.get("text") or "")
+            cleaned = _clean_memory_text(text)
+            if not cleaned or cleaned in seen:
+                continue
+            rows.append(
+                {
+                    "kind": str(memory.get("kind") or "note"),
+                    "text": cleaned[:400],
+                    "source": str(memory.get("source") or "memory"),
+                }
+            )
+            seen.add(cleaned)
+            if len(rows) >= limit:
+                break
+        return rows[: max(1, int(limit or 8))]
+
     def enabled(self) -> bool:
         with sqlite3.connect(self.path) as db:
             row = db.execute("select value from memory_settings where key = 'enabled'").fetchone()
@@ -185,6 +213,7 @@ class MemoryStore:
             )
 
     def _rewrite_vault(self) -> None:
+        manual_notes = self._manual_vault_notes(limit=80)
         memories = self.recent(200)
         lines = [
             "# Joi Memory Vault",
@@ -202,9 +231,38 @@ class MemoryStore:
             kind = _safe_label(str(memory.get("kind") or "note"), "note")
             source = _safe_label(str(memory.get("source") or "manual"), "manual")
             lines.append(f"- {timestamp} [{kind}/{source}] {memory.get('text')}")
+        lines.extend(["", "## Manual Notes", ""])
+        if manual_notes:
+            for note in manual_notes:
+                lines.append(f"- {note}")
+        else:
+            lines.append("_Add user-edited notes here. Unsafe paths, URLs, secrets, screenshots, and logs are ignored at read time._")
         lines.append("")
         self.vault_path.parent.mkdir(parents=True, exist_ok=True)
         self.vault_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _manual_vault_notes(self, *, limit: int = 40) -> list[str]:
+        try:
+            text = self.vault_path.read_text(encoding="utf-8")
+        except Exception:
+            return []
+        in_manual = False
+        notes: list[str] = []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("## "):
+                in_manual = line.casefold() == "## manual notes"
+                continue
+            if not in_manual or not line or line.startswith("_"):
+                continue
+            if line.startswith("-"):
+                line = line[1:].strip()
+            cleaned = _clean_memory_text(line)
+            if cleaned:
+                notes.append(cleaned[:400])
+            if len(notes) >= limit:
+                break
+        return notes
 
     def _init(self) -> None:
         with sqlite3.connect(self.path) as db:

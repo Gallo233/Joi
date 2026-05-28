@@ -331,6 +331,7 @@ class AgentCompanionApp:
         pending_approval = False
         for index, plan_step in enumerate(plan.steps[start_index:], start=start_index):
             step = self._step_for_execution(plan, index, plan_step, approved_step)
+            step = self._step_with_memory_context(step)
             is_approved_step = self._is_approved_step(plan, index, step, approved_step)
             decision = self.policy.classify(step, approved=is_approved_step)
             if decision.requires_approval:
@@ -760,6 +761,16 @@ class AgentCompanionApp:
         if pending.plan.task_id == plan.task_id and pending.index == index:
             return pending.request_override
         return step
+
+    def _step_with_memory_context(self, step: ToolRequest) -> ToolRequest:
+        if step.name != "companion.chat":
+            return step
+        context = self.memory.context(8)
+        if not context:
+            return step
+        arguments = dict(step.arguments)
+        arguments["memory_context"] = context
+        return ToolRequest(step.name, arguments, step.reason)
 
     @staticmethod
     def _approval_request_from_result(result: ToolResult) -> ToolRequest | None:

@@ -20,13 +20,15 @@ class CompanionChatTool(ToolAdapter):
 
     def run(self, request: ToolRequest) -> ToolResult:
         text = str(request.arguments.get("text") or "").strip()
-        reply, voice_text, emotion, sprite = self._reply(text)
+        memory_context = _memory_context(request.arguments.get("memory_context"))
+        reply, voice_text, emotion, sprite = self._reply(text, memory_context)
         voice_line = safe_voice_line(voice_text or reply, emotion=emotion, sprite=sprite)
         return ToolResult(
             ok=True,
             agent_state={
                 "tool": self.name,
                 "reply": reply,
+                "memory_context": memory_context,
                 "expression_sync": {
                     "emotion": voice_line.emotion,
                     "sprite": voice_line.sprite,
@@ -37,12 +39,15 @@ class CompanionChatTool(ToolAdapter):
             voice_line=voice_line,
         )
 
-    def _reply(self, text: str) -> tuple[str, str, str, str]:
+    def _reply(self, text: str, memory_context: list[dict[str, str]] | None = None) -> tuple[str, str, str, str]:
         fallback = "我在。你可以直接告诉我要看、要玩，还是要写代码。"
         fallback_emotion = _fallback_chat_emotion(text)
         config = self._config
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1" or config is None or config.llm.use_mock or not config.llm.is_configured:
             sprite = _sprite_for_character_emotion(config.primary_character if config else None, fallback_emotion)
+            memory_reply = _fallback_memory_reply(text, memory_context or [])
+            if memory_reply:
+                return (memory_reply, "我记得这一点。", "thinking", sprite)
             return (fallback if not text else f"我听到了：{text}", fallback if not text else f"我听到了。", fallback_emotion, sprite)
         try:
             from openai import OpenAI
@@ -56,6 +61,7 @@ class CompanionChatTool(ToolAdapter):
             character = config.primary_character
             voice_lang = character.voice_text_lang(config.tts.text_lang)
             sprite_catalog = _sprite_catalog(character)
+            memory_prompt = _memory_prompt(memory_context or [])
             response = self._client.chat.completions.create(
                 model=endpoint.model,
                 messages=[
@@ -64,6 +70,7 @@ class CompanionChatTool(ToolAdapter):
                         "content": (
                             f"你是{character.name}，按角色设定和用户自然聊天。\n"
                             f"角色设定：{character.setting[:2200]}\n"
+                            f"{memory_prompt}"
                             "只输出 JSON：{\"reply\":\"给屏幕显示的中文回复\",\"voice_text\":\"<emo: happy>适合配音朗读的短句\",\"emotion\":\"neutral|happy|thinking|alert|worried|serious\",\"sprite\":\"1\"}。"
                             "emotion 必须贴合回复语气；sprite 必须从可用立绘 id 中选择最贴近 emotion 的一个。"
                             f"可用立绘：{sprite_catalog}。\n"
@@ -83,6 +90,9 @@ class CompanionChatTool(ToolAdapter):
             return reply[:600], voice_text[:180], emotion, sprite
         except Exception:
             sprite = _sprite_for_character_emotion(config.primary_character if config else None, fallback_emotion)
+            memory_reply = _fallback_memory_reply(text, memory_context or [])
+            if memory_reply:
+                return (memory_reply, "我记得这一点。", "thinking", sprite)
             return (fallback if not text else f"我听到了：{text}", fallback if not text else "我听到了。", fallback_emotion, sprite)
 
     def _load_config(self) -> Any | None:
@@ -106,6 +116,72 @@ def _sprite_catalog(character: Any) -> str:
         if sprite_id:
             rows.append(f"{sprite_id}={label or 'default'}")
     return "；".join(rows) or "1=default"
+
+
+def _memory_context(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, str]] = []
+    for item in value[:8]:
+        if isinstance(item, str):
+            text = item.strip()
+            kind = "note"
+            source = "memory"
+        elif isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+            kind = str(item.get("kind") or "note").strip()
+            source = str(item.get("source") or "memory").strip()
+        else:
+            continue
+        if text and _safe_memory_text(text):
+            rows.append({"kind": kind[:40] or "note", "text": text[:400], "source": source[:40] or "memory"})
+    return rows
+
+
+def _memory_prompt(memory_context: list[dict[str, str]]) -> str:
+    if not memory_context:
+        return ""
+    lines = ["已确认长期记忆，只作为用户偏好和背景使用，不要透露为系统日志或截图："]
+    for row in memory_context[:8]:
+        lines.append(f"- {row.get('text', '')[:240]}")
+    return "\n".join(lines) + "\n"
+
+
+def _fallback_memory_reply(text: str, memory_context: list[dict[str, str]]) -> str:
+    if not memory_context:
+        return ""
+    value = text or ""
+    if not any(token in value for token in ("喜欢", "偏好", "习惯", "记得", "知道我", "了解我")):
+        return ""
+    facts = [row["text"] for row in memory_context[:3] if row.get("text")]
+    if not facts:
+        return ""
+    return "我记得：" + "；".join(facts)
+
+
+def _safe_memory_text(text: str) -> bool:
+    forbidden = (
+        "sk-",
+        "api_key",
+        "token",
+        "secret",
+        "password",
+        "http://",
+        "https://",
+        "data/agent_companion/",
+        "screenshot",
+        "traceback",
+        "stderr",
+        "stdout",
+        "approval-",
+        "task-",
+        "selection-",
+        "codex-",
+    )
+    lowered = text.casefold()
+    if any(item in lowered for item in forbidden):
+        return False
+    return not any(item in text for item in ("C:\\", "/Users/", "/home/", ".png", ".jpg", ".json", ".log", ".yaml", ".yml"))
 
 
 def _fallback_chat_emotion(text: str) -> str:

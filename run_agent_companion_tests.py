@@ -819,6 +819,11 @@ def main() -> int:
     assert_true(chat_emotion_result.voice_line.emotion == "happy", "chat fallback should infer happy emotion from user text")
     assert_true(chat_emotion_result.voice_line.sprite != "1", "chat emotion should select a non-neutral sprite when available")
     assert_true(chat_emotion_result.agent_state["expression_sync"]["emotion"] == "happy", "chat should expose expression sync state")
+    chat_memory_result = CompanionChatTool(workspace).run(
+        ToolRequest("companion.chat", {"text": "你知道我喜欢什么吗", "memory_context": [{"text": "用户更喜欢轻量级原生控件", "kind": "preference", "source": "test"}]})
+    )
+    assert_true("轻量级原生控件" in chat_memory_result.display_card.summary, "chat should answer from approved memory context")
+    assert_true(chat_memory_result.agent_state["memory_context"], "chat should expose the approved memory context it used")
 
     expression_sync_event = AgentCompanionApp(workspace).expression.express(
         AgentEvent(
@@ -851,6 +856,16 @@ def main() -> int:
         assert_true(saved_candidate["ok"] and any(row["text"] == "用户更喜欢原生 CSS 变量" for row in memory.recent(10)), "saving a memory candidate should persist it")
         vault_text = (memory_dir / "memory" / "joi_memory_vault.md").read_text(encoding="utf-8")
         assert_true("用户更喜欢原生 CSS 变量" in vault_text, "saved memories should appear in the local vault")
+        (memory_dir / "memory" / "joi_memory_vault.md").write_text(
+            vault_text + "\n## Manual Notes\n\n- 用户喜欢回答短一点\n- C:\\secret\\raw.log\n",
+            encoding="utf-8",
+        )
+        context_rows = memory.context(10)
+        assert_true(any("回答短一点" in row["text"] for row in context_rows), "manual vault notes should enter memory context")
+        assert_true(not any("secret" in row["text"] or "raw.log" in row["text"] for row in context_rows), "unsafe manual vault notes should be ignored")
+        memory.remember("normal", "用户偏好稳定控件")
+        preserved_vault = (memory_dir / "memory" / "joi_memory_vault.md").read_text(encoding="utf-8")
+        assert_true("用户喜欢回答短一点" in preserved_vault, "vault rewrites should preserve manual notes")
         rejected_candidate = memory.propose("preference", "用户的 key 是 sk-1234567890abcdef", source="chat")
         assert_true(not rejected_candidate["ok"] and not memory.pending(10), "unsafe memory candidates should fail closed")
         disabled_status = memory.set_enabled(False)
@@ -884,6 +899,9 @@ def main() -> int:
         assert_true(not any(event.agent_state.get("memory_candidate") for event in disabled_memory_events), "disabled memory should suppress explicit memory candidates")
         memory_on_events = memory_app.handle_user_text("开启记忆")
         assert_true(any(event.agent_state.get("memory", {}).get("enabled") is True for event in memory_on_events), "memory enable command should update memory state")
+        personalized_events = memory_app.handle_user_text("你知道我喜欢什么吗")
+        personalized_chat = [event for event in personalized_events if event.agent_state.get("tool") == "companion.chat"]
+        assert_true(personalized_chat and "轻量级原生控件" in personalized_chat[-1].display_card.summary, "approved memories should personalize companion chat")
     finally:
         shutil.rmtree(memory_app_dir, ignore_errors=True)
 
@@ -3335,7 +3353,9 @@ llm:
     commentary_source = (workspace / "agent_companion" / "core" / "watch_commentary.py").read_text(encoding="utf-8")
     assert_true("min_interval_seconds" in commentary_source and "maybe_comment" in commentary_source and "safe_voice_line" in commentary_source, "Watch commentary planner should enforce cooldown and safe voice output")
     memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
-    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, local vault, and privacy gate")
+    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, local vault context, and privacy gate")
+    chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
+    assert_true("memory_context" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
     assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
@@ -3353,6 +3373,7 @@ llm:
     assert_true("watchTranscriptSource" in shell_source and "configureWatchLoop" in shell_source and "watchProactiveEnabled" in shell_source, "Shell should expose realtime watch controls")
     assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
     assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "saveMemoryCandidate" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory candidate controls")
+    assert_true("_step_with_memory_context" in (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8"), "App should inject approved memory context into companion chat")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 
