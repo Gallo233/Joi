@@ -22,6 +22,9 @@ const isCompactMode = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
 const miniSpeechActive = ref(false)
 const miniDashboardActive = ref(false)
+const watchTranscriptSource = ref<'system_audio' | 'ocr_subtitle' | 'auto'>('system_audio')
+const watchProactiveEnabled = ref(true)
+const watchCommentaryInterval = ref(30)
 let miniSpeechTimer: number | null = null
 
 async function toggleCompactMode() {
@@ -327,10 +330,26 @@ const watchLoopMeta = computed(() => {
   if (iterations) pieces.push(`${iterations} 次采样`)
   const windowSeconds = Number(status.transcript_window_seconds || 0)
   if (windowSeconds) pieces.push(`最近 ${Math.max(1, Math.round(windowSeconds / 60))} 分钟`)
-  if (status.last_comment_at) pieces.push('主动陪看已开启')
+  pieces.push(status.proactive_enabled === false ? '主动发言关闭' : '主动发言开启')
   if (status.transcript_source) pieces.push(String(status.transcript_source))
   if (status.transcript_status) pieces.push(String(status.transcript_status))
   return pieces.join(' · ') || '等待采样'
+})
+const watchLoopSourceHealth = computed(() => {
+  const health = asRecord(watchLoopStatus.value.source_health)
+  return Object.entries(health)
+    .map(([source, raw]) => {
+      const row = asRecord(raw)
+      return `${sourceLabel(source)} ${Number(row.count || 0)} 段${stringValue(row.status) ? ` · ${stringValue(row.status)}` : ''}`
+    })
+    .slice(0, 3)
+})
+
+watch(watchLoopStatus, (status) => {
+  const source = stringValue(status.transcript_source)
+  if (source === 'system_audio' || source === 'ocr_subtitle' || source === 'auto') watchTranscriptSource.value = source
+  if (typeof status.proactive_enabled === 'boolean') watchProactiveEnabled.value = status.proactive_enabled
+  if (status.commentary_interval_seconds) watchCommentaryInterval.value = Number(status.commentary_interval_seconds)
 })
 
 const latestSpeech = computed(() => {
@@ -1154,6 +1173,15 @@ function stringValue(value: unknown) {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+function sourceLabel(value: string) {
+  const labels: Record<string, string> = {
+    system_audio: '系统音频',
+    ocr_subtitle: '字幕/OCR',
+    auto: '自动',
+  }
+  return labels[value] || value
+}
+
 function expressionEmotionClass(value: string) {
   const normalized = value.trim().toLowerCase().replace(/\s+/g, '_')
   return ['happy', 'thinking', 'alert', 'worried', 'serious', 'neutral'].includes(normalized) ? normalized : 'neutral'
@@ -1195,9 +1223,22 @@ function startWatchLoop() {
     interval_seconds: 6,
     sample_count: 3,
     sample_interval_ms: 700,
-    transcript_source: 'system_audio',
+    transcript_source: watchTranscriptSource.value,
+    proactive_enabled: watchProactiveEnabled.value,
+    commentary_interval_seconds: watchCommentaryInterval.value,
   }).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '实时陪看启动失败'
+  })
+}
+
+function configureWatchLoop() {
+  errorText.value = ''
+  void client.watchLoopConfigure({
+    transcript_source: watchTranscriptSource.value,
+    proactive_enabled: watchProactiveEnabled.value,
+    commentary_interval_seconds: watchCommentaryInterval.value,
+  }).catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '实时陪看设置失败'
   })
 }
 
@@ -1787,6 +1828,30 @@ onBeforeUnmount(() => {
         </div>
         <p v-if="watchLoopTranscript">{{ watchLoopTranscript }}</p>
         <p v-else>{{ watchLoopStatus.rolling_summary || watchLoopStatus.last_summary || '后台会持续捕获当前视频画面、字幕和系统音频转写上下文。' }}</p>
+        <div class="watch-session-controls">
+          <label>
+            <span>源</span>
+            <select v-model="watchTranscriptSource" @change="configureWatchLoop">
+              <option value="system_audio">系统音频</option>
+              <option value="ocr_subtitle">字幕/OCR</option>
+              <option value="auto">自动</option>
+            </select>
+          </label>
+          <label class="watch-session-toggle">
+            <input type="checkbox" v-model="watchProactiveEnabled" @change="configureWatchLoop" />
+            <span>主动发言</span>
+          </label>
+          <label>
+            <span>间隔</span>
+            <select v-model.number="watchCommentaryInterval" :disabled="!watchProactiveEnabled" @change="configureWatchLoop">
+              <option :value="20">20s</option>
+              <option :value="30">30s</option>
+              <option :value="45">45s</option>
+              <option :value="60">60s</option>
+            </select>
+          </label>
+          <small v-if="watchLoopSourceHealth.length">{{ watchLoopSourceHealth.join(' / ') }}</small>
+        </div>
         <button type="button" class="ghost-button" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()">
           {{ watchLoopActive ? '停止' : '重新开始' }}
         </button>

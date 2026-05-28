@@ -18,6 +18,8 @@ class WatchLoopOptions:
     sample_interval_ms: int = 700
     transcript_source: str = "system_audio"
     transcribe: bool = True
+    proactive_enabled: bool = True
+    commentary_interval_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,8 @@ class WatchLoopSnapshot:
     rolling_transcript: list[str] = field(default_factory=list)
     transcript_window_seconds: int = 0
     source_health: dict = field(default_factory=dict)
+    proactive_enabled: bool = True
+    commentary_interval_seconds: float = 30.0
     last_comment: str = ""
     last_comment_at: float = 0.0
     proactive_reason: str = ""
@@ -80,6 +84,8 @@ class WatchLoopSnapshot:
             "rolling_transcript": list(self.rolling_transcript[:12]),
             "transcript_window_seconds": int(self.transcript_window_seconds or 0),
             "source_health": self.source_health,
+            "proactive_enabled": bool(self.proactive_enabled),
+            "commentary_interval_seconds": round(float(self.commentary_interval_seconds or 0), 2),
             "last_comment": self.last_comment[:240],
             "last_comment_at": self.last_comment_at,
             "proactive_reason": self.proactive_reason,
@@ -116,6 +122,8 @@ class WatchLoopController:
                 interval_seconds=options.interval_seconds,
                 sample_count=options.sample_count,
                 transcript_source=options.transcript_source,
+                proactive_enabled=options.proactive_enabled,
+                commentary_interval_seconds=options.commentary_interval_seconds,
                 started_at=now,
                 updated_at=now,
             )
@@ -144,6 +152,20 @@ class WatchLoopController:
             self._emit_event(reason, status="info")
         return self.snapshot()
 
+    def configure(self, options: WatchLoopOptions) -> WatchLoopSnapshot:
+        options = _normalize_options(options)
+        with self._lock:
+            self._options = options
+            self._snapshot.query = options.query
+            self._snapshot.interval_seconds = options.interval_seconds
+            self._snapshot.sample_count = options.sample_count
+            self._snapshot.transcript_source = options.transcript_source
+            self._snapshot.proactive_enabled = options.proactive_enabled
+            self._snapshot.commentary_interval_seconds = options.commentary_interval_seconds
+            self._snapshot.updated_at = time.time()
+        self._emit_event("实时陪看设置已更新。", status="info")
+        return self.snapshot()
+
     def snapshot(self) -> WatchLoopSnapshot:
         with self._lock:
             snap = self._snapshot
@@ -164,6 +186,8 @@ class WatchLoopController:
                 rolling_transcript=list(snap.rolling_transcript),
                 transcript_window_seconds=snap.transcript_window_seconds,
                 source_health=dict(snap.source_health),
+                proactive_enabled=snap.proactive_enabled,
+                commentary_interval_seconds=snap.commentary_interval_seconds,
                 last_comment=snap.last_comment,
                 last_comment_at=snap.last_comment_at,
                 proactive_reason=snap.proactive_reason,
@@ -222,6 +246,7 @@ class WatchLoopController:
             f"状态：{'运行中' if snapshot.active else '已停止'}",
             f"采样：{snapshot.iterations} 次，每 {snapshot.interval_seconds:g}s",
         ]
+        body_lines.append(f"主动发言：{'开启' if snapshot.proactive_enabled else '关闭'}")
         if snapshot.transcript_source:
             body_lines.append(f"转写源：{snapshot.transcript_source}")
         if snapshot.last_transcript:
@@ -287,6 +312,8 @@ def _normalize_options(options: WatchLoopOptions) -> WatchLoopOptions:
         sample_interval_ms=max(0, min(2500, int(options.sample_interval_ms or 700))),
         transcript_source=source,
         transcribe=bool(options.transcribe),
+        proactive_enabled=bool(options.proactive_enabled),
+        commentary_interval_seconds=max(8.0, min(180.0, float(options.commentary_interval_seconds or 30.0))),
     )
 
 

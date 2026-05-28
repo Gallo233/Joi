@@ -2496,6 +2496,8 @@ asr:
     assert_true(repeated_comment is None, "watch commentary should not repeat unchanged transcript")
     next_comment = commentary.maybe_comment({"recent_text": ["第一段说小猫正在靠近实验道具。", "第二段说小猫开始观察主人的动作。"], "summary": "最近 5 分钟的转写线索：第一段 / 第二段"}, now=170)
     assert_true(next_comment is not None and "{" not in next_comment.voice_text, "watch commentary should react only to new transcript content")
+    commentary.reset(now=200)
+    assert_true(commentary.maybe_comment({"recent_text": ["第三段说小猫做出了反应。"], "summary": "第三段"}, now=230, min_interval_seconds=60) is None, "watch commentary should respect runtime interval overrides")
 
     watch_loop_bridge = JsonRpcBridge(workspace)
     watch_loop_bridge.app.tools.register(
@@ -2521,6 +2523,9 @@ asr:
         assert_true("这一条是小猫发的" in " ".join(loop_state["rolling_transcript"]) and loop_state["rolling_summary"], "watch loop should expose rolling transcript memory")
         loop_events = watch_loop_bridge.app.bus.drain()
         assert_true(any(event.agent_state.get("tool") == "watch.loop" for event in loop_events), "watch loop should emit status events without task cards")
+        loop_config = watch_loop_bridge.watch_loop_configure_command({"transcript_source": "ocr_subtitle", "proactive_enabled": False, "commentary_interval_seconds": 60})["watch_loop"]
+        assert_true(loop_config["transcript_source"] == "ocr_subtitle" and loop_config["proactive_enabled"] is False, "watch loop should hot-update transcript source and proactive setting")
+        assert_true(loop_config["commentary_interval_seconds"] == 60, "watch loop should expose proactive commentary interval")
         loop_status = watch_loop_bridge.watch_loop_status_command()["watch_loop"]
         assert_true(loop_status["active"] is True and loop_status["transcript_status"], "watch loop status RPC should expose current state")
         loop_recall = WatchRecallTool(workspace, watch_loop_bridge.app.watch_session.recent).run(ToolRequest("watch.recall", {"query": "刚才视频在讲什么"}))
@@ -3032,7 +3037,7 @@ llm:
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
-    assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
+    assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source and "watch.loop.configure" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
     assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
     assert_true("event_created_at" in voice_runtime_source, "voice runtime key should include event identity")
@@ -3240,7 +3245,7 @@ llm:
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
-    assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
+    assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop_configure_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
@@ -3260,8 +3265,9 @@ llm:
     assert_true("watchLoopStatus" in shell_source and "watch-session-strip" in shell_source and "stopWatchLoop" in shell_source, "Shell should show and control realtime watch loop state")
     assert_true("rolling_transcript" in shell_source and "transcript_window_seconds" in shell_source, "Shell should display rolling transcript state")
     assert_true("shouldSuppressProactiveVoice" in shell_source and "watch_commentary" in shell_source, "Shell should suppress proactive watch voice while the user is typing")
+    assert_true("watchTranscriptSource" in shell_source and "configureWatchLoop" in shell_source and "watchProactiveEnabled" in shell_source, "Shell should expose realtime watch controls")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
-    assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source, "Shell styles should include realtime watch loop status strip")
+    assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")

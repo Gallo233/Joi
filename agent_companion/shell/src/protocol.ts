@@ -165,6 +165,8 @@ export interface WatchLoopStatus {
   rolling_transcript?: string[]
   transcript_window_seconds?: number
   source_health?: Record<string, unknown>
+  proactive_enabled?: boolean
+  commentary_interval_seconds?: number
   last_comment?: string
   last_comment_at?: number
   proactive_reason?: string

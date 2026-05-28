@@ -39,9 +39,10 @@ class WatchCommentaryPlanner:
         self._config = self._load_config()
         self._client = None
 
-    def maybe_comment(self, transcript_state: dict[str, Any], *, now: float | None = None) -> WatchComment | None:
+    def maybe_comment(self, transcript_state: dict[str, Any], *, now: float | None = None, min_interval_seconds: float | None = None) -> WatchComment | None:
         now = now if now is not None else time.time()
-        if now - self._last_comment_at < self.min_interval_seconds:
+        interval = max(5.0, float(min_interval_seconds or self.min_interval_seconds))
+        if now - self._last_comment_at < interval:
             return None
         rows = _recent_rows(transcript_state)
         if not rows:

@@ -88,6 +88,10 @@ export class CoreClient {
     return this.send('watch.loop.stop', {})
   }
 
+  watchLoopConfigure(params: Record<string, unknown> = {}) {
+    return this.send('watch.loop.configure', params)
+  }
+
   watchLoopStatus() {
     return this.send('watch.loop.status', {})
   }

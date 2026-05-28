@@ -117,6 +117,10 @@ class JsonRpcBridge:
                 result = await asyncio.to_thread(self.watch_loop_stop_command)
                 await websocket.send(self._result(request_id, result))
                 return
+            if method == "watch.loop.configure":
+                result = await asyncio.to_thread(self.watch_loop_configure_command, params)
+                await websocket.send(self._result(request_id, result))
+                return
             if method == "watch.loop.status":
                 await websocket.send(self._result(request_id, self.watch_loop_status_command()))
                 return
@@ -254,6 +258,25 @@ class JsonRpcBridge:
         snapshot = self.watch_loop.stop()
         return {"ok": True, "watch_loop": snapshot.to_agent_state()}
 
+    def watch_loop_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        current = self.watch_loop.snapshot()
+        merged: dict[str, Any] = {
+            "query": current.query or "陪我看当前视频",
+            "interval_seconds": current.interval_seconds,
+            "sample_count": current.sample_count,
+            "sample_interval_ms": 700,
+            "transcript_source": current.transcript_source or "system_audio",
+            "transcribe": True,
+            "proactive_enabled": current.proactive_enabled,
+            "commentary_interval_seconds": current.commentary_interval_seconds or 30.0,
+        }
+        if isinstance(params, dict):
+            merged.update(params)
+        snapshot = self.watch_loop.configure(self._watch_loop_options_from_params(merged))
+        if not snapshot.proactive_enabled:
+            self.watch_commentary.reset()
+        return {"ok": True, "watch_loop": snapshot.to_agent_state()}
+
     def watch_loop_status_command(self) -> dict[str, Any]:
         return {"ok": True, "watch_loop": self.watch_loop.snapshot().to_agent_state()}
 
@@ -304,6 +327,8 @@ class JsonRpcBridge:
             sample_interval_ms=sample_interval_ms if sample_interval_ms is not None else 700,
             transcript_source=str(params.get("transcript_source") or "system_audio"),
             transcribe=bool(params.get("transcribe", True)),
+            proactive_enabled=_safe_bool(params.get("proactive_enabled"), True),
+            commentary_interval_seconds=_safe_float(params.get("commentary_interval_seconds"), 30.0),
         )
 
     def _watch_loop_tick(self, options: WatchLoopOptions) -> WatchLoopTick:
@@ -330,7 +355,7 @@ class JsonRpcBridge:
         if not result.ok and not error:
             error = str(state.get("error") or "watch_loop_failed")
         rolling = self.app.watch_session.transcript_state()
-        comment = self.watch_commentary.maybe_comment(rolling)
+        comment = self.watch_commentary.maybe_comment(rolling, min_interval_seconds=options.commentary_interval_seconds) if options.proactive_enabled else None
         return WatchLoopTick(
             ok=result.ok,
             summary=result.display_card.summary,
@@ -569,6 +594,19 @@ def _safe_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    if text in {"1", "true", "yes", "on", "enabled", "开启"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "关闭"}:
+        return False
+    return default
 
 
 def _looks_like_watch_loop_start(text: str) -> bool:
