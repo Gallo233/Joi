@@ -269,6 +269,7 @@ class JsonRpcBridge:
             "transcribe": True,
             "proactive_enabled": current.proactive_enabled,
             "commentary_interval_seconds": current.commentary_interval_seconds or 30.0,
+            "vision_interval_ticks": current.vision_interval_ticks or 5,
         }
         if isinstance(params, dict):
             merged.update(params)
@@ -329,9 +330,12 @@ class JsonRpcBridge:
             transcribe=bool(params.get("transcribe", True)),
             proactive_enabled=_safe_bool(params.get("proactive_enabled"), True),
             commentary_interval_seconds=_safe_float(params.get("commentary_interval_seconds"), 30.0),
+            vision_interval_ticks=_safe_int(params.get("vision_interval_ticks")) or 5,
         )
 
     def _watch_loop_tick(self, options: WatchLoopOptions) -> WatchLoopTick:
+        next_iteration = self.watch_loop.snapshot().iterations + 1
+        run_vision_summary = _watch_loop_should_summarize(options, next_iteration)
         with self._command_lock:
             result = self.app.refresh_watch_context(
                 options.query,
@@ -339,7 +343,7 @@ class JsonRpcBridge:
                 sample_interval_ms=options.sample_interval_ms,
                 transcript_source=options.transcript_source,
                 transcribe=options.transcribe,
-                skip_summary=True,
+                skip_summary=not run_vision_summary,
             )
         state = result.agent_state if isinstance(result.agent_state, dict) else {}
         transcript = state.get("transcript") if isinstance(state.get("transcript"), dict) else {}
@@ -354,6 +358,8 @@ class JsonRpcBridge:
         error = str(transcript.get("error") or "")
         if not result.ok and not error:
             error = str(state.get("error") or "watch_loop_failed")
+        visual_summary = str(state.get("sequence_summary") or state.get("vision_summary") or "")
+        visual_status = str(state.get("model_status") or "")
         rolling = self.app.watch_session.transcript_state()
         comment = self.watch_commentary.maybe_comment(rolling, min_interval_seconds=options.commentary_interval_seconds) if options.proactive_enabled else None
         return WatchLoopTick(
@@ -371,6 +377,8 @@ class JsonRpcBridge:
             proactive_emotion=comment.emotion if comment else "neutral",
             proactive_sprite=comment.sprite if comment else "1",
             proactive_reason=comment.reason if comment else "",
+            visual_summary=visual_summary,
+            visual_status=visual_status,
             error=error,
         )
 
@@ -607,6 +615,15 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off", "disabled", "关闭"}:
         return False
     return default
+
+
+def _watch_loop_should_summarize(options: WatchLoopOptions, next_iteration: int) -> bool:
+    interval = max(0, int(options.vision_interval_ticks or 0))
+    if interval <= 0:
+        return False
+    if next_iteration <= 1:
+        return True
+    return next_iteration % interval == 0
 
 
 def _looks_like_watch_loop_start(text: str) -> bool:

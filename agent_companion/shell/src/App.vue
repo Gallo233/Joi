@@ -338,6 +338,7 @@ const watchLoopMeta = computed(() => {
   }
   if (status.transcript_status) pieces.push(String(status.transcript_status))
   if (status.last_error) pieces.push(errorLabel(String(status.last_error)))
+  if (status.visual_status) pieces.push(`视觉 ${status.visual_status}`)
   return pieces.join(' · ') || '等待采样'
 })
 const watchLoopSourceHealth = computed(() => {
@@ -1847,7 +1848,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <p v-if="watchLoopTranscript">{{ watchLoopTranscript }}</p>
-        <p v-else>{{ watchLoopStatus.rolling_summary || watchLoopStatus.last_summary || '后台会持续捕获当前视频画面、字幕和系统音频转写上下文。' }}</p>
+        <p v-else>{{ watchLoopStatus.last_visual_summary || watchLoopStatus.rolling_summary || watchLoopStatus.last_summary || '后台会持续捕获当前视频画面、字幕和系统音频转写上下文。' }}</p>
         <div class="watch-session-controls">
           <label>
             <span>源</span>

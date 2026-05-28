@@ -20,6 +20,7 @@ class WatchLoopOptions:
     transcribe: bool = True
     proactive_enabled: bool = True
     commentary_interval_seconds: float = 30.0
+    vision_interval_ticks: int = 5
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,8 @@ class WatchLoopTick:
     proactive_emotion: str = "neutral"
     proactive_sprite: str = "1"
     proactive_reason: str = ""
+    visual_summary: str = ""
+    visual_status: str = ""
     error: str = ""
 
 
@@ -62,6 +65,9 @@ class WatchLoopSnapshot:
     source_health: dict = field(default_factory=dict)
     proactive_enabled: bool = True
     commentary_interval_seconds: float = 30.0
+    vision_interval_ticks: int = 5
+    last_visual_summary: str = ""
+    visual_status: str = ""
     last_comment: str = ""
     last_comment_at: float = 0.0
     proactive_reason: str = ""
@@ -88,6 +94,9 @@ class WatchLoopSnapshot:
             "source_health": self.source_health,
             "proactive_enabled": bool(self.proactive_enabled),
             "commentary_interval_seconds": round(float(self.commentary_interval_seconds or 0), 2),
+            "vision_interval_ticks": int(self.vision_interval_ticks or 0),
+            "last_visual_summary": self.last_visual_summary[:500],
+            "visual_status": self.visual_status,
             "last_comment": self.last_comment[:240],
             "last_comment_at": self.last_comment_at,
             "proactive_reason": self.proactive_reason,
@@ -127,6 +136,7 @@ class WatchLoopController:
                 active_transcript_source=options.transcript_source,
                 proactive_enabled=options.proactive_enabled,
                 commentary_interval_seconds=options.commentary_interval_seconds,
+                vision_interval_ticks=options.vision_interval_ticks,
                 started_at=now,
                 updated_at=now,
             )
@@ -165,6 +175,7 @@ class WatchLoopController:
             self._snapshot.transcript_source = options.transcript_source
             self._snapshot.proactive_enabled = options.proactive_enabled
             self._snapshot.commentary_interval_seconds = options.commentary_interval_seconds
+            self._snapshot.vision_interval_ticks = options.vision_interval_ticks
             self._snapshot.updated_at = time.time()
         self._emit_event("实时陪看设置已更新。", status="info")
         return self.snapshot()
@@ -192,6 +203,9 @@ class WatchLoopController:
                 source_health=dict(snap.source_health),
                 proactive_enabled=snap.proactive_enabled,
                 commentary_interval_seconds=snap.commentary_interval_seconds,
+                vision_interval_ticks=snap.vision_interval_ticks,
+                last_visual_summary=snap.last_visual_summary,
+                visual_status=snap.visual_status,
                 last_comment=snap.last_comment,
                 last_comment_at=snap.last_comment_at,
                 proactive_reason=snap.proactive_reason,
@@ -229,6 +243,10 @@ class WatchLoopController:
             self._snapshot.rolling_transcript = list(tick.rolling_transcript[:12])
             self._snapshot.transcript_window_seconds = tick.transcript_window_seconds
             self._snapshot.source_health = dict(tick.source_health)
+            if tick.visual_summary:
+                self._snapshot.last_visual_summary = tick.visual_summary
+            if tick.visual_status:
+                self._snapshot.visual_status = tick.visual_status
             if tick.proactive_reply:
                 self._snapshot.last_comment = tick.proactive_reply
                 self._snapshot.last_comment_at = time.time()
@@ -259,6 +277,8 @@ class WatchLoopController:
             body_lines.append("最近转写：" + " / ".join(snapshot.last_transcript[:4]))
         if snapshot.rolling_summary:
             body_lines.append(f"滚动摘要：{snapshot.rolling_summary}")
+        if snapshot.last_visual_summary:
+            body_lines.append(f"视觉摘要：{snapshot.last_visual_summary}")
         if snapshot.last_comment:
             body_lines.append(f"最近主动评论：{snapshot.last_comment}")
         if snapshot.last_error:
@@ -311,6 +331,10 @@ def _normalize_options(options: WatchLoopOptions) -> WatchLoopOptions:
     source = (options.transcript_source or "auto").strip().casefold()
     if source not in {"auto", "ocr_subtitle", "system_audio"}:
         source = "auto"
+    try:
+        vision_interval = int(options.vision_interval_ticks)
+    except Exception:
+        vision_interval = 5
     return WatchLoopOptions(
         query=query or "陪我看当前视频",
         interval_seconds=max(2.0, min(60.0, float(options.interval_seconds or 6.0))),
@@ -320,6 +344,7 @@ def _normalize_options(options: WatchLoopOptions) -> WatchLoopOptions:
         transcribe=bool(options.transcribe),
         proactive_enabled=bool(options.proactive_enabled),
         commentary_interval_seconds=max(8.0, min(180.0, float(options.commentary_interval_seconds or 30.0))),
+        vision_interval_ticks=max(0, min(60, vision_interval)),
     )
 
 

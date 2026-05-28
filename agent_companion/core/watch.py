@@ -173,6 +173,7 @@ def answer_from_recent_frames(question: str, frames: list[WatchFrame]) -> tuple[
         return "我还没有最近的画面上下文。先让我看一下当前窗口吧。", ""
     latest = frames[0]
     transcript_frame = _best_transcript_frame(frames)
+    visual_frame = _best_visual_summary_frame(frames)
     region_frame = _best_region_frame(frames)
     title = f"《{latest.title}》" if latest.title else "刚才的画面"
     if latest.model_status == "unconfigured":
@@ -187,6 +188,10 @@ def answer_from_recent_frames(question: str, frames: list[WatchFrame]) -> tuple[
         return region_answer, "vision_context"
     if transcript_line and _asks_video_content(question_hint):
         sequence_summary = (transcript_frame or latest).sequence_summary
+        if visual_frame and visual_frame.sequence_summary and visual_frame.sequence_summary != sequence_summary:
+            return f"从画面看，{visual_frame.sequence_summary}。转写里能读到/听到：{transcript_line}", "vision_context"
+        if visual_frame and visual_frame.summary and visual_frame.summary != sequence_summary:
+            return f"从画面看，{visual_frame.summary}。转写里能读到/听到：{transcript_line}", "vision_context"
         prefix = f"从连续画面看，{sequence_summary}" if sequence_summary else "根据实时转写"
         return f"{prefix}。转写里能读到/听到：{transcript_line}", "vision_context"
     if latest.sequence_summary and _asks_video_content(question_hint):
@@ -317,6 +322,13 @@ def _best_transcript_frame(frames: list[WatchFrame]) -> WatchFrame | None:
 def _best_region_frame(frames: list[WatchFrame]) -> WatchFrame | None:
     for frame in frames:
         if frame.ocr_regions:
+            return frame
+    return None
+
+
+def _best_visual_summary_frame(frames: list[WatchFrame]) -> WatchFrame | None:
+    for frame in frames:
+        if frame.model_status == "ok" and (frame.sequence_summary or frame.summary):
             return frame
     return None
 

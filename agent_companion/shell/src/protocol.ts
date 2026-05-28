@@ -168,6 +168,9 @@ export interface WatchLoopStatus {
   source_health?: Record<string, unknown>
   proactive_enabled?: boolean
   commentary_interval_seconds?: number
+  vision_interval_ticks?: number
+  last_visual_summary?: string
+  visual_status?: string
   last_comment?: string
   last_comment_at?: number
   proactive_reason?: string

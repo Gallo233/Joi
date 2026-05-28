@@ -2523,6 +2523,7 @@ asr:
     assert_true(commentary.maybe_comment({"recent_text": ["第三段说小猫做出了反应。"], "summary": "第三段"}, now=230, min_interval_seconds=60) is None, "watch commentary should respect runtime interval overrides")
 
     watch_loop_bridge = JsonRpcBridge(workspace)
+    watch_loop_summarizer = SequenceSummarizer()
     watch_loop_bridge.app.tools.register(
         ScreenObserveTool(
             workspace,
@@ -2533,7 +2534,7 @@ asr:
                     _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-loop-2.png", title="Bilibili Video"),
                 ],
             ),
-            summarizer=SequenceSummarizer(),
+            summarizer=watch_loop_summarizer,
             ocr=FakeOcrExtractor(video_ocr),
         )
     )
@@ -2544,16 +2545,19 @@ asr:
         assert_true(watch_loop_bridge.app.watch_session.has_context(), "watch loop should refresh watch session context")
         assert_true("这一条是小猫发的" in " ".join(loop_state["last_transcript"]), "watch loop should expose latest transcript snippets")
         assert_true("这一条是小猫发的" in " ".join(loop_state["rolling_transcript"]) and loop_state["rolling_summary"], "watch loop should expose rolling transcript memory")
+        assert_true(watch_loop_summarizer.sequence_calls and "连续画面显示一只猫" in loop_state["last_visual_summary"], "watch loop first tick should capture a low-frequency visual summary")
+        assert_true(loop_state["visual_status"] == "ok", "watch loop should expose visual summary status")
         loop_events = watch_loop_bridge.app.bus.drain()
         assert_true(any(event.agent_state.get("tool") == "watch.loop" for event in loop_events), "watch loop should emit status events without task cards")
-        loop_config = watch_loop_bridge.watch_loop_configure_command({"transcript_source": "ocr_subtitle", "proactive_enabled": False, "commentary_interval_seconds": 60})["watch_loop"]
+        loop_config = watch_loop_bridge.watch_loop_configure_command({"transcript_source": "ocr_subtitle", "proactive_enabled": False, "commentary_interval_seconds": 60, "vision_interval_ticks": 3})["watch_loop"]
         assert_true(loop_config["transcript_source"] == "ocr_subtitle" and loop_config["proactive_enabled"] is False, "watch loop should hot-update transcript source and proactive setting")
         assert_true(loop_config["commentary_interval_seconds"] == 60, "watch loop should expose proactive commentary interval")
+        assert_true(loop_config["vision_interval_ticks"] == 3, "watch loop should expose low-frequency visual summary interval")
         assert_true("active_transcript_source" in loop_config, "watch loop should distinguish configured and active transcript sources")
         loop_status = watch_loop_bridge.watch_loop_status_command()["watch_loop"]
         assert_true(loop_status["active"] is True and loop_status["transcript_status"], "watch loop status RPC should expose current state")
-        loop_recall = WatchRecallTool(workspace, watch_loop_bridge.app.watch_session.recent).run(ToolRequest("watch.recall", {"query": "刚才视频在讲什么"}))
-        assert_true("这一条是小猫发的" in loop_recall.display_card.summary, "watch loop context should support follow-up recall")
+        loop_recall = WatchRecallTool(workspace, watch_loop_bridge.app.watch_session.recent_with_transcript).run(ToolRequest("watch.recall", {"query": "刚才视频在讲什么"}))
+        assert_true("这一条是小猫发的" in loop_recall.display_card.summary and "连续画面显示一只猫" in loop_recall.display_card.summary, "watch loop context should combine transcript and low-frequency vision summary")
         loop_stop = watch_loop_bridge.watch_loop_stop_command()["watch_loop"]
         assert_true(loop_stop["active"] is False, "watch loop stop should deactivate the session")
     finally:
@@ -3270,6 +3274,7 @@ llm:
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
     assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop_configure_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
+    assert_true("_watch_loop_should_summarize" in server_source and "skip_summary=not run_vision_summary" in server_source, "Core watch loop should run low-frequency visual summaries")
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
@@ -3289,7 +3294,7 @@ llm:
     assert_true("preventNativeAssetDrag" in shell_source and "@dragstart.capture.prevent" in shell_source, "Compact mascot should block native asset dragging")
     assert_true("miniBubbleHasActions" in shell_source and "mini-approval-actions" in shell_source and "requestMiniChange" in shell_source, "Compact speech bubble should expose approval and change actions")
     assert_true("watchLoopStatus" in shell_source and "watch-session-strip" in shell_source and "stopWatchLoop" in shell_source, "Shell should show and control realtime watch loop state")
-    assert_true("rolling_transcript" in shell_source and "transcript_window_seconds" in shell_source and "active_transcript_source" in shell_source, "Shell should display rolling transcript state")
+    assert_true("rolling_transcript" in shell_source and "transcript_window_seconds" in shell_source and "active_transcript_source" in shell_source and "last_visual_summary" in shell_source, "Shell should display rolling transcript and visual state")
     assert_true("shouldSuppressProactiveVoice" in shell_source and "watch_commentary" in shell_source, "Shell should suppress proactive watch voice while the user is typing")
     assert_true("watchTranscriptSource" in shell_source and "configureWatchLoop" in shell_source and "watchProactiveEnabled" in shell_source, "Shell should expose realtime watch controls")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
