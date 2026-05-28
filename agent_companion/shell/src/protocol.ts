@@ -177,6 +177,32 @@ export interface WatchLoopStatus {
   last_error?: string
 }
 
+export interface MemoryRecord {
+  id: number
+  kind?: string
+  text?: string
+  source?: string
+  created_at?: number
+}
+
+export interface MemoryCandidate {
+  id: number
+  kind?: string
+  text?: string
+  source?: string
+  status?: string
+  created_at?: number
+  resolved_at?: number
+  rejection_reason?: string
+}
+
+export interface MemoryStatus {
+  enabled?: boolean
+  vault_path?: string
+  recent?: MemoryRecord[]
+  pending?: MemoryCandidate[]
+}
+
 export interface CoreReadyPayload {
   workspace: string
   asr?: {
@@ -203,6 +229,7 @@ export interface CoreReadyPayload {
     providers?: RuntimeProviderStatus[]
   }
   watch_loop?: WatchLoopStatus
+  memory?: MemoryStatus
   runtime_settings?: {
     asr?: {
       enabled?: boolean

@@ -128,6 +128,21 @@ class JsonRpcBridge:
             if method == "watch.loop.status":
                 await websocket.send(self._result(request_id, self.watch_loop_status_command()))
                 return
+            if method == "memory.status":
+                await websocket.send(self._result(request_id, self.memory_status_command()))
+                return
+            if method == "memory.save_candidate":
+                result = self.memory_save_candidate_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.reject_candidate":
+                result = self.memory_reject_candidate_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.delete":
+                result = self.memory_delete_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
             if method == "approval.resolve":
                 approval_id = str(params.get("approval_id") or "")
                 approved = bool(params.get("approved", False))
@@ -292,6 +307,31 @@ class JsonRpcBridge:
 
     def watch_loop_status_command(self) -> dict[str, Any]:
         return {"ok": True, "watch_loop": self.watch_loop.snapshot().to_agent_state()}
+
+    def memory_status_command(self) -> dict[str, Any]:
+        return {"ok": True, "memory": self.app.memory.status()}
+
+    def memory_save_candidate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        candidate_id = _safe_int(params.get("candidate_id")) if isinstance(params, dict) else None
+        if candidate_id is None:
+            return {"ok": False, "error": "missing_candidate_id", "memory": self.app.memory.status()}
+        result = self.app.memory.save_candidate(candidate_id)
+        return {**result, "memory": self.app.memory.status()}
+
+    def memory_reject_candidate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        candidate_id = _safe_int(params.get("candidate_id")) if isinstance(params, dict) else None
+        if candidate_id is None:
+            return {"ok": False, "error": "missing_candidate_id", "memory": self.app.memory.status()}
+        reason = str(params.get("reason") or "user_rejected") if isinstance(params, dict) else "user_rejected"
+        result = self.app.memory.reject_candidate(candidate_id, reason)
+        return {**result, "memory": self.app.memory.status()}
+
+    def memory_delete_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        memory_id = _safe_int(params.get("memory_id")) if isinstance(params, dict) else None
+        if memory_id is None:
+            return {"ok": False, "error": "missing_memory_id", "memory": self.app.memory.status()}
+        result = self.app.memory.delete(memory_id)
+        return {**result, "memory": self.app.memory.status()}
 
     def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
         sequence, events = self._run_serial("approval.resolve", lambda: self.app.resolve_approval(approval_id, approved))
@@ -494,6 +534,7 @@ class JsonRpcBridge:
             "tts": tts_status,
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
+            "memory": self.app.memory.status(),
             "character": {
                 "name": self.app.character.name,
                 "sprites": [],

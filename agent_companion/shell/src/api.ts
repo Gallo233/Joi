@@ -104,6 +104,22 @@ export class CoreClient {
     return this.send('watch.loop.status', {})
   }
 
+  memoryStatus() {
+    return this.send('memory.status', {})
+  }
+
+  memorySaveCandidate(candidateId: number) {
+    return this.send('memory.save_candidate', { candidate_id: candidateId })
+  }
+
+  memoryRejectCandidate(candidateId: number) {
+    return this.send('memory.reject_candidate', { candidate_id: candidateId })
+  }
+
+  memoryDelete(memoryId: number) {
+    return this.send('memory.delete', { memory_id: memoryId })
+  }
+
   private send(method: string, params: Record<string, unknown>, options?: { timeoutMs?: number; timeoutMessage?: string }) {
     const payload = { jsonrpc: '2.0', id: `ui-${this.nextId++}`, method, params }
     if (this.socket?.readyState === WebSocket.OPEN) {

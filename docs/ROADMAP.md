@@ -87,7 +87,7 @@ Remaining P4 closeout risks:
 
 ## P5 Memory Core
 
-Status: planned
+Status: in progress
 
 - Add local SQLite storage for user preferences, project summaries, game habits, recent task outcomes, and companion relationship notes.
 - Add human-readable Markdown summaries for durable handoff, similar to a local memory vault.

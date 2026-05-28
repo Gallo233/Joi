@@ -3,7 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryStatus, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -17,6 +17,7 @@ const previewArtifact = ref('')
 const previewArtifactEvent = ref<AgentEvent | null>(null)
 const activeCabin = ref<'workspace' | 'chat' | 'inspector'>('workspace')
 const artifactDialog = ref<HTMLDialogElement | null>(null)
+const memoryStatus = ref<MemoryStatus | null>(null)
 
 const isCompactMode = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
@@ -245,10 +246,12 @@ const client = new CoreClient({
   onEvent: (event) => {
     rememberVoiceEventEpoch(event)
     events.value.push(event)
+    syncMemoryFromEvent(event)
     preloadImageArtifacts(event)
   },
   onReady: (payload) => {
     ready.value = payload
+    memoryStatus.value = payload.memory || memoryStatus.value
     syncRuntimeDraft(payload)
   },
   onVoiceAudio: (payload) => void playVoiceAudio(payload),
@@ -353,6 +356,8 @@ const watchLoopSourceHealth = computed(() => {
     })
     .slice(0, 3)
 })
+const pendingMemories = computed(() => (memoryStatus.value?.pending || []).filter((item) => item.status === 'pending'))
+const recentMemories = computed(() => memoryStatus.value?.recent || [])
 
 watch(watchLoopStatus, (status) => {
   const source = stringValue(status.transcript_source)
@@ -1285,6 +1290,52 @@ function stopWatchLoop() {
   })
 }
 
+function syncMemoryFromEvent(event: AgentEvent) {
+  const memory = asRecord(event.agent_state?.memory)
+  if ('recent' in memory || 'pending' in memory || 'vault_path' in memory) {
+    memoryStatus.value = memory as unknown as MemoryStatus
+  }
+}
+
+async function refreshMemoryStatus() {
+  try {
+    const result = (await client.memoryStatus()) as { ok?: boolean; memory?: MemoryStatus }
+    if (result.memory) memoryStatus.value = result.memory
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆状态读取失败'
+  }
+}
+
+async function saveMemoryCandidate(candidateId: number) {
+  try {
+    const result = (await client.memorySaveCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (!result.ok) errorText.value = result.error || '记忆保存失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆保存失败'
+  }
+}
+
+async function rejectMemoryCandidate(candidateId: number) {
+  try {
+    const result = (await client.memoryRejectCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (!result.ok) errorText.value = result.error || '记忆已忽略'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆忽略失败'
+  }
+}
+
+async function deleteMemory(memoryId: number) {
+  try {
+    const result = (await client.memoryDelete(memoryId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (!result.ok) errorText.value = result.error || '记忆删除失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆删除失败'
+  }
+}
+
 function resolveApproval(approved: boolean) {
   if (!pendingApproval.value) return
   const approvalId = approvalIdFor(pendingApproval.value)
@@ -2169,6 +2220,38 @@ onBeforeUnmount(() => {
               🐰 兔耳朵
             </button>
           </div>
+        </div>
+
+        <div class="runtime-settings memory-settings">
+          <div class="runtime-settings-head">
+            <strong>记忆舱</strong>
+            <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+          </div>
+          <div class="memory-vault-path" v-if="memoryStatus?.vault_path">{{ memoryStatus.vault_path }}</div>
+          <div class="memory-list" v-if="pendingMemories.length">
+            <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
+              <div>
+                <strong>{{ candidate.kind || 'note' }}</strong>
+                <p>{{ candidate.text }}</p>
+                <span>{{ candidate.source || 'candidate' }}</span>
+              </div>
+              <div class="memory-actions">
+                <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
+                <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
+              </div>
+            </article>
+          </div>
+          <div class="memory-list" v-if="recentMemories.length">
+            <article v-for="memory in recentMemories" :key="memory.id" class="memory-row">
+              <div>
+                <strong>{{ memory.kind || 'note' }}</strong>
+                <p>{{ memory.text }}</p>
+                <span>{{ memory.source || 'manual' }}</span>
+              </div>
+              <button type="button" class="memory-delete" @click="deleteMemory(memory.id)">删除</button>
+            </article>
+          </div>
+          <p class="memory-empty" v-if="!pendingMemories.length && !recentMemories.length">暂无长期记忆</p>
         </div>
 
         <div class="section-title">

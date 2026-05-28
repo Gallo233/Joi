@@ -111,6 +111,7 @@ class AgentCompanionApp:
             ),
             plan.user_text,
         )
+        self._record_explicit_memory_candidate(plan)
         if plan.intent != "companion_chat":
             self._emit(
                 AgentEvent(
@@ -432,13 +433,8 @@ class AgentCompanionApp:
             self._emit_result(plan.task_id, result, plan.user_text)
             self._record_watch_context(plan, step, result)
             self._record_desktop_context(plan, step, result)
+            self._record_result_memory_candidate(plan, step, result)
             final_ok = final_ok and result.ok
-            self.memory.remember(
-                "task_result",
-                f"{plan.intent}: {result.display_card.summary}",
-                ephemeral=self._is_ephemeral_result(plan, step, result),
-                sensitive=self._is_sensitive_result(plan, step, result),
-            )
             if not result.ok:
                 break
         if final_ok:
@@ -536,6 +532,50 @@ class AgentCompanionApp:
     @staticmethod
     def _is_sensitive_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
         return step.name.startswith("computer.") and bool(result.display_card.artifacts)
+
+    def _record_explicit_memory_candidate(self, plan: AgentPlan) -> None:
+        fact = _explicit_memory_fact(plan.user_text)
+        if not fact:
+            return
+        self._record_memory_candidate(plan.task_id, "user_note", fact, "chat", plan.user_text)
+
+    def _record_result_memory_candidate(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
+        raw = result.agent_state.get("memory_candidate") if isinstance(result.agent_state, dict) else None
+        if raw is None:
+            return
+        if self._is_ephemeral_result(plan, step, result) or self._is_sensitive_result(plan, step, result):
+            return
+        kind = "tool_note"
+        source = step.name
+        text = ""
+        if isinstance(raw, str):
+            text = raw
+        elif isinstance(raw, dict):
+            text = str(raw.get("fact") or raw.get("text") or "")
+            kind = str(raw.get("kind") or kind)
+            source = str(raw.get("source") or source)
+        self._record_memory_candidate(plan.task_id, kind, text, source, plan.user_text)
+
+    def _record_memory_candidate(self, task_id: str, kind: str, text: str, source: str, user_text: str) -> None:
+        result = self.memory.propose(kind, text, source=source)
+        if not result.get("ok"):
+            return
+        candidate = result.get("candidate") if isinstance(result.get("candidate"), dict) else {}
+        summary = f"待确认记忆：{str(candidate.get('text') or '')[:80]}"
+        self._emit(
+            AgentEvent(
+                EventType.AUDIT_EVENT,
+                task_id,
+                DisplayCard("记忆候选", summary, "这条记忆需要你在记忆舱中确认后才会写入长期记忆。", status="approval"),
+                safe_voice_line(""),
+                {
+                    "tool": "memory.candidate",
+                    "memory_candidate": candidate,
+                    "memory": self.memory.status(),
+                },
+            ),
+            user_text,
+        )
 
     def _plan_body(self, plan: AgentPlan) -> str:
         return "\n".join(self._tool_label(step.name) for step in plan.steps)
@@ -1017,6 +1057,22 @@ def _parse_candidate_selection(text: str) -> int | None:
         if f"第{token}个" in value or f"选{token}" in value or f"点第{token}" in value:
             return number
     return None
+
+
+def _explicit_memory_fact(text: str) -> str:
+    value = " ".join((text or "").strip().split())
+    if not value:
+        return ""
+    patterns = (
+        r"^(?:请|麻烦)?(?:你)?(?:帮我)?(?:记住|记一下|记录一下|以后记得)\s*[：:，,]?\s*(.+)$",
+        r"^(.+?)\s*(?:请|麻烦)?(?:你)?(?:帮我)?(?:记住|记一下|记录一下)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, value)
+        if match:
+            fact = match.group(1).strip(" 。.!！")
+            return fact[:240]
+    return ""
 
 
 def _safe_rank(value: object) -> int:
