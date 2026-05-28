@@ -19,6 +19,7 @@ from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
 from agent_companion.core.voice import safe_voice_line
+from agent_companion.core.watch_loop import WatchLoopController, WatchLoopOptions, WatchLoopTick
 
 
 SPEAKABLE_EVENTS = {
@@ -46,6 +47,7 @@ class JsonRpcBridge:
         self.port = port
         self.app = AgentCompanionApp(self.workspace)
         self.tts = TtsBridge(self.workspace)
+        self.watch_loop = WatchLoopController(self._watch_loop_tick, self.app.bus.emit)
         if asr_provider is None:
             self.asr, self.asr_state = build_asr_provider(self.workspace, allow_mock=allow_mock_asr)
         else:
@@ -72,6 +74,7 @@ class JsonRpcBridge:
             try:
                 await asyncio.Future()
             finally:
+                self.watch_loop.stop(emit=False)
                 pump.cancel()
                 self.tts.shutdown()
 
@@ -103,6 +106,17 @@ class JsonRpcBridge:
                     return
                 asyncio.create_task(asyncio.to_thread(self.submit_user_text, text))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
+                return
+            if method == "watch.loop.start":
+                result = await asyncio.to_thread(self.watch_loop_start_command, params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "watch.loop.stop":
+                result = await asyncio.to_thread(self.watch_loop_stop_command)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "watch.loop.status":
+                await websocket.send(self._result(request_id, self.watch_loop_status_command()))
                 return
             if method == "approval.resolve":
                 approval_id = str(params.get("approval_id") or "")
@@ -209,15 +223,33 @@ class JsonRpcBridge:
             "submitted": False,
         }
         if result.ok:
-            sequence, events = self._run_serial("voice.transcribe", lambda: self.app.handle_user_text(result.transcript))
+            submitted = self.submit_user_text(result.transcript)
             payload["submitted"] = True
-            payload["sequence"] = sequence
-            payload["events"] = [event.to_dict() for event in events]
+            payload["sequence"] = submitted.get("sequence")
+            payload["events"] = submitted.get("events", [])
+            if "watch_loop" in submitted:
+                payload["watch_loop"] = submitted["watch_loop"]
         return payload
 
     def submit_user_text(self, text: str) -> dict[str, Any]:
+        if _looks_like_watch_loop_stop(text):
+            return self.watch_loop_stop_command()
         sequence, events = self._run_serial("user.message", lambda: self.app.handle_user_text(text))
-        return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+        payload: dict[str, Any] = {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+        if _looks_like_watch_loop_start(text):
+            payload["watch_loop"] = self.watch_loop.start(self._watch_loop_options_from_params({"query": text})).to_agent_state()
+        return payload
+
+    def watch_loop_start_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        snapshot = self.watch_loop.start(self._watch_loop_options_from_params(params if isinstance(params, dict) else {}))
+        return {"ok": True, "watch_loop": snapshot.to_agent_state()}
+
+    def watch_loop_stop_command(self) -> dict[str, Any]:
+        snapshot = self.watch_loop.stop()
+        return {"ok": True, "watch_loop": snapshot.to_agent_state()}
+
+    def watch_loop_status_command(self) -> dict[str, Any]:
+        return {"ok": True, "watch_loop": self.watch_loop.snapshot().to_agent_state()}
 
     def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
         sequence, events = self._run_serial("approval.resolve", lambda: self.app.resolve_approval(approval_id, approved))
@@ -255,6 +287,50 @@ class JsonRpcBridge:
         mime = mimetypes.guess_type(path.name)[0] or "image/png"
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return {"ok": True, "artifact": artifact, "mime": mime, "data_url": f"data:{mime};base64,{encoded}"}
+
+    def _watch_loop_options_from_params(self, params: dict[str, Any]) -> WatchLoopOptions:
+        query = str(params.get("query") or "陪我看当前视频").strip()
+        sample_interval_ms = _safe_int(params.get("sample_interval_ms"))
+        return WatchLoopOptions(
+            query=query or "陪我看当前视频",
+            interval_seconds=_safe_float(params.get("interval_seconds"), 6.0),
+            sample_count=_safe_int(params.get("sample_count")) or 3,
+            sample_interval_ms=sample_interval_ms if sample_interval_ms is not None else 700,
+            transcript_source=str(params.get("transcript_source") or "system_audio"),
+            transcribe=bool(params.get("transcribe", True)),
+        )
+
+    def _watch_loop_tick(self, options: WatchLoopOptions) -> WatchLoopTick:
+        with self._command_lock:
+            result = self.app.refresh_watch_context(
+                options.query,
+                sample_count=options.sample_count,
+                sample_interval_ms=options.sample_interval_ms,
+                transcript_source=options.transcript_source,
+                transcribe=options.transcribe,
+                skip_summary=True,
+            )
+        state = result.agent_state if isinstance(result.agent_state, dict) else {}
+        transcript = state.get("transcript") if isinstance(state.get("transcript"), dict) else {}
+        segments = transcript.get("segments") if isinstance(transcript.get("segments"), list) else []
+        transcript_text: list[str] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            text = str(segment.get("text") or "").strip()
+            if text:
+                transcript_text.append(text[:180])
+        error = str(transcript.get("error") or "")
+        if not result.ok and not error:
+            error = str(state.get("error") or "watch_loop_failed")
+        return WatchLoopTick(
+            ok=result.ok,
+            summary=result.display_card.summary,
+            transcript_text=transcript_text,
+            transcript_source=str(transcript.get("source") or options.transcript_source),
+            transcript_status=str(transcript.get("status") or ""),
+            error=error,
+        )
 
     def _resolve_artifact_path(self, artifact: str) -> Path | None:
         value = (artifact or "").strip()
@@ -354,6 +430,7 @@ class JsonRpcBridge:
             },
             "tts": tts_status,
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
+            "watch_loop": self.watch_loop.snapshot().to_agent_state(),
             "character": {
                 "name": self.app.character.name,
                 "sprites": [],
@@ -467,6 +544,50 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _looks_like_watch_loop_start(text: str) -> bool:
+    value = " ".join((text or "").strip().split()).casefold()
+    if not value:
+        return False
+    start_tokens = (
+        "开始陪看",
+        "持续陪看",
+        "实时陪看",
+        "陪我看",
+        "陪着我看",
+        "一起看",
+        "边看边聊",
+        "陪看这个视频",
+    )
+    if any(token in value for token in start_tokens):
+        return True
+    return ("这个视频" in value or "当前视频" in value or "正在播放" in value) and any(token in value for token in ("实时", "持续", "一直", "边看边"))
+
+
+def _looks_like_watch_loop_stop(text: str) -> bool:
+    value = " ".join((text or "").strip().split()).casefold()
+    if not value:
+        return False
+    return any(
+        token in value
+        for token in (
+            "停止陪看",
+            "结束陪看",
+            "关闭陪看",
+            "停下陪看",
+            "停止实时陪看",
+            "别陪看了",
+            "不用陪看了",
+        )
+    )
 
 
 def _event_applied_runtime_config(event: AgentEvent) -> bool:

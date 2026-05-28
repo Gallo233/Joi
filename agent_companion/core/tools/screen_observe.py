@@ -39,6 +39,7 @@ class ScreenObserveTool(ToolAdapter):
         target = self._target_from_request(request)
         sample_count = self._sample_count_from_request(request)
         sample_interval_ms = self._sample_interval_ms_from_request(request)
+        skip_summary = bool(request.arguments.get("skip_summary"))
         try:
             records = self._capture_records(target, query, sample_count, sample_interval_ms)
         except Exception as exc:
@@ -60,7 +61,9 @@ class ScreenObserveTool(ToolAdapter):
         summary_text = ""
         summary_error = ""
         model_status = "unconfigured"
-        if self.summarizer is not None:
+        if skip_summary:
+            model_status = "skipped"
+        elif self.summarizer is not None:
             try:
                 vs = self._summarize_records(records, query, transcript)
                 summary_text = (vs.text or "").strip()
@@ -90,6 +93,8 @@ class ScreenObserveTool(ToolAdapter):
         if summary_text:
             body = f"视觉摘要：{summary_text}\n\n{body}"
             card_summary = summary_text
+        elif skip_summary:
+            card_summary = "实时陪看上下文已刷新。"
         elif self.summarizer is None:
             body = f"{body}\n\n视觉摘要：未配置视觉模型，截图已保存。"
             card_summary = "截图已保存；配置视觉模型后可以生成画面摘要。"

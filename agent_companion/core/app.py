@@ -199,6 +199,44 @@ class AgentCompanionApp:
         self._run_plan(plan, 0)
         return self.bus.drain()
 
+    def refresh_watch_context(
+        self,
+        query: str,
+        *,
+        sample_count: int = 3,
+        sample_interval_ms: int = 700,
+        transcript_source: str = "auto",
+        transcribe: bool = True,
+        skip_summary: bool = True,
+    ) -> ToolResult:
+        arguments: dict[str, object] = {
+            "query": query,
+            "sample_count": sample_count,
+            "sample_interval_ms": sample_interval_ms,
+            "transcribe": transcribe,
+            "skip_summary": skip_summary,
+        }
+        if transcript_source and transcript_source != "auto":
+            arguments["transcript_source"] = transcript_source
+        step = ToolRequest("observe.screen", arguments, "后台刷新实时陪看上下文。")
+        try:
+            result = self.tools.run(step)
+        except Exception as exc:
+            return ToolResult(
+                ok=False,
+                agent_state={"tool": step.name, "error": type(exc).__name__, "detail": str(exc)[:500]},
+                display_card=DisplayCard("实时陪看", "后台陪看采样失败。", str(exc)[:1800], status="failed"),
+                voice_line=safe_voice_line("后台陪看采样失败。", sprite="4"),
+            )
+        plan = AgentPlan(
+            task_id=f"watch-loop-{uuid.uuid4().hex[:10]}",
+            user_text=query,
+            intent="watch_together",
+            steps=[step],
+        )
+        self._record_watch_context(plan, step, result)
+        return result
+
     def resolve_approval(self, approval_id: str, approved: bool) -> list[AgentEvent]:
         if not approval_id:
             return self.bus.drain()

@@ -80,6 +80,18 @@ export class CoreClient {
     return this.send('artifact.read', { artifact })
   }
 
+  watchLoopStart(params: Record<string, unknown> = {}) {
+    return this.send('watch.loop.start', params)
+  }
+
+  watchLoopStop() {
+    return this.send('watch.loop.stop', {})
+  }
+
+  watchLoopStatus() {
+    return this.send('watch.loop.status', {})
+  }
+
   private send(method: string, params: Record<string, unknown>, options?: { timeoutMs?: number; timeoutMessage?: string }) {
     const payload = { jsonrpc: '2.0', id: `ui-${this.nextId++}`, method, params }
     if (this.socket?.readyState === WebSocket.OPEN) {

@@ -2455,6 +2455,38 @@ asr:
     assert_true(live_video_backend.observe_calls == 4, "current video questions should refresh with four sampled frames")
     assert_true(live_video_frames and live_video_frames[0].sequence_size == 4, "current video refresh should store dense temporal context")
 
+    watch_loop_bridge = JsonRpcBridge(workspace)
+    watch_loop_bridge.app.tools.register(
+        ScreenObserveTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-loop-1.png", title="Bilibili Video"),
+                    _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-loop-2.png", title="Bilibili Video"),
+                ],
+            ),
+            summarizer=SequenceSummarizer(),
+            ocr=FakeOcrExtractor(video_ocr),
+        )
+    )
+    try:
+        loop_start = watch_loop_bridge.watch_loop_start_command({"query": "陪我看这个视频", "interval_seconds": 60, "sample_count": 2, "sample_interval_ms": 0})
+        loop_state = loop_start["watch_loop"]
+        assert_true(loop_state["active"] is True and loop_state["iterations"] >= 1, "watch loop start should capture immediately")
+        assert_true(watch_loop_bridge.app.watch_session.has_context(), "watch loop should refresh watch session context")
+        assert_true("这一条是小猫发的" in " ".join(loop_state["last_transcript"]), "watch loop should expose latest transcript snippets")
+        loop_events = watch_loop_bridge.app.bus.drain()
+        assert_true(any(event.agent_state.get("tool") == "watch.loop" for event in loop_events), "watch loop should emit status events without task cards")
+        loop_status = watch_loop_bridge.watch_loop_status_command()["watch_loop"]
+        assert_true(loop_status["active"] is True and loop_status["transcript_status"], "watch loop status RPC should expose current state")
+        loop_recall = WatchRecallTool(workspace, watch_loop_bridge.app.watch_session.recent).run(ToolRequest("watch.recall", {"query": "刚才视频在讲什么"}))
+        assert_true("这一条是小猫发的" in loop_recall.display_card.summary, "watch loop context should support follow-up recall")
+        loop_stop = watch_loop_bridge.watch_loop_stop_command()["watch_loop"]
+        assert_true(loop_stop["active"] is False, "watch loop stop should deactivate the session")
+    finally:
+        watch_loop_bridge.watch_loop.stop(emit=False)
+
     fallback_watch_app = AgentCompanionApp(workspace)
     fallback_watch_app.tools.register(ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=None))
     fallback_watch_app.handle_user_text("陪我看当前窗口")
@@ -2957,6 +2989,7 @@ llm:
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
+    assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
     assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
     assert_true("event_created_at" in voice_runtime_source, "voice runtime key should include event identity")
@@ -3164,6 +3197,7 @@ llm:
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
+    assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
     assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
@@ -3175,7 +3209,9 @@ llm:
     assert_true("accessoryFitStyle" in shell_source and "--acc-hat-top" in shell_source and ":style=\"accessoryFitStyle\"" in shell_source, "Accessory overlays should use adaptive anchor variables")
     assert_true("preventNativeAssetDrag" in shell_source and "@dragstart.capture.prevent" in shell_source, "Compact mascot should block native asset dragging")
     assert_true("miniBubbleHasActions" in shell_source and "mini-approval-actions" in shell_source and "requestMiniChange" in shell_source, "Compact speech bubble should expose approval and change actions")
+    assert_true("watchLoopStatus" in shell_source and "watch-session-strip" in shell_source and "stopWatchLoop" in shell_source, "Shell should show and control realtime watch loop state")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
+    assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")

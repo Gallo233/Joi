@@ -3,7 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload } from './protocol'
+import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -302,6 +302,30 @@ const taskRows = computed(() => {
 
 const activeTask = computed(() => taskRows.value[0])
 
+const latestWatchLoopStatus = computed<WatchLoopStatus | undefined>(() => {
+  for (let index = events.value.length - 1; index >= 0; index -= 1) {
+    const loop = asRecord(events.value[index].agent_state?.watch_loop)
+    if ('active' in loop || stringValue(loop.session_id)) return loop as WatchLoopStatus
+  }
+  return ready.value?.watch_loop
+})
+
+const watchLoopStatus = computed<WatchLoopStatus>(() => latestWatchLoopStatus.value || ready.value?.watch_loop || {})
+const watchLoopActive = computed(() => Boolean(watchLoopStatus.value.active))
+const watchLoopTranscript = computed(() => {
+  const rows = Array.isArray(watchLoopStatus.value.last_transcript) ? watchLoopStatus.value.last_transcript : []
+  return rows.filter(Boolean).slice(0, 3).join(' / ')
+})
+const watchLoopMeta = computed(() => {
+  const status = watchLoopStatus.value
+  const pieces: string[] = []
+  const iterations = Number(status.iterations || 0)
+  if (iterations) pieces.push(`${iterations} 次采样`)
+  if (status.transcript_source) pieces.push(String(status.transcript_source))
+  if (status.transcript_status) pieces.push(String(status.transcript_status))
+  return pieces.join(' · ') || '等待采样'
+})
+
 const latestSpeech = computed(() => {
   const latest = [...events.value]
     .reverse()
@@ -427,6 +451,7 @@ const characterImageSrc = computed(() => {
 
 const currentMode = computed(() => {
   if (pendingApproval.value) return '等待确认'
+  if (watchLoopActive.value) return '陪看'
   const latest = [...events.value].reverse().find((event) => intentName(event) || toolName(event))
   const intent = latest ? intentName(latest) : ''
   const tool = latest ? toolName(latest) : ''
@@ -1156,6 +1181,26 @@ function submit() {
   input.value = ''
 }
 
+function startWatchLoop() {
+  errorText.value = ''
+  void client.watchLoopStart({
+    query: '陪我看当前视频',
+    interval_seconds: 6,
+    sample_count: 3,
+    sample_interval_ms: 700,
+    transcript_source: 'system_audio',
+  }).catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '实时陪看启动失败'
+  })
+}
+
+function stopWatchLoop() {
+  errorText.value = ''
+  void client.watchLoopStop().catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '实时陪看停止失败'
+  })
+}
+
 function resolveApproval(approved: boolean) {
   if (!pendingApproval.value) return
   const approvalId = approvalIdFor(pendingApproval.value)
@@ -1705,6 +1750,9 @@ onBeforeUnmount(() => {
           <span class="mode">{{ currentMode }}</span>
         </div>
         <div class="top-actions">
+          <button type="button" class="ghost-button watch-loop-action" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()" v-if="activeCabin === 'workspace'">
+            {{ watchLoopActive ? '停止陪看' : '实时陪看' }}
+          </button>
           <button type="button" class="ghost-button" @click="developerMode = !developerMode" v-if="activeCabin === 'workspace'">
             {{ developerMode ? '隐藏审计' : '显示审计' }}
           </button>
@@ -1713,6 +1761,21 @@ onBeforeUnmount(() => {
       </div>
 
       <p class="error" v-if="errorText">{{ errorText }}</p>
+
+      <section class="watch-session-strip" :class="{ active: watchLoopActive }" v-if="activeCabin === 'workspace' && (watchLoopActive || watchLoopStatus.iterations)">
+        <div class="watch-session-main">
+          <span class="watch-session-dot"></span>
+          <div>
+            <strong>{{ watchLoopActive ? '实时陪看运行中' : '实时陪看已停止' }}</strong>
+            <span>{{ watchLoopMeta }}</span>
+          </div>
+        </div>
+        <p v-if="watchLoopTranscript">{{ watchLoopTranscript }}</p>
+        <p v-else>{{ watchLoopStatus.last_summary || '后台会持续捕获当前视频画面、字幕和系统音频转写上下文。' }}</p>
+        <button type="button" class="ghost-button" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()">
+          {{ watchLoopActive ? '停止' : '重新开始' }}
+        </button>
+      </section>
 
       <section class="hero-panel" v-if="activeCabin === 'workspace' && !taskRows.length">
         <p class="eyebrow">Joi Agent</p>

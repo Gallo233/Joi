@@ -146,6 +146,22 @@ export interface UserCommand {
   text: string
 }
 
+export interface WatchLoopStatus {
+  active?: boolean
+  session_id?: string
+  query?: string
+  interval_seconds?: number
+  sample_count?: number
+  transcript_source?: string
+  transcript_status?: string
+  iterations?: number
+  started_at?: number
+  updated_at?: number
+  last_summary?: string
+  last_transcript?: string[]
+  last_error?: string
+}
+
 export interface CoreReadyPayload {
   workspace: string
   asr?: {
@@ -171,6 +187,7 @@ export interface CoreReadyPayload {
     safe_for_display?: boolean
     providers?: RuntimeProviderStatus[]
   }
+  watch_loop?: WatchLoopStatus
   runtime_settings?: {
     asr?: {
       enabled?: boolean
