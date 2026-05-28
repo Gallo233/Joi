@@ -1490,6 +1490,39 @@ details pre {
   cursor: pointer;
 }
 
+.memory-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.memory-enable-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #64748b;
+  font-size: 11.5px;
+  font-weight: 800;
+}
+
+.memory-enable-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--color-primary);
+}
+
+.memory-disabled-note {
+  margin: 0;
+  border-radius: 7px;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.12);
+  color: #991b1b;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 10px;
+}
+
 .memory-vault-path {
   overflow: hidden;
   text-overflow: ellipsis;

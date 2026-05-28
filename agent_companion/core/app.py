@@ -89,6 +89,23 @@ class AgentCompanionApp:
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
+        memory_command = _parse_memory_command(text)
+        if memory_command:
+            task_id = f"task-{uuid.uuid4().hex[:10]}"
+            user_text = " ".join((text or "").strip().split())
+            self._emit(
+                AgentEvent(
+                    EventType.USER_MESSAGE,
+                    task_id,
+                    DisplayCard("用户请求", user_text),
+                    safe_voice_line("我收到了。", sprite="1"),
+                    {"intent": "memory_control"},
+                ),
+                user_text,
+            )
+            self._emit_memory_command(task_id, user_text, memory_command)
+            return self.bus.drain()
+
         selection = _parse_candidate_selection(text)
         if selection is not None and self.semantic_selection.has_pending():
             plan = AgentPlan(
@@ -573,6 +590,33 @@ class AgentCompanionApp:
                     "memory_candidate": candidate,
                     "memory": self.memory.status(),
                 },
+            ),
+            user_text,
+        )
+
+    def _emit_memory_command(self, task_id: str, user_text: str, command: str) -> None:
+        if command == "enable":
+            status = self.memory.set_enabled(True)
+            summary = "长期记忆已开启。"
+            voice = "长期记忆已开启。"
+        elif command == "disable":
+            status = self.memory.set_enabled(False)
+            summary = "长期记忆已关闭。"
+            voice = "长期记忆已关闭。"
+        else:
+            status = self.memory.status()
+            saved = len(status.get("recent", []) if isinstance(status, dict) else [])
+            pending = len(status.get("pending", []) if isinstance(status, dict) else [])
+            state = "开启" if status.get("enabled") else "关闭"
+            summary = f"记忆当前{state}，已保存 {saved} 条，待确认 {pending} 条。"
+            voice = "这是当前记忆状态。"
+        self._emit(
+            AgentEvent(
+                EventType.TOOL_COMPLETED,
+                task_id,
+                DisplayCard("记忆舱", summary, _memory_status_body(status), status="success"),
+                safe_voice_line(voice, sprite="3"),
+                {"tool": "memory.status", "memory": status, "intent": "memory_control"},
             ),
             user_text,
         )
@@ -1073,6 +1117,39 @@ def _explicit_memory_fact(text: str) -> str:
             fact = match.group(1).strip(" 。.!！")
             return fact[:240]
     return ""
+
+
+def _parse_memory_command(text: str) -> str:
+    value = " ".join((text or "").strip().split()).casefold()
+    if not value or ("记忆" not in value and "你记得什么" not in value):
+        return ""
+    if any(token in value for token in ("关闭记忆", "停用记忆", "禁用记忆", "不要记忆", "不要再记", "停止记忆")):
+        return "disable"
+    if any(token in value for token in ("开启记忆", "打开记忆", "启用记忆", "恢复记忆", "继续记忆")):
+        return "enable"
+    if any(token in value for token in ("查看记忆", "记忆舱", "当前记忆", "记忆状态", "列出记忆", "你记得什么")):
+        return "status"
+    return ""
+
+
+def _memory_status_body(status: dict[str, object]) -> str:
+    enabled = "开启" if status.get("enabled") else "关闭"
+    pending = status.get("pending") if isinstance(status.get("pending"), list) else []
+    recent = status.get("recent") if isinstance(status.get("recent"), list) else []
+    lines = [f"状态：{enabled}", f"Vault：{status.get('vault_path') or ''}"]
+    if pending:
+        lines.append("待确认：")
+        for item in pending[:5]:
+            if isinstance(item, dict):
+                lines.append(f"- {str(item.get('text') or '')[:120]}")
+    if recent:
+        lines.append("已保存：")
+        for item in recent[:5]:
+            if isinstance(item, dict):
+                lines.append(f"- {str(item.get('text') or '')[:120]}")
+    if not pending and not recent:
+        lines.append("暂无长期记忆。")
+    return "\n".join(lines)
 
 
 def _safe_rank(value: object) -> int:

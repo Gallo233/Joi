@@ -39,7 +39,7 @@ class MemoryStore:
         sensitive: bool = False,
     ) -> dict[str, Any] | None:
         cleaned = _clean_memory_text(text)
-        if not cleaned or ephemeral or sensitive or _rejection_reason(cleaned):
+        if not self.enabled() or not cleaned or ephemeral or sensitive or _rejection_reason(cleaned):
             return None
         with sqlite3.connect(self.path) as db:
             cursor = db.execute(
@@ -61,6 +61,8 @@ class MemoryStore:
     ) -> dict[str, Any]:
         cleaned = _clean_memory_text(text)
         reason = _rejection_reason(cleaned)
+        if not self.enabled():
+            return {"ok": False, "error": "memory_disabled", "reason": "disabled"}
         if not cleaned:
             return {"ok": False, "error": "empty_memory_candidate", "reason": "empty"}
         if ephemeral or sensitive:
@@ -148,9 +150,22 @@ class MemoryStore:
             ).fetchall()
         return [_memory_row(row) for row in rows]
 
+    def enabled(self) -> bool:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("select value from memory_settings where key = 'enabled'").fetchone()
+        return row is None or str(row[0]).strip() != "0"
+
+    def set_enabled(self, enabled: bool) -> dict[str, Any]:
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "insert or replace into memory_settings(key, value, updated_at) values ('enabled', ?, ?)",
+                ("1" if enabled else "0", time.time()),
+            )
+        return self.status()
+
     def status(self, *, recent_limit: int = 8, pending_limit: int = 8) -> dict[str, Any]:
         return {
-            "enabled": True,
+            "enabled": self.enabled(),
             "vault_path": str(self.vault_path),
             "recent": self.recent(recent_limit),
             "pending": self.pending(pending_limit),
@@ -226,6 +241,16 @@ class MemoryStore:
                 )
                 """
             )
+            db.execute(
+                """
+                create table if not exists memory_settings(
+                    key text primary key,
+                    value text not null,
+                    updated_at real not null
+                )
+                """
+            )
+            db.execute("insert or ignore into memory_settings(key, value, updated_at) values ('enabled', '1', ?)", (time.time(),))
 
 
 def _memory_row(row: tuple) -> dict[str, Any]:

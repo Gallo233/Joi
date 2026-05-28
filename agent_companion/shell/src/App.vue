@@ -358,6 +358,7 @@ const watchLoopSourceHealth = computed(() => {
 })
 const pendingMemories = computed(() => (memoryStatus.value?.pending || []).filter((item) => item.status === 'pending'))
 const recentMemories = computed(() => memoryStatus.value?.recent || [])
+const memoryEnabled = computed(() => memoryStatus.value?.enabled !== false)
 
 watch(watchLoopStatus, (status) => {
   const source = stringValue(status.transcript_source)
@@ -1326,6 +1327,17 @@ async function rejectMemoryCandidate(candidateId: number) {
   }
 }
 
+async function toggleMemoryEnabled(event: Event) {
+  const enabled = Boolean((event.target as HTMLInputElement | null)?.checked)
+  try {
+    const result = (await client.memorySetEnabled(enabled)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (!result.ok) errorText.value = result.error || '记忆开关更新失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆开关更新失败'
+  }
+}
+
 async function deleteMemory(memoryId: number) {
   try {
     const result = (await client.memoryDelete(memoryId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
@@ -2225,8 +2237,15 @@ onBeforeUnmount(() => {
         <div class="runtime-settings memory-settings">
           <div class="runtime-settings-head">
             <strong>记忆舱</strong>
-            <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+            <div class="memory-head-actions">
+              <label class="memory-enable-toggle">
+                <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
+                <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
+              </label>
+              <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+            </div>
           </div>
+          <p class="memory-disabled-note" v-if="!memoryEnabled">长期记忆已关闭，新候选不会写入待确认队列。</p>
           <div class="memory-vault-path" v-if="memoryStatus?.vault_path">{{ memoryStatus.vault_path }}</div>
           <div class="memory-list" v-if="pendingMemories.length">
             <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">

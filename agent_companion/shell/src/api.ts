@@ -116,6 +116,10 @@ export class CoreClient {
     return this.send('memory.reject_candidate', { candidate_id: candidateId })
   }
 
+  memorySetEnabled(enabled: boolean) {
+    return this.send('memory.set_enabled', { enabled })
+  }
+
   memoryDelete(memoryId: number) {
     return this.send('memory.delete', { memory_id: memoryId })
   }

@@ -139,6 +139,10 @@ class JsonRpcBridge:
                 result = self.memory_reject_candidate_command(params)
                 await websocket.send(self._result(request_id, result))
                 return
+            if method == "memory.set_enabled":
+                result = self.memory_set_enabled_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
             if method == "memory.delete":
                 result = self.memory_delete_command(params)
                 await websocket.send(self._result(request_id, result))
@@ -325,6 +329,10 @@ class JsonRpcBridge:
         reason = str(params.get("reason") or "user_rejected") if isinstance(params, dict) else "user_rejected"
         result = self.app.memory.reject_candidate(candidate_id, reason)
         return {**result, "memory": self.app.memory.status()}
+
+    def memory_set_enabled_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        enabled = _safe_bool(params.get("enabled"), True) if isinstance(params, dict) else True
+        return {"ok": True, "memory": self.app.memory.set_enabled(enabled)}
 
     def memory_delete_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         memory_id = _safe_int(params.get("memory_id")) if isinstance(params, dict) else None
