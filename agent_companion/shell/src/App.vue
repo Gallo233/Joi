@@ -359,6 +359,8 @@ const watchLoopSourceHealth = computed(() => {
 const pendingMemories = computed(() => (memoryStatus.value?.pending || []).filter((item) => item.status === 'pending'))
 const recentMemories = computed(() => memoryStatus.value?.recent || [])
 const memoryEnabled = computed(() => memoryStatus.value?.enabled !== false)
+const topPendingMemory = computed(() => pendingMemories.value[0] || null)
+const memoryAuthorizeText = computed(() => topPendingMemory.value?.text || '')
 
 watch(watchLoopStatus, (status) => {
   const source = stringValue(status.transcript_source)
@@ -2388,6 +2390,17 @@ onBeforeUnmount(() => {
         <strong>{{ activeTask?.latest.display_card.status || currentMode }}</strong>
       </div>
       <div class="scene-line"></div>
+
+      <div class="memory-authorize-bubble" v-if="topPendingMemory">
+        <div>
+          <strong>待确认记忆</strong>
+          <p>{{ memoryAuthorizeText }}</p>
+        </div>
+        <div class="memory-authorize-actions">
+          <button type="button" @mousedown.stop @click.stop="saveMemoryCandidate(topPendingMemory.id)">记住</button>
+          <button type="button" class="secondary" @mousedown.stop @click.stop="rejectMemoryCandidate(topPendingMemory.id)">忽略</button>
+        </div>
+      </div>
       
       <!-- Mascot Container circles -->
       <div
