@@ -335,6 +335,16 @@ class FakeAudioTranscriber:
         )
 
 
+class FailingAudioTranscriber:
+    def __init__(self, error: str = "asr_unconfigured") -> None:
+        self.error = error
+        self.calls: list[float] = []
+
+    def transcribe(self, seconds: float = 5.0) -> TranscriptResult:
+        self.calls.append(seconds)
+        return TranscriptResult("failed", "system_audio", [], "音频转写没有生成文本。", self.error)
+
+
 class FailingAsrProvider:
     def __init__(self, error: str = "asr_failed") -> None:
         self.error = error
@@ -881,6 +891,19 @@ def main() -> int:
     audio_transcript_result = audio_transcript_tool.run(ToolRequest("observe.screen", {"query": "用系统音频听一下这个视频", "sample_count": 2, "sample_interval_ms": 0, "transcribe": True, "transcript_source": "system_audio"}))
     assert_true(audio_transcript_result.agent_state["transcript"]["source"] == "system_audio", "system audio transcript source should be exposed")
     assert_true(audio_transcriber.calls, "system audio transcript provider should be invoked when requested")
+
+    auto_fallback_audio = FailingAudioTranscriber("asr_unconfigured")
+    auto_fallback_tool = ScreenObserveTool(
+        workspace,
+        computer_backend=FakeComputerBackend(workspace),
+        summarizer=SequenceSummarizer(),
+        ocr=FakeOcrExtractor(video_ocr),
+        audio_transcriber=auto_fallback_audio,
+    )
+    auto_fallback_result = auto_fallback_tool.run(ToolRequest("observe.screen", {"query": "陪我看这个视频", "sample_count": 2, "sample_interval_ms": 0, "transcribe": True, "transcript_source": "auto"}))
+    assert_true(auto_fallback_audio.calls, "auto transcript source should try system audio first")
+    assert_true(auto_fallback_result.agent_state["transcript"]["source"] == "ocr_subtitle", "auto transcript should fall back to OCR subtitles when audio fails")
+    assert_true(auto_fallback_result.agent_state["transcript"]["error"] == "asr_unconfigured", "auto transcript fallback should preserve audio failure reason")
 
     unavailable_ocr = UnavailableOcrExtractor("OCR 依赖未安装，暂时只能保存截图。")
     unavailable_result = unavailable_ocr.extract(workspace / "missing.png")
@@ -2526,6 +2549,7 @@ asr:
         loop_config = watch_loop_bridge.watch_loop_configure_command({"transcript_source": "ocr_subtitle", "proactive_enabled": False, "commentary_interval_seconds": 60})["watch_loop"]
         assert_true(loop_config["transcript_source"] == "ocr_subtitle" and loop_config["proactive_enabled"] is False, "watch loop should hot-update transcript source and proactive setting")
         assert_true(loop_config["commentary_interval_seconds"] == 60, "watch loop should expose proactive commentary interval")
+        assert_true("active_transcript_source" in loop_config, "watch loop should distinguish configured and active transcript sources")
         loop_status = watch_loop_bridge.watch_loop_status_command()["watch_loop"]
         assert_true(loop_status["active"] is True and loop_status["transcript_status"], "watch loop status RPC should expose current state")
         loop_recall = WatchRecallTool(workspace, watch_loop_bridge.app.watch_session.recent).run(ToolRequest("watch.recall", {"query": "刚才视频在讲什么"}))
@@ -3249,6 +3273,8 @@ llm:
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
+    screen_observe_source = (workspace / "agent_companion" / "core" / "tools" / "screen_observe.py").read_text(encoding="utf-8")
+    assert_true('source in {"auto", "system_audio", "audio"}' in screen_observe_source and "audio_result.error" in screen_observe_source, "Auto transcript source should try system audio and preserve fallback reason")
     commentary_source = (workspace / "agent_companion" / "core" / "watch_commentary.py").read_text(encoding="utf-8")
     assert_true("min_interval_seconds" in commentary_source and "maybe_comment" in commentary_source and "safe_voice_line" in commentary_source, "Watch commentary planner should enforce cooldown and safe voice output")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
@@ -3263,7 +3289,7 @@ llm:
     assert_true("preventNativeAssetDrag" in shell_source and "@dragstart.capture.prevent" in shell_source, "Compact mascot should block native asset dragging")
     assert_true("miniBubbleHasActions" in shell_source and "mini-approval-actions" in shell_source and "requestMiniChange" in shell_source, "Compact speech bubble should expose approval and change actions")
     assert_true("watchLoopStatus" in shell_source and "watch-session-strip" in shell_source and "stopWatchLoop" in shell_source, "Shell should show and control realtime watch loop state")
-    assert_true("rolling_transcript" in shell_source and "transcript_window_seconds" in shell_source, "Shell should display rolling transcript state")
+    assert_true("rolling_transcript" in shell_source and "transcript_window_seconds" in shell_source and "active_transcript_source" in shell_source, "Shell should display rolling transcript state")
     assert_true("shouldSuppressProactiveVoice" in shell_source and "watch_commentary" in shell_source, "Shell should suppress proactive watch voice while the user is typing")
     assert_true("watchTranscriptSource" in shell_source and "configureWatchLoop" in shell_source and "watchProactiveEnabled" in shell_source, "Shell should expose realtime watch controls")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")

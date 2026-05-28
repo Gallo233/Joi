@@ -179,7 +179,9 @@ class ScreenObserveTool(ToolAdapter):
         source = str(request.arguments.get("transcript_source") or "auto").strip().casefold()
         query = str(request.arguments.get("query") or "")
         wants_transcript = bool(request.arguments.get("transcribe")) or _looks_like_transcript_watch(query) or _looks_like_video_watch(query)
-        if source in {"system_audio", "audio"} and self.audio_transcriber is not None:
+        if not wants_transcript:
+            return TranscriptResult("empty", "ocr_subtitle", [], "未请求视频转写。", "")
+        if source in {"auto", "system_audio", "audio"} and self.audio_transcriber is not None:
             seconds = max(1.0, min(10.0, (len(records) * max(300, sample_interval_ms)) / 1000.0))
             audio_result = self.audio_transcriber.transcribe(seconds)
             if audio_result.ok:
@@ -188,13 +190,11 @@ class ScreenObserveTool(ToolAdapter):
             if fallback.ok:
                 return TranscriptResult(fallback.status, fallback.source, fallback.segments, fallback.summary, audio_result.error)
             return audio_result
-        if source in {"system_audio", "audio"}:
+        if source in {"auto", "system_audio", "audio"}:
             fallback = transcript_from_ocr_records(records, sample_interval_ms)
             if fallback.ok:
                 return TranscriptResult(fallback.status, fallback.source, fallback.segments, fallback.summary, "system_audio_unavailable")
             return TranscriptResult("unavailable", "system_audio", [], "系统音频转写不可用。", "system_audio_unavailable")
-        if not wants_transcript:
-            return TranscriptResult("empty", "ocr_subtitle", [], "未请求视频转写。", "")
         return transcript_from_ocr_records(records, sample_interval_ms)
 
     def _run_ocr(self, observation: VisionObservation) -> OcrResult:

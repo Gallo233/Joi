@@ -49,6 +49,7 @@ class WatchLoopSnapshot:
     interval_seconds: float = 6.0
     sample_count: int = 3
     transcript_source: str = "system_audio"
+    active_transcript_source: str = ""
     transcript_status: str = ""
     iterations: int = 0
     started_at: float = 0.0
@@ -74,6 +75,7 @@ class WatchLoopSnapshot:
             "interval_seconds": round(float(self.interval_seconds or 0), 2),
             "sample_count": int(self.sample_count or 0),
             "transcript_source": self.transcript_source,
+            "active_transcript_source": self.active_transcript_source,
             "transcript_status": self.transcript_status,
             "iterations": int(self.iterations or 0),
             "started_at": self.started_at,
@@ -122,6 +124,7 @@ class WatchLoopController:
                 interval_seconds=options.interval_seconds,
                 sample_count=options.sample_count,
                 transcript_source=options.transcript_source,
+                active_transcript_source=options.transcript_source,
                 proactive_enabled=options.proactive_enabled,
                 commentary_interval_seconds=options.commentary_interval_seconds,
                 started_at=now,
@@ -176,6 +179,7 @@ class WatchLoopController:
                 interval_seconds=snap.interval_seconds,
                 sample_count=snap.sample_count,
                 transcript_source=snap.transcript_source,
+                active_transcript_source=snap.active_transcript_source,
                 transcript_status=snap.transcript_status,
                 iterations=snap.iterations,
                 started_at=snap.started_at,
@@ -229,7 +233,7 @@ class WatchLoopController:
                 self._snapshot.last_comment = tick.proactive_reply
                 self._snapshot.last_comment_at = time.time()
                 self._snapshot.proactive_reason = tick.proactive_reason
-            self._snapshot.transcript_source = tick.transcript_source or self._options.transcript_source
+            self._snapshot.active_transcript_source = tick.transcript_source or self._options.transcript_source
             self._snapshot.transcript_status = tick.transcript_status
             self._snapshot.last_error = tick.error
         self._emit_event(tick.summary or "实时陪看上下文已更新。", status="success" if tick.ok else "failed")
@@ -249,6 +253,8 @@ class WatchLoopController:
         body_lines.append(f"主动发言：{'开启' if snapshot.proactive_enabled else '关闭'}")
         if snapshot.transcript_source:
             body_lines.append(f"转写源：{snapshot.transcript_source}")
+        if snapshot.active_transcript_source and snapshot.active_transcript_source != snapshot.transcript_source:
+            body_lines.append(f"当前命中源：{snapshot.active_transcript_source}")
         if snapshot.last_transcript:
             body_lines.append("最近转写：" + " / ".join(snapshot.last_transcript[:4]))
         if snapshot.rolling_summary:

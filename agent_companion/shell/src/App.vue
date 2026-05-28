@@ -331,8 +331,13 @@ const watchLoopMeta = computed(() => {
   const windowSeconds = Number(status.transcript_window_seconds || 0)
   if (windowSeconds) pieces.push(`最近 ${Math.max(1, Math.round(windowSeconds / 60))} 分钟`)
   pieces.push(status.proactive_enabled === false ? '主动发言关闭' : '主动发言开启')
-  if (status.transcript_source) pieces.push(String(status.transcript_source))
+  if (status.transcript_source) {
+    const configured = String(status.transcript_source)
+    const active = String(status.active_transcript_source || configured)
+    pieces.push(active && active !== configured ? `${sourceLabel(configured)}→${sourceLabel(active)}` : sourceLabel(configured))
+  }
   if (status.transcript_status) pieces.push(String(status.transcript_status))
+  if (status.last_error) pieces.push(errorLabel(String(status.last_error)))
   return pieces.join(' · ') || '等待采样'
 })
 const watchLoopSourceHealth = computed(() => {
@@ -1178,6 +1183,21 @@ function sourceLabel(value: string) {
     system_audio: '系统音频',
     ocr_subtitle: '字幕/OCR',
     auto: '自动',
+  }
+  return labels[value] || value
+}
+
+function errorLabel(value: string) {
+  const labels: Record<string, string> = {
+    system_audio_unavailable: '音频不可用',
+    system_audio_windows_only: '仅 Windows 音频',
+    system_audio_dependency_missing: '音频依赖缺失',
+    system_audio_device_missing: '无回环设备',
+    system_audio_capture_failed: '音频捕获失败',
+    asr_unconfigured: 'ASR 未配置',
+    asr_disabled: 'ASR 未启用',
+    asr_timeout: 'ASR 超时',
+    empty_transcript: '音频无文本',
   }
   return labels[value] || value
 }

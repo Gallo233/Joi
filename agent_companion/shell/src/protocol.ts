@@ -155,6 +155,7 @@ export interface WatchLoopStatus {
   interval_seconds?: number
   sample_count?: number
   transcript_source?: string
+  active_transcript_source?: string
   transcript_status?: string
   iterations?: number
   started_at?: number
