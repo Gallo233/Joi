@@ -124,6 +124,10 @@ export class CoreClient {
     return this.send('memory.delete', { memory_id: memoryId })
   }
 
+  memoryClear() {
+    return this.send('memory.clear', {})
+  }
+
   private send(method: string, params: Record<string, unknown>, options?: { timeoutMs?: number; timeoutMessage?: string }) {
     const payload = { jsonrpc: '2.0', id: `ui-${this.nextId++}`, method, params }
     if (this.socket?.readyState === WebSocket.OPEN) {

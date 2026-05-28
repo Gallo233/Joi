@@ -1490,6 +1490,17 @@ details pre {
   cursor: pointer;
 }
 
+.memory-link-button.danger {
+  border-color: rgba(239, 68, 68, 0.16);
+  background: rgba(239, 68, 68, 0.08);
+  color: #b91c1c;
+}
+
+.memory-link-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .memory-head-actions {
   display: flex;
   align-items: center;

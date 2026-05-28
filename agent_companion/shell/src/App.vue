@@ -1350,6 +1350,19 @@ async function deleteMemory(memoryId: number) {
   }
 }
 
+async function clearMemory() {
+  const count = pendingMemories.value.length + recentMemories.value.length
+  if (!count) return
+  if (!window.confirm(`清空 ${count} 条记忆和待确认候选？此操作不会删除手动编辑区。`)) return
+  try {
+    const result = (await client.memoryClear()) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (!result.ok) errorText.value = result.error || '记忆清空失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆清空失败'
+  }
+}
+
 function resolveApproval(approved: boolean) {
   if (!pendingApproval.value) return
   const approvalId = approvalIdFor(pendingApproval.value)
@@ -2245,6 +2258,7 @@ onBeforeUnmount(() => {
                 <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
               </label>
               <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+              <button type="button" class="memory-link-button danger" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
             </div>
           </div>
           <p class="memory-disabled-note" v-if="!memoryEnabled">长期记忆已关闭，新候选不会写入待确认队列。</p>

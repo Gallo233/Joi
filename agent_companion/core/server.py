@@ -147,6 +147,10 @@ class JsonRpcBridge:
                 result = self.memory_delete_command(params)
                 await websocket.send(self._result(request_id, result))
                 return
+            if method == "memory.clear":
+                result = self.memory_clear_command()
+                await websocket.send(self._result(request_id, result))
+                return
             if method == "approval.resolve":
                 approval_id = str(params.get("approval_id") or "")
                 approved = bool(params.get("approved", False))
@@ -339,6 +343,10 @@ class JsonRpcBridge:
         if memory_id is None:
             return {"ok": False, "error": "missing_memory_id", "memory": self.app.memory.status()}
         result = self.app.memory.delete(memory_id)
+        return {**result, "memory": self.app.memory.status()}
+
+    def memory_clear_command(self) -> dict[str, Any]:
+        result = self.app.memory.clear()
         return {**result, "memory": self.app.memory.status()}
 
     def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:

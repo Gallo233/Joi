@@ -199,11 +199,12 @@ class MemoryStore:
             "pending": self.pending(pending_limit),
         }
 
-    def clear(self) -> None:
+    def clear(self) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:
             db.execute("delete from memories")
             db.execute("delete from memory_candidates")
         self._rewrite_vault()
+        return {"ok": True}
 
     def _resolve_candidate(self, candidate_id: int, status: str, reason: str) -> None:
         with sqlite3.connect(self.path) as db:
