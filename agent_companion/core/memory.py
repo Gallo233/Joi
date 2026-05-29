@@ -140,6 +140,49 @@ class MemoryStore:
             ).fetchall()
         return [_candidate_row(row) for row in rows]
 
+    def profile(self, *, recent_limit: int = 80, manual_limit: int = 24) -> dict[str, Any]:
+        if not self.enabled():
+            return {
+                "version": "joi.memory_profile.v1",
+                "enabled": False,
+                "summary": "长期记忆已关闭",
+                "highlights": [],
+                "preferences": [],
+                "habits": [],
+                "relationship": [],
+                "recent_focus": [],
+                "counts": {"saved": 0, "manual_notes": 0, "pending": 0},
+                "updated_at": 0.0,
+            }
+        memories = self.recent(recent_limit)
+        manual_notes = [
+            note
+            for note in self._manual_vault_notes(limit=manual_limit)
+            if note and not _rejection_reason(note)
+        ]
+        preferences = _profile_bucket_items(memories, manual_notes, "preferences", limit=6)
+        habits = _profile_bucket_items(memories, manual_notes, "habits", limit=5)
+        relationship = _profile_bucket_items(memories, manual_notes, "relationship", limit=5)
+        recent_focus = _profile_bucket_items(memories, manual_notes, "recent_focus", limit=5)
+        highlights = _profile_highlights(preferences, habits, relationship, recent_focus)
+        updated_at = max([float(row.get("created_at") or 0) for row in memories] or [0.0])
+        return {
+            "version": "joi.memory_profile.v1",
+            "enabled": True,
+            "summary": _profile_summary(highlights, len(memories), len(manual_notes)),
+            "highlights": highlights,
+            "preferences": preferences,
+            "habits": habits,
+            "relationship": relationship,
+            "recent_focus": recent_focus,
+            "counts": {
+                "saved": len(memories),
+                "manual_notes": len(manual_notes),
+                "pending": len(self.pending(50)),
+            },
+            "updated_at": updated_at,
+        }
+
     def recent(self, limit: int = 12, *, include_ephemeral: bool = False, include_sensitive: bool = False) -> list[dict[str, Any]]:
         filters = []
         if not include_ephemeral:
@@ -157,9 +200,21 @@ class MemoryStore:
     def context(self, limit: int = 8, query: str = "") -> list[dict[str, Any]]:
         if not self.enabled():
             return []
+        safe_limit = max(1, int(limit or 8))
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for memory in self.recall(query, limit) if query else []:
+        profile_text = _profile_context_text(self.profile())
+        if profile_text:
+            rows.append(
+                {
+                    "kind": "profile",
+                    "text": profile_text[:400],
+                    "source": "memory_profile",
+                    "relevance": 20.0,
+                }
+            )
+            seen.add(profile_text)
+        for memory in self.recall(query, safe_limit) if query else []:
             text = str(memory.get("text") or "")
             cleaned = _clean_memory_text(text)
             if not cleaned or cleaned in seen:
@@ -173,15 +228,17 @@ class MemoryStore:
                 }
             )
             seen.add(cleaned)
-            if len(rows) >= limit:
-                return rows[: max(1, int(limit or 8))]
-        for note in self._manual_vault_notes(limit=limit):
+            if len(rows) >= safe_limit:
+                return rows[:safe_limit]
+        for note in self._manual_vault_notes(limit=safe_limit):
             cleaned = _clean_memory_text(note)
             if not cleaned or _rejection_reason(cleaned) or cleaned in seen:
                 continue
             rows.append({"kind": "vault", "text": cleaned[:400], "source": "vault"})
             seen.add(cleaned)
-        for memory in self.recent(limit):
+            if len(rows) >= safe_limit:
+                return rows[:safe_limit]
+        for memory in self.recent(safe_limit):
             text = str(memory.get("text") or "")
             cleaned = _clean_memory_text(text)
             if not cleaned or cleaned in seen:
@@ -194,9 +251,9 @@ class MemoryStore:
                 }
             )
             seen.add(cleaned)
-            if len(rows) >= limit:
+            if len(rows) >= safe_limit:
                 break
-        return rows[: max(1, int(limit or 8))]
+        return rows[:safe_limit]
 
     def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         if not self.enabled():
@@ -231,6 +288,7 @@ class MemoryStore:
             "storage": "local",
             "recent": self.recent(recent_limit),
             "pending": self.pending(pending_limit),
+            "profile": self.profile(recent_limit=max(40, recent_limit * 8)),
         }
 
     def browse_vault(self, *, max_lines_per_section: int = 18) -> dict[str, Any]:
@@ -479,6 +537,7 @@ def _memory_row(row: tuple) -> dict[str, Any]:
 
 def _candidate_row(row: tuple) -> dict[str, Any]:
     candidate_id, kind, text, source, status, created_at, resolved_at, rejection_reason = row
+    priority = _candidate_priority(str(kind or ""), str(text or ""), str(source or ""))
     return {
         "id": int(candidate_id),
         "kind": kind,
@@ -488,7 +547,134 @@ def _candidate_row(row: tuple) -> dict[str, Any]:
         "created_at": float(created_at),
         "resolved_at": float(resolved_at or 0),
         "rejection_reason": rejection_reason,
+        **priority,
     }
+
+
+def _candidate_priority(kind: str, text: str, source: str) -> dict[str, Any]:
+    value = _clean_memory_text(text)
+    lowered_kind = (kind or "").casefold()
+    lowered_source = (source or "").casefold()
+    score = 15
+    reasons: list[str] = []
+    if lowered_kind.startswith(("preference", "habit", "relationship", "identity")):
+        score += 28
+        reasons.append("长期画像字段")
+    if lowered_source in {"chat", "manual", "candidate", "explicit"}:
+        score += 8
+    if any(token in value for token in ("更喜欢", "偏好", "不喜欢", "讨厌", "习惯", "默认", "希望", "不要", "总是")):
+        score += 30
+        reasons.append("稳定偏好")
+    if any(token in value for token in ("称呼", "名字", "关系", "角色", "语气", "回答", "界面", "UI", "ui")):
+        score += 12
+        reasons.append("会影响体验")
+    if any(token in value for token in ("今天", "现在", "刚刚", "这次", "临时")):
+        score -= 18
+        reasons.append("可能是短期状态")
+    if len(value) < 8:
+        score -= 12
+    score = max(0, min(100, score))
+    if score >= 62:
+        priority = "high"
+    elif score >= 38:
+        priority = "medium"
+    else:
+        priority = "low"
+    return {
+        "priority": priority,
+        "priority_score": score,
+        "priority_reason": " / ".join(reasons[:2]) or "普通候选",
+    }
+
+
+PROFILE_BUCKETS: dict[str, tuple[str, ...]] = {
+    "preferences": ("喜欢", "更喜欢", "偏好", "不喜欢", "讨厌", "倾向", "爱用", "想要"),
+    "habits": ("习惯", "经常", "总是", "默认", "希望", "不要", "短一点", "长一点", "先", "每次"),
+    "relationship": ("称呼", "叫我", "名字", "关系", "陪", "角色", "语气", "态度", "对话"),
+    "recent_focus": ("正在", "最近", "关注", "开发", "修复", "优化", "前端", "后端", "UI", "ui", "B站", "bilibili"),
+}
+
+
+def _profile_bucket_items(
+    memories: list[dict[str, Any]],
+    manual_notes: list[str],
+    bucket: str,
+    *,
+    limit: int,
+) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+    for memory in memories:
+        text = _clean_memory_text(str(memory.get("text") or ""))
+        if not text or _rejection_reason(text) or text in seen:
+            continue
+        if _profile_bucket_matches(bucket, str(memory.get("kind") or ""), text):
+            items.append(text[:180])
+            seen.add(text)
+        if len(items) >= limit:
+            return items
+    for note in manual_notes:
+        text = _clean_memory_text(note)
+        if not text or _rejection_reason(text) or text in seen:
+            continue
+        if _profile_bucket_matches(bucket, "vault", text):
+            items.append(text[:180])
+            seen.add(text)
+        if len(items) >= limit:
+            break
+    if bucket == "recent_focus" and len(items) < limit:
+        for memory in memories:
+            text = _clean_memory_text(str(memory.get("text") or ""))
+            if not text or _rejection_reason(text) or text in seen:
+                continue
+            items.append(text[:180])
+            seen.add(text)
+            if len(items) >= limit:
+                break
+    return items
+
+
+def _profile_bucket_matches(bucket: str, kind: str, text: str) -> bool:
+    normalized_kind = (kind or "").casefold()
+    if bucket == "preferences" and normalized_kind.startswith("preference"):
+        return True
+    if bucket == "habits" and normalized_kind.startswith(("habit", "routine")):
+        return True
+    if bucket == "relationship" and normalized_kind.startswith(("relationship", "identity", "persona")):
+        return True
+    if bucket == "recent_focus" and normalized_kind.startswith(("project", "focus", "task", "note")):
+        return True
+    return any(token in text for token in PROFILE_BUCKETS.get(bucket, ()))
+
+
+def _profile_highlights(*groups: list[str]) -> list[str]:
+    highlights: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            cleaned = _clean_memory_text(item)
+            if not cleaned or cleaned in seen:
+                continue
+            highlights.append(cleaned[:180])
+            seen.add(cleaned)
+            if len(highlights) >= 5:
+                return highlights
+    return highlights
+
+
+def _profile_summary(highlights: list[str], saved_count: int, manual_count: int) -> str:
+    if not highlights:
+        if saved_count or manual_count:
+            return f"已保存 {saved_count} 条长期记忆，正在等待更多偏好信号形成画像。"
+        return "还没有足够的长期记忆形成用户画像。"
+    return "；".join(highlights[:3])
+
+
+def _profile_context_text(profile: dict[str, Any]) -> str:
+    highlights = [str(item).strip() for item in profile.get("highlights", []) if str(item).strip()]
+    if not highlights:
+        return ""
+    return "用户画像：" + "；".join(highlights[:4])
 
 
 def _clean_memory_text(text: str) -> str:

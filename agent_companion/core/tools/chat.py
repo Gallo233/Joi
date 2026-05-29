@@ -34,6 +34,9 @@ class CompanionChatTool(ToolAdapter):
                 "voice_style": voice_line.emotion,
             },
         }
+        memory_profile = _memory_profile(memory_context)
+        if memory_profile:
+            agent_state["memory_profile"] = memory_profile
         if model_usage:
             agent_state["model_usage"] = model_usage
         return ToolResult(
@@ -147,8 +150,12 @@ def _memory_context(value: Any) -> list[dict[str, str]]:
 def _memory_prompt(memory_context: list[dict[str, str]]) -> str:
     if not memory_context:
         return ""
+    profile_rows = [row for row in memory_context[:3] if row.get("source") == "memory_profile" and row.get("text")]
+    fact_rows = [row for row in memory_context[:8] if row.get("source") != "memory_profile" and row.get("text")]
     lines = ["已确认长期记忆，只作为用户偏好和背景使用，不要透露为系统日志或截图："]
-    for row in memory_context[:8]:
+    for row in profile_rows:
+        lines.append(f"- 长期画像：{row.get('text', '')[:260]}")
+    for row in fact_rows[:7]:
         lines.append(f"- {row.get('text', '')[:240]}")
     return "\n".join(lines) + "\n"
 
@@ -159,10 +166,21 @@ def _fallback_memory_reply(text: str, memory_context: list[dict[str, str]]) -> s
     value = text or ""
     if not any(token in value for token in ("喜欢", "偏好", "习惯", "记得", "知道我", "了解我")):
         return ""
-    facts = [row["text"] for row in memory_context[:3] if row.get("text")]
+    facts = [
+        row["text"].replace("用户画像：", "", 1)
+        for row in memory_context[:4]
+        if row.get("text")
+    ]
     if not facts:
         return ""
     return "我记得：" + "；".join(facts)
+
+
+def _memory_profile(memory_context: list[dict[str, str]]) -> dict[str, str]:
+    for row in memory_context:
+        if row.get("source") == "memory_profile" and row.get("text"):
+            return {"kind": row.get("kind", "profile"), "text": row["text"]}
+    return {}
 
 
 def _safe_memory_text(text: str) -> bool:

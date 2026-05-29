@@ -875,10 +875,20 @@ def main() -> int:
     assert_true(chat_emotion_result.voice_line.sprite != "1", "chat emotion should select a non-neutral sprite when available")
     assert_true(chat_emotion_result.agent_state["expression_sync"]["emotion"] == "happy", "chat should expose expression sync state")
     chat_memory_result = CompanionChatTool(workspace).run(
-        ToolRequest("companion.chat", {"text": "你知道我喜欢什么吗", "memory_context": [{"text": "用户更喜欢轻量级原生控件", "kind": "preference", "source": "test"}]})
+        ToolRequest(
+            "companion.chat",
+            {
+                "text": "你知道我喜欢什么吗",
+                "memory_context": [
+                    {"text": "用户画像：用户更喜欢轻量级原生控件", "kind": "profile", "source": "memory_profile"},
+                    {"text": "用户更喜欢轻量级原生控件", "kind": "preference", "source": "test"},
+                ],
+            },
+        )
     )
     assert_true("轻量级原生控件" in chat_memory_result.display_card.summary, "chat should answer from approved memory context")
     assert_true(chat_memory_result.agent_state["memory_context"], "chat should expose the approved memory context it used")
+    assert_true("memory_profile" in chat_memory_result.agent_state, "chat should expose approved memory profile context")
 
     expression_sync_event = AgentCompanionApp(workspace).expression.express(
         AgentEvent(
@@ -905,13 +915,20 @@ def main() -> int:
         assert_true((memory_dir / "memory" / "joi_memory_vault.md").is_file(), "approved memories should rewrite a human-readable vault")
         safe_candidate = memory.propose("preference", "用户更喜欢原生 CSS 变量", source="chat")
         assert_true(safe_candidate["ok"] and memory.pending(10), "safe memory candidates should wait for user authorization")
+        assert_true(safe_candidate["candidate"]["priority"] == "high", "preference candidates should be ranked high for review")
         candidate_id = int(safe_candidate["candidate"]["id"])
         assert_true(not any(row["text"] == "用户更喜欢原生 CSS 变量" for row in memory.recent(10)), "pending memory candidates must not be saved automatically")
         saved_candidate = memory.save_candidate(candidate_id)
         assert_true(saved_candidate["ok"] and any(row["text"] == "用户更喜欢原生 CSS 变量" for row in memory.recent(10)), "saving a memory candidate should persist it")
+        memory_profile = memory.profile()
+        assert_true(
+            memory_profile["summary"] and any("原生 CSS 变量" in row for row in memory_profile["preferences"]),
+            "approved memories should form a user memory profile",
+        )
         recalled_css = memory.recall("CSS 偏好", 5)
         assert_true(any("原生 CSS 变量" in row["text"] for row in recalled_css), "memory recall should find relevant approved memories")
         query_context = memory.context(10, query="我有什么 CSS 偏好")
+        assert_true(query_context and query_context[0].get("source") == "memory_profile", "memory context should start with the profile summary")
         assert_true(any(row.get("source") == "semantic_recall" and "原生 CSS 变量" in row["text"] for row in query_context), "query memory context should prioritize semantic recall")
         vault_text = (memory_dir / "memory" / "joi_memory_vault.md").read_text(encoding="utf-8")
         assert_true("用户更喜欢原生 CSS 变量" in vault_text, "saved memories should appear in the local vault")
@@ -4119,9 +4136,9 @@ llm:
     tool_compression_source = (workspace / "agent_companion" / "core" / "tool_compression.py").read_text(encoding="utf-8")
     assert_true("compress_tool_result" in tool_compression_source and "build_event_agent_state" in tool_compression_source and "planner_state" in tool_compression_source and "_explicit_memory_candidate" in tool_compression_source, "P6 JoiJuice should expose safe tool-result channels without auto memory")
     memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
-    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, semantic recall, local vault browsing/context, and privacy gate")
+    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "profile" in memory_source and "_candidate_priority" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, profiles, disable switch, semantic recall, local vault browsing/context, and privacy gate")
     chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
-    assert_true("memory_context" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context")
+    assert_true("memory_context" in chat_source and "memory_profile" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context and profile")
     config_source = (workspace / "agent_companion" / "core" / "config.py").read_text(encoding="utf-8")
     runtime_status_source = (workspace / "agent_companion" / "core" / "runtime_status.py").read_text(encoding="utf-8")
     watch_tool_source = (workspace / "agent_companion" / "core" / "tools" / "watch.py").read_text(encoding="utf-8")
@@ -4145,18 +4162,18 @@ llm:
     assert_true("shouldSuppressProactiveVoice" in shell_source and "watch_commentary" in shell_source, "Shell should suppress proactive watch voice while the user is typing")
     assert_true("watchTranscriptSource" in shell_source and "configureWatchLoop" in shell_source and "watchProactiveEnabled" in shell_source, "Shell should expose realtime watch controls")
     assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
-    assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory candidate controls and stage authorization bubble")
+    assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "memoryProfile" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory profile, candidate controls, and stage authorization bubble")
     assert_true("backgroundStatus" in shell_source and "background-context-panel" in shell_source and "configureBackgroundScope" in shell_source and "clearBackgroundContext" in shell_source and "syncBackgroundFromEvent" in shell_source, "Shell developer panel should expose constrained background context inspection and controls")
     assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
     assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source and "setSkillEnabled" in shell_source and "skillEnabled" in shell_source and "skillToggleDisabled" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
-    assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with recall search and vault preview")
+    assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-profile-panel" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with profile, recall search, and vault preview")
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
     assert_true("_step_with_memory_context" in app_source and "build_event_agent_state" in app_source, "App should inject approved memory context and emit safe JoiJuice event channels")
     desktop_context_source = (workspace / "agent_companion" / "core" / "desktop_context.py").read_text(encoding="utf-8")
     assert_true("rewrite_plan_for_desktop_context" in desktop_context_source and "record_desktop_context" in desktop_context_source and "DesktopContext" in desktop_context_source, "Desktop context planning should live outside the app orchestrator")
     assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source and "reload_runtime_policy" in app_source and "skill_settings_payload" in app_source and "block_reason" in app_source, "App execution boundary should attach native skill metadata and enforce disabled skills")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
-    assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
+    assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-profile-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
     assert_true("skill-grid" in shell_style_source and "skill-card" in shell_style_source and "skill-actions" in shell_style_source, "Shell styles should include native skill manifest cards")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
     assert_true("background-status-grid" in shell_style_source and "background-scope-form" in shell_style_source and "background-row" in shell_style_source, "Shell styles should include background context settings and summary rows")

@@ -196,6 +196,22 @@ export interface MemoryCandidate {
   created_at?: number
   resolved_at?: number
   rejection_reason?: string
+  priority?: 'high' | 'medium' | 'low' | string
+  priority_score?: number
+  priority_reason?: string
+}
+
+export interface MemoryProfile {
+  version?: string
+  enabled?: boolean
+  summary?: string
+  highlights?: string[]
+  preferences?: string[]
+  habits?: string[]
+  relationship?: string[]
+  recent_focus?: string[]
+  counts?: Record<string, number>
+  updated_at?: number
 }
 
 export interface MemoryStatus {
@@ -204,6 +220,7 @@ export interface MemoryStatus {
   storage?: string
   recent?: MemoryRecord[]
   pending?: MemoryCandidate[]
+  profile?: MemoryProfile
 }
 
 export interface MemoryVaultSection {

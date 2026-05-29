@@ -391,6 +391,22 @@ const watchLoopSourceHealth = computed(() => {
 const pendingMemories = computed(() => (memoryStatus.value?.pending || []).filter((item) => item.status === 'pending'))
 const recentMemories = computed(() => memoryStatus.value?.recent || [])
 const memoryEnabled = computed(() => memoryStatus.value?.enabled !== false)
+const memoryProfile = computed(() => memoryStatus.value?.profile || null)
+const memoryProfileHighlights = computed(() => memoryProfile.value?.highlights || [])
+const memoryProfileSections = computed(() =>
+  [
+    { key: 'preferences', label: '偏好', rows: memoryProfile.value?.preferences || [] },
+    { key: 'habits', label: '习惯', rows: memoryProfile.value?.habits || [] },
+    { key: 'relationship', label: '关系', rows: memoryProfile.value?.relationship || [] },
+    { key: 'recent_focus', label: '关注', rows: memoryProfile.value?.recent_focus || [] },
+  ].filter((section) => section.rows.length),
+)
+const memoryProfileCountText = computed(() => {
+  const counts = memoryProfile.value?.counts || {}
+  const saved = Number(counts.saved || recentMemories.value.length || 0)
+  const pending = Number(counts.pending || pendingMemories.value.length || 0)
+  return `${saved} 已保存 · ${pending} 待确认`
+})
 const topPendingMemory = computed(() => pendingMemories.value[0] || null)
 const memoryAuthorizeText = computed(() => topPendingMemory.value?.text || '')
 const memoryQueryText = computed(() => memoryQuery.value.trim())
@@ -1480,6 +1496,13 @@ function backgroundEntryMeta(row: BackgroundContextEntry) {
   return pieces.join(' · ')
 }
 
+function memoryPriorityLabel(value?: string) {
+  if (value === 'high') return '高优先'
+  if (value === 'medium') return '中优先'
+  if (value === 'low') return '低优先'
+  return value || '普通'
+}
+
 async function refreshMemoryStatus() {
   try {
     const result = (await client.memoryStatus()) as { ok?: boolean; memory?: MemoryStatus }
@@ -2549,6 +2572,23 @@ onBeforeUnmount(() => {
         </form>
 
         <div class="memory-grid">
+          <div class="memory-panel memory-profile-panel">
+            <header>
+              <strong>记忆画像</strong>
+              <span>{{ memoryProfileCountText }}</span>
+            </header>
+            <p class="memory-profile-summary">{{ memoryProfile?.summary || '保存并授权几条长期记忆后，Joi 会在这里汇总用户画像。' }}</p>
+            <div class="memory-profile-highlights" v-if="memoryProfileHighlights.length">
+              <span v-for="highlight in memoryProfileHighlights.slice(0, 5)" :key="highlight">{{ highlight }}</span>
+            </div>
+            <div class="memory-profile-sections" v-if="memoryProfileSections.length">
+              <section v-for="section in memoryProfileSections" :key="section.key">
+                <strong>{{ section.label }}</strong>
+                <p v-for="row in section.rows.slice(0, 3)" :key="`${section.key}-${row}`">{{ row }}</p>
+              </section>
+            </div>
+          </div>
+
           <div class="memory-panel">
             <header>
               <strong>待确认</strong>
@@ -2559,7 +2599,8 @@ onBeforeUnmount(() => {
                 <div>
                   <strong>{{ candidate.kind || 'note' }}</strong>
                   <p>{{ candidate.text }}</p>
-                  <span>{{ candidate.source || 'candidate' }}</span>
+                  <span>{{ candidate.source || 'candidate' }} · {{ memoryPriorityLabel(candidate.priority) }}</span>
+                  <small class="memory-priority-note" v-if="candidate.priority_reason">{{ candidate.priority_reason }}</small>
                 </div>
                 <div class="memory-actions">
                   <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
@@ -2667,12 +2708,17 @@ onBeforeUnmount(() => {
           </div>
           <p class="memory-disabled-note" v-if="!memoryEnabled">长期记忆已关闭，新候选不会写入待确认队列。</p>
           <div class="memory-vault-path" v-if="memoryStatus?.vault_label">本地记忆库 · {{ memoryStatus.vault_label }}</div>
+          <div class="memory-profile-inline" v-if="memoryProfile">
+            <strong>记忆画像</strong>
+            <p>{{ memoryProfile.summary || '等待更多长期记忆形成画像。' }}</p>
+          </div>
           <div class="memory-list" v-if="pendingMemories.length">
             <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
               <div>
                 <strong>{{ candidate.kind || 'note' }}</strong>
                 <p>{{ candidate.text }}</p>
-                <span>{{ candidate.source || 'candidate' }}</span>
+                <span>{{ candidate.source || 'candidate' }} · {{ memoryPriorityLabel(candidate.priority) }}</span>
+                <small class="memory-priority-note" v-if="candidate.priority_reason">{{ candidate.priority_reason }}</small>
               </div>
               <div class="memory-actions">
                 <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
