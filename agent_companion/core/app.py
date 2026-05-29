@@ -40,6 +40,7 @@ from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import PendingSemanticTargetSelection, SemanticTargetSelectionStore, SemanticTargetSelectionTool, SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
+from agent_companion.core.tool_compression import compress_tool_result
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
@@ -481,13 +482,15 @@ class AgentCompanionApp:
 
     def _emit_result(self, task_id: str, result: ToolResult, user_text: str = "") -> None:
         event_type = EventType.TOOL_COMPLETED if result.ok else EventType.TOOL_FAILED
+        agent_state = dict(result.agent_state)
+        agent_state["joi_juice"] = compress_tool_result(result).to_agent_state()
         self._emit(
             AgentEvent(
                 event_type,
                 task_id,
                 result.display_card,
                 result.voice_line,
-                result.agent_state,
+                agent_state,
             ),
             user_text,
         )

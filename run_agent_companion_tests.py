@@ -28,6 +28,7 @@ from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.schemas import AgentEvent, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.server import JsonRpcBridge
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
+from agent_companion.core.tool_compression import compress_tool_result
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.computer import ComputerActionTool
@@ -803,6 +804,43 @@ def main() -> int:
         and ".log" not in blocked_runtime_detail.text,
         "voice leaked provider secret, local model path, or log filename",
     )
+    compression_result = ToolResult(
+        ok=True,
+        agent_state={
+            "tool": "observe.screen",
+            "summary": "用户喜欢蓝色主题",
+            "screenshot_path": r"C:\secret\screen.png",
+            "stdout": "raw " * 400,
+            "target_candidate": {
+                "label": "保存",
+                "source": "ocr",
+                "confidence": 0.91,
+                "bbox": [10, 20, 30, 40],
+                "preview": {"artifact": "data/agent_companion/vision/private.png"},
+            },
+        },
+        display_card=DisplayCard("观察", "看到了保存按钮", "路径 data/agent_companion/vision/private.png", artifacts=["data/agent_companion/vision/private.png"]),
+        voice_line=VoiceLine(r"我看到了 C:\secret\screen.png 和 sk-test-token 100,200"),
+    )
+    compressed = compress_tool_result(compression_result)
+    planner_blob = json.dumps(compressed.agent_state, ensure_ascii=False)
+    assert_true("screenshot_path" not in planner_blob and "stdout" not in planner_blob and "bbox" not in planner_blob, "JoiJuice planner state leaked raw path/log/coordinates")
+    assert_true(compressed.agent_state["target_candidate"]["label"] == "保存", "JoiJuice should preserve semantic target label")
+    assert_true("sk-" not in compressed.voice_line and "C:\\" not in compressed.voice_line and "100,200" not in compressed.voice_line, "JoiJuice voice channel leaked sensitive detail")
+    assert_true(compressed.memory_candidate is None, "JoiJuice must not auto-create memory candidates from tool summaries")
+    compression_app_dir = Path(tempfile.mkdtemp())
+    try:
+        (compression_app_dir / "agent_companion" / "config").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(workspace / "agent_companion" / "config" / "default_character.yaml", compression_app_dir / "agent_companion" / "config" / "default_character.yaml")
+        compression_app = AgentCompanionApp(compression_app_dir)
+        compression_app._emit_result("compression-test", compression_result)
+        compressed_events = compression_app.bus.drain()
+        compressed_event = [event for event in compressed_events if event.task_id == "compression-test"][-1]
+        assert_true("joi_juice" in compressed_event.agent_state, "Tool result events should attach JoiJuice channels")
+        assert_true(compressed_event.agent_state["screenshot_path"] == r"C:\secret\screen.png", "JoiJuice should not remove UI/debug state from emitted events")
+        assert_true("screenshot_path" not in json.dumps(compressed_event.agent_state["joi_juice"]["planner_state"], ensure_ascii=False), "JoiJuice planner channel should stay sanitized")
+    finally:
+        shutil.rmtree(compression_app_dir, ignore_errors=True)
     token_text, token_emotion = strip_emotion_token("<emo: thinking> 我想一下。")
     assert_true(token_text == "我想一下。" and token_emotion == "thinking", "emotion token should be stripped and normalized")
     happy_voice = safe_voice_line("<emo: happy> 做完了。")
@@ -3362,6 +3400,8 @@ llm:
     assert_true('source in {"auto", "system_audio", "audio"}' in screen_observe_source and "audio_result.error" in screen_observe_source, "Auto transcript source should try system audio and preserve fallback reason")
     commentary_source = (workspace / "agent_companion" / "core" / "watch_commentary.py").read_text(encoding="utf-8")
     assert_true("min_interval_seconds" in commentary_source and "maybe_comment" in commentary_source and "safe_voice_line" in commentary_source, "Watch commentary planner should enforce cooldown and safe voice output")
+    tool_compression_source = (workspace / "agent_companion" / "core" / "tool_compression.py").read_text(encoding="utf-8")
+    assert_true("compress_tool_result" in tool_compression_source and "planner_state" in tool_compression_source and "_explicit_memory_candidate" in tool_compression_source, "P6 JoiJuice should expose safe tool-result channels without auto memory")
     memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
     assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, semantic recall, local vault context, and privacy gate")
     chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
@@ -3383,7 +3423,8 @@ llm:
     assert_true("watchTranscriptSource" in shell_source and "configureWatchLoop" in shell_source and "watchProactiveEnabled" in shell_source, "Shell should expose realtime watch controls")
     assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
     assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory candidate controls and stage authorization bubble")
-    assert_true("_step_with_memory_context" in (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8"), "App should inject approved memory context into companion chat")
+    app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
+    assert_true("_step_with_memory_context" in app_source and "compress_tool_result" in app_source and '"joi_juice"' in app_source, "App should inject approved memory context and attach JoiJuice channels")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 
