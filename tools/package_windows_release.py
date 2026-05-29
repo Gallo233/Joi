@@ -53,6 +53,7 @@ TOOLS_FILES = [
     "tools/provider_preflight.py",
     "tools/smoke_ws_bridge.py",
     "tools/start_joi.ps1",
+    "tools/windows_handoff_report.py",
     "tools/windows_release_check.py",
     "tools/windows_setup_wizard.py",
 ]

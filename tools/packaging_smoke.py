@@ -34,6 +34,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
     demo_check_path = root / "tools" / "mvp_demo_check.py"
     release_packager_path = root / "tools" / "package_windows_release.py"
     provider_preflight_path = root / "tools" / "provider_preflight.py"
+    handoff_report_path = root / "tools" / "windows_handoff_report.py"
     release_check_path = root / "tools" / "windows_release_check.py"
     setup_wizard_path = root / "tools" / "windows_setup_wizard.py"
 
@@ -51,6 +52,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
             "mvp_demo_check": demo_check_path,
             "windows_release_packager": release_packager_path,
             "provider_preflight": provider_preflight_path,
+            "windows_handoff_report": handoff_report_path,
             "windows_release_check": release_check_path,
             "windows_setup_wizard": setup_wizard_path,
         },

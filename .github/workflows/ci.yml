@@ -52,6 +52,8 @@ jobs:
         run: python tools/package_windows_release.py --dry-run --allow-missing-exe
       - name: Run release readiness check
         run: python tools/windows_release_check.py --skip-doctor --allow-missing-exe
+      - name: Run Windows handoff report
+        run: python tools/windows_handoff_report.py --skip-doctor --allow-missing-exe
       - name: Build frontend
         working-directory: agent_companion/shell
         run: npm run build

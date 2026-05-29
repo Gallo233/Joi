@@ -110,6 +110,14 @@ Aggregated release readiness:
 
 Remove `--allow-missing-exe` after the Tauri release shell exists to require a publishable portable package.
 
+Safe RC handoff summary:
+
+```powershell
+.\.venv\Scripts\python.exe tools\windows_handoff_report.py --allow-missing-exe
+```
+
+This report reuses release readiness and prints only branch/commit, phase summaries, commands, and next actions suitable for cross-machine review.
+
 Portable release zip:
 
 ```powershell

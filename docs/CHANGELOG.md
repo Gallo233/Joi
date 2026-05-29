@@ -88,6 +88,7 @@
 - Added an offline provider preflight for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification, with sanitized output and release-readiness integration.
 - Added an MVP demo readiness check that exposes safe Watch Together, Codex coding, and OK-WW game-skill demo prompts plus local dependency readiness without starting external actions.
 - Added a Windows first-run setup wizard and `start_joi.bat -Setup` launcher path that can create `config.yaml` from the example without writing secrets.
+- Added a safe Windows RC handoff report that summarizes release readiness for cross-machine review without exposing local paths or secrets.
 
 ## 2026-05-14
 

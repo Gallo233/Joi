@@ -99,6 +99,7 @@ Run core tests:
 .\.venv\Scripts\python.exe tools\mvp_demo_check.py
 .\.venv\Scripts\python.exe tools\provider_preflight.py
 .\.venv\Scripts\python.exe tools\windows_release_check.py --allow-missing-exe
+.\.venv\Scripts\python.exe tools\windows_handoff_report.py --allow-missing-exe
 ```
 
 `tools\packaging_smoke.py` also validates the Windows release privacy policy for local config, secrets, runtime data, logs, dependency folders, and build caches.
@@ -106,6 +107,7 @@ Run core tests:
 `tools\mvp_demo_check.py` prints safe watch/coding/game demo prompts and dependency readiness without starting external actions.
 `tools\provider_preflight.py` runs an offline, sanitized provider readiness check for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification.
 `tools\windows_release_check.py` aggregates doctor, MVP demo check, provider preflight, packaging smoke, release privacy, and portable package dry-run status into one release readiness report.
+`tools\windows_handoff_report.py` converts release readiness into a safe Windows RC handoff summary for cross-machine review without local paths or secrets.
 
 Build a Windows portable release zip after the Tauri release shell exists:
 

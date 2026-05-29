@@ -162,5 +162,5 @@ Status: in progress
 - Offline provider preflight now reports sanitized readiness for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification without endpoint or secret probes.
 - MVP demo readiness now covers safe Watch Together, Codex coding, and OK-WW game-skill scripts without launching external actions.
 - Packaging smoke now validates version alignment, Tauri shell metadata, window permissions, and launcher wiring.
-- Mac handoff kept current.
+- Mac handoff kept current through a safe Windows RC handoff report that summarizes release readiness without local paths or secrets.
 - CI workflow now runs Python tests, packaging smoke, frontend build, and Tauri debug no-bundle build on Windows.
