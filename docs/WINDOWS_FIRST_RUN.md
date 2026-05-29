@@ -72,6 +72,14 @@ Packaging metadata smoke:
 
 This also checks the Windows release privacy policy so local `config.yaml`, `secrets.yaml`, runtime data, logs, dependency folders, and build caches are not eligible for release packaging.
 
+Offline provider preflight:
+
+```powershell
+.\.venv\Scripts\python.exe tools\provider_preflight.py
+```
+
+This prints only sanitized provider state for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification. It does not test network endpoints or print API keys, URLs, paths, logs, or model files.
+
 Aggregated release readiness:
 
 ```powershell

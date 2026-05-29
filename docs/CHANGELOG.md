@@ -85,6 +85,7 @@
 - Added a Windows portable release packager that zips only allowlisted runtime files plus the release shell and excludes local config, secrets, logs, data, dependency folders, and build caches.
 - Added release privacy policy validation so packaging smoke and portable package reports verify that local config, secrets, runtime data, logs, dependency folders, and build caches stay out of Windows release artifacts.
 - Added a Windows release readiness aggregator that combines doctor, packaging smoke, release privacy, and portable package dry-run status into a safe RC report for local release checks and CI metadata validation.
+- Added an offline provider preflight for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification, with sanitized output and release-readiness integration.
 
 ## 2026-05-14
 

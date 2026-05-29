@@ -49,6 +49,7 @@ TOOLS_FILES = [
     "tools/joi_doctor.py",
     "tools/package_windows_release.py",
     "tools/packaging_smoke.py",
+    "tools/provider_preflight.py",
     "tools/smoke_ws_bridge.py",
     "tools/start_joi.ps1",
     "tools/windows_release_check.py",

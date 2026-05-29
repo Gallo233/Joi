@@ -158,6 +158,7 @@ Status: in progress
 - Release readiness aggregation now combines doctor, packaging smoke, privacy policy, and portable package dry-run status into one safe RC report.
 - First-run setup checklist.
 - First-run doctor now checks Python packages, optional OCR/audio packages, frontend toolchain, shell build state, `config.yaml`, Tesseract, and Core port readiness.
+- Offline provider preflight now reports sanitized readiness for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification without endpoint or secret probes.
 - Packaging smoke now validates version alignment, Tauri shell metadata, window permissions, and launcher wiring.
 - Mac handoff kept current.
 - CI workflow now runs Python tests, packaging smoke, frontend build, and Tauri debug no-bundle build on Windows.
