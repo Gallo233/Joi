@@ -131,6 +131,14 @@ class JsonRpcBridge:
             if method == "memory.status":
                 await websocket.send(self._result(request_id, self.memory_status_command()))
                 return
+            if method == "memory.recall":
+                result = self.memory_recall_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.browse_vault":
+                result = self.memory_browse_vault_command()
+                await websocket.send(self._result(request_id, result))
+                return
             if method == "memory.save_candidate":
                 result = self.memory_save_candidate_command(params)
                 await websocket.send(self._result(request_id, result))
@@ -318,6 +326,15 @@ class JsonRpcBridge:
 
     def memory_status_command(self) -> dict[str, Any]:
         return {"ok": True, "memory": self.app.memory.status()}
+
+    def memory_recall_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        query = str(params.get("query") or "") if isinstance(params, dict) else ""
+        limit = _safe_int(params.get("limit")) if isinstance(params, dict) else None
+        safe_limit = min(20, max(1, int(limit or 8)))
+        return {"ok": True, "memories": self.app.memory.recall(query, safe_limit), "memory": self.app.memory.status()}
+
+    def memory_browse_vault_command(self) -> dict[str, Any]:
+        return {"ok": True, "vault": self.app.memory.browse_vault(), "memory": self.app.memory.status()}
 
     def memory_save_candidate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         candidate_id = _safe_int(params.get("candidate_id")) if isinstance(params, dict) else None

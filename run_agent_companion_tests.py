@@ -898,6 +898,12 @@ def main() -> int:
         assert_true(any(row.get("source") == "semantic_recall" and "原生 CSS 变量" in row["text"] for row in query_context), "query memory context should prioritize semantic recall")
         vault_text = (memory_dir / "memory" / "joi_memory_vault.md").read_text(encoding="utf-8")
         assert_true("用户更喜欢原生 CSS 变量" in vault_text, "saved memories should appear in the local vault")
+        browsed_vault = memory.browse_vault()
+        assert_true(
+            browsed_vault["path"].endswith("joi_memory_vault.md")
+            and any("Saved Memories" == section["title"] and any("原生 CSS 变量" in line for line in section["lines"]) for section in browsed_vault["sections"]),
+            "memory vault browsing should expose safe saved-memory sections",
+        )
         (memory_dir / "memory" / "joi_memory_vault.md").write_text(
             vault_text + "\n## Manual Notes\n\n- 用户喜欢回答短一点\n- C:\\secret\\raw.log\n",
             encoding="utf-8",
@@ -939,6 +945,11 @@ def main() -> int:
         assert_true(not any("轻量级原生控件" in row["text"] for row in memory_app.memory.recent(20)), "explicit remember requests should still require user save")
         saved_memory = memory_app.memory.save_candidate(int(memory_candidates[-1]["id"]))
         assert_true(saved_memory["ok"] and any("轻量级原生控件" in row["text"] for row in memory_app.memory.recent(20)), "approved explicit memory should persist")
+        memory_bridge = JsonRpcBridge(memory_app_dir)
+        recall_rpc = memory_bridge.memory_recall_command({"query": "轻量级偏好", "limit": 5})
+        assert_true(recall_rpc["ok"] and any("轻量级原生控件" in row["text"] for row in recall_rpc["memories"]), "memory recall RPC should return approved semantic matches")
+        vault_rpc = memory_bridge.memory_browse_vault_command()
+        assert_true(vault_rpc["ok"] and vault_rpc["vault"]["sections"], "memory vault RPC should expose browsable vault sections")
         memory_status_events = memory_app.handle_user_text("你记得什么")
         assert_true(any(event.agent_state.get("tool") == "memory.status" and event.agent_state.get("memory", {}).get("enabled") is True for event in memory_status_events), "memory status command should expose saved memory state")
         memory_off_events = memory_app.handle_user_text("关闭记忆")
@@ -3181,7 +3192,7 @@ llm:
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
     assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source and "watch.loop.configure" in shell_api_source and "watch.loop.refresh" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
-    assert_true("memory.status" in shell_api_source and "memory.save_candidate" in shell_api_source and "memory.reject_candidate" in shell_api_source and "memory.set_enabled" in shell_api_source and "memory.delete" in shell_api_source and "memory.clear" in shell_api_source, "Shell API should expose memory authorization RPC methods")
+    assert_true("memory.status" in shell_api_source and "memory.recall" in shell_api_source and "memory.browse_vault" in shell_api_source and "memory.save_candidate" in shell_api_source and "memory.reject_candidate" in shell_api_source and "memory.set_enabled" in shell_api_source and "memory.delete" in shell_api_source and "memory.clear" in shell_api_source, "Shell API should expose memory authorization and recall RPC methods")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
     assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
     assert_true("event_created_at" in voice_runtime_source, "voice runtime key should include event identity")
@@ -3392,7 +3403,7 @@ llm:
     assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop_configure_command" in server_source and "watch_loop_refresh_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
     assert_true("_watch_loop_should_summarize" in server_source and "skip_summary=not run_vision_summary" in server_source, "Core watch loop should run low-frequency visual summaries")
     assert_true("force_visual_summary" in server_source and '"watch.loop.refresh"' in server_source, "Core watch loop should expose forced visual refresh")
-    assert_true("memory_status_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
+    assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
@@ -3403,7 +3414,7 @@ llm:
     tool_compression_source = (workspace / "agent_companion" / "core" / "tool_compression.py").read_text(encoding="utf-8")
     assert_true("compress_tool_result" in tool_compression_source and "planner_state" in tool_compression_source and "_explicit_memory_candidate" in tool_compression_source, "P6 JoiJuice should expose safe tool-result channels without auto memory")
     memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
-    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, semantic recall, local vault context, and privacy gate")
+    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, semantic recall, local vault browsing/context, and privacy gate")
     chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
     assert_true("memory_context" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
@@ -3423,9 +3434,12 @@ llm:
     assert_true("watchTranscriptSource" in shell_source and "configureWatchLoop" in shell_source and "watchProactiveEnabled" in shell_source, "Shell should expose realtime watch controls")
     assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
     assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory candidate controls and stage authorization bubble")
+    assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
+    assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with recall search and vault preview")
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
     assert_true("_step_with_memory_context" in app_source and "compress_tool_result" in app_source and '"joi_juice"' in app_source, "App should inject approved memory context and attach JoiJuice channels")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
+    assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))

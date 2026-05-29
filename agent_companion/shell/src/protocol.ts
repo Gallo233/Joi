@@ -183,6 +183,7 @@ export interface MemoryRecord {
   text?: string
   source?: string
   created_at?: number
+  relevance?: number
 }
 
 export interface MemoryCandidate {
@@ -201,6 +202,17 @@ export interface MemoryStatus {
   vault_path?: string
   recent?: MemoryRecord[]
   pending?: MemoryCandidate[]
+}
+
+export interface MemoryVaultSection {
+  title: string
+  lines: string[]
+}
+
+export interface MemoryVault {
+  path?: string
+  updated_at?: number
+  sections?: MemoryVaultSection[]
 }
 
 export interface CoreReadyPayload {

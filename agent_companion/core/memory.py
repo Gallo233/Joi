@@ -232,6 +232,34 @@ class MemoryStore:
             "pending": self.pending(pending_limit),
         }
 
+    def browse_vault(self, *, max_lines_per_section: int = 18) -> dict[str, Any]:
+        if not self.vault_path.is_file():
+            self._rewrite_vault()
+        try:
+            text = self.vault_path.read_text(encoding="utf-8")
+            updated_at = self.vault_path.stat().st_mtime
+        except Exception:
+            return {"path": str(self.vault_path), "updated_at": 0, "sections": []}
+        sections: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("## "):
+                current = {"title": _clean_memory_text(line[3:])[:80] or "Section", "lines": []}
+                sections.append(current)
+                continue
+            if current is None or not line or line.startswith("#") or line.startswith("_"):
+                continue
+            if line.startswith("-"):
+                line = line[1:].strip()
+            cleaned = _clean_memory_text(line)
+            if not cleaned or _rejection_reason(cleaned):
+                continue
+            lines = current.setdefault("lines", [])
+            if len(lines) < max(1, int(max_lines_per_section or 18)):
+                lines.append(cleaned[:500])
+        return {"path": str(self.vault_path), "updated_at": float(updated_at), "sections": sections}
+
     def clear(self) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:
             db.execute("delete from memories")

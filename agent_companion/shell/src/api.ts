@@ -108,6 +108,14 @@ export class CoreClient {
     return this.send('memory.status', {})
   }
 
+  memoryRecall(query: string, limit = 8) {
+    return this.send('memory.recall', { query, limit })
+  }
+
+  memoryBrowseVault() {
+    return this.send('memory.browse_vault', {})
+  }
+
   memorySaveCandidate(candidateId: number) {
     return this.send('memory.save_candidate', { candidate_id: candidateId })
   }

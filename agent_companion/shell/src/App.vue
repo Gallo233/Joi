@@ -3,7 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryStatus, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -15,9 +15,21 @@ const ready = ref<CoreReadyPayload | null>(null)
 const failedImageSrc = ref('')
 const previewArtifact = ref('')
 const previewArtifactEvent = ref<AgentEvent | null>(null)
-const activeCabin = ref<'workspace' | 'chat' | 'inspector'>('workspace')
+const activeCabin = ref<'workspace' | 'chat' | 'memory' | 'inspector'>('workspace')
 const artifactDialog = ref<HTMLDialogElement | null>(null)
 const memoryStatus = ref<MemoryStatus | null>(null)
+type SettingsTabId = 'runtime' | 'memory' | 'appearance' | 'developer'
+const activeSettingsTab = ref<SettingsTabId>('runtime')
+const settingsTabs: Array<{ id: SettingsTabId; label: string; icon: string }> = [
+  { id: 'runtime', label: '运行', icon: '⚡' },
+  { id: 'memory', label: '记忆', icon: '🧠' },
+  { id: 'appearance', label: '外观', icon: '🎨' },
+  { id: 'developer', label: '审计', icon: '🧾' },
+]
+const memoryQuery = ref('')
+const memorySearchResults = ref<MemoryRecord[]>([])
+const memorySearchLoading = ref(false)
+const memoryVault = ref<MemoryVault | null>(null)
 
 const isCompactMode = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
@@ -361,6 +373,10 @@ const recentMemories = computed(() => memoryStatus.value?.recent || [])
 const memoryEnabled = computed(() => memoryStatus.value?.enabled !== false)
 const topPendingMemory = computed(() => pendingMemories.value[0] || null)
 const memoryAuthorizeText = computed(() => topPendingMemory.value?.text || '')
+const memoryQueryText = computed(() => memoryQuery.value.trim())
+const displayedMemoryRows = computed(() => (memoryQueryText.value ? memorySearchResults.value : recentMemories.value))
+const memoryVaultSections = computed(() => memoryVault.value?.sections || [])
+const memorySearchEmptyText = computed(() => (memoryQueryText.value ? '没有找到相关记忆' : '暂无长期记忆'))
 
 watch(watchLoopStatus, (status) => {
   const source = stringValue(status.transcript_source)
@@ -369,6 +385,18 @@ watch(watchLoopStatus, (status) => {
   if (status.commentary_interval_seconds) watchCommentaryInterval.value = Number(status.commentary_interval_seconds)
   const visionInterval = Number(status.vision_interval_ticks)
   if (Number.isFinite(visionInterval)) watchVisionInterval.value = Math.max(0, visionInterval)
+})
+
+watch(activeCabin, (cabin) => {
+  if (cabin !== 'memory') return
+  void refreshMemoryStatus()
+  void browseMemoryVault()
+})
+
+watch(activeSettingsTab, (tab) => {
+  if (tab !== 'memory') return
+  void refreshMemoryStatus()
+  void browseMemoryVault()
 })
 
 const latestSpeech = computed(() => {
@@ -1309,10 +1337,42 @@ async function refreshMemoryStatus() {
   }
 }
 
+async function searchMemory() {
+  const query = memoryQueryText.value
+  if (!query) {
+    memorySearchResults.value = []
+    return
+  }
+  memorySearchLoading.value = true
+  try {
+    const result = (await client.memoryRecall(query, 12)) as { ok?: boolean; memories?: MemoryRecord[]; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    memorySearchResults.value = result.memories || []
+    if (!result.ok) errorText.value = result.error || '记忆检索失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆检索失败'
+  } finally {
+    memorySearchLoading.value = false
+  }
+}
+
+async function browseMemoryVault() {
+  try {
+    const result = (await client.memoryBrowseVault()) as { ok?: boolean; vault?: MemoryVault; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (result.vault) memoryVault.value = result.vault
+    if (!result.ok) errorText.value = result.error || '记忆库读取失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆库读取失败'
+  }
+}
+
 async function saveMemoryCandidate(candidateId: number) {
   try {
     const result = (await client.memorySaveCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
+    if (memoryQueryText.value) void searchMemory()
+    void browseMemoryVault()
     if (!result.ok) errorText.value = result.error || '记忆保存失败'
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '记忆保存失败'
@@ -1344,6 +1404,8 @@ async function deleteMemory(memoryId: number) {
   try {
     const result = (await client.memoryDelete(memoryId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
+    if (memoryQueryText.value) void searchMemory()
+    void browseMemoryVault()
     if (!result.ok) errorText.value = result.error || '记忆删除失败'
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '记忆删除失败'
@@ -1357,6 +1419,8 @@ async function clearMemory() {
   try {
     const result = (await client.memoryClear()) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
+    memorySearchResults.value = []
+    void browseMemoryVault()
     if (!result.ok) errorText.value = result.error || '记忆清空失败'
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '记忆清空失败'
@@ -2214,9 +2278,108 @@ onBeforeUnmount(() => {
         </form>
       </section>
 
+      <section class="memory-section" v-if="activeCabin === 'memory'">
+        <div class="section-title">
+          <h2>记忆舱</h2>
+          <span>{{ pendingMemories.length }} 待确认 · {{ recentMemories.length }} 已保存</span>
+        </div>
+
+        <div class="memory-command-panel">
+          <div class="memory-command-copy">
+            <strong>{{ memoryEnabled ? '长期记忆开启' : '长期记忆关闭' }}</strong>
+            <span>{{ memoryStatus?.vault_path || '等待核心连接后读取本地记忆库' }}</span>
+          </div>
+          <div class="memory-head-actions">
+            <label class="memory-enable-toggle">
+              <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
+              <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
+            </label>
+            <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+            <button type="button" class="memory-link-button" @click="browseMemoryVault">读取库</button>
+            <button type="button" class="memory-link-button danger" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
+          </div>
+        </div>
+
+        <form class="memory-search-bar" @submit.prevent="searchMemory">
+          <input v-model="memoryQuery" type="search" placeholder="搜索 Joi 已获授权的长期记忆..." />
+          <button type="submit" :disabled="memorySearchLoading || !memoryQueryText">
+            {{ memorySearchLoading ? '检索中' : '检索' }}
+          </button>
+        </form>
+
+        <div class="memory-grid">
+          <div class="memory-panel">
+            <header>
+              <strong>待确认</strong>
+              <span>{{ pendingMemories.length }}</span>
+            </header>
+            <div class="memory-list" v-if="pendingMemories.length">
+              <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
+                <div>
+                  <strong>{{ candidate.kind || 'note' }}</strong>
+                  <p>{{ candidate.text }}</p>
+                  <span>{{ candidate.source || 'candidate' }}</span>
+                </div>
+                <div class="memory-actions">
+                  <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
+                  <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
+                </div>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>没有待确认记忆</p>
+          </div>
+
+          <div class="memory-panel">
+            <header>
+              <strong>{{ memoryQueryText ? '检索结果' : '最近记忆' }}</strong>
+              <span>{{ displayedMemoryRows.length }}</span>
+            </header>
+            <div class="memory-list" v-if="displayedMemoryRows.length">
+              <article v-for="memory in displayedMemoryRows" :key="memory.id" class="memory-row">
+                <div>
+                  <strong>{{ memory.kind || 'note' }}</strong>
+                  <p>{{ memory.text }}</p>
+                  <span>{{ memory.source || 'manual' }}<template v-if="memory.relevance"> · 相关 {{ Math.round(memory.relevance) }}</template></span>
+                </div>
+                <button type="button" class="memory-delete" @click="deleteMemory(memory.id)">删除</button>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>{{ memorySearchEmptyText }}</p>
+          </div>
+
+          <div class="memory-panel memory-vault-panel">
+            <header>
+              <strong>本地 Vault</strong>
+              <button type="button" class="memory-link-button" @click="browseMemoryVault">刷新</button>
+            </header>
+            <div class="memory-vault-sections" v-if="memoryVaultSections.length">
+              <section v-for="section in memoryVaultSections" :key="section.title">
+                <strong>{{ section.title }}</strong>
+                <p v-for="line in section.lines.slice(0, 6)" :key="`${section.title}-${line}`">{{ line }}</p>
+              </section>
+            </div>
+            <p class="memory-empty" v-else>还没有可展示的本地记忆库内容</p>
+          </div>
+        </div>
+      </section>
+
       <section class="debug-section" v-if="activeCabin === 'inspector'">
+        <nav class="settings-tabbar">
+          <button
+            v-for="tab in settingsTabs"
+            :key="tab.id"
+            type="button"
+            class="settings-tab"
+            :class="{ active: activeSettingsTab === tab.id }"
+            @click="activeSettingsTab = tab.id"
+          >
+            <span>{{ tab.icon }}</span>
+            {{ tab.label }}
+          </button>
+        </nav>
+
         <!-- Closet Wardrobe -->
-        <div class="runtime-settings" style="margin-bottom: 20px;">
+        <div class="runtime-settings" v-if="activeSettingsTab === 'appearance'">
           <div class="runtime-settings-head">
             <strong>个性化装扮 (Cosplay Closet)</strong>
             <span>点击进行穿戴</span>
@@ -2249,7 +2412,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="runtime-settings memory-settings">
+        <div class="runtime-settings memory-settings" v-if="activeSettingsTab === 'memory'">
           <div class="runtime-settings-head">
             <strong>记忆舱</strong>
             <div class="memory-head-actions">
@@ -2289,23 +2452,24 @@ onBeforeUnmount(() => {
           <p class="memory-empty" v-if="!pendingMemories.length && !recentMemories.length">暂无长期记忆</p>
         </div>
 
-        <div class="section-title">
-          <h2>运行设置</h2>
-          <span>{{ ready?.runtime?.read_only ? '只读' : '状态' }}</span>
-        </div>
-        <div class="provider-grid">
-          <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
-            <header>
-              <strong>{{ row.label || row.name }}</strong>
-              <span>{{ providerStateLabel(row.state) }}</span>
-            </header>
-            <p>{{ providerSummary(row) }}</p>
-            <div class="provider-meta" v-if="providerMeta(row).length">
-              <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+        <template v-if="activeSettingsTab === 'runtime'">
+          <div class="section-title">
+            <h2>运行设置</h2>
+            <span>{{ ready?.runtime?.read_only ? '只读' : '状态' }}</span>
+          </div>
+          <div class="provider-grid">
+            <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
+              <header>
+                <strong>{{ row.label || row.name }}</strong>
+                <span>{{ providerStateLabel(row.state) }}</span>
+              </header>
+              <p>{{ providerSummary(row) }}</p>
+              <div class="provider-meta" v-if="providerMeta(row).length">
+                <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="runtime-settings">
+          <div class="runtime-settings">
           <div class="runtime-settings-head">
             <strong>安全设置</strong>
             <span>非密钥字段</span>
@@ -2381,19 +2545,23 @@ onBeforeUnmount(() => {
               </span>
             </div>
           </div>
-        </div>
-        <div class="section-title debug-title">
-          <h2>开发者事件</h2>
-          <span>{{ events.length }} 条</span>
-        </div>
-        <div class="debug-list">
-          <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">
-            <span>{{ eventTime(event) }}</span>
-            <strong>{{ event.type }}</strong>
-            <code>{{ toolName(event) || intentName(event) || event.display_card.status }}</code>
-            <p>{{ event.display_card.summary }}</p>
           </div>
-        </div>
+        </template>
+
+        <template v-if="activeSettingsTab === 'developer'">
+          <div class="section-title debug-title">
+            <h2>开发者事件</h2>
+            <span>{{ events.length }} 条</span>
+          </div>
+          <div class="debug-list">
+            <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">
+              <span>{{ eventTime(event) }}</span>
+              <strong>{{ event.type }}</strong>
+              <code>{{ toolName(event) || intentName(event) || event.display_card.status }}</code>
+              <p>{{ event.display_card.summary }}</p>
+            </div>
+          </div>
+        </template>
       </section>
     </section>
 
@@ -2537,6 +2705,12 @@ onBeforeUnmount(() => {
               <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
             </svg>
             <span>任务流</span>
+          </button>
+          <button type="button" class="dock-btn" :class="{ active: activeCabin === 'memory' }" @click="activeCabin = 'memory'">
+            <svg viewBox="0 0 24 24">
+              <path d="M12 3c-2.76 0-5 1.9-5 4.25 0 .55.13 1.08.36 1.56C5.91 9.43 5 10.72 5 12.25c0 1.76 1.22 3.24 2.88 3.67C8.42 17.71 10.05 19 12 19s3.58-1.29 4.12-3.08C17.78 15.49 19 14.01 19 12.25c0-1.53-.91-2.82-2.36-3.44.23-.48.36-1.01.36-1.56C17 4.9 14.76 3 12 3zm-2.5 7.75a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5zm5 0a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5zM12 16.5c-1.4 0-2.55-.83-2.9-2h5.8c-.35 1.17-1.5 2-2.9 2z"/>
+            </svg>
+            <span>记忆舱</span>
           </button>
           <button type="button" class="dock-btn" :class="{ active: activeCabin === 'inspector' }" @click="activeCabin = 'inspector'">
             <svg viewBox="0 0 24 24">
