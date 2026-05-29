@@ -41,12 +41,15 @@ class MemoryStore:
         cleaned = _clean_memory_text(text)
         if not self.enabled() or not cleaned or ephemeral or sensitive or _rejection_reason(cleaned):
             return None
+        safe_kind = _safe_label(kind, "note")
+        safe_source = _safe_label(source, "manual")
         with sqlite3.connect(self.path) as db:
             cursor = db.execute(
                 "insert into memories(kind, text, source, created_at, ephemeral, sensitive) values (?, ?, ?, ?, ?, ?)",
-                (_safe_label(kind, "note"), cleaned[:1200], _safe_label(source, "manual"), time.time(), int(ephemeral), int(sensitive)),
+                (safe_kind, cleaned[:1200], safe_source, time.time(), int(ephemeral), int(sensitive)),
             )
             memory_id = int(cursor.lastrowid)
+            self._index_memory(db, memory_id, safe_kind, cleaned[:1200])
         self._rewrite_vault()
         return self.memory(memory_id)
 
@@ -103,6 +106,7 @@ class MemoryStore:
     def delete(self, memory_id: int) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:
             cursor = db.execute("delete from memories where id = ?", (int(memory_id),))
+            self._delete_memory_index(db, int(memory_id))
         self._rewrite_vault()
         return {"ok": bool(cursor.rowcount), "deleted": int(memory_id)}
 
@@ -150,11 +154,27 @@ class MemoryStore:
             ).fetchall()
         return [_memory_row(row) for row in rows]
 
-    def context(self, limit: int = 8) -> list[dict[str, Any]]:
+    def context(self, limit: int = 8, query: str = "") -> list[dict[str, Any]]:
         if not self.enabled():
             return []
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
+        for memory in self.recall(query, limit) if query else []:
+            text = str(memory.get("text") or "")
+            cleaned = _clean_memory_text(text)
+            if not cleaned or cleaned in seen:
+                continue
+            rows.append(
+                {
+                    "kind": str(memory.get("kind") or "note"),
+                    "text": cleaned[:400],
+                    "source": "semantic_recall",
+                    "relevance": memory.get("relevance", 0),
+                }
+            )
+            seen.add(cleaned)
+            if len(rows) >= limit:
+                return rows[: max(1, int(limit or 8))]
         for note in self._manual_vault_notes(limit=limit):
             cleaned = _clean_memory_text(note)
             if not cleaned or _rejection_reason(cleaned) or cleaned in seen:
@@ -177,6 +197,19 @@ class MemoryStore:
             if len(rows) >= limit:
                 break
         return rows[: max(1, int(limit or 8))]
+
+    def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        if not self.enabled():
+            return []
+        cleaned = _clean_memory_text(query)
+        if not cleaned:
+            return self.recent(limit)
+        rows = self._recall_fts(cleaned, max(1, int(limit or 5)))
+        seen_ids = {int(row.get("id") or 0) for row in rows}
+        fallback = self._recall_by_score(cleaned, max(1, int(limit or 5)) * 2, seen_ids)
+        combined = [*rows, *fallback]
+        combined.sort(key=lambda row: (float(row.get("relevance") or 0), float(row.get("created_at") or 0)), reverse=True)
+        return combined[: max(1, int(limit or 5))]
 
     def enabled(self) -> bool:
         with sqlite3.connect(self.path) as db:
@@ -203,8 +236,78 @@ class MemoryStore:
         with sqlite3.connect(self.path) as db:
             db.execute("delete from memories")
             db.execute("delete from memory_candidates")
+            self._clear_memory_index(db)
         self._rewrite_vault()
         return {"ok": True}
+
+    def _recall_fts(self, query: str, limit: int) -> list[dict[str, Any]]:
+        terms = _fts_query_terms(query)
+        if not terms:
+            return []
+        fts_query = " OR ".join(f'"{term}"' for term in terms[:8])
+        try:
+            with sqlite3.connect(self.path) as db:
+                rows = db.execute(
+                    """
+                    select m.id, m.kind, m.text, m.source, m.created_at, bm25(memories_fts) as rank
+                    from memories_fts
+                    join memories m on m.id = memories_fts.rowid
+                    where memories_fts match ?
+                      and m.ephemeral = 0
+                      and m.sensitive = 0
+                    order by rank
+                    limit ?
+                    """,
+                    (fts_query, limit),
+                ).fetchall()
+        except Exception:
+            return []
+        return [
+            {
+                "id": int(memory_id),
+                "kind": kind,
+                "text": text,
+                "source": source,
+                "created_at": float(created_at),
+                "relevance": max(0.0, 10.0 - float(rank or 0)),
+            }
+            for memory_id, kind, text, source, created_at, rank in rows
+        ]
+
+    def _recall_by_score(self, query: str, limit: int, exclude_ids: set[int] | None = None) -> list[dict[str, Any]]:
+        exclude_ids = exclude_ids or set()
+        scored: list[dict[str, Any]] = []
+        for memory in self.recent(200):
+            memory_id = int(memory.get("id") or 0)
+            if memory_id in exclude_ids:
+                continue
+            score = _memory_recall_score(query, memory)
+            if score <= 0:
+                continue
+            scored.append({**memory, "relevance": score})
+        scored.sort(key=lambda row: (float(row.get("relevance") or 0), float(row.get("created_at") or 0)), reverse=True)
+        return scored[:limit]
+
+    @staticmethod
+    def _index_memory(db: sqlite3.Connection, memory_id: int, kind: str, text: str) -> None:
+        try:
+            db.execute("insert or replace into memories_fts(rowid, kind, text) values (?, ?, ?)", (memory_id, kind, text))
+        except Exception:
+            return
+
+    @staticmethod
+    def _delete_memory_index(db: sqlite3.Connection, memory_id: int) -> None:
+        try:
+            db.execute("delete from memories_fts where rowid = ?", (memory_id,))
+        except Exception:
+            return
+
+    @staticmethod
+    def _clear_memory_index(db: sqlite3.Connection) -> None:
+        try:
+            db.execute("delete from memories_fts")
+        except Exception:
+            return
 
     def _resolve_candidate(self, candidate_id: int, status: str, reason: str) -> None:
         with sqlite3.connect(self.path) as db:
@@ -286,6 +389,26 @@ class MemoryStore:
                 db.execute("alter table memories add column sensitive integer not null default 0")
             if "source" not in columns:
                 db.execute("alter table memories add column source text not null default 'legacy'")
+            try:
+                db.execute(
+                    """
+                    create virtual table if not exists memories_fts using fts5(
+                        kind,
+                        text,
+                        content='memories',
+                        content_rowid='id'
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    insert into memories_fts(rowid, kind, text)
+                    select id, kind, text from memories
+                    where id not in (select rowid from memories_fts)
+                    """
+                )
+            except Exception:
+                pass
             db.execute(
                 """
                 create table if not exists memory_candidates(
@@ -357,6 +480,54 @@ def _rejection_reason(text: str) -> str:
     if _RAW_SCREEN_RE.search(text):
         return "raw_screen_or_log_like"
     return ""
+
+
+def _fts_query_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for term in _recall_terms(query):
+        if '"' in term:
+            term = term.replace('"', '""')
+        if term and term not in terms:
+            terms.append(term)
+    return terms
+
+
+def _recall_terms(query: str) -> list[str]:
+    value = (query or "").casefold()
+    terms: list[str] = []
+    for raw in re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", value, re.IGNORECASE):
+        token = raw.strip()
+        if not token:
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fff]+", token):
+            if len(token) <= 3:
+                terms.append(token)
+            else:
+                terms.extend(token[index : index + 2] for index in range(len(token) - 1))
+                terms.append(token)
+        elif len(token) > 1:
+            terms.append(token)
+    stopwords = {"知道", "什么", "这个", "那个", "一下", "帮我", "请你"}
+    return [term for term in terms if term not in stopwords]
+
+
+def _memory_recall_score(query: str, memory: dict[str, Any]) -> float:
+    terms = _recall_terms(query)
+    text = str(memory.get("text") or "").casefold()
+    kind = str(memory.get("kind") or "").casefold()
+    haystack = f"{kind} {text}"
+    score = 0.0
+    for term in terms:
+        if term in haystack:
+            score += max(1.0, min(4.0, len(term) * 0.8))
+    if any(token in query for token in ("喜欢", "偏好", "习惯", "更喜欢")):
+        if kind.startswith("preference"):
+            score += 4.0
+        if any(token in text for token in ("喜欢", "偏好", "习惯", "更喜欢")):
+            score += 2.0
+    if any(token in query for token in ("记得", "知道我", "了解我")) and text:
+        score += 0.75
+    return score
 
 
 def _safe_label(value: str, fallback: str) -> str:

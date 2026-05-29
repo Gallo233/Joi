@@ -765,7 +765,7 @@ class AgentCompanionApp:
     def _step_with_memory_context(self, step: ToolRequest) -> ToolRequest:
         if step.name != "companion.chat":
             return step
-        context = self.memory.context(8)
+        context = self.memory.context(8, query=str(step.arguments.get("text") or ""))
         if not context:
             return step
         arguments = dict(step.arguments)

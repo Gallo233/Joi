@@ -854,6 +854,10 @@ def main() -> int:
         assert_true(not any(row["text"] == "用户更喜欢原生 CSS 变量" for row in memory.recent(10)), "pending memory candidates must not be saved automatically")
         saved_candidate = memory.save_candidate(candidate_id)
         assert_true(saved_candidate["ok"] and any(row["text"] == "用户更喜欢原生 CSS 变量" for row in memory.recent(10)), "saving a memory candidate should persist it")
+        recalled_css = memory.recall("CSS 偏好", 5)
+        assert_true(any("原生 CSS 变量" in row["text"] for row in recalled_css), "memory recall should find relevant approved memories")
+        query_context = memory.context(10, query="我有什么 CSS 偏好")
+        assert_true(any(row.get("source") == "semantic_recall" and "原生 CSS 变量" in row["text"] for row in query_context), "query memory context should prioritize semantic recall")
         vault_text = (memory_dir / "memory" / "joi_memory_vault.md").read_text(encoding="utf-8")
         assert_true("用户更喜欢原生 CSS 变量" in vault_text, "saved memories should appear in the local vault")
         (memory_dir / "memory" / "joi_memory_vault.md").write_text(
@@ -880,6 +884,7 @@ def main() -> int:
         assert_true(memory.propose("preference", "用户喜欢低噪音提醒", source="chat")["ok"], "clear test should have a pending candidate")
         clear_result = memory.clear()
         assert_true(clear_result["ok"] and not memory.recent(10) and not memory.pending(10), "memory clear should remove saved and pending rows")
+        assert_true(not memory.recall("低噪音提醒", 5), "memory clear should remove recall index rows")
         cleared_vault = (memory_dir / "memory" / "joi_memory_vault.md").read_text(encoding="utf-8")
         assert_true("_No saved memories yet._" in cleared_vault and "用户喜欢回答短一点" in cleared_vault, "memory clear should preserve manual vault notes")
     finally:
@@ -3358,7 +3363,7 @@ llm:
     commentary_source = (workspace / "agent_companion" / "core" / "watch_commentary.py").read_text(encoding="utf-8")
     assert_true("min_interval_seconds" in commentary_source and "maybe_comment" in commentary_source and "safe_voice_line" in commentary_source, "Watch commentary planner should enforce cooldown and safe voice output")
     memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
-    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, local vault context, and privacy gate")
+    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, semantic recall, local vault context, and privacy gate")
     chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
     assert_true("memory_context" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
