@@ -2290,6 +2290,10 @@ asr:
                 "temperature": 0.3,
                 "use_mock": False,
             },
+            "skills": {
+                "joi.computer_use": {"enabled": False},
+                "joi.local_files": {"enabled": False},
+            },
         }
         preview_mutation = preview_runtime_config_update(mutation_tmp, safe_updates)
         assert_true(preview_mutation.ok and preview_mutation.changed and preview_mutation.dry_run, "safe config mutation preview should report changes")
@@ -2305,6 +2309,7 @@ asr:
         assert_true(mutated_config["tts"]["fallback_to_system"] is True and mutated_config["tts"]["volume"] == 0.7, "TTS allowlist fields should update")
         assert_true(mutated_config["ocr"]["timeout_seconds"] == 8 and mutated_config["computer_use"]["post_action_settle_ms"] == 325, "runtime numeric allowlist fields should update")
         assert_true(mutated_config["llm"]["model"] == "gpt-public-next" and mutated_config["llm"]["use_mock"] is False, "LLM allowlist fields should update")
+        assert_true(mutated_config["skills"]["joi.computer_use"]["enabled"] is False and mutated_config["skills"]["joi.local_files"]["enabled"] is False, "native skill enabled flags should update through safe runtime config")
         assert_true(mutated_config["custom_section"]["unknown_flag"] == "keep-me", "unknown config fields must be preserved")
         assert_true(mutated_config["llm"]["api_key"] == "${JOI_LLM_API_KEY}" and mutated_config["asr"]["api_key"] == "${JOI_ASR_API_KEY}", "env placeholders must be preserved")
         assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "secrets.yaml must not be rewritten")
@@ -2338,6 +2343,10 @@ asr:
         invalid_mutation = update_runtime_config(mutation_tmp, {"ocr": {"timeout_seconds": 0}, "tts": {"volume": "loud"}}, dry_run=False)
         assert_true(not invalid_mutation.ok, "invalid type/range config mutation should fail")
         assert_true(config_path.read_text(encoding="utf-8") == before_invalid, "invalid config mutation must not touch config.yaml")
+        invalid_skill_mutation = update_runtime_config(mutation_tmp, {"skills": {"joi.unknown": {"enabled": False}}}, dry_run=False)
+        assert_true(not invalid_skill_mutation.ok and invalid_skill_mutation.errors[0]["code"] == "unknown_skill", "unknown skill toggles should fail closed")
+        protected_skill_mutation = update_runtime_config(mutation_tmp, {"skills": {"joi.runtime_config": {"enabled": False}}}, dry_run=False)
+        assert_true(not protected_skill_mutation.ok and protected_skill_mutation.errors[0]["code"] == "protected_skill", "runtime config skill should not be disabled through runtime config")
     finally:
         shutil.rmtree(mutation_tmpdir, ignore_errors=True)
 
@@ -2422,6 +2431,7 @@ asr:
             "ocr": {"timeout_seconds": 7},
             "computer_use": {"post_action_settle_ms": 350},
             "llm": {"temperature": 0.4, "use_mock": False},
+            "skills": {"joi.mcp": {"enabled": False}},
         }
         preview_payload = bridge.preview_runtime_config_update_command(safe_panel_updates)
         assert_true(preview_payload["ok"] and preview_payload["preview"]["dry_run"], "runtime config preview RPC should be read-only")
@@ -2490,12 +2500,17 @@ asr:
         assert_true(mutated_runtime_config["tts"]["volume"] == 0.75 and mutated_runtime_config["tts"]["fallback_to_system"] is True, "approved runtime config update should write TTS safe fields")
         assert_true(mutated_runtime_config["ocr"]["timeout_seconds"] == 7 and mutated_runtime_config["computer_use"]["post_action_settle_ms"] == 350, "approved runtime config update should write local runtime safe fields")
         assert_true(mutated_runtime_config["llm"]["temperature"] == 0.4 and mutated_runtime_config["llm"]["use_mock"] is False, "approved runtime config update should write LLM safe fields")
+        assert_true(mutated_runtime_config["skills"]["joi.mcp"]["enabled"] is False, "approved runtime config update should write native skill switches")
         assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "approved runtime config update must preserve secrets.yaml byte-for-byte")
         assert_true("sk-runtime" not in config_path.read_text(encoding="utf-8"), "runtime config apply must not copy secrets into config.yaml")
         ready_payload = applied_payload.get("ready") or {}
         assert_true(ready_payload.get("runtime_settings", {}).get("asr", {}).get("max_seconds") == 42, "runtime ready payload should refresh ASR safe settings after apply")
         assert_true(ready_payload.get("runtime_settings", {}).get("tts", {}).get("volume") == 0.75, "runtime ready payload should refresh TTS safe settings after apply")
         assert_true(ready_payload.get("runtime_settings", {}).get("llm", {}).get("temperature") == 0.4, "runtime ready payload should refresh LLM safe settings after apply")
+        assert_true(ready_payload.get("runtime_settings", {}).get("skills", {}).get("joi.mcp", {}).get("enabled") is False, "runtime ready payload should refresh native skill switches after apply")
+        ready_skill_rows = {row["id"]: row for row in ready_payload.get("skills", {}).get("skills", [])}
+        assert_true(ready_skill_rows["joi.mcp"]["enabled"] is False and ready_skill_rows["joi.mcp"]["local_capability"] == "off", "runtime ready skill manifest should mirror disabled native skills")
+        assert_true(not bridge.app.policy.classify(ToolRequest("mcp.list_tools", {})).allowed, "runtime reload should apply disabled native skill policy")
         assert_true(ready_payload.get("runtime", {}).get("safe_for_display") is True, "runtime status payload should remain marked safe for display")
         _assert_config_mutation_payload_safe(ready_payload.get("runtime"), "runtime status payload leaked sensitive detail after config apply")
         _assert_config_mutation_payload_safe(ready_payload.get("runtime_settings"), "runtime settings payload leaked sensitive detail after config apply")
@@ -3081,6 +3096,54 @@ asr:
         )["skills"]
     }
     assert_true(direct_skill_rows["joi.voice_input"]["local_capability"] == "off" and direct_skill_rows["joi.memory"]["enabled"] is False, "Skill manifest should mirror disabled ASR and memory states")
+
+    disabled_skill_tmpdir = tempfile.mkdtemp()
+    try:
+        disabled_skill_tmp = Path(disabled_skill_tmpdir)
+        disabled_character_dir = disabled_skill_tmp / "agent_companion" / "config"
+        disabled_character_dir.mkdir(parents=True, exist_ok=True)
+        (disabled_character_dir / "default_character.yaml").write_text(
+            """
+id: test-joi
+name: Joi
+asset_policy: test
+style:
+  tone: concise
+  speech: safe
+  boundaries: []
+persona: "Test companion."
+voice:
+  default_lang: zh
+  start: "开始。"
+  progress: "处理中。"
+  done: "完成。"
+  failed: "失败。"
+""",
+            encoding="utf-8",
+        )
+        (disabled_skill_tmp / "config.yaml").write_text(
+            """
+llm:
+  use_mock: true
+characters:
+  - name: Joi
+    color: "#d76f8f"
+    setting: "local test companion"
+skills:
+  joi.computer_use:
+    enabled: false
+""",
+            encoding="utf-8",
+        )
+        disabled_app = AgentCompanionApp(disabled_skill_tmp)
+        disabled_events = disabled_app.handle_user_text("点击 100,200")
+        blocked_events = [event for event in disabled_events if event.type == EventType.TOOL_FAILED and event.agent_state.get("block_reason") == "skill_disabled"]
+        assert_true(blocked_events and blocked_events[-1].agent_state.get("skill_id") == "joi.computer_use", "Disabled native skills should block execution before approval")
+        assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in disabled_events), "Disabled native skills should not create approval requests")
+        assert_true(not any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("tool") == "computer.click" for event in disabled_events), "Disabled native skills must not run bound tools")
+    finally:
+        shutil.rmtree(disabled_skill_tmpdir, ignore_errors=True)
+
     skill_payload_text = str(ready_payload["skills"])
     assert_true(all(fragment not in skill_payload_text for fragment in ["sk-", "api_key", "base_url", "/Users/", "C:\\", "secret"]), "Skill manifest leaked secrets, endpoints, or private paths")
     runtime_provider_names = {row["name"] for row in ready_payload["runtime"]["providers"]}
@@ -3470,8 +3533,12 @@ llm:
     assert_true("force_visual_summary" in server_source and '"watch.loop.refresh"' in server_source, "Core watch loop should expose forced visual refresh")
     assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
     skill_manifest_source = (workspace / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
-    assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
-    assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source, "Core should expose P8 native skill manifest RPC and ready payload")
+    assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "KNOWN_SKILL_IDS" in skill_manifest_source and "_apply_skill_setting" in skill_manifest_source and "normalize_skill_id" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
+    assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source and "skill_settings_payload" in server_source, "Core should expose P8 native skill manifest RPC and ready payload")
+    runtime_config_writer_source = (workspace / "agent_companion" / "core" / "runtime_config_writer.py").read_text(encoding="utf-8")
+    policy_source = (workspace / "agent_companion" / "core" / "policy.py").read_text(encoding="utf-8")
+    assert_true("_prepare_skill_update" in runtime_config_writer_source and "unknown_skill" in runtime_config_writer_source and "protected_skill" in runtime_config_writer_source and "joi.local_files" not in runtime_config_writer_source, "Runtime config writer should support dynamic native skill toggles without hardcoding path-sensitive ids")
+    assert_true("disabled_skills" in policy_source and "skill_id_for_tool" in policy_source and "skill_disabled" in policy_source, "Policy gate should fail closed for disabled native skills")
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
@@ -3489,6 +3556,7 @@ llm:
     runtime_status_source = (workspace / "agent_companion" / "core" / "runtime_status.py").read_text(encoding="utf-8")
     watch_tool_source = (workspace / "agent_companion" / "core" / "tools" / "watch.py").read_text(encoding="utf-8")
     assert_true("MODEL_ROUTES" in config_source and "ModelRouteConfig" in config_source and "fallback_reason" in config_source and "to_agent_state" in config_source, "P7 model router should expose stable routes and safe model usage metadata")
+    assert_true("SkillSettingConfig" in config_source and "_parse_skill_settings" in config_source and "skill_enabled" in config_source, "Config should parse safe native skill enabled flags")
     assert_true("ModelRouter.stable_routes()" in runtime_status_source and "MODEL_ROUTE_LABELS" in runtime_status_source, "Runtime status should render stable model route rows")
     assert_true("model_usage" in chat_source and "model_usage" in watch_tool_source, "Chat and watch tools should attach safe model usage metadata")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
@@ -3509,14 +3577,14 @@ llm:
     assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
     assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory candidate controls and stage authorization bubble")
     assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
-    assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
+    assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source and "setSkillEnabled" in shell_source and "skillEnabled" in shell_source and "skillToggleDisabled" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
     assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with recall search and vault preview")
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
     assert_true("_step_with_memory_context" in app_source and "compress_tool_result" in app_source and '"joi_juice"' in app_source, "App should inject approved memory context and attach JoiJuice channels")
-    assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source, "App execution boundary should attach native skill metadata to plan, approval, and result events")
+    assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source and "reload_runtime_policy" in app_source and "skill_settings_payload" in app_source and "block_reason" in app_source, "App execution boundary should attach native skill metadata and enforce disabled skills")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
-    assert_true("skill-grid" in shell_style_source and "skill-card" in shell_style_source, "Shell styles should include native skill manifest cards")
+    assert_true("skill-grid" in shell_style_source and "skill-card" in shell_style_source and "skill-actions" in shell_style_source, "Shell styles should include native skill manifest cards")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))

@@ -334,6 +334,11 @@ class ComputerUseConfig:
 
 
 @dataclass(frozen=True)
+class SkillSettingConfig:
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     base_dir: Path
     llm: LlmConfig
@@ -341,6 +346,7 @@ class AppConfig:
     asr: AsrConfig
     ocr: OcrConfig
     computer_use: ComputerUseConfig
+    skills: dict[str, SkillSettingConfig]
     characters: list[CharacterConfig]
 
     @property
@@ -352,6 +358,10 @@ class AppConfig:
     def resolve_path(self, path: str) -> Path:
         candidate = Path(path)
         return candidate if candidate.is_absolute() else self.base_dir / candidate
+
+    def skill_enabled(self, skill_id: str) -> bool:
+        setting = self.skills.get(normalize_skill_setting_id(skill_id))
+        return bool(setting.enabled) if setting is not None else True
 
 
 def load_app_config(path: Path) -> AppConfig:
@@ -368,6 +378,7 @@ def load_app_config(path: Path) -> AppConfig:
     asr_raw = raw.get("asr") or {}
     ocr_raw = raw.get("ocr") or {}
     computer_use_raw = raw.get("computer_use") or {}
+    skills_raw = raw.get("skills") or {}
     character_rows = raw.get("characters") or []
     characters = [_parse_character(row) for row in character_rows if isinstance(row, dict)]
 
@@ -422,8 +433,26 @@ def load_app_config(path: Path) -> AppConfig:
         computer_use=ComputerUseConfig(
             post_action_settle_ms=max(0, int(computer_use_raw.get("post_action_settle_ms", 200) or 0)),
         ),
+        skills=_parse_skill_settings(skills_raw),
         characters=characters,
     )
+
+
+def normalize_skill_setting_id(value: str) -> str:
+    text = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    return re.sub(r"[^a-z0-9_.]+", "", text)[:80]
+
+
+def _parse_skill_settings(raw: Any) -> dict[str, SkillSettingConfig]:
+    if not isinstance(raw, dict):
+        return {}
+    rows: dict[str, SkillSettingConfig] = {}
+    for raw_id, raw_value in raw.items():
+        skill_id = normalize_skill_setting_id(str(raw_id))
+        if not skill_id.startswith("joi.") or not isinstance(raw_value, dict):
+            continue
+        rows[skill_id] = SkillSettingConfig(enabled=bool(raw_value.get("enabled", True)))
+    return rows
 
 
 def normalize_model_route(value: str = "fast") -> str:

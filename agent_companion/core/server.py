@@ -340,6 +340,7 @@ class JsonRpcBridge:
                 asr_state=self.asr_state,
                 tts_status=tts_status,
                 memory_status=self.app.memory.status(),
+                skill_settings=self.app.skill_settings_payload(),
             ),
         }
 
@@ -585,7 +586,13 @@ class JsonRpcBridge:
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
             "memory": memory_status,
-            "skills": build_native_skill_manifest(self.workspace, asr_state=self.asr_state, tts_status=tts_status, memory_status=memory_status),
+            "skills": build_native_skill_manifest(
+                self.workspace,
+                asr_state=self.asr_state,
+                tts_status=tts_status,
+                memory_status=memory_status,
+                skill_settings=self.app.skill_settings_payload(),
+            ),
             "character": {
                 "name": self.app.character.name,
                 "sprites": [],
@@ -625,6 +632,7 @@ class JsonRpcBridge:
         self.asr, self.asr_state = build_asr_provider(self.workspace)
         self.tts.reload()
         self.watch_commentary.reload()
+        self.app.reload_runtime_policy()
 
     @staticmethod
     def _image_data_url(path: Path) -> str:
@@ -798,6 +806,10 @@ def _safe_runtime_settings(config: Any) -> dict[str, Any]:
         },
         "computer_use": {
             "post_action_settle_ms": max(0, int(config.computer_use.post_action_settle_ms or 0)),
+        },
+        "skills": {
+            skill_id: {"enabled": bool(setting.enabled)}
+            for skill_id, setting in sorted(config.skills.items())
         },
     }
 

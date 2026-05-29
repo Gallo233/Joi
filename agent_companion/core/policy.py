@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_companion.core.schemas import RiskLevel, ToolRequest
+from agent_companion.core.skill_manifest import skill_id_for_tool
 
 
 LOW_RISK = {
@@ -42,9 +43,15 @@ class PolicyDecision:
 
 
 class PolicyGate:
+    def __init__(self, disabled_skills: set[str] | None = None) -> None:
+        self.disabled_skills = set(disabled_skills or set())
+
     def classify(self, request: ToolRequest, approved: bool = False) -> PolicyDecision:
         name = request.name
         risk = RiskLevel.LOW
+        skill_id = skill_id_for_tool(name)
+        if skill_id in self.disabled_skills:
+            return PolicyDecision(RiskLevel.MEDIUM, False, False, "skill_disabled")
         if name == "game.ok_ww.run" and bool(request.arguments.get("dry_run", True)):
             return PolicyDecision(risk, True, False, "游戏技能 dry-run 只做检查，可直接执行。")
         if name in MEDIUM_RISK:

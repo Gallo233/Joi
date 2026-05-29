@@ -293,6 +293,7 @@ export interface CoreReadyPayload {
     computer_use?: {
       post_action_settle_ms?: number
     }
+    skills?: Record<string, { enabled?: boolean }>
   }
   character?: {
     name?: string

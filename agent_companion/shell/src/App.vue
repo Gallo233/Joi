@@ -1648,6 +1648,42 @@ function skillTools(skill: NativeSkill) {
   return [...(skill.tools || []), ...(skill.rpc_methods || [])].slice(0, 10)
 }
 
+function skillEnabled(skill: NativeSkill) {
+  return skill.enabled !== false
+}
+
+function skillToggleDisabled(skill: NativeSkill) {
+  return !connected.value || skillRefreshLoading.value || skill.id === 'joi.runtime_config'
+}
+
+function skillActionLabel(skill: NativeSkill) {
+  if (skill.id === 'joi.runtime_config') return '核心'
+  return skillEnabled(skill) ? '关闭' : '开启'
+}
+
+async function setSkillEnabled(skill: NativeSkill, enabled: boolean) {
+  if (!skill.id) return
+  skillRefreshLoading.value = true
+  try {
+    const result = (await client.applyRuntimeConfig({ skills: { [skill.id]: { enabled } } })) as {
+      ok?: boolean
+      preview?: RuntimeConfigMutationResult
+      ready?: CoreReadyPayload
+    }
+    if (result.preview) runtimePreview.value = result.preview
+    if (result.ok === false) errorText.value = result.preview?.summary || '技能开关没有提交'
+    if (result.ready) {
+      ready.value = result.ready
+      skillManifest.value = result.ready.skills || skillManifest.value
+      syncRuntimeDraft(result.ready)
+    }
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '技能开关提交失败'
+  } finally {
+    skillRefreshLoading.value = false
+  }
+}
+
 async function refreshSkills() {
   skillRefreshLoading.value = true
   try {
@@ -2540,6 +2576,11 @@ onBeforeUnmount(() => {
               </div>
               <div class="skill-tool-list" v-if="skillTools(skill).length">
                 <code v-for="tool in skillTools(skill)" :key="`${skill.id}-${tool}`">{{ tool }}</code>
+              </div>
+              <div class="skill-actions">
+                <button type="button" :disabled="skillToggleDisabled(skill)" @click="setSkillEnabled(skill, !skillEnabled(skill))">
+                  {{ skillActionLabel(skill) }}
+                </button>
               </div>
             </article>
           </div>

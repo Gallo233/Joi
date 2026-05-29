@@ -131,6 +131,7 @@ Status: in progress
 - Treat Codex, Browser/Computer Use, OK-WW, Memory, ASR, and TTS as native core skills before chasing broad third-party integrations.
 - Native skill manifest V1 now reports built-in skill ids, tool/RPC bindings, permission level, dry-run support, local capability, state policy, and audit policy through safe `core.ready` / `skills.list` payloads.
 - Plan, approval, tool result, task lifecycle, and Computer Use audit events now carry native skill boundary metadata for permission and audit UI work.
+- Native skill enable switches are now safe runtime config fields; disabled skills show as off in the manifest and are blocked by policy before approval or execution.
 
 ## P9 Policy, Audit, And Background Companion Loop
 

@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from agent_companion.core.skill_manifest import KNOWN_SKILL_IDS, normalize_skill_id
+
 
 _SECRET_FIELD_TOKENS = ("api_key", "token", "secret", "password", "server_url", "refer_audio_path", "gpt_sovits_work_path")
 _PATH_FIELD_TOKENS = ("path", "file", "dir")
@@ -123,15 +125,27 @@ def update_runtime_config(workspace: Path, updates: dict[str, Any], *, dry_run: 
 
 @dataclass(frozen=True)
 class _PreparedUpdates:
-    rows: list[tuple[tuple[str, str], object, _FieldSpec]]
+    rows: list[tuple[tuple[str, ...], object, _FieldSpec]]
     errors: list[dict[str, str]]
 
 
 def _prepare_updates(raw_config: dict[str, Any], updates: dict[str, Any]) -> _PreparedUpdates:
-    rows: list[tuple[tuple[str, str], object, _FieldSpec]] = []
+    rows: list[tuple[tuple[str, ...], object, _FieldSpec]] = []
     errors: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, ...]] = set()
     for path, value in _flatten_updates(updates):
+        skill_row = _prepare_skill_update(path, value)
+        if skill_row is not None:
+            skill_path, normalized, spec_or_error = skill_row
+            if isinstance(spec_or_error, dict):
+                errors.append(spec_or_error)
+                continue
+            if skill_path in seen:
+                errors.append({"code": "duplicate_field", "setting": spec_or_error.setting_id})
+                continue
+            seen.add(skill_path)
+            rows.append((skill_path, normalized, spec_or_error))
+            continue
         if _is_sensitive_path(path):
             errors.append({"code": "sensitive_field_forbidden", "setting": "redacted"})
             continue
@@ -151,6 +165,24 @@ def _prepare_updates(raw_config: dict[str, Any], updates: dict[str, Any]) -> _Pr
     if not rows and not errors:
         errors.append({"code": "empty_update", "setting": "runtime_config"})
     return _PreparedUpdates(rows, errors)
+
+
+def _prepare_skill_update(path: tuple[str, ...], value: object) -> tuple[tuple[str, str, str], object | None, _FieldSpec | dict[str, str]] | None:
+    if len(path) != 3 or path[0] != "skills" or path[2] != "enabled":
+        return None
+    skill_id = normalize_skill_id(path[1])
+    if not skill_id or skill_id not in KNOWN_SKILL_IDS:
+        return ("skills", "unknown", "enabled"), None, {"code": "unknown_skill", "setting": "skill_enabled"}
+    ok, normalized, code = _validate_bool(value)
+    if not ok:
+        return ("skills", skill_id, "enabled"), None, {"code": code, "setting": f"{skill_id}_enabled"}
+    if skill_id == "joi.runtime_config" and normalized is False:
+        return ("skills", skill_id, "enabled"), None, {"code": "protected_skill", "setting": f"{skill_id}_enabled"}
+    return (
+        "skills",
+        skill_id,
+        "enabled",
+    ), normalized, _FieldSpec(f"{skill_id} enabled", f"{skill_id}_enabled", "boolean", lambda item: _validate_bool(item))
 
 
 def _flatten_updates(value: object, prefix: tuple[str, ...] = ()) -> list[tuple[tuple[str, ...], object]]:
@@ -274,19 +306,24 @@ def _write_yaml_atomically(path: Path, payload: dict[str, Any]) -> str:
     return ""
 
 
-def _nested_get(payload: dict[str, Any], path: tuple[str, str]) -> object:
-    parent = payload.get(path[0])
-    if not isinstance(parent, dict):
-        return None
-    return parent.get(path[1])
+def _nested_get(payload: dict[str, Any], path: tuple[str, ...]) -> object:
+    current: object = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
-def _nested_set(payload: dict[str, Any], path: tuple[str, str], value: object) -> None:
-    parent = payload.get(path[0])
-    if not isinstance(parent, dict):
-        parent = {}
-        payload[path[0]] = parent
-    parent[path[1]] = value
+def _nested_set(payload: dict[str, Any], path: tuple[str, ...], value: object) -> None:
+    current = payload
+    for key in path[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            child = {}
+            current[key] = child
+        current = child
+    current[path[-1]] = value
 
 
 def _summary(changes: list[dict[str, str]], changed: bool, *, preview: bool) -> str:

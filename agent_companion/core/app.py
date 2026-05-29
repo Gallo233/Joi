@@ -78,7 +78,8 @@ class AgentCompanionApp:
         self.expression = ExpressionEngine(self.workspace, self.character)
         self.bus = EventBus(self.workspace / "data" / "agent_companion" / "events.jsonl")
         self.memory = MemoryStore(self.workspace / "data" / "agent_companion" / "memory.sqlite3")
-        self.policy = PolicyGate()
+        self._runtime_config = self._load_runtime_config()
+        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config))
         self.tools = ToolRegistry()
         self.watch_session = WatchSession()
         self.semantic_selection = SemanticTargetSelectionStore()
@@ -257,6 +258,16 @@ class AgentCompanionApp:
         self._record_watch_context(plan, step, result)
         return result
 
+    def reload_runtime_policy(self) -> None:
+        self._runtime_config = self._load_runtime_config()
+        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config))
+
+    def skill_settings_payload(self) -> dict[str, bool]:
+        config = self._runtime_config or self._load_runtime_config()
+        if config is None:
+            return {}
+        return {skill_id: bool(setting.enabled) for skill_id, setting in config.skills.items()}
+
     def resolve_approval(self, approval_id: str, approved: bool) -> list[AgentEvent]:
         if not approval_id:
             return self.bus.drain()
@@ -339,6 +350,28 @@ class AgentCompanionApp:
             step = self._step_with_memory_context(step)
             is_approved_step = self._is_approved_step(plan, index, step, approved_step)
             decision = self.policy.classify(step, approved=is_approved_step)
+            if not decision.allowed and not decision.requires_approval:
+                self._emit(
+                    AgentEvent(
+                        EventType.TOOL_FAILED,
+                        plan.task_id,
+                        DisplayCard("能力已关闭", f"{self._tool_label(step.name)} 当前不可用。", status="failed"),
+                        safe_voice_line("这个能力现在是关闭的。", sprite="4"),
+                        annotate_agent_state_with_skill(
+                            {
+                                "tool": step.name,
+                                "policy": self.policy.public_payload(step),
+                                "risk": decision.risk.value,
+                                "blocked": True,
+                                "block_reason": decision.reason,
+                            },
+                            step.name,
+                        ),
+                    ),
+                    plan.user_text,
+                )
+                final_ok = False
+                break
             if decision.requires_approval:
                 pending = self._make_pending_step(plan, index, step)
                 self._store_pending_step(pending)
@@ -670,7 +703,7 @@ class AgentCompanionApp:
         return f"{self._tool_label(step.name)}需要你确认。"
 
     def _register_tools(self) -> None:
-        app_config = self._load_runtime_config()
+        app_config = self._runtime_config
         ocr = self._build_ocr_extractor(app_config)
         post_action_settle_ms = app_config.computer_use.post_action_settle_ms if app_config else 200
         self.tools.register(CompanionChatTool(self.workspace))
@@ -1067,6 +1100,12 @@ class AgentCompanionApp:
 def _arguments_hash(arguments: dict) -> str:
     serialized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+
+
+def _disabled_skill_ids(config: AppConfig | None) -> set[str]:
+    if config is None:
+        return set()
+    return {skill_id for skill_id, setting in config.skills.items() if not setting.enabled}
 
 
 def _ocr_text_from_state(ocr: dict) -> list[str]:

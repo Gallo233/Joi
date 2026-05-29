@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import os
 import shutil
@@ -11,6 +11,20 @@ from agent_companion.core.speech_input import AsrRuntimeState
 
 
 SKILL_MANIFEST_VERSION = "joi.skill_manifest.v1"
+KNOWN_SKILL_IDS: tuple[str, ...] = (
+    "joi.companion.chat",
+    "joi.codex",
+    "joi.browser",
+    "joi.computer_use",
+    "joi.watch",
+    "joi.memory",
+    "joi.voice_input",
+    "joi.voice_output",
+    "joi.ok_ww",
+    "joi.runtime_config",
+    "joi.local_files",
+    "joi.mcp",
+)
 
 
 @dataclass(frozen=True)
@@ -59,9 +73,15 @@ def build_native_skill_manifest(
     asr_state: AsrRuntimeState | None = None,
     tts_status: dict[str, Any] | None = None,
     memory_status: dict[str, Any] | None = None,
+    skill_settings: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     tts_status = tts_status or {}
     memory_status = memory_status or {}
+    normalized_skill_settings: dict[str, bool] = {}
+    for key, value in (skill_settings or {}).items():
+        skill_id = normalize_skill_id(key)
+        if skill_id:
+            normalized_skill_settings[skill_id] = bool(value)
     skills = [
         _companion_chat_skill(),
         _codex_skill(),
@@ -80,7 +100,7 @@ def build_native_skill_manifest(
         "version": SKILL_MANIFEST_VERSION,
         "safe_for_display": True,
         "workspace_bound": True,
-        "skills": [skill.to_agent_state() for skill in skills],
+        "skills": [_apply_skill_setting(skill, normalized_skill_settings).to_agent_state() for skill in skills],
     }
 
 
@@ -324,6 +344,11 @@ def skill_id_for_tool(tool_name: str) -> str:
     return _skill_binding(tool_name).get("skill_id", "joi.unknown")
 
 
+def normalize_skill_id(value: str) -> str:
+    text = _safe_token(value)
+    return text if text in KNOWN_SKILL_IDS else ""
+
+
 def skill_boundary_for_tool(tool_name: str) -> dict[str, Any]:
     binding = _skill_binding(tool_name)
     return {
@@ -354,6 +379,13 @@ def annotate_agent_state_with_skill(agent_state: dict[str, Any], tool_name: str)
     payload.update(boundary)
     payload["skill"] = boundary
     return payload
+
+
+def _apply_skill_setting(skill: NativeSkillManifest, skill_settings: dict[str, bool]) -> NativeSkillManifest:
+    enabled_override = skill_settings.get(skill.id)
+    if enabled_override is not False:
+        return skill
+    return replace(skill, enabled=False, local_capability="off")
 
 
 def _codex_available() -> bool:
