@@ -23,6 +23,7 @@ from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, Computer
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouteConfig, ModelRouter, load_app_config
 from agent_companion.core.llm_planner import plan_from_llm_payload
 from agent_companion.core.memory import MemoryStore
+from agent_companion.core.memory_candidates import tool_result_memory_candidate
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core import runtime_status as runtime_status_module
@@ -897,6 +898,27 @@ def main() -> int:
     )
     chat_question_result = CompanionChatTool(workspace).run(ToolRequest("companion.chat", {"text": "你喜欢什么吗？"}))
     assert_true("memory_candidate" not in chat_question_result.agent_state, "questions should not become memory candidates")
+    codex_tool_candidate = tool_result_memory_candidate(
+        intent="coding",
+        tool="codex.run",
+        user_text="修复桌面窗口拖动并跑测试",
+        agent_state={"tool": "codex.run"},
+        ok=True,
+    )
+    assert_true(
+        codex_tool_candidate is not None
+        and codex_tool_candidate["kind"] == "task_outcome"
+        and "工程任务" in codex_tool_candidate["fact"],
+        "successful coding tools should emit safe task-outcome memory candidates",
+    )
+    watch_tool_candidate = tool_result_memory_candidate(
+        intent="watch_together",
+        tool="observe.screen",
+        user_text="陪我看当前画面",
+        agent_state={"tool": "observe.screen"},
+        ok=True,
+    )
+    assert_true(watch_tool_candidate is None, "watch/screen observations should not create long-term memory candidates")
 
     expression_sync_event = AgentCompanionApp(workspace).expression.express(
         AgentEvent(
@@ -1013,6 +1035,36 @@ def main() -> int:
         assert_true(implicit_candidates and any("短一点回答" in candidate["text"] for candidate in implicit_candidates), "normal chat should create safe pending memory candidates from stable preferences")
         non_memory_events = memory_app.handle_user_text("你喜欢什么吗？")
         assert_true(not any(event.agent_state.get("memory_candidate") for event in non_memory_events), "ordinary questions should not create memory candidates")
+        safe_tool_result = ToolResult(
+            ok=True,
+            agent_state={"tool": "codex.run"},
+            display_card=DisplayCard("Codex", "完成", status="success"),
+            voice_line=safe_voice_line("完成。"),
+        )
+        memory_app._record_result_memory_candidate(
+            build_plan("修复设置面板并跑测试"),
+            ToolRequest("codex.run", {"goal": "修复设置面板并跑测试"}),
+            safe_tool_result,
+        )
+        assert_true(
+            any("修复设置面板" in row["text"] for row in memory_app.memory.pending(20)),
+            "app should queue safe tool-result memory candidates for authorization",
+        )
+        screen_tool_result = ToolResult(
+            ok=True,
+            agent_state={"tool": "observe.screen"},
+            display_card=DisplayCard("观察", "完成", status="success"),
+            voice_line=safe_voice_line("完成。"),
+        )
+        memory_app._record_result_memory_candidate(
+            build_plan("陪我看当前画面"),
+            ToolRequest("observe.screen", {"query": "陪我看当前画面"}),
+            screen_tool_result,
+        )
+        assert_true(
+            not any("陪我看当前画面" in row["text"] for row in memory_app.memory.pending(20)),
+            "app should keep watch observations out of long-term memory candidates",
+        )
     finally:
         shutil.rmtree(memory_app_dir, ignore_errors=True)
 
@@ -4156,7 +4208,7 @@ llm:
     memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
     assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "profile" in memory_source and "_candidate_priority" in memory_source and "_candidate_duplicate" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, profiles, dedupe, disable switch, semantic recall, local vault browsing/context, and privacy gate")
     memory_candidates_source = (workspace / "agent_companion" / "core" / "memory_candidates.py").read_text(encoding="utf-8")
-    assert_true("chat_memory_candidate" in memory_candidates_source and "MEMORY_CANDIDATE_VERSION" in memory_candidates_source and "_looks_transient" in memory_candidates_source, "P5 memory candidate extraction should support safe stable chat preferences")
+    assert_true("chat_memory_candidate" in memory_candidates_source and "tool_result_memory_candidate" in memory_candidates_source and "MEMORY_CANDIDATE_VERSION" in memory_candidates_source and "_looks_transient" in memory_candidates_source, "P5 memory candidate extraction should support safe stable chat preferences and low-sensitive tool outcomes")
     chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
     assert_true("memory_context" in chat_source and "memory_profile" in chat_source and "chat_memory_candidate" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context/profile and emit safe memory candidates")
     config_source = (workspace / "agent_companion" / "core" / "config.py").read_text(encoding="utf-8")
@@ -4188,7 +4240,7 @@ llm:
     assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source and "setSkillEnabled" in shell_source and "skillEnabled" in shell_source and "skillToggleDisabled" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
     assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-profile-panel" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with profile, recall search, and vault preview")
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
-    assert_true("_step_with_memory_context" in app_source and "build_event_agent_state" in app_source, "App should inject approved memory context and emit safe JoiJuice event channels")
+    assert_true("_step_with_memory_context" in app_source and "build_event_agent_state" in app_source and "tool_result_memory_candidate" in app_source, "App should inject approved memory context, emit safe JoiJuice event channels, and queue safe tool-result memory candidates")
     desktop_context_source = (workspace / "agent_companion" / "core" / "desktop_context.py").read_text(encoding="utf-8")
     assert_true("rewrite_plan_for_desktop_context" in desktop_context_source and "record_desktop_context" in desktop_context_source and "DesktopContext" in desktop_context_source, "Desktop context planning should live outside the app orchestrator")
     assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source and "reload_runtime_policy" in app_source and "skill_settings_payload" in app_source and "block_reason" in app_source, "App execution boundary should attach native skill metadata and enforce disabled skills")

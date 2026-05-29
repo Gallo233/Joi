@@ -37,6 +37,45 @@ def chat_memory_candidate(text: str) -> dict[str, str] | None:
     }
 
 
+def tool_result_memory_candidate(
+    *,
+    intent: str,
+    tool: str,
+    user_text: str,
+    agent_state: dict | None = None,
+    ok: bool = False,
+) -> dict[str, str] | None:
+    if not ok:
+        return None
+    text = _clean(user_text)
+    if not text or _looks_transient(text) or _QUESTION_RE.search(text):
+        return None
+    if tool == "codex.run" and intent == "coding":
+        return _candidate("task_outcome", f"用户让 Joi 处理工程任务：{text}", "codex")
+    if tool == "game.ok_ww.run" and intent == "game_assist":
+        state = agent_state if isinstance(agent_state, dict) else {}
+        if state.get("dry_run"):
+            return None
+        intent_text = _clean(str(state.get("intent") or text))
+        if not intent_text or _looks_transient(intent_text):
+            return None
+        return _candidate("game_habit", f"用户使用游戏技能处理：{intent_text}", "game_ok_ww")
+    return None
+
+
+def _candidate(kind: str, fact: str, source: str) -> dict[str, str] | None:
+    fact = _clean_fact(fact)
+    if not _valid_content(fact, min_len=8, max_len=240):
+        return None
+    return {
+        "version": MEMORY_CANDIDATE_VERSION,
+        "kind": kind,
+        "fact": fact[:240],
+        "text": fact[:240],
+        "source": source,
+    }
+
+
 def _first_person_preference(text: str) -> tuple[str, str] | None:
     match = re.search(r"^(?:我|本人)?\s*(更喜欢|喜欢|偏好|不喜欢|讨厌|倾向于|习惯)\s*(.+)$", text, re.IGNORECASE)
     if not match:

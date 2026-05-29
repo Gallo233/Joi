@@ -31,6 +31,7 @@ from agent_companion.core.event_bus import EventBus
 from agent_companion.core.expression import ExpressionEngine
 from agent_companion.core.llm_planner import LlmPlanParser
 from agent_companion.core.memory import MemoryStore
+from agent_companion.core.memory_candidates import tool_result_memory_candidate
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
@@ -627,6 +628,14 @@ class AgentCompanionApp:
 
     def _record_result_memory_candidate(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
         raw = result.agent_state.get("memory_candidate") if isinstance(result.agent_state, dict) else None
+        if raw is None:
+            raw = tool_result_memory_candidate(
+                intent=plan.intent,
+                tool=step.name,
+                user_text=plan.user_text,
+                agent_state=result.agent_state if isinstance(result.agent_state, dict) else {},
+                ok=result.ok,
+            )
         if raw is None:
             return
         if self._is_ephemeral_result(plan, step, result) or self._is_sensitive_result(plan, step, result):
