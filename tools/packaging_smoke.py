@@ -31,6 +31,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
     start_bat_path = root / "start_joi.bat"
     start_ps1_path = root / "tools" / "start_joi.ps1"
     doctor_path = root / "tools" / "joi_doctor.py"
+    demo_check_path = root / "tools" / "mvp_demo_check.py"
     release_packager_path = root / "tools" / "package_windows_release.py"
     provider_preflight_path = root / "tools" / "provider_preflight.py"
     release_check_path = root / "tools" / "windows_release_check.py"
@@ -46,6 +47,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
             "start_joi_bat": start_bat_path,
             "start_joi_ps1": start_ps1_path,
             "joi_doctor": doctor_path,
+            "mvp_demo_check": demo_check_path,
             "windows_release_packager": release_packager_path,
             "provider_preflight": provider_preflight_path,
             "windows_release_check": release_check_path,

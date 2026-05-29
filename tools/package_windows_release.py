@@ -47,6 +47,7 @@ SHELL_DIRS = [
 TOOLS_FILES = [
     "run_agent_companion_tests.py",
     "tools/joi_doctor.py",
+    "tools/mvp_demo_check.py",
     "tools/package_windows_release.py",
     "tools/packaging_smoke.py",
     "tools/provider_preflight.py",

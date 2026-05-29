@@ -44,6 +44,8 @@ jobs:
         run: python tools/packaging_smoke.py
       - name: Run provider preflight
         run: python tools/provider_preflight.py
+      - name: Run MVP demo check
+        run: python tools/mvp_demo_check.py
       - name: Run release packager dry-run
         run: python tools/package_windows_release.py --dry-run --allow-missing-exe
       - name: Run release readiness check

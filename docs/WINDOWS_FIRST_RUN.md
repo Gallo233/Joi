@@ -72,6 +72,14 @@ Packaging metadata smoke:
 
 This also checks the Windows release privacy policy so local `config.yaml`, `secrets.yaml`, runtime data, logs, dependency folders, and build caches are not eligible for release packaging.
 
+MVP demo readiness:
+
+```powershell
+.\.venv\Scripts\python.exe tools\mvp_demo_check.py
+```
+
+This prints safe prompts and readiness notes for the Watch Together, Codex coding, and OK-WW game-skill demos. It does not click, type, start Codex, or launch OK-WW.
+
 Offline provider preflight:
 
 ```powershell

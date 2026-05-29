@@ -7,11 +7,13 @@ from typing import Any
 
 try:
     from tools.joi_doctor import build_doctor_report
+    from tools.mvp_demo_check import build_mvp_demo_check_report
     from tools.package_windows_release import build_release_privacy_report, build_windows_release_package
     from tools.packaging_smoke import build_packaging_smoke_report
     from tools.provider_preflight import build_provider_preflight_report
 except ModuleNotFoundError:
     from joi_doctor import build_doctor_report
+    from mvp_demo_check import build_mvp_demo_check_report
     from package_windows_release import build_release_privacy_report, build_windows_release_package
     from packaging_smoke import build_packaging_smoke_report
     from provider_preflight import build_provider_preflight_report
@@ -36,6 +38,9 @@ def build_windows_release_check_report(
 
     provider_preflight = build_provider_preflight_report(root)
     phases.append(_phase("provider_preflight", provider_preflight, _counts_summary(provider_preflight), required=False))
+
+    demo_check = build_mvp_demo_check_report(root)
+    phases.append(_phase("mvp_demo_check", demo_check, _counts_summary(demo_check), required=False))
 
     privacy = build_release_privacy_report()
     phases.append(

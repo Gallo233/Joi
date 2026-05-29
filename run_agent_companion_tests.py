@@ -55,6 +55,7 @@ from agent_companion.core.watch_commentary import WatchCommentaryPlanner
 from agent_companion.core.watch_transcript import TranscriptResult, TranscriptSegment
 from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, run_eval as run_visual_detector_eval, run_local_semantic_calibration
 from tools.joi_doctor import build_doctor_report, doctor_exit_code
+from tools.mvp_demo_check import build_mvp_demo_check_report, mvp_demo_check_exit_code
 from tools.package_windows_release import build_release_privacy_report, build_windows_release_package, package_exit_code
 from tools.packaging_smoke import build_packaging_smoke_report, packaging_smoke_exit_code
 from tools.provider_preflight import build_provider_preflight_report, provider_preflight_exit_code
@@ -1999,6 +2000,50 @@ characters:
     finally:
         shutil.rmtree(provider_tmpdir, ignore_errors=True)
 
+    demo_tmpdir = tempfile.mkdtemp()
+    old_codex_bin = os.environ.get("AGENT_COMPANION_CODEX_BIN")
+    old_ok_ww_runner = os.environ.get("OK_WW_RUNNER")
+    try:
+        demo_root = Path(demo_tmpdir)
+        (demo_root / "config.yaml").write_text(
+            """
+llm:
+  use_mock: true
+characters:
+  - name: Joi
+    color: "#ff4b91"
+    setting: demo fixture
+""",
+            encoding="utf-8",
+        )
+        fake_codex = demo_root / ("codex.cmd" if os.name == "nt" else "codex")
+        fake_codex.write_text("@echo off\r\n" if os.name == "nt" else "#!/bin/sh\n", encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(fake_codex, 0o755)
+        fake_ok_ww = demo_root / "run_ok_ww.ps1"
+        fake_ok_ww.write_text("# dry-run fixture\n", encoding="utf-8")
+        os.environ["AGENT_COMPANION_CODEX_BIN"] = str(fake_codex)
+        os.environ["OK_WW_RUNNER"] = str(fake_ok_ww)
+        demo_report = build_mvp_demo_check_report(demo_root)
+        demo_text = json.dumps(demo_report, ensure_ascii=False)
+        assert_true(demo_report["status"] in {"ok", "warn"} and mvp_demo_check_exit_code(demo_report) == 0, "MVP demo check should pass or warn when local optional providers are missing")
+        assert_true({row["id"] for row in demo_report["demos"]} == {"watch_together", "coding_task", "game_skill"}, "MVP demo check should cover watch, coding, and game demos")
+        assert_true(all(row["prompts"] for row in demo_report["demos"]), "MVP demo check should expose safe demo prompts")
+        forbidden_demo_fragments = ["sk-", "https://", "http://", "C:\\", "/Users/", "secret", "api_key", "base_url", "server_url", str(demo_root)]
+        assert_true(all(fragment not in demo_text for fragment in forbidden_demo_fragments), "MVP demo check leaked secrets, endpoints, or local paths")
+        missing_demo_report = build_mvp_demo_check_report(demo_root / "missing")
+        assert_true(missing_demo_report["status"] in {"warn", "fail"} and missing_demo_report["next_actions"], "MVP demo check should explain missing local demo dependencies")
+    finally:
+        if old_codex_bin is None:
+            os.environ.pop("AGENT_COMPANION_CODEX_BIN", None)
+        else:
+            os.environ["AGENT_COMPANION_CODEX_BIN"] = old_codex_bin
+        if old_ok_ww_runner is None:
+            os.environ.pop("OK_WW_RUNNER", None)
+        else:
+            os.environ["OK_WW_RUNNER"] = old_ok_ww_runner
+        shutil.rmtree(demo_tmpdir, ignore_errors=True)
+
     packaging_tmpdir = tempfile.mkdtemp()
     try:
         packaging_root = Path(packaging_tmpdir)
@@ -2058,11 +2103,13 @@ edition = "2021"
         (packaging_root / "start_joi.bat").write_text("powershell -File tools\\start_joi.ps1 %*", encoding="utf-8")
         (packaging_root / "tools" / "start_joi.ps1").write_text("-Doctor\njoi_doctor.py\njoi_core.err.log\njoi_core.out.log", encoding="utf-8")
         (packaging_root / "tools" / "joi_doctor.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "mvp_demo_check.py").write_text("", encoding="utf-8")
         (packaging_root / "tools" / "package_windows_release.py").write_text("", encoding="utf-8")
         (packaging_root / "tools" / "provider_preflight.py").write_text("", encoding="utf-8")
         (packaging_root / "tools" / "windows_release_check.py").write_text("", encoding="utf-8")
         packaging_report = build_packaging_smoke_report(packaging_root)
         assert_true(packaging_report["status"] == "ok" and packaging_smoke_exit_code(packaging_report) == 0, "packaging smoke should pass valid release metadata")
+        assert_true(any(item["name"] == "mvp_demo_check" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require MVP demo check tooling")
         assert_true(any(item["name"] == "provider_preflight" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require provider preflight tooling")
         assert_true(any(item["name"] == "windows_release_check" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require the release readiness aggregator")
         privacy_smoke = {item["name"]: item for item in packaging_report["items"]}.get("release_privacy_policy", {})
@@ -2100,6 +2147,7 @@ edition = "2021"
             "agent_companion/shell/src-tauri/tauri.conf.json",
             "run_agent_companion_tests.py",
             "tools/joi_doctor.py",
+            "tools/mvp_demo_check.py",
             "tools/package_windows_release.py",
             "tools/packaging_smoke.py",
             "tools/provider_preflight.py",
@@ -2222,7 +2270,7 @@ characters:
         readiness_report = build_windows_release_check_report(release_root, include_doctor=False)
         readiness_phases = {phase["name"]: phase for phase in readiness_report["phases"]}
         assert_true(readiness_report["status"] in {"ok", "warn"} and windows_release_check_exit_code(readiness_report) == 0, "Windows release readiness check should pass or warn when only advisory provider gaps remain")
-        assert_true(readiness_phases["provider_preflight"]["status"] in {"ok", "warn"} and readiness_phases["release_privacy_policy"]["status"] == "ok" and readiness_phases["release_package_dry_run"]["status"] == "ok", "Windows release readiness check should aggregate provider, privacy, and release dry-run status")
+        assert_true(readiness_phases["provider_preflight"]["status"] in {"ok", "warn"} and readiness_phases["mvp_demo_check"]["status"] in {"ok", "warn"} and readiness_phases["release_privacy_policy"]["status"] == "ok" and readiness_phases["release_package_dry_run"]["status"] == "ok", "Windows release readiness check should aggregate provider, demo, privacy, and release dry-run status")
         zip_path = release_root / release_report["zip"]
         with zipfile.ZipFile(zip_path) as archive:
             names = archive.namelist()
@@ -4057,6 +4105,7 @@ llm:
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
     assert_true("background-status-grid" in shell_style_source and "background-scope-form" in shell_style_source and "background-row" in shell_style_source, "Shell styles should include background context settings and summary rows")
     doctor_source = (workspace / "tools" / "joi_doctor.py").read_text(encoding="utf-8")
+    demo_check_source = (workspace / "tools" / "mvp_demo_check.py").read_text(encoding="utf-8")
     release_packager_source = (workspace / "tools" / "package_windows_release.py").read_text(encoding="utf-8")
     packaging_smoke_source = (workspace / "tools" / "packaging_smoke.py").read_text(encoding="utf-8")
     provider_preflight_source = (workspace / "tools" / "provider_preflight.py").read_text(encoding="utf-8")
@@ -4065,11 +4114,12 @@ llm:
     first_run_doc_source = (workspace / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
     start_joi_source = (workspace / "tools" / "start_joi.ps1").read_text(encoding="utf-8")
     assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
-    assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source and "tools/provider_preflight.py" in release_packager_source and "tools/windows_release_check.py" in release_packager_source, "P10 release packager should create a safe portable Windows zip and include release check tooling")
-    assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source and "release_privacy_policy" in packaging_smoke_source and "provider_preflight" in packaging_smoke_source and "windows_release_check" in packaging_smoke_source, "P10 packaging smoke should validate release metadata, Tauri permissions, release privacy policy, provider preflight, and release readiness tooling")
+    assert_true("build_mvp_demo_check_report" in demo_check_source and "watch_together" in demo_check_source and "coding_task" in demo_check_source and "game_skill" in demo_check_source and "privacy_boundary" in demo_check_source, "P10 MVP demo check should expose safe watch/coding/game demo scripts")
+    assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source and "tools/mvp_demo_check.py" in release_packager_source and "tools/provider_preflight.py" in release_packager_source and "tools/windows_release_check.py" in release_packager_source, "P10 release packager should create a safe portable Windows zip and include release check tooling")
+    assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source and "release_privacy_policy" in packaging_smoke_source and "mvp_demo_check" in packaging_smoke_source and "provider_preflight" in packaging_smoke_source and "windows_release_check" in packaging_smoke_source, "P10 packaging smoke should validate release metadata, Tauri permissions, release privacy policy, MVP demo check, provider preflight, and release readiness tooling")
     assert_true("build_provider_preflight_report" in provider_preflight_source and "build_runtime_status" in provider_preflight_source and "REQUIRED_DEMO_PROVIDERS" in provider_preflight_source and "safe_for_display" in provider_preflight_source, "P10 provider preflight should expose sanitized offline provider readiness")
-    assert_true("build_windows_release_check_report" in release_check_source and "build_doctor_report" in release_check_source and "build_provider_preflight_report" in release_check_source and "build_packaging_smoke_report" in release_check_source and "build_windows_release_package" in release_check_source and "release_ready" in release_check_source, "P10 release check should aggregate doctor, provider, smoke, privacy, and package dry-run status")
-    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source and "tools/provider_preflight.py" in ci_workflow_source and "tools/package_windows_release.py --dry-run" in ci_workflow_source and "tools/windows_release_check.py" in ci_workflow_source, "CI should cover Python tests, frontend build, packaging smoke, provider preflight, release dry-run, release readiness, and Tauri debug smoke build")
+    assert_true("build_windows_release_check_report" in release_check_source and "build_doctor_report" in release_check_source and "build_mvp_demo_check_report" in release_check_source and "build_provider_preflight_report" in release_check_source and "build_packaging_smoke_report" in release_check_source and "build_windows_release_package" in release_check_source and "release_ready" in release_check_source, "P10 release check should aggregate doctor, demo, provider, smoke, privacy, and package dry-run status")
+    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source and "tools/mvp_demo_check.py" in ci_workflow_source and "tools/provider_preflight.py" in ci_workflow_source and "tools/package_windows_release.py --dry-run" in ci_workflow_source and "tools/windows_release_check.py" in ci_workflow_source, "CI should cover Python tests, frontend build, packaging smoke, MVP demo check, provider preflight, release dry-run, release readiness, and Tauri debug smoke build")
     assert_true("-Doctor" in start_joi_source and "joi_doctor.py" in start_joi_source, "Windows launcher should expose a doctor mode")
     assert_true("start_joi.bat -Doctor" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source and "package_windows_release.py" in first_run_doc_source, "Windows first-run docs should cover doctor, OCR, audio, and release packaging setup")
 

@@ -86,6 +86,7 @@
 - Added release privacy policy validation so packaging smoke and portable package reports verify that local config, secrets, runtime data, logs, dependency folders, and build caches stay out of Windows release artifacts.
 - Added a Windows release readiness aggregator that combines doctor, packaging smoke, release privacy, and portable package dry-run status into a safe RC report for local release checks and CI metadata validation.
 - Added an offline provider preflight for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification, with sanitized output and release-readiness integration.
+- Added an MVP demo readiness check that exposes safe Watch Together, Codex coding, and OK-WW game-skill demo prompts plus local dependency readiness without starting external actions.
 
 ## 2026-05-14
 
