@@ -95,6 +95,8 @@ Run core tests:
 .\.venv\Scripts\python.exe tools\packaging_smoke.py
 ```
 
+`tools\packaging_smoke.py` also validates the Windows release privacy policy for local config, secrets, runtime data, logs, dependency folders, and build caches.
+
 Build a Windows portable release zip after the Tauri release shell exists:
 
 ```powershell

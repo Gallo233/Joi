@@ -9,6 +9,7 @@ from typing import Any
 
 
 PACKAGE_VERSION = "joi.windows_package.v1"
+PRIVACY_POLICY_VERSION = "joi.windows_release_privacy.v1"
 ROOT_FILES = [
     "README.md",
     "config.example.yaml",
@@ -55,6 +56,20 @@ RELEASE_EXE = "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
 FORBIDDEN_NAMES = {"config.yaml", "secrets.yaml", ".env"}
 FORBIDDEN_SUFFIXES = (".local.yaml", ".pyc", ".log")
 FORBIDDEN_PARTS = {".git", ".venv", "__pycache__", "data", "dist", "logs", "node_modules", "gen", "target"}
+LOCAL_ONLY_SAMPLE_PATHS = [
+    "config.yaml",
+    "secrets.yaml",
+    ".env",
+    "config.local.yaml",
+    "data/agent_companion/memory.sqlite3",
+    "data/local_visual_eval/private_manifest.json",
+    "logs/joi_core.err.log",
+    "agent_companion/shell/node_modules/private.txt",
+    "agent_companion/shell/dist/index.html",
+    "agent_companion/shell/src-tauri/target/debug/joi-shell.exe",
+    "agent_companion/shell/src-tauri/target/release/private.pdb",
+    "agent_companion/core/__pycache__/app.pyc",
+]
 
 
 def build_windows_release_package(
@@ -87,10 +102,14 @@ def build_windows_release_package(
     forbidden_hits = _forbidden_hits([arc for _, arc in deduped])
     if forbidden_hits:
         errors.extend(f"forbidden_entry:{hit}" for hit in forbidden_hits[:8])
+    privacy_report = build_release_privacy_report()
+    if privacy_report["status"] != "ok":
+        errors.append("release_privacy_policy_failed")
 
     manifest = {
         "version": PACKAGE_VERSION,
         "safe_for_display": True,
+        "privacy_policy_version": privacy_report["version"],
         "release_version": version,
         "package_root": package_root,
         "entry_count": len(deduped) + 1,
@@ -117,6 +136,11 @@ def build_windows_release_package(
         "sha256": digest,
         "entry_count": manifest["entry_count"],
         "includes_release_exe": manifest["includes_release_exe"],
+        "privacy_policy": {
+            "version": privacy_report["version"],
+            "status": privacy_report["status"],
+            "protected_sample_count": privacy_report["protected_sample_count"],
+        },
         "dry_run": dry_run,
         "errors": errors,
         "next_actions": _next_actions(errors),
@@ -125,6 +149,22 @@ def build_windows_release_package(
 
 def package_exit_code(report: dict[str, Any]) -> int:
     return 1 if report.get("status") == "fail" else 0
+
+
+def build_release_privacy_report() -> dict[str, Any]:
+    unprotected = [relative for relative in LOCAL_ONLY_SAMPLE_PATHS if not _is_forbidden(relative)]
+    status = "fail" if unprotected else "ok"
+    return {
+        "version": PRIVACY_POLICY_VERSION,
+        "safe_for_display": True,
+        "status": status,
+        "protected_sample_count": len(LOCAL_ONLY_SAMPLE_PATHS) - len(unprotected),
+        "unprotected_samples": unprotected,
+        "forbidden_names": sorted(FORBIDDEN_NAMES),
+        "forbidden_suffixes": list(FORBIDDEN_SUFFIXES),
+        "forbidden_parts": sorted(FORBIDDEN_PARTS),
+        "release_exe_exception": RELEASE_EXE,
+    }
 
 
 def print_text_report(report: dict[str, Any]) -> None:
@@ -233,6 +273,8 @@ def _next_actions(errors: list[str]) -> list[str]:
         actions.append("Restore missing release inputs before packaging.")
     if any(error.startswith("forbidden_entry:") for error in errors):
         actions.append("Remove local secrets/runtime data from the package input set.")
+    if any(error == "release_privacy_policy_failed" for error in errors):
+        actions.append("Restore release privacy forbidden-path rules before packaging.")
     return actions
 
 

@@ -70,6 +70,8 @@ Packaging metadata smoke:
 .\.venv\Scripts\python.exe tools\packaging_smoke.py
 ```
 
+This also checks the Windows release privacy policy so local `config.yaml`, `secrets.yaml`, runtime data, logs, dependency folders, and build caches are not eligible for release packaging.
+
 Portable release zip:
 
 ```powershell

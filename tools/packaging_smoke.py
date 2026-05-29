@@ -6,6 +6,11 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
+try:
+    from tools.package_windows_release import build_release_privacy_report
+except ModuleNotFoundError:
+    from package_windows_release import build_release_privacy_report
+
 
 SMOKE_VERSION = "joi.packaging_smoke.v1"
 
@@ -55,6 +60,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
         _check_capabilities(capabilities, add)
     if start_bat_path.is_file() and start_ps1_path.is_file():
         _check_launcher(start_bat_path, start_ps1_path, add)
+    _check_release_privacy_policy(add)
 
     counts = {status: sum(1 for item in items if item["status"] == status) for status in ("ok", "warn", "fail")}
     status = "fail" if counts["fail"] else "warn" if counts["warn"] else "ok"
@@ -142,6 +148,13 @@ def _check_launcher(start_bat_path: Path, start_ps1_path: Path, add: Any) -> Non
     _expect("%*" in bat, add, "bat_argument_forwarding", "start_joi.bat forwards command-line arguments.", "Forward batch arguments so -Doctor and future launch switches work.")
     _expect("-Doctor" in ps1 and "joi_doctor.py" in ps1, add, "doctor_launcher", "PowerShell launcher exposes doctor mode.", "Keep start_joi.ps1 wired to tools/joi_doctor.py.")
     _expect("joi_core.err.log" in ps1 and "joi_core.out.log" in ps1, add, "core_logs", "Core stdout/stderr logs are configured.", "Keep Core logs under logs/ for shortcut debugging.")
+
+
+def _check_release_privacy_policy(add: Any) -> None:
+    report = build_release_privacy_report()
+    ok = report.get("status") == "ok" and not report.get("unprotected_samples")
+    count = int(report.get("protected_sample_count", 0) or 0)
+    _expect(ok, add, "release_privacy_policy", f"Release packager protects {count} local-only sample paths.", "Restore package_windows_release forbidden names, suffixes, and directory rules before release.")
 
 
 def _read_json(path: Path, add: Any, name: str) -> dict[str, Any]:

@@ -83,6 +83,7 @@
 - Added a Windows first-run doctor and setup checklist for Python, frontend tooling, config, OCR, audio transcription, shell build state, and Core port diagnostics.
 - Added a packaging metadata smoke check and Windows GitHub Actions workflow for Python tests, frontend build, and Tauri debug no-bundle build.
 - Added a Windows portable release packager that zips only allowlisted runtime files plus the release shell and excludes local config, secrets, logs, data, dependency folders, and build caches.
+- Added release privacy policy validation so packaging smoke and portable package reports verify that local config, secrets, runtime data, logs, dependency folders, and build caches stay out of Windows release artifacts.
 
 ## 2026-05-14
 
