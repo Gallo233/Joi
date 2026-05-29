@@ -150,9 +150,10 @@ Status: in progress
 
 ## P10 Packaging
 
-Status: planned
+Status: in progress
 
 - Windows-first release build.
 - First-run setup checklist.
+- First-run doctor now checks Python packages, optional OCR/audio packages, frontend toolchain, shell build state, `config.yaml`, Tesseract, and Core port readiness.
 - Mac handoff kept current.
 - CI for Python tests, frontend build, and Tauri smoke build.

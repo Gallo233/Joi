@@ -21,6 +21,7 @@ The current repository is intentionally focused on the Joi main line.
 - [Feedback Log](docs/FEEDBACK_LOG.md)
 - [OpenHuman-Inspired Plan](docs/OPENHUMAN_INSIGHTS.md)
 - [Hermes Handoff](docs/HERMES_TASKS.md)
+- [Windows First-Run Checklist](docs/WINDOWS_FIRST_RUN.md)
 - [Private Semantic Calibration](docs/SEMANTIC_CALIBRATION.md)
 - [Architecture](agent_companion/docs/architecture.md)
 - [Windows Toolchain and Bridge](agent_companion/docs/windows_toolchain_and_bridge.md)
@@ -29,6 +30,7 @@ The current repository is intentionally focused on the Joi main line.
 
 ```powershell
 cd path\to\Joi
+.\start_joi.bat -Doctor
 .\start_joi.bat
 ```
 

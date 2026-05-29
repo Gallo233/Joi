@@ -53,6 +53,7 @@ from agent_companion.core.watch import WatchFrame, WatchSession
 from agent_companion.core.watch_commentary import WatchCommentaryPlanner
 from agent_companion.core.watch_transcript import TranscriptResult, TranscriptSegment
 from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, run_eval as run_visual_detector_eval, run_local_semantic_calibration
+from tools.joi_doctor import build_doctor_report, doctor_exit_code
 
 
 def assert_true(value: bool, message: str) -> None:
@@ -1873,6 +1874,76 @@ def main() -> int:
     finally:
         shutil.rmtree(background_tmpdir, ignore_errors=True)
 
+    doctor_tmpdir = tempfile.mkdtemp()
+    try:
+        doctor_root = Path(doctor_tmpdir)
+        for relative in (
+            "README.md",
+            "config.example.yaml",
+            "requirements.txt",
+            "agent_companion/shell/package.json",
+            "agent_companion/shell/src-tauri/tauri.conf.json",
+            "tools/start_joi.ps1",
+        ):
+            target = doctor_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}", encoding="utf-8")
+        venv_bin = doctor_root / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        (venv_bin / ("python.exe" if os.name == "nt" else "python")).write_text("", encoding="utf-8")
+        (doctor_root / "agent_companion/shell/node_modules").mkdir(parents=True, exist_ok=True)
+        release_shell = doctor_root / "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
+        release_shell.parent.mkdir(parents=True, exist_ok=True)
+        release_shell.write_text("", encoding="utf-8")
+        (doctor_root / "config.yaml").write_text(
+            """
+llm:
+  use_mock: false
+  base_url: https://api.example.test/v1
+  model: joi-fast
+  api_key: sk-private-do-not-print
+  vision_enabled: true
+  vision_base_url: https://vision.example.test/v1
+  vision_model: joi-vision
+  vision_api_key: ${JOI_VISION_API_KEY}
+asr:
+  enabled: true
+  provider: openai_compatible
+  base_url: https://asr.example.test/v1
+  model: whisper-test
+  api_key: ${JOI_ASR_API_KEY}
+tts:
+  enabled: true
+  provider: gpt-sovits
+  server_url: http://127.0.0.1:9880/
+ocr:
+  tesseract_cmd: C:\\secret\\tesseract.exe
+characters:
+  - name: Joi
+""",
+            encoding="utf-8",
+        )
+        doctor_report = build_doctor_report(
+            doctor_root,
+            import_probe=lambda _name: True,
+            which_probe=lambda name: "tool" if name in {"npm.cmd", "cargo.exe", "tesseract.exe"} else None,
+            port_probe=lambda _port: False,
+            env={"JOI_ASR_API_KEY": "sk-asr-private", "JOI_VISION_API_KEY": "sk-vision-private"},
+        )
+        doctor_text = json.dumps(doctor_report, ensure_ascii=False)
+        assert_true(doctor_report["status"] == "ok" and doctor_exit_code(doctor_report) == 0, "doctor should pass a complete local setup")
+        assert_true("sk-" not in doctor_text and "C:\\" not in doctor_text and "secret" not in doctor_text, "doctor report leaked secrets or local paths")
+        broken_report = build_doctor_report(
+            doctor_root / "missing",
+            import_probe=lambda _name: False,
+            which_probe=lambda _name: None,
+            port_probe=lambda _port: True,
+            env={},
+        )
+        assert_true(broken_report["status"] == "fail" and doctor_exit_code(broken_report) == 1 and broken_report["next_actions"], "doctor should fail closed with actionable first-run next steps")
+    finally:
+        shutil.rmtree(doctor_tmpdir, ignore_errors=True)
+
     changed_verification = verify_post_action(
         _fake_computer_observation(workspace, title="Before", ocr_text=["登录"]),
         _fake_computer_observation(workspace, title="After", ocr_text=["仪表盘"]),
@@ -3689,6 +3760,12 @@ llm:
     assert_true("skill-grid" in shell_style_source and "skill-card" in shell_style_source and "skill-actions" in shell_style_source, "Shell styles should include native skill manifest cards")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
     assert_true("background-status-grid" in shell_style_source and "background-scope-form" in shell_style_source and "background-row" in shell_style_source, "Shell styles should include background context settings and summary rows")
+    doctor_source = (workspace / "tools" / "joi_doctor.py").read_text(encoding="utf-8")
+    first_run_doc_source = (workspace / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
+    start_joi_source = (workspace / "tools" / "start_joi.ps1").read_text(encoding="utf-8")
+    assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
+    assert_true("-Doctor" in start_joi_source and "joi_doctor.py" in start_joi_source, "Windows launcher should expose a doctor mode")
+    assert_true("start_joi.bat -Doctor" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source, "Windows first-run docs should cover doctor, OCR, and audio setup")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")
