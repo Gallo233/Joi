@@ -132,6 +132,10 @@ class JsonRpcBridge:
             if method == "skills.list":
                 await websocket.send(self._result(request_id, self.skill_manifest_command()))
                 return
+            if method == "audit.recent":
+                limit = _safe_int(params.get("limit")) or 50
+                await websocket.send(self._result(request_id, self.audit_recent_command(limit)))
+                return
             if method == "memory.status":
                 await websocket.send(self._result(request_id, self.memory_status_command()))
                 return
@@ -343,6 +347,9 @@ class JsonRpcBridge:
                 skill_settings=self.app.skill_settings_payload(),
             ),
         }
+
+    def audit_recent_command(self, limit: int = 50) -> dict[str, Any]:
+        return {"ok": True, "audit": self.app.audit_store.recent(limit)}
 
     def memory_recall_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         query = str(params.get("query") or "") if isinstance(params, dict) else ""
@@ -586,6 +593,7 @@ class JsonRpcBridge:
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
             "memory": memory_status,
+            "audit": self.app.audit_store.status(),
             "skills": build_native_skill_manifest(
                 self.workspace,
                 asr_state=self.asr_state,

@@ -108,6 +108,10 @@ export class CoreClient {
     return this.send('skills.list', {})
   }
 
+  auditRecent(limit = 50) {
+    return this.send('audit.recent', { limit })
+  }
+
   memoryStatus() {
     return this.send('memory.status', {})
   }

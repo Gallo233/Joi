@@ -141,6 +141,7 @@ Status: in progress
 - Medium risk actions require task-level confirmation.
 - High risk actions require step-by-step confirmation.
 - Persist audit records for tool actions and approvals.
+- Persistent audit V1 now records approval, tool, task, and policy-block lifecycle rows to a local sanitized JSONL and exposes safe status plus `audit.recent`.
 - Add constrained background observation only for user-approved windows, projects, and games.
 - Summarize approved context without recording video by default.
 - Let users inspect, clear, or disable background context.

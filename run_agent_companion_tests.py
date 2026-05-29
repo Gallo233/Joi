@@ -16,6 +16,7 @@ from pathlib import Path
 import yaml
 
 from agent_companion.core.app import AgentCompanionApp
+from agent_companion.core.audit_store import AUDIT_SCHEMA_VERSION, AuditStore
 from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, ComputerAction, ComputerObservation, ComputerUseResult, computer_action_audit_event, verify_post_action
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouteConfig, ModelRouter, load_app_config
 from agent_companion.core.llm_planner import plan_from_llm_payload
@@ -1793,6 +1794,63 @@ def main() -> int:
     public_payload = policy.public_payload(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true("100" not in str(public_payload), "policy preview should not expose raw click coordinates")
 
+    audit_tmpdir = tempfile.mkdtemp()
+    try:
+        audit_path = Path(audit_tmpdir) / "audit.jsonl"
+        audit_store = AuditStore(audit_path)
+        audit_store.record_event(
+            AgentEvent(
+                EventType.APPROVAL_REQUIRED,
+                "task-abcdef123456",
+                DisplayCard("需要确认", r"打开 C:\secret\screen.png sk-test-private", status="approval", artifacts=[r"data/agent_companion/vision/private.png"]),
+                VoiceLine("需要确认。"),
+                {
+                    "tool": "computer.click",
+                    "risk": "medium",
+                    "approval": {
+                        "approval_id": "approval-abcdef123456",
+                        "task_id": "task-abcdef123456",
+                        "step_index": 1,
+                        "tool": "computer.click",
+                    },
+                    "policy": {
+                        "tool": "computer.click",
+                        "reason": "medium 风险动作需要确认。",
+                        "arguments_preview": {"target": "指定屏幕位置", "raw": r"C:\secret\screen.png"},
+                    },
+                    "skill_id": "joi.computer_use",
+                    "skill_category": "computer_use",
+                    "skill_permission_level": "medium",
+                    "skill_audit": "computer_use_audit",
+                    COMPUTER_AUDIT_STATE_KEY: [
+                        {
+                            "event_type": "approval_pending",
+                            "sanitized_summary": "Approval is required before this Computer Use action can run.",
+                            "risk_level": "medium",
+                            "approval_id": "approval-abcdef123456",
+                            "approval_status": "pending",
+                            "tool_name": "computer.click",
+                            "skill_id": "joi.computer_use",
+                            "action_name": "click",
+                            "sanitized_arguments": {"target": "screen_position"},
+                            "before_artifacts": [{"ref": r"data/agent_companion/vision/private.png"}],
+                        }
+                    ],
+                },
+            )
+        )
+        audit_payload = audit_store.recent(10)
+        assert_true(audit_payload["version"] == AUDIT_SCHEMA_VERSION and audit_payload["safe_for_display"], "audit store should expose a safe display payload")
+        audit_record = audit_payload["records"][-1]
+        assert_true(audit_record["outcome"] == "approval_pending" and audit_record["approval"]["status"] == "pending", "audit store should persist approval lifecycle records")
+        assert_true(audit_record["skill_id"] == "joi.computer_use" and audit_record["tool"] == "computer.click", "audit store should preserve stable skill/tool ids")
+        assert_true(audit_record["computer_audit"][0]["artifact_counts"]["before"] == 1, "audit store should keep artifact counts without refs")
+        audit_text = audit_path.read_text(encoding="utf-8")
+        forbidden_audit_fragments = ["C:\\", "sk-", "approval-", "task-abcdef", "data/", ".png", "secret"]
+        assert_true(all(fragment not in audit_text for fragment in forbidden_audit_fragments), "persistent audit log leaked private ids, paths, artifacts, or secrets")
+    finally:
+        shutil.rmtree(audit_tmpdir, ignore_errors=True)
+
     changed_verification = verify_post_action(
         _fake_computer_observation(workspace, title="Before", ocr_text=["登录"]),
         _fake_computer_observation(workspace, title="After", ocr_text=["仪表盘"]),
@@ -3073,6 +3131,7 @@ asr:
     assert_true("tts" in ready_payload and "provider" in ready_payload["tts"], "Core ready payload should expose safe TTS status")
     assert_true("server_url" not in ready_payload["tts"] and "gpt_sovits_work_path" not in ready_payload["tts"], "TTS status should not expose paths or endpoints")
     assert_true(ready_payload["runtime"]["read_only"] and ready_payload["runtime"]["safe_for_display"], "Core ready payload should expose safe read-only runtime status")
+    assert_true(ready_payload["audit"]["version"] == AUDIT_SCHEMA_VERSION and ready_payload["audit"]["safe_for_display"], "Core ready payload should expose safe audit status")
     assert_true(ready_payload["skills"]["version"] == SKILL_MANIFEST_VERSION and ready_payload["skills"]["safe_for_display"], "Core ready payload should expose safe native skill manifest")
     skill_ids = {row["id"] for row in ready_payload["skills"]["skills"]}
     assert_true(
@@ -3086,6 +3145,8 @@ asr:
     assert_true("runtime.update_config" in skill_rows["joi.runtime_config"]["tools"], "Runtime config should be bound to a native skill")
     skill_manifest_payload = ready_bridge.skill_manifest_command()
     assert_true(skill_manifest_payload["ok"] and skill_manifest_payload["skills"]["version"] == SKILL_MANIFEST_VERSION, "skills.list RPC should return the native skill manifest")
+    audit_recent_payload = ready_bridge.audit_recent_command(5)
+    assert_true(audit_recent_payload["ok"] and audit_recent_payload["audit"]["version"] == AUDIT_SCHEMA_VERSION and audit_recent_payload["audit"]["safe_for_display"], "audit.recent RPC should return safe persisted audit records")
     direct_skill_rows = {
         row["id"]: row
         for row in build_native_skill_manifest(
@@ -3141,6 +3202,8 @@ skills:
         assert_true(blocked_events and blocked_events[-1].agent_state.get("skill_id") == "joi.computer_use", "Disabled native skills should block execution before approval")
         assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in disabled_events), "Disabled native skills should not create approval requests")
         assert_true(not any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("tool") == "computer.click" for event in disabled_events), "Disabled native skills must not run bound tools")
+        disabled_audit = disabled_app.audit_store.recent(20)["records"]
+        assert_true(any(row.get("outcome") == "blocked" and row.get("block_reason") == "skill_disabled" and row.get("skill_id") == "joi.computer_use" for row in disabled_audit), "Persistent audit should record disabled skill policy blocks")
     finally:
         shutil.rmtree(disabled_skill_tmpdir, ignore_errors=True)
 
@@ -3318,7 +3381,7 @@ llm:
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
-    assert_true("skills.list" in shell_api_source and "skillsList()" in shell_api_source, "Shell API should expose native skill manifest RPC")
+    assert_true("skills.list" in shell_api_source and "skillsList()" in shell_api_source and "audit.recent" in shell_api_source and "auditRecent" in shell_api_source, "Shell API should expose native skill manifest and audit RPCs")
     assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source and "watch.loop.configure" in shell_api_source and "watch.loop.refresh" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
     assert_true("memory.status" in shell_api_source and "memory.recall" in shell_api_source and "memory.browse_vault" in shell_api_source and "memory.save_candidate" in shell_api_source and "memory.reject_candidate" in shell_api_source and "memory.set_enabled" in shell_api_source and "memory.delete" in shell_api_source and "memory.clear" in shell_api_source, "Shell API should expose memory authorization and recall RPC methods")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
@@ -3534,7 +3597,9 @@ llm:
     assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
     skill_manifest_source = (workspace / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
     assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "KNOWN_SKILL_IDS" in skill_manifest_source and "_apply_skill_setting" in skill_manifest_source and "normalize_skill_id" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
-    assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source and "skill_settings_payload" in server_source, "Core should expose P8 native skill manifest RPC and ready payload")
+    assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source and "skill_settings_payload" in server_source and "audit_recent_command" in server_source and '"audit.recent"' in server_source, "Core should expose P8 native skill manifest and P9 audit RPCs")
+    audit_store_source = (workspace / "agent_companion" / "core" / "audit_store.py").read_text(encoding="utf-8")
+    assert_true("AUDIT_SCHEMA_VERSION" in audit_store_source and "AuditStore" in audit_store_source and "record_event" in audit_store_source and "audit_record_from_event" in audit_store_source and "safe_for_display" in audit_store_source, "Core should persist sanitized P9 audit records")
     runtime_config_writer_source = (workspace / "agent_companion" / "core" / "runtime_config_writer.py").read_text(encoding="utf-8")
     policy_source = (workspace / "agent_companion" / "core" / "policy.py").read_text(encoding="utf-8")
     assert_true("_prepare_skill_update" in runtime_config_writer_source and "unknown_skill" in runtime_config_writer_source and "protected_skill" in runtime_config_writer_source and "joi.local_files" not in runtime_config_writer_source, "Runtime config writer should support dynamic native skill toggles without hardcoding path-sensitive ids")

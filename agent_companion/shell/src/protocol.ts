@@ -269,6 +269,12 @@ export interface CoreReadyPayload {
   }
   watch_loop?: WatchLoopStatus
   memory?: MemoryStatus
+  audit?: {
+    version?: string
+    safe_for_display?: boolean
+    record_count?: number
+    storage?: string
+  }
   skills?: NativeSkillManifest
   runtime_settings?: {
     asr?: {
