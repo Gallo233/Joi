@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "0 18 * * 5"
 
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   windows-release-candidate:
     name: Windows release build and package

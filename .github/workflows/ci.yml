@@ -7,6 +7,10 @@ on:
       - win-desktop-fixes
   pull_request:
 
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   python-core:
     name: Python core tests
