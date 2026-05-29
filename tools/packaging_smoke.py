@@ -32,6 +32,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
     start_ps1_path = root / "tools" / "start_joi.ps1"
     doctor_path = root / "tools" / "joi_doctor.py"
     release_packager_path = root / "tools" / "package_windows_release.py"
+    release_check_path = root / "tools" / "windows_release_check.py"
 
     package = _read_json(package_path, add, "package_json")
     tauri = _read_json(tauri_path, add, "tauri_config")
@@ -45,6 +46,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
             "start_joi_ps1": start_ps1_path,
             "joi_doctor": doctor_path,
             "windows_release_packager": release_packager_path,
+            "windows_release_check": release_check_path,
         },
         add,
     )

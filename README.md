@@ -93,9 +93,11 @@ Run core tests:
 ```powershell
 .\.venv\Scripts\python.exe run_agent_companion_tests.py
 .\.venv\Scripts\python.exe tools\packaging_smoke.py
+.\.venv\Scripts\python.exe tools\windows_release_check.py --allow-missing-exe
 ```
 
 `tools\packaging_smoke.py` also validates the Windows release privacy policy for local config, secrets, runtime data, logs, dependency folders, and build caches.
+`tools\windows_release_check.py` aggregates doctor, packaging smoke, release privacy, and portable package dry-run status into one release readiness report.
 
 Build a Windows portable release zip after the Tauri release shell exists:
 

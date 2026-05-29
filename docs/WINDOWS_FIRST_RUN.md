@@ -72,6 +72,14 @@ Packaging metadata smoke:
 
 This also checks the Windows release privacy policy so local `config.yaml`, `secrets.yaml`, runtime data, logs, dependency folders, and build caches are not eligible for release packaging.
 
+Aggregated release readiness:
+
+```powershell
+.\.venv\Scripts\python.exe tools\windows_release_check.py --allow-missing-exe
+```
+
+Remove `--allow-missing-exe` after the Tauri release shell exists to require a publishable portable package.
+
 Portable release zip:
 
 ```powershell

@@ -57,6 +57,7 @@ from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, 
 from tools.joi_doctor import build_doctor_report, doctor_exit_code
 from tools.package_windows_release import build_release_privacy_report, build_windows_release_package, package_exit_code
 from tools.packaging_smoke import build_packaging_smoke_report, packaging_smoke_exit_code
+from tools.windows_release_check import build_windows_release_check_report, windows_release_check_exit_code
 
 
 def assert_true(value: bool, message: str) -> None:
@@ -2007,8 +2008,10 @@ edition = "2021"
         (packaging_root / "tools" / "start_joi.ps1").write_text("-Doctor\njoi_doctor.py\njoi_core.err.log\njoi_core.out.log", encoding="utf-8")
         (packaging_root / "tools" / "joi_doctor.py").write_text("", encoding="utf-8")
         (packaging_root / "tools" / "package_windows_release.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "windows_release_check.py").write_text("", encoding="utf-8")
         packaging_report = build_packaging_smoke_report(packaging_root)
         assert_true(packaging_report["status"] == "ok" and packaging_smoke_exit_code(packaging_report) == 0, "packaging smoke should pass valid release metadata")
+        assert_true(any(item["name"] == "windows_release_check" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require the release readiness aggregator")
         privacy_smoke = {item["name"]: item for item in packaging_report["items"]}.get("release_privacy_policy", {})
         assert_true(privacy_smoke.get("status") == "ok", "packaging smoke should validate the release privacy policy")
         (tauri_dir / "tauri.conf.json").write_text(
@@ -2048,11 +2051,49 @@ edition = "2021"
             "tools/packaging_smoke.py",
             "tools/smoke_ws_bridge.py",
             "tools/start_joi.ps1",
+            "tools/windows_release_check.py",
         ):
             target = release_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            if relative.endswith("tauri.conf.json"):
-                target.write_text(json.dumps({"version": "0.1.0"}), encoding="utf-8")
+            if relative.endswith("package.json"):
+                target.write_text(
+                    json.dumps(
+                        {
+                            "name": "joi-shell",
+                            "private": True,
+                            "version": "0.1.0",
+                            "scripts": {"build": "vue-tsc --noEmit && vite build", "tauri": "tauri"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            elif relative.endswith("Cargo.toml"):
+                target.write_text(
+                    """
+[package]
+name = "joi-shell"
+version = "0.1.0"
+edition = "2021"
+""",
+                    encoding="utf-8",
+                )
+            elif relative.endswith("tauri.conf.json"):
+                target.write_text(
+                    json.dumps(
+                        {
+                            "productName": "Joi",
+                            "version": "0.1.0",
+                            "identifier": "local.joi",
+                            "build": {"beforeBuildCommand": "npm run build", "frontendDist": "../dist"},
+                            "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": False}]},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            elif relative == "start_joi.bat":
+                target.write_text("powershell -File tools\\start_joi.ps1 %*", encoding="utf-8")
+            elif relative == "tools/start_joi.ps1":
+                target.write_text("-Doctor\njoi_doctor.py\njoi_core.err.log\njoi_core.out.log", encoding="utf-8")
             else:
                 target.write_text("release input", encoding="utf-8")
         for relative in (
@@ -2067,7 +2108,25 @@ edition = "2021"
         ):
             target = release_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("release input", encoding="utf-8")
+            if relative.endswith("capabilities/default.json"):
+                target.write_text(
+                    json.dumps(
+                        {
+                            "identifier": "default",
+                            "windows": ["main"],
+                            "permissions": [
+                                "core:window:allow-close",
+                                "core:window:allow-minimize",
+                                "core:window:allow-start-dragging",
+                                "core:window:allow-set-always-on-top",
+                                "core:window:allow-set-skip-taskbar",
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                target.write_text("release input", encoding="utf-8")
         release_exe = release_root / "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
         release_exe.parent.mkdir(parents=True, exist_ok=True)
         release_exe.write_bytes(b"fake exe")
@@ -2093,6 +2152,8 @@ edition = "2021"
         release_report = build_windows_release_package(release_root, output_dir=release_root / "out")
         assert_true(release_report["status"] == "ok" and package_exit_code(release_report) == 0 and release_report["sha256"], "Windows release packager should create a portable zip")
         assert_true(release_report["privacy_policy"]["status"] == "ok", "Windows release report should include a passing privacy policy check")
+        readiness_report = build_windows_release_check_report(release_root, include_doctor=False)
+        assert_true(readiness_report["status"] == "ok" and readiness_report["release_ready"] and windows_release_check_exit_code(readiness_report) == 0, "Windows release readiness check should aggregate packaging, privacy, and release dry-run status")
         zip_path = release_root / release_report["zip"]
         with zipfile.ZipFile(zip_path) as archive:
             names = archive.namelist()
@@ -2103,6 +2164,10 @@ edition = "2021"
         release_exe.unlink()
         missing_exe_report = build_windows_release_package(release_root, output_dir=release_root / "out3", require_exe=True)
         assert_true(missing_exe_report["status"] == "fail" and "release_exe_missing" in missing_exe_report["errors"], "Release packager should require the release shell by default")
+        missing_exe_readiness = build_windows_release_check_report(release_root, include_doctor=False)
+        assert_true(missing_exe_readiness["status"] == "fail" and windows_release_check_exit_code(missing_exe_readiness) == 1, "Release readiness check should fail when the release shell is missing")
+        ci_readiness = build_windows_release_check_report(release_root, include_doctor=False, allow_missing_exe=True)
+        assert_true(ci_readiness["status"] == "ok" and not ci_readiness["release_ready"] and ci_readiness["next_actions"], "CI readiness mode should allow metadata checks before the release shell exists")
     finally:
         shutil.rmtree(release_tmpdir, ignore_errors=True)
 
@@ -3925,13 +3990,15 @@ llm:
     doctor_source = (workspace / "tools" / "joi_doctor.py").read_text(encoding="utf-8")
     release_packager_source = (workspace / "tools" / "package_windows_release.py").read_text(encoding="utf-8")
     packaging_smoke_source = (workspace / "tools" / "packaging_smoke.py").read_text(encoding="utf-8")
+    release_check_source = (workspace / "tools" / "windows_release_check.py").read_text(encoding="utf-8")
     ci_workflow_source = (workspace / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     first_run_doc_source = (workspace / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
     start_joi_source = (workspace / "tools" / "start_joi.ps1").read_text(encoding="utf-8")
     assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
-    assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source, "P10 release packager should create a safe portable Windows zip and expose privacy policy validation")
-    assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source and "release_privacy_policy" in packaging_smoke_source, "P10 packaging smoke should validate release metadata, Tauri permissions, and release privacy policy")
-    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source and "tools/package_windows_release.py --dry-run" in ci_workflow_source, "CI should cover Python tests, frontend build, packaging smoke, release dry-run, and Tauri debug smoke build")
+    assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source and "tools/windows_release_check.py" in release_packager_source, "P10 release packager should create a safe portable Windows zip and expose privacy policy validation")
+    assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source and "release_privacy_policy" in packaging_smoke_source and "windows_release_check" in packaging_smoke_source, "P10 packaging smoke should validate release metadata, Tauri permissions, release privacy policy, and release readiness tooling")
+    assert_true("build_windows_release_check_report" in release_check_source and "build_doctor_report" in release_check_source and "build_packaging_smoke_report" in release_check_source and "build_windows_release_package" in release_check_source and "release_ready" in release_check_source, "P10 release check should aggregate doctor, smoke, privacy, and package dry-run status")
+    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source and "tools/package_windows_release.py --dry-run" in ci_workflow_source and "tools/windows_release_check.py" in ci_workflow_source, "CI should cover Python tests, frontend build, packaging smoke, release dry-run, release readiness, and Tauri debug smoke build")
     assert_true("-Doctor" in start_joi_source and "joi_doctor.py" in start_joi_source, "Windows launcher should expose a doctor mode")
     assert_true("start_joi.bat -Doctor" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source and "package_windows_release.py" in first_run_doc_source, "Windows first-run docs should cover doctor, OCR, audio, and release packaging setup")
 

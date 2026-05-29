@@ -155,6 +155,7 @@ Status: in progress
 - Windows-first release build.
 - Portable Windows release packager now creates a safe zip from allowlisted runtime files and the release shell.
 - Release privacy validation now checks that packaging rules protect local config, secrets, runtime data, logs, dependency folders, and build caches before Windows artifacts are shipped.
+- Release readiness aggregation now combines doctor, packaging smoke, privacy policy, and portable package dry-run status into one safe RC report.
 - First-run setup checklist.
 - First-run doctor now checks Python packages, optional OCR/audio packages, frontend toolchain, shell build state, `config.yaml`, Tesseract, and Core port readiness.
 - Packaging smoke now validates version alignment, Tauri shell metadata, window permissions, and launcher wiring.
