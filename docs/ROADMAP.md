@@ -146,6 +146,7 @@ Status: in progress
 - Background context controls now require an approved window/project/game scope and store summary-only context, with no video recording by default.
 - Summarize approved context without recording video by default.
 - Let users inspect, clear, or disable background context.
+- Shell developer controls now expose background status, approved scopes, recent summaries, disable, clear, and scope approval.
 
 ## P10 Packaging
 

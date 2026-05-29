@@ -1893,6 +1893,140 @@ details pre {
   font-weight: 700;
 }
 
+.background-context-panel {
+  gap: 12px;
+}
+
+.background-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.background-status-card {
+  min-width: 0;
+  border: 1px solid rgba(0,0,0,0.05);
+  border-radius: 8px;
+  background: #f9fafb;
+  padding: 10px;
+}
+
+.background-status-card.active {
+  border-color: rgba(16, 185, 129, 0.24);
+  background: rgba(16, 185, 129, 0.07);
+}
+
+.background-status-card span,
+.background-status-card small {
+  display: block;
+  overflow: hidden;
+  color: #94a3b8;
+  font-size: 10.5px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.background-status-card strong {
+  display: block;
+  margin: 4px 0;
+  overflow: hidden;
+  color: #1f2937;
+  font-size: 16px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.background-scope-form {
+  display: grid;
+  grid-template-columns: 94px minmax(0, 1fr) 76px;
+  gap: 8px;
+}
+
+.background-scope-form select,
+.background-scope-form input {
+  min-width: 0;
+  height: 34px;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #1f2937;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 10px;
+}
+
+.background-scope-form button {
+  height: 34px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--color-primary);
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.background-scope-form button:disabled,
+.background-scope-form input:disabled,
+.background-scope-form select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.background-list {
+  display: grid;
+  gap: 8px;
+}
+
+.background-list.recent {
+  max-height: 210px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.background-row {
+  min-width: 0;
+  border: 1px solid rgba(0,0,0,0.05);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.background-row header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.background-row strong,
+.background-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.background-row strong {
+  color: #1f2937;
+  font-size: 12px;
+}
+
+.background-row span {
+  color: #94a3b8;
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+.background-row p {
+  margin: 6px 0 0;
+  color: #374151;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .runtime-controls {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

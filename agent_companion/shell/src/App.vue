@@ -3,7 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -31,6 +31,10 @@ const memoryQuery = ref('')
 const memorySearchResults = ref<MemoryRecord[]>([])
 const memorySearchLoading = ref(false)
 const memoryVault = ref<MemoryVault | null>(null)
+const backgroundStatus = ref<BackgroundContextStatus | null>(null)
+const backgroundScopeType = ref<'window' | 'project' | 'game'>('window')
+const backgroundScopeLabel = ref('当前窗口')
+const backgroundLoading = ref(false)
 const skillManifest = ref<NativeSkillManifest | null>(null)
 const skillRefreshLoading = ref(false)
 
@@ -262,11 +266,13 @@ const client = new CoreClient({
     rememberVoiceEventEpoch(event)
     events.value.push(event)
     syncMemoryFromEvent(event)
+    syncBackgroundFromEvent(event)
     preloadImageArtifacts(event)
   },
   onReady: (payload) => {
     ready.value = payload
     memoryStatus.value = payload.memory || memoryStatus.value
+    backgroundStatus.value = payload.background || backgroundStatus.value
     skillManifest.value = payload.skills || skillManifest.value
     syncRuntimeDraft(payload)
   },
@@ -381,6 +387,23 @@ const memoryQueryText = computed(() => memoryQuery.value.trim())
 const displayedMemoryRows = computed(() => (memoryQueryText.value ? memorySearchResults.value : recentMemories.value))
 const memoryVaultSections = computed(() => memoryVault.value?.sections || [])
 const memorySearchEmptyText = computed(() => (memoryQueryText.value ? '没有找到相关记忆' : '暂无长期记忆'))
+const backgroundEnabled = computed(() => backgroundStatus.value?.enabled === true)
+const backgroundActive = computed(() => backgroundStatus.value?.active === true)
+const backgroundScopes = computed<BackgroundContextScope[]>(() => backgroundStatus.value?.approved_scopes || [])
+const backgroundRecentRows = computed<BackgroundContextEntry[]>(() => backgroundStatus.value?.recent_context || [])
+const backgroundStateText = computed(() => {
+  if (!backgroundStatus.value) return '未连接'
+  if (!backgroundEnabled.value) return '已关闭'
+  return backgroundActive.value ? '已批准' : '等待范围'
+})
+const backgroundSummaryText = computed(() => {
+  if (!backgroundStatus.value) return '等待核心状态'
+  if (!backgroundEnabled.value) return '后台上下文关闭'
+  const scope = backgroundStatus.value.active_scope
+  if (!scope) return '需要批准窗口、项目或游戏范围'
+  return `${backgroundScopeTypeLabel(scope.type)} · ${scope.label || '已批准范围'}`
+})
+const backgroundRetentionText = computed(() => backgroundRetentionLabel(backgroundStatus.value?.retention))
 
 watch(watchLoopStatus, (status) => {
   const source = stringValue(status.transcript_source)
@@ -398,9 +421,11 @@ watch(activeCabin, (cabin) => {
 })
 
 watch(activeSettingsTab, (tab) => {
-  if (tab !== 'memory') return
-  void refreshMemoryStatus()
-  void browseMemoryVault()
+  if (tab === 'memory') {
+    void refreshMemoryStatus()
+    void browseMemoryVault()
+  }
+  if (tab === 'developer') void refreshBackgroundStatus()
 })
 
 const latestSpeech = computed(() => {
@@ -1335,6 +1360,112 @@ function syncMemoryFromEvent(event: AgentEvent) {
   if ('recent' in memory || 'pending' in memory || 'vault_path' in memory) {
     memoryStatus.value = memory as unknown as MemoryStatus
   }
+}
+
+function syncBackgroundFromEvent(event: AgentEvent) {
+  const background = asRecord(event.agent_state?.background_context)
+  if ('safe_for_display' in background || 'recent_context' in background || 'recent_count' in background || 'scope_count' in background) {
+    backgroundStatus.value = background as unknown as BackgroundContextStatus
+  }
+}
+
+async function refreshBackgroundStatus() {
+  backgroundLoading.value = true
+  try {
+    const result = (await client.backgroundStatus()) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景上下文读取失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景上下文读取失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+async function configureBackgroundScope() {
+  backgroundLoading.value = true
+  try {
+    const label = backgroundScopeLabel.value.trim() || backgroundScopeTypeLabel(backgroundScopeType.value)
+    const result = (await client.backgroundConfigure({
+      enabled: true,
+      scope_type: backgroundScopeType.value,
+      label,
+    })) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景范围批准失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景范围批准失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+async function toggleBackgroundEnabled(event: Event) {
+  const enabled = Boolean((event.target as HTMLInputElement | null)?.checked)
+  backgroundLoading.value = true
+  try {
+    const result = (await client.backgroundConfigure({ enabled })) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景上下文开关更新失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景上下文开关更新失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+async function clearBackgroundContext() {
+  if (!backgroundRecentRows.value.length) return
+  if (!window.confirm(`清空 ${backgroundRecentRows.value.length} 条背景摘要？批准范围会保留。`)) return
+  backgroundLoading.value = true
+  try {
+    const result = (await client.backgroundClear()) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景摘要清空失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景摘要清空失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+function backgroundScopeTypeLabel(value?: string) {
+  const labels: Record<string, string> = {
+    window: '窗口',
+    project: '项目',
+    game: '游戏',
+  }
+  return labels[value || ''] || '范围'
+}
+
+function backgroundRetentionLabel(value?: string) {
+  const labels: Record<string, string> = {
+    summaries_only: '仅摘要',
+  }
+  return labels[value || ''] || value || '仅摘要'
+}
+
+function backgroundScopeMeta(scope: BackgroundContextScope) {
+  const pieces = [backgroundScopeTypeLabel(scope.type)]
+  if (scope.approved_at) pieces.push(new Date(scope.approved_at * 1000).toLocaleString([], { hour12: false }))
+  pieces.push(scope.enabled === false ? '关闭' : '启用')
+  return pieces.join(' · ')
+}
+
+function backgroundEntryTime(row: BackgroundContextEntry) {
+  if (!row.created_at) return '刚刚'
+  return new Date(row.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function backgroundEntryMeta(row: BackgroundContextEntry) {
+  const pieces = [backgroundScopeTypeLabel(row.scope_type)]
+  const source = stringValue(row.source)
+  if (source) pieces.push(source === 'watch_loop' ? '陪看' : source)
+  const transcript = stringValue(row.transcript_source)
+  if (transcript) pieces.push(sourceLabel(transcript))
+  const visual = stringValue(row.visual_status)
+  if (visual) pieces.push(`视觉 ${visual}`)
+  return pieces.join(' · ')
 }
 
 async function refreshMemoryStatus() {
@@ -2684,6 +2815,71 @@ onBeforeUnmount(() => {
         </template>
 
         <template v-if="activeSettingsTab === 'developer'">
+          <div class="runtime-settings background-context-panel">
+            <div class="runtime-settings-head">
+              <strong>背景上下文</strong>
+              <div class="memory-head-actions">
+                <label class="memory-enable-toggle">
+                  <input type="checkbox" :checked="backgroundEnabled" :disabled="backgroundLoading" @change="toggleBackgroundEnabled" />
+                  <span>{{ backgroundEnabled ? '已开启' : '已关闭' }}</span>
+                </label>
+                <button type="button" class="memory-link-button" :disabled="backgroundLoading" @click="refreshBackgroundStatus">
+                  {{ backgroundLoading ? '同步中' : '刷新' }}
+                </button>
+                <button type="button" class="memory-link-button danger" :disabled="backgroundLoading || !backgroundRecentRows.length" @click="clearBackgroundContext">清空</button>
+              </div>
+            </div>
+            <div class="background-status-grid">
+              <article class="background-status-card" :class="{ active: backgroundActive }">
+                <span>状态</span>
+                <strong>{{ backgroundStateText }}</strong>
+                <small>{{ backgroundSummaryText }}</small>
+              </article>
+              <article class="background-status-card">
+                <span>范围</span>
+                <strong>{{ backgroundStatus?.scope_count ?? backgroundScopes.length }}</strong>
+                <small>已批准</small>
+              </article>
+              <article class="background-status-card">
+                <span>摘要</span>
+                <strong>{{ backgroundStatus?.recent_count ?? backgroundRecentRows.length }}</strong>
+                <small>{{ backgroundRetentionText }}</small>
+              </article>
+              <article class="background-status-card">
+                <span>录制</span>
+                <strong>{{ backgroundStatus?.video_recording ? '开启' : '关闭' }}</strong>
+                <small>{{ backgroundStatus?.safe_for_display === false ? '不可展示' : '安全展示' }}</small>
+              </article>
+            </div>
+            <div class="background-scope-form">
+              <select v-model="backgroundScopeType" :disabled="backgroundLoading">
+                <option value="window">窗口</option>
+                <option value="project">项目</option>
+                <option value="game">游戏</option>
+              </select>
+              <input v-model="backgroundScopeLabel" :disabled="backgroundLoading" type="text" placeholder="批准范围名称" />
+              <button type="button" :disabled="!connected || backgroundLoading" @click="configureBackgroundScope">批准</button>
+            </div>
+            <div class="background-list" v-if="backgroundScopes.length">
+              <article v-for="scope in backgroundScopes" :key="scope.id || `${scope.type}-${scope.label}`" class="background-row">
+                <header>
+                  <strong>{{ scope.label || '已批准范围' }}</strong>
+                  <span>{{ backgroundScopeMeta(scope) }}</span>
+                </header>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>暂无批准范围</p>
+            <div class="background-list recent" v-if="backgroundRecentRows.length">
+              <article v-for="row in backgroundRecentRows" :key="`${row.created_at}-${row.scope_id}`" class="background-row">
+                <header>
+                  <strong>{{ backgroundEntryTime(row) }}</strong>
+                  <span>{{ backgroundEntryMeta(row) }}</span>
+                </header>
+                <p>{{ trimText(row.summary || '', 140) }}</p>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>暂无背景摘要</p>
+          </div>
           <div class="section-title debug-title">
             <h2>开发者事件</h2>
             <span>{{ events.length }} 条</span>
