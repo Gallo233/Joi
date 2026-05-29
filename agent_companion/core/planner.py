@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sys
 import uuid
 
 from agent_companion.core.schemas import AgentPlan, ToolRequest
@@ -71,6 +72,18 @@ def build_plan(user_text: str) -> AgentPlan:
             intent="watch_together",
             steps=[ToolRequest("observe.screen", {"query": text}, "观察当前窗口或屏幕内容并生成陪看摘要。")],
         )
+    if _looks_like_open_app(text, lowered):
+        app_name = _parse_app_name(text)
+        if app_name:
+            # Use open_app action which handles Spotlight + open -a fallback internally
+            return AgentPlan(
+                task_id=task_id,
+                user_text=text,
+                intent="computer_use",
+                steps=[
+                    ToolRequest("computer.open_app", {"app_name": app_name}, f"打开应用 {app_name}。"),
+                ],
+            )
     computer_action = _build_computer_action(text, lowered)
     if computer_action is not None:
         intent = "semantic_target" if computer_action.name == "vision.resolve_target" else "computer_use"
@@ -273,9 +286,21 @@ def _build_computer_action(text: str, lowered: str) -> ToolRequest | None:
     if _looks_like_scroll(text, lowered):
         direction = "up" if any(token in text for token in ("向上", "往上", "上滚", "上滑")) else "down"
         return ToolRequest("computer.scroll", {"direction": direction, "amount": 3}, "滚动当前前台应用，需要确认。")
-    if _looks_like_click(text, lowered):
+    if _looks_like_double_click(text, lowered):
         x, y = _parse_coordinates(text)
         args: dict[str, int | str] = {}
+        if x is not None and y is not None:
+            args.update({"x": x, "y": y})
+            return ToolRequest("computer.double_click", args, "双击当前屏幕会影响前台应用，需要确认。")
+        return ToolRequest("vision.resolve_target", {"query": text, "action": "double_click"}, "先从当前画面中寻找候选区域。")
+    if _looks_like_drag(text, lowered):
+        coords = _parse_drag_coordinates(text)
+        if coords:
+            x1, y1, x2, y2 = coords
+            return ToolRequest("computer.drag", {"x": x1, "y": y1, "end_x": x2, "end_y": y2}, "拖拽操作会影响前台应用，需要确认。")
+    if _looks_like_click(text, lowered):
+        x, y = _parse_coordinates(text)
+        args = {}
         if x is not None and y is not None:
             args.update({"x": x, "y": y})
             return ToolRequest("computer.click", args, "点击当前屏幕会影响前台应用，需要确认。")
@@ -286,6 +311,14 @@ def _build_computer_action(text: str, lowered: str) -> ToolRequest | None:
 def _looks_like_click(text: str, lowered: str) -> bool:
     contextual_click = "点" in text and any(token in text for token in ("按钮", "那个", "这个", "右上", "左上", "右下", "左下", "开始", "登录", "任务"))
     return any(token in text for token in ("点击", "点一下", "鼠标点", "单击")) or contextual_click or "click" in lowered
+
+
+def _looks_like_double_click(text: str, lowered: str) -> bool:
+    return any(token in text for token in ("双击", "双点", "连点", "连击")) or "double" in lowered or "dblclick" in lowered
+
+
+def _looks_like_drag(text: str, lowered: str) -> bool:
+    return any(token in text for token in ("拖拽", "拖动", "拉动", "滑动到", "拖到")) or "drag" in lowered
 
 
 def _looks_like_type_text(text: str, lowered: str) -> bool:
@@ -307,6 +340,14 @@ def _parse_coordinates(text: str) -> tuple[int | None, int | None]:
     return int(match.group(1)), int(match.group(2))
 
 
+def _parse_drag_coordinates(text: str) -> tuple[int, int, int, int] | None:
+    """Parse drag coordinates like '100,200 到 300,400' or '100,200 -> 300,400'."""
+    match = re.search(r"(\d{1,5})\s*[,，]\s*(\d{1,5})\s*(?:到|->|→|拖到|拖至)\s*(\d{1,5})\s*[,，]\s*(\d{1,5})", text)
+    if match:
+        return int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
+    return None
+
+
 def _parse_text_payload(text: str) -> str:
     match = re.search(r"[\"“'「](.+?)[\"”'」]", text)
     if match:
@@ -321,3 +362,15 @@ def _parse_hotkey(text: str) -> list[str]:
         raw = match.group(1)
         return [part for part in re.split(r"[+\s,，-]+", raw) if part]
     return []
+
+
+def _looks_like_open_app(text: str, lowered: str) -> bool:
+    return any(token in text for token in ("打开", "启动", "运行")) or lowered.startswith("open ")
+
+
+def _parse_app_name(text: str) -> str:
+    cleaned = text
+    for prefix in ("帮我", "请", "一键", "打开", "启动", "运行", "open"):
+        cleaned = cleaned.replace(prefix, "")
+    cleaned = re.sub(r"[。！!?？，\s]", "", cleaned)
+    return cleaned.strip()

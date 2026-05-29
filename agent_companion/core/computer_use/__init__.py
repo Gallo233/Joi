@@ -11,6 +11,7 @@ from agent_companion.core.computer_use.image_compare import ScreenshotComparison
 from agent_companion.core.computer_use.schemas import ComputerAction, ComputerObservation, ComputerUseResult
 from agent_companion.core.computer_use.verification import PostActionVerification, VerificationSignals, verify_post_action
 from agent_companion.core.computer_use.windows import WindowsComputerUseBackend
+from agent_companion.core.computer_use.mac import MacComputerUseBackend
 
 __all__ = [
     "COMPUTER_AUDIT_STATE_KEY",
@@ -23,6 +24,7 @@ __all__ = [
     "ScreenshotComparison",
     "VerificationSignals",
     "WindowsComputerUseBackend",
+    "MacComputerUseBackend",
     "audit_state",
     "compare_screenshots",
     "computer_action_audit_event",

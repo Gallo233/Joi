@@ -12,9 +12,9 @@ from agent_companion.core.computer_use import (
     ComputerUseBackend,
     ComputerUseResult,
     PostActionVerification,
-    WindowsComputerUseBackend,
     verify_post_action,
 )
+from agent_companion.core.platform_factory import get_computer_backend
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.vision import OcrExtractor
@@ -36,7 +36,7 @@ class ComputerActionTool(ToolAdapter):
         self.workspace = workspace.resolve()
         self.name = name
         self.action_type = action_type
-        self.backend = backend or WindowsComputerUseBackend(workspace)
+        self.backend = backend or get_computer_backend(workspace)
         self.ocr = ocr
         self.post_action_settle_ms = max(0, int(post_action_settle_ms or 0))
         self._sleep = sleep_fn or time.sleep
@@ -68,6 +68,25 @@ class ComputerActionTool(ToolAdapter):
             if x is None or y is None:
                 return None
             return ComputerAction("click", x=x, y=y, button=str(args.get("button") or "left"))
+        if self.action_type == "double_click":
+            x = _maybe_int(args.get("x"))
+            y = _maybe_int(args.get("y"))
+            if x is None or y is None:
+                return None
+            return ComputerAction("double_click", x=x, y=y, button=str(args.get("button") or "left"))
+        if self.action_type == "drag":
+            x = _maybe_int(args.get("x"))
+            y = _maybe_int(args.get("y"))
+            end_x = _maybe_int(args.get("end_x"))
+            end_y = _maybe_int(args.get("end_y"))
+            if x is None or y is None or end_x is None or end_y is None:
+                return None
+            return ComputerAction("drag", x=x, y=y, end_x=end_x, end_y=end_y, button=str(args.get("button") or "left"))
+        if self.action_type == "open_app":
+            app_name = str(args.get("app_name") or "").strip()
+            if not app_name:
+                return None
+            return ComputerAction("open_app", app_name=app_name)
         if self.action_type == "type_text":
             text = str(args.get("text") or "").strip()
             if not text:
@@ -182,9 +201,12 @@ def _parse_keys(value: Any) -> tuple[str, ...]:
 def _action_label(action_type: str) -> str:
     labels = {
         "click": "点击指定位置",
+        "double_click": "双击指定位置",
+        "drag": "拖拽操作",
         "type_text": "输入一段文字",
         "scroll": "滚动画面",
         "hotkey": "按下快捷键",
+        "open_app": "打开应用",
     }
     return labels.get(action_type, "电脑操作")
 

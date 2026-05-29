@@ -71,6 +71,24 @@ class UnavailableAccessibilityObserver:
         return AccessibilitySnapshot("unavailable", title=title, window_handle=window_handle, error=self.reason)
 
 
+class MacAccessibilityObserver:
+    """macOS accessibility observer using AXUIElement + AppleScript fallback.
+
+    Import is deferred to the module to avoid loading ctypes on non-macOS platforms.
+    """
+
+    def __init__(self, max_depth: int = 5, max_elements: int = 100) -> None:
+        self._max_depth = max_depth
+        self._max_elements = max_elements
+        self._inner: Any = None
+
+    def observe(self, window_handle: int | None = None, title: str = "") -> AccessibilitySnapshot:
+        if self._inner is None:
+            from agent_companion.core.vision.mac_accessibility import MacAccessibilityObserver as _MacObs
+            self._inner = _MacObs(max_depth=self._max_depth, max_elements=self._max_elements)
+        return self._inner.observe(window_handle=window_handle, title=title)
+
+
 class WindowsAccessibilityObserver:
     def __init__(self, max_depth: int = 4, max_elements: int = 120) -> None:
         self.max_depth = max(1, int(max_depth))

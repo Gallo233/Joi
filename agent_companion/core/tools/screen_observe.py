@@ -4,10 +4,11 @@ from pathlib import Path
 import time
 from typing import Any
 
-from agent_companion.core.computer_use import ComputerUseBackend, WindowsComputerUseBackend
+from agent_companion.core.computer_use import ComputerUseBackend
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.tools.base import ToolAdapter
-from agent_companion.core.vision import OcrExtractor, PytesseractOcrExtractor, VisionObserver, VisionSummarizer, WindowsScreenObserver
+from agent_companion.core.platform_factory import get_computer_backend, get_screen_observer
+from agent_companion.core.vision import OcrExtractor, PytesseractOcrExtractor, VisionObserver, VisionSummarizer
 from agent_companion.core.vision.ocr import OcrResult, run_ocr_safely
 from agent_companion.core.vision.regions import group_ocr_regions, regions_to_agent_state, summarize_ocr_regions
 from agent_companion.core.vision.schemas import VisionObservation
@@ -28,8 +29,8 @@ class ScreenObserveTool(ToolAdapter):
         audio_transcriber: AudioTranscriptProvider | None = None,
     ) -> None:
         self.workspace = workspace
-        self.observer = observer or WindowsScreenObserver(workspace)
-        self.computer_backend = computer_backend or WindowsComputerUseBackend(workspace, self.observer)
+        self.observer = observer or get_screen_observer(workspace)
+        self.computer_backend = computer_backend or get_computer_backend(workspace, self.observer)
         self.summarizer = summarizer
         self.ocr = ocr or PytesseractOcrExtractor()
         self.audio_transcriber = audio_transcriber

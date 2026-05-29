@@ -13,6 +13,7 @@ from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionS
 from agent_companion.core.vision.targeting import TargetCandidate, resolve_target_candidates
 from agent_companion.core.vision.visual_detector import HeuristicVisualDetector, UnavailableVisualDetector, VisualCandidate, VisualDetectionResult, VisualDetector
 from agent_companion.core.vision.windows import WindowsScreenObserver
+from agent_companion.core.vision.mac import MacScreenObserver
 
 __all__ = [
     "MockSummarizer",
@@ -39,6 +40,7 @@ __all__ = [
     "HeuristicVisualDetector",
     "UnavailableVisualDetector",
     "WindowsScreenObserver",
+    "MacScreenObserver",
     "WindowsAccessibilityObserver",
     "group_ocr_regions",
     "regions_to_agent_state",

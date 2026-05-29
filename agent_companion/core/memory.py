@@ -150,17 +150,35 @@ class MemoryStore:
             ).fetchall()
         return [_memory_row(row) for row in rows]
 
-    def context(self, limit: int = 8) -> list[dict[str, Any]]:
+    def context(self, limit: int = 8, query: str = "") -> list[dict[str, Any]]:
         if not self.enabled():
             return []
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
+
+        # If query provided, use FTS5 semantic recall first
+        if query:
+            for mem in self.recall(query, limit=limit):
+                cleaned = _clean_memory_text(str(mem.get("text") or ""))
+                if not cleaned or cleaned in seen:
+                    continue
+                rows.append({
+                    "kind": str(mem.get("kind") or "note"),
+                    "text": cleaned[:400],
+                    "source": "semantic_recall",
+                    "relevance": mem.get("relevance", 0),
+                })
+                seen.add(cleaned)
+
+        # Vault notes
         for note in self._manual_vault_notes(limit=limit):
             cleaned = _clean_memory_text(note)
             if not cleaned or _rejection_reason(cleaned) or cleaned in seen:
                 continue
             rows.append({"kind": "vault", "text": cleaned[:400], "source": "vault"})
             seen.add(cleaned)
+
+        # Recent memories
         for memory in self.recent(limit):
             text = str(memory.get("text") or "")
             cleaned = _clean_memory_text(text)
@@ -178,6 +196,56 @@ class MemoryStore:
                 break
         return rows[: max(1, int(limit or 8))]
 
+    def browse_vault(self) -> dict[str, Any]:
+        """Return vault content as structured data for frontend browsing."""
+        try:
+            content = self.vault_path.read_text(encoding="utf-8") if self.vault_path.exists() else ""
+        except Exception:
+            content = ""
+        sections: list[dict[str, Any]] = []
+        current_section = ""
+        current_lines: list[str] = []
+        for line in content.split("\n"):
+            if line.startswith("## "):
+                if current_section:
+                    sections.append({"title": current_section, "lines": current_lines})
+                current_section = line[3:].strip()
+                current_lines = []
+            elif line.startswith("# "):
+                continue  # skip h1
+            else:
+                current_lines.append(line)
+        if current_section:
+            sections.append({"title": current_section, "lines": current_lines})
+        return {
+            "path": str(self.vault_path),
+            "exists": self.vault_path.exists(),
+            "sections": sections,
+            "raw": content,
+        }
+
+    def remember_preference(self, key: str, value: str) -> dict[str, Any] | None:
+        """Store a user preference (e.g., 'theme', 'dark')."""
+        return self.remember("preference", f"{key}: {value}", source="preference")
+
+    def remember_fact(self, fact: str, topic: str = "") -> dict[str, Any] | None:
+        """Store a factual note about a topic."""
+        kind = f"fact:{topic}" if topic else "fact"
+        return self.remember(kind, fact, source="fact")
+
+    def remember_relationship(self, entity: str, note: str) -> dict[str, Any] | None:
+        """Store a relationship note (e.g., 'Alice: colleague who likes Python')."""
+        return self.remember("relationship", f"{entity}: {note}", source="relationship")
+
+    def search_by_kind(self, kind_prefix: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search memories by kind prefix (e.g., 'preference', 'fact', 'relationship')."""
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(
+                "select kind, text, source, created_at from memories where kind like ? and ephemeral = 0 and sensitive = 0 order by id desc limit ?",
+                (f"{kind_prefix}%", limit),
+            ).fetchall()
+        return [{"kind": k, "text": t, "source": s, "created_at": c} for k, t, s, c in rows]
+
     def enabled(self) -> bool:
         with sqlite3.connect(self.path) as db:
             row = db.execute("select value from memory_settings where key = 'enabled'").fetchone()
@@ -190,6 +258,31 @@ class MemoryStore:
                 ("1" if enabled else "0", time.time()),
             )
         return self.status()
+
+    def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Semantic recall: find memories related to query using FTS5."""
+        cleaned_query = " ".join((query or "").split()).strip()
+        if not cleaned_query:
+            return self.recent(limit)
+        try:
+            with sqlite3.connect(self.path) as db:
+                words = [w for w in cleaned_query.split() if len(w) > 1]
+                fts_query = " OR ".join(f'"{w}"' for w in words) if words else f'"{cleaned_query}"'
+                rows = db.execute(
+                    """SELECT m.kind, m.text, m.created_at, rank
+                       FROM memories_fts fts
+                       JOIN memories m ON m.id = fts.rowid
+                       WHERE memories_fts MATCH ?
+                         AND m.ephemeral = 0 AND m.sensitive = 0
+                       ORDER BY rank LIMIT ?""",
+                    (fts_query, limit),
+                ).fetchall()
+            return [
+                {"kind": kind, "text": text, "created_at": created_at, "relevance": -rank}
+                for kind, text, created_at, rank in rows
+            ]
+        except Exception:
+            return self.recent(limit)
 
     def status(self, *, recent_limit: int = 8, pending_limit: int = 8) -> dict[str, Any]:
         return {
@@ -286,6 +379,28 @@ class MemoryStore:
                 db.execute("alter table memories add column sensitive integer not null default 0")
             if "source" not in columns:
                 db.execute("alter table memories add column source text not null default 'legacy'")
+            if "importance" not in columns:
+                db.execute("alter table memories add column importance real not null default 0.5")
+            if "tags" not in columns:
+                db.execute("alter table memories add column tags text not null default '[]'")
+            # FTS5 full-text search index
+            try:
+                db.execute(
+                    """
+                    create virtual table if not exists memories_fts using fts5(
+                        kind, text,
+                        content='memories',
+                        content_rowid='id'
+                    )
+                    """
+                )
+                db.execute("""
+                    INSERT INTO memories_fts(rowid, kind, text)
+                    SELECT id, kind, text FROM memories
+                    WHERE id NOT IN (SELECT rowid FROM memories_fts)
+                """)
+            except Exception:
+                pass
             db.execute(
                 """
                 create table if not exists memory_candidates(

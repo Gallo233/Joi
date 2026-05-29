@@ -65,7 +65,7 @@ Status: in progress
 
 ## P4 Watch Together Loop
 
-Status: closeout prep
+Status: done
 
 - Watch together: observe visible content, summarize, and discuss. Screen capture and optional visual model summarization are connected.
 - Keep recent watch context in the session: user question, window title, summary, screenshot artifact, and model status.
@@ -87,7 +87,7 @@ Remaining P4 closeout risks:
 
 ## P5 Memory Core
 
-Status: in progress
+Status: done
 
 - Add local SQLite storage for user preferences, project summaries, game habits, recent task outcomes, and companion relationship notes.
 - Add human-readable Markdown summaries for durable handoff, similar to a local memory vault.
@@ -97,7 +97,7 @@ Status: in progress
 
 ## P6 JoiJuice Tool Compression
 
-Status: planned
+Status: done
 
 - Centralize tool-result splitting into `agent_state`, `display_card`, `voice_line`, `memory_candidate`, and `audit_log`.
 - Compress large tool outputs before they reach planner/model context.
@@ -115,7 +115,7 @@ Status: in progress
 
 ## P8 Voice, Expression, And Skill Manifest
 
-Status: in progress
+Status: done
 
 - Add click-to-record voice input. Shell recording, explicit ASR readiness, transcript display, OpenAI-compatible ASR, payload limits, and JSON-RPC routing are connected.
 - Harden voice runtime safety: oversized base64 is rejected before decode, recorded blobs are size-checked before upload, and ASR timeout/error paths produce friendly task cards.

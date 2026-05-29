@@ -70,12 +70,14 @@ class JsonRpcBridge:
         self.loop = asyncio.get_running_loop()
         self.queue = asyncio.Queue()
         self.app.bus.subscribe(self._on_event)
+        self.app.start_subconscious()
         async with websockets.serve(self._client_handler, self.host, self.port):
             print(f"Joi Core listening on ws://{self.host}:{self.port}")
             pump = asyncio.create_task(self._event_pump())
             try:
                 await asyncio.Future()
             finally:
+                self.app.stop_subconscious()
                 self.watch_loop.stop(emit=False)
                 pump.cancel()
                 self.tts.shutdown()
@@ -150,6 +152,55 @@ class JsonRpcBridge:
             if method == "memory.clear":
                 result = self.memory_clear_command()
                 await websocket.send(self._result(request_id, result))
+                return
+
+            if method == "memory.recall":
+                query = str((params or {}).get("query") or "").strip()
+                limit = _safe_int((params or {}).get("limit")) or 5
+                entries = self.app.memory.recall(query, limit=limit)
+                await websocket.send(self._result(request_id, {"ok": True, "entries": entries}))
+                return
+
+            if method == "memory.browse_vault":
+                vault = self.app.memory.browse_vault()
+                await websocket.send(self._result(request_id, {"ok": True, "vault": vault}))
+                return
+
+            if method == "memory.search_by_kind":
+                kind_prefix = str((params or {}).get("kind") or "").strip()
+                limit = _safe_int((params or {}).get("limit")) or 10
+                entries = self.app.memory.search_by_kind(kind_prefix, limit=limit)
+                await websocket.send(self._result(request_id, {"ok": True, "entries": entries}))
+                return
+
+            if method == "memory.context":
+                limit = _safe_int((params or {}).get("limit")) or 8
+                query = str((params or {}).get("query") or "").strip()
+                entries = self.app.memory.context(limit=limit, query=query)
+                await websocket.send(self._result(request_id, {"ok": True, "entries": entries}))
+                return
+
+            if method == "subconscious.start":
+                self.app.start_subconscious()
+                await websocket.send(self._result(request_id, {"ok": True, "state": self.app.subconscious.snapshot().to_dict()}))
+                return
+
+            if method == "subconscious.stop":
+                self.app.stop_subconscious()
+                await websocket.send(self._result(request_id, {"ok": True, "state": self.app.subconscious.snapshot().to_dict()}))
+                return
+
+            if method == "subconscious.status":
+                await websocket.send(self._result(request_id, {"ok": True, "state": self.app.subconscious.snapshot().to_dict()}))
+                return
+
+            if method == "skills.list":
+                await websocket.send(self._result(request_id, {"ok": True, "skills": self.app.skills.to_dict()}))
+                return
+
+            if method == "skills.available":
+                available = [s.to_dict() for s in self.app.skills.available()]
+                await websocket.send(self._result(request_id, {"ok": True, "skills": available}))
                 return
             if method == "approval.resolve":
                 approval_id = str(params.get("approval_id") or "")
@@ -551,6 +602,8 @@ class JsonRpcBridge:
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
             "memory": self.app.memory.status(),
+            "skills": self.app.skills.to_dict(),
+            "subconscious": self.app.subconscious.snapshot().to_dict(),
             "character": {
                 "name": self.app.character.name,
                 "sprites": [],

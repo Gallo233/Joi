@@ -15,8 +15,22 @@ const ready = ref<CoreReadyPayload | null>(null)
 const failedImageSrc = ref('')
 const previewArtifact = ref('')
 const previewArtifactEvent = ref<AgentEvent | null>(null)
-const activeCabin = ref<'workspace' | 'chat' | 'inspector'>('workspace')
+const activeCabin = ref<'workspace' | 'chat' | 'inspector' | 'memory'>('workspace')
 const artifactDialog = ref<HTMLDialogElement | null>(null)
+
+// ---- Settings Panel Navigation ----
+type SettingsTabId = 'execution' | 'voice' | 'memory' | 'plugins' | 'appearance' | 'security' | 'about'
+const activeSettingsTab = ref<SettingsTabId>('execution')
+const settingsTabs: { id: SettingsTabId; icon: string; label: string; description: string }[] = [
+  { id: 'execution', icon: '⚡', label: '执行模式', description: '模型路由与提供商状态。在本机 CLI 与 BYOK 之间选择。' },
+  { id: 'voice', icon: '🎙️', label: '语音', description: '语音识别与合成设置。ASR/TTS 配置与状态。' },
+  { id: 'memory', icon: '🧠', label: '记忆', description: '语义记忆搜索、候选审批与仓库浏览。' },
+  { id: 'plugins', icon: '🧩', label: '技能', description: '原生技能清单、插件与 MCP 服务器。' },
+  { id: 'appearance', icon: '🎨', label: '外观', description: '个性化装扮、配件与显示偏好。' },
+  { id: 'security', icon: '🔒', label: '安全', description: '安全策略、参数限制与审计设置。' },
+  { id: 'about', icon: 'ℹ️', label: '关于', description: '版本信息、连接状态与项目链接。' },
+]
+const currentSettingsTab = computed(() => settingsTabs.find(t => t.id === activeSettingsTab.value))
 const memoryStatus = ref<MemoryStatus | null>(null)
 
 const isCompactMode = ref(false)
@@ -28,6 +42,75 @@ const watchProactiveEnabled = ref(true)
 const watchCommentaryInterval = ref(30)
 const watchVisionInterval = ref(5)
 let miniSpeechTimer: number | null = null
+
+// ---- Mascot Mood State Machine (inspired by OpenHuman) ----
+type MascotMood = 'idle' | 'thinking' | 'listening' | 'talking' | 'surprised' | 'dreaming'
+const mascotMood = ref<MascotMood>('idle')
+const moodTransitionTimer = ref<number | null>(null)
+const subconsciousActive = ref(false)
+
+function deriveMoodFromEvents(): MascotMood {
+  const latest = events.value[events.value.length - 1]
+  if (!latest) return 'idle'
+  const t = latest.type
+  const status = latest.display_card?.status
+  if (t === 'user_message') return 'listening'
+  if (t === 'plan_created' || t === 'tool_started') return 'thinking'
+  if (t === 'tool_completed') { if (status === 'success') return 'talking'; if (status === 'failed') return 'surprised' }
+  if (t === 'approval_required') return 'surprised'
+  if (t === 'task_completed') return 'talking'
+  if (t === 'task_failed') return 'surprised'
+  return 'idle'
+}
+
+watch(events, () => {
+  const newMood = deriveMoodFromEvents()
+  if (newMood !== mascotMood.value) {
+    mascotMood.value = newMood
+    if (moodTransitionTimer.value) clearTimeout(moodTransitionTimer.value)
+    if (newMood !== 'thinking' && newMood !== 'listening') {
+      moodTransitionTimer.value = window.setTimeout(() => { mascotMood.value = 'idle'; moodTransitionTimer.value = null }, newMood === 'talking' ? 5000 : 3000)
+    }
+  }
+}, { deep: true })
+
+let idleTimer: number | null = null
+watch(mascotMood, (mood) => {
+  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
+  if (mood === 'idle') { idleTimer = window.setTimeout(() => { mascotMood.value = 'dreaming'; subconsciousActive.value = true }, 30000) }
+  else { subconsciousActive.value = false }
+})
+
+const moodIcon = computed(() => ({ idle: '😊', thinking: '🤔', listening: '👂', talking: '💬', surprised: '😮', dreaming: '💤' }[mascotMood.value] || '😊'))
+const moodLabel = computed(() => ({ idle: '空闲', thinking: '思考中', listening: '倾听', talking: '说话中', surprised: '惊讶', dreaming: '发呆' }[mascotMood.value] || '空闲'))
+
+// ---- Memory Panel ----
+interface MemoryEntry { kind: string; text: string; importance: number; tags: string[]; created_at: number; relevance?: number }
+const memoryQuery = ref('')
+const memoryEntries = ref<MemoryEntry[]>([])
+const vaultContent = ref<any>(null)
+async function searchMemory() {
+  const q = memoryQuery.value.trim()
+  try { const r = await coreClient.value?.rpc(q ? 'memory.recall' : 'memory.recent', q ? { query: q, limit: 10 } : { limit: 20 }); if (r?.entries) memoryEntries.value = r.entries } catch { memoryEntries.value = [] }
+}
+async function browseVault() {
+  try { const r = await coreClient.value?.rpc('memory.browse_vault', {}); if (r?.vault) vaultContent.value = r.vault } catch { vaultContent.value = null }
+}
+function formatMemoryTime(ts: number): string {
+  if (!ts) return ''; const d = new Date(ts * 1000), now = new Date(), diff = now.getTime() - d.getTime()
+  if (diff < 60000) return '刚刚'; if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`; if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`; return d.toLocaleDateString('zh-CN')
+}
+watch(activeCabin, (cabin) => { if (cabin === 'memory' && memoryEntries.value.length === 0) searchMemory() })
+
+// ---- Plugin List & Model Router ----
+const pluginList = computed(() => (ready.value?.tools || []).map((t: any) => ({ name: t.name, adapter: t.adapter, plugin: t.plugin || '' })))
+const skillManifest = computed(() => ready.value?.skills || { total: 0, available: 0, skills: [] })
+function skillIcon(category: string): string {
+  const icons: Record<string, string> = { coding: '💻', vision: '👁️', computer_use: '🖱️', memory: '🧠', watch: '📺', browser: '🌐', game: '🎮', chat: '💬', voice: '🎙️' }
+  return icons[category] || '⚡'
+}
+const modelRouteLabel = computed(() => ready.value?.runtime?.model || '未配置')
+const modelRoutes = computed(() => { const r = ready.value?.runtime; if (!r) return []; return [{ label: 'fast', model: r.model || '' }, { label: 'vision', model: r.vision_model || r.model || '' }, { label: 'expression', model: r.expression_model || '' }].filter(r => r.model) })
 
 async function toggleCompactMode() {
   const nextCompactMode = !isCompactMode.value
@@ -2214,184 +2297,229 @@ onBeforeUnmount(() => {
         </form>
       </section>
 
-      <section class="debug-section" v-if="activeCabin === 'inspector'">
-        <!-- Closet Wardrobe -->
-        <div class="runtime-settings" style="margin-bottom: 20px;">
-          <div class="runtime-settings-head">
-            <strong>个性化装扮 (Cosplay Closet)</strong>
-            <span>点击进行穿戴</span>
-          </div>
-          <div class="closet-grid">
-            <button
-              type="button"
-              class="accessory-card"
-              :class="{ equipped: equippedAccessories.hat }"
-              @click="toggleAccessory('hat')"
-            >
-              🎓 巫师帽
-            </button>
-            <button
-              type="button"
-              class="accessory-card"
-              :class="{ equipped: equippedAccessories.glasses }"
-              @click="toggleAccessory('glasses')"
-            >
-              🕶️ 酷墨镜
-            </button>
-            <button
-              type="button"
-              class="accessory-card"
-              :class="{ equipped: equippedAccessories.ears }"
-              @click="toggleAccessory('ears')"
-            >
-              🐰 兔耳朵
-            </button>
-          </div>
-        </div>
-
-        <div class="runtime-settings memory-settings">
-          <div class="runtime-settings-head">
-            <strong>记忆舱</strong>
-            <div class="memory-head-actions">
-              <label class="memory-enable-toggle">
-                <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
-                <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
-              </label>
-              <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
-              <button type="button" class="memory-link-button danger" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
-            </div>
-          </div>
-          <p class="memory-disabled-note" v-if="!memoryEnabled">长期记忆已关闭，新候选不会写入待确认队列。</p>
-          <div class="memory-vault-path" v-if="memoryStatus?.vault_path">{{ memoryStatus.vault_path }}</div>
-          <div class="memory-list" v-if="pendingMemories.length">
-            <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
-              <div>
-                <strong>{{ candidate.kind || 'note' }}</strong>
-                <p>{{ candidate.text }}</p>
-                <span>{{ candidate.source || 'candidate' }}</span>
-              </div>
-              <div class="memory-actions">
-                <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
-                <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
-              </div>
-            </article>
-          </div>
-          <div class="memory-list" v-if="recentMemories.length">
-            <article v-for="memory in recentMemories" :key="memory.id" class="memory-row">
-              <div>
-                <strong>{{ memory.kind || 'note' }}</strong>
-                <p>{{ memory.text }}</p>
-                <span>{{ memory.source || 'manual' }}</span>
-              </div>
-              <button type="button" class="memory-delete" @click="deleteMemory(memory.id)">删除</button>
-            </article>
-          </div>
-          <p class="memory-empty" v-if="!pendingMemories.length && !recentMemories.length">暂无长期记忆</p>
-        </div>
-
+      <!-- Memory Cabin (Hermes-enhanced semantic search) -->
+      <section class="memory-section" v-if="activeCabin === 'memory'" style="padding: 0 4px;">
         <div class="section-title">
-          <h2>运行设置</h2>
-          <span>{{ ready?.runtime?.read_only ? '只读' : '状态' }}</span>
+          <h2>🧠 语义记忆</h2>
+          <span>{{ memoryEntries.length }} 条</span>
         </div>
-        <div class="provider-grid">
-          <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
-            <header>
-              <strong>{{ row.label || row.name }}</strong>
-              <span>{{ providerStateLabel(row.state) }}</span>
-            </header>
-            <p>{{ providerSummary(row) }}</p>
-            <div class="provider-meta" v-if="providerMeta(row).length">
-              <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+        <div style="display:flex;gap:8px;margin-bottom:12px;">
+          <input v-model="memoryQuery" type="text" placeholder="搜索记忆... (语义检索)" class="memory-search-input" style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--glass-inner-border);background:var(--glass-panel-bg);font-size:12px;" @keydown.enter="searchMemory" />
+          <button type="button" class="settings-btn-secondary" @click="searchMemory">搜索</button>
+        </div>
+        <div v-if="memoryEntries.length" style="display:flex;flex-direction:column;gap:8px;max-height:400px;overflow-y:auto;">
+          <div v-for="(mem, idx) in memoryEntries" :key="idx" style="padding:10px 12px;border-radius:10px;background:var(--glass-panel-bg);border:1px solid var(--glass-inner-border);">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+              <span style="font-size:10px;font-weight:600;color:var(--color-primary);background:var(--color-primary-glow);padding:2px 6px;border-radius:4px;">{{ mem.kind }}</span>
+              <span style="font-size:10px;color:#9ca3af;">{{ formatMemoryTime(mem.created_at) }}</span>
+            </div>
+            <p style="font-size:12px;color:#374151;line-height:1.5;margin:0;">{{ mem.text }}</p>
+          </div>
+        </div>
+        <div v-else style="text-align:center;padding:40px 20px;color:#9ca3af;font-size:12px;">
+          <p>暂无记忆。对话中的重要信息会被自动保存。</p>
+        </div>
+      </section>
+
+      <!-- Settings Panel (Integrated Design) -->
+      <section class="settings-panel" v-if="activeCabin === 'inspector'">
+        <nav class="settings-nav">
+          <div class="settings-nav-header">设置</div>
+          <button v-for="tab in settingsTabs" :key="tab.id" type="button" class="settings-nav-item" :class="{ active: activeSettingsTab === tab.id }" @click="activeSettingsTab = tab.id">
+            <span class="settings-nav-icon">{{ tab.icon }}</span>
+            <span class="settings-nav-label">{{ tab.label }}</span>
+          </button>
+        </nav>
+        <div class="settings-content">
+          <div class="settings-content-header">
+            <h2>{{ currentSettingsTab?.label }}</h2>
+            <p>{{ currentSettingsTab?.description }}</p>
+          </div>
+
+          <!-- 执行模式 -->
+          <div v-if="activeSettingsTab === 'execution'" class="settings-section">
+            <div class="settings-group">
+              <div class="settings-group-title">当前模型</div>
+              <div class="settings-model-card">
+                <div class="model-card-row" v-for="r in modelRoutes" :key="r.label">
+                  <span class="model-card-label">{{ r.label }}</span>
+                  <span class="model-card-value">{{ r.model || '—' }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="settings-group">
+              <div class="settings-group-title">提供商状态 · 运行设置</div>
+              <div class="settings-provider-list">
+                <div v-for="row in runtimeStatusRows()" :key="row.name" class="settings-provider-item provider-card" :class="row.state">
+                  <div class="provider-dot" :class="row.state"></div>
+                  <div class="provider-info">
+                    <span class="provider-name">{{ row.label || row.name }}</span>
+                    <span class="provider-desc">{{ providerSummary(row) }}</span>
+                  </div>
+                  <span class="provider-state-badge" :class="row.state">{{ providerStateLabel(row.state) }}</span>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="runtime-settings">
-          <div class="runtime-settings-head">
-            <strong>安全设置</strong>
-            <span>非密钥字段</span>
-          </div>
-          <div class="runtime-controls">
-            <label>
-              <span>ASR</span>
-              <input v-model="runtimeDraft.asr_enabled" type="checkbox" @change="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>ASR 时长</span>
-              <input v-model.number="runtimeDraft.asr_max_seconds" type="number" min="1" max="600" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>ASR 体积</span>
-              <input v-model.number="runtimeDraft.asr_max_bytes" type="number" min="1024" step="1024" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>ASR 超时</span>
-              <input v-model.number="runtimeDraft.asr_timeout_seconds" type="number" min="1" max="300" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>TTS</span>
-              <input v-model="runtimeDraft.tts_enabled" type="checkbox" @change="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>音量</span>
-              <input v-model.number="runtimeDraft.tts_volume" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>语速</span>
-              <input v-model.number="runtimeDraft.tts_speed_factor" type="number" min="0.5" max="2" step="0.05" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>系统回退</span>
-              <input v-model="runtimeDraft.tts_fallback_to_system" type="checkbox" @change="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>OCR 超时</span>
-              <input v-model.number="runtimeDraft.ocr_timeout_seconds" type="number" min="1" max="120" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>温度</span>
-              <input v-model.number="runtimeDraft.llm_temperature" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>Mock 模型</span>
-              <input v-model="runtimeDraft.llm_use_mock" type="checkbox" @change="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>操作等待</span>
-              <input v-model.number="runtimeDraft.computer_post_action_settle_ms" type="number" min="0" max="10000" step="25" @input="markRuntimeDraftDirty" />
-            </label>
-          </div>
-          <div class="runtime-actions">
-            <button type="button" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">
-              {{ runtimePreviewLoading ? '预览中' : '预览' }}
-            </button>
-            <button type="button" class="secondary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">
-              {{ runtimeApplyLoading ? '提交中' : '提交审批' }}
-            </button>
-          </div>
-          <div class="runtime-preview" v-if="runtimePreview">
-            <p>{{ runtimePreview.summary }}</p>
-            <div class="runtime-preview-list" v-if="runtimePreview.changes?.length">
-              <span v-for="change in runtimePreview.changes" :key="change.setting">
-                <strong>{{ change.label }}</strong>{{ runtimeChangeActionLabel(change.action) }} · {{ runtimeValueKindLabel(change.value_kind) }}
-              </span>
+
+          <!-- 语音 -->
+          <div v-if="activeSettingsTab === 'voice'" class="settings-section">
+            <div class="settings-group">
+              <div class="settings-group-title">语音识别 (ASR)</div>
+              <div class="settings-toggle-row"><span>启用 ASR</span><label class="settings-switch"><input v-model="runtimeDraft.asr_enabled" type="checkbox" @change="markRuntimeDraftDirty" /><span class="settings-switch-slider"></span></label></div>
+              <div class="settings-input-row"><span>最大时长 (秒)</span><input v-model.number="runtimeDraft.asr_max_seconds" type="number" min="1" max="600" class="settings-number-input" @input="markRuntimeDraftDirty" /></div>
+              <div class="settings-input-row"><span>超时 (秒)</span><input v-model.number="runtimeDraft.asr_timeout_seconds" type="number" min="1" max="300" class="settings-number-input" @input="markRuntimeDraftDirty" /></div>
             </div>
-            <div class="runtime-preview-list failed" v-if="runtimePreview.errors?.length">
-              <span v-for="error in runtimePreview.errors" :key="`${error.setting}-${error.code}`">
-                <strong>{{ error.setting }}</strong>{{ providerErrorLabel(error.code) || '无法应用' }}
-              </span>
+            <div class="settings-group">
+              <div class="settings-group-title">语音合成 (TTS)</div>
+              <div class="settings-toggle-row"><span>启用 TTS</span><label class="settings-switch"><input v-model="runtimeDraft.tts_enabled" type="checkbox" @change="markRuntimeDraftDirty" /><span class="settings-switch-slider"></span></label></div>
+              <div class="settings-input-row"><span>音量</span><input v-model.number="runtimeDraft.tts_volume" type="range" min="0" max="2" step="0.05" class="settings-range" @input="markRuntimeDraftDirty" /><span class="settings-range-value">{{ (runtimeDraft.tts_volume * 100).toFixed(0) }}%</span></div>
+              <div class="settings-input-row"><span>语速</span><input v-model.number="runtimeDraft.tts_speed_factor" type="range" min="0.5" max="2" step="0.05" class="settings-range" @input="markRuntimeDraftDirty" /><span class="settings-range-value">{{ runtimeDraft.tts_speed_factor?.toFixed(1) }}x</span></div>
+              <div class="settings-toggle-row"><span>系统 TTS 回退</span><label class="settings-switch"><input v-model="runtimeDraft.tts_fallback_to_system" type="checkbox" @change="markRuntimeDraftDirty" /><span class="settings-switch-slider"></span></label></div>
             </div>
           </div>
-        </div>
-        <div class="section-title debug-title">
-          <h2>开发者事件</h2>
-          <span>{{ events.length }} 条</span>
-        </div>
-        <div class="debug-list">
-          <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">
-            <span>{{ eventTime(event) }}</span>
-            <strong>{{ event.type }}</strong>
-            <code>{{ toolName(event) || intentName(event) || event.display_card.status }}</code>
-            <p>{{ event.display_card.summary }}</p>
+
+          <!-- 记忆 -->
+          <div v-if="activeSettingsTab === 'memory'" class="settings-section">
+            <div class="settings-group">
+              <div class="settings-group-title">记忆舱</div>
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+                <label class="memory-enable-toggle" style="display:flex;align-items:center;gap:4px;font-size:12px;">
+                  <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
+                  <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
+                </label>
+                <button type="button" class="settings-btn-secondary" @click="refreshMemoryStatus">刷新</button>
+                <button type="button" class="settings-btn-secondary" style="color:var(--color-error);" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
+              </div>
+              <p v-if="!memoryEnabled" style="font-size:11px;color:#9ca3af;margin-bottom:8px;">长期记忆已关闭，新候选不会写入待确认队列。</p>
+              <div v-if="memoryStatus?.vault_path" style="font-size:10px;color:#9ca3af;font-family:monospace;margin-bottom:8px;">{{ memoryStatus.vault_path }}</div>
+
+              <!-- Pending Candidates -->
+              <div v-if="pendingMemories.length" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;">
+                <div v-for="candidate in pendingMemories" :key="candidate.id" class="memory-authorize-bubble" style="padding:8px 10px;border-radius:8px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.2);">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                    <span style="font-size:10px;font-weight:600;color:#d97706;">{{ candidate.kind || 'note' }}</span>
+                    <span style="font-size:10px;color:#9ca3af;">{{ candidate.source || 'candidate' }}</span>
+                  </div>
+                  <p style="font-size:11px;color:#374151;margin:0 0 6px;">{{ candidate.text }}</p>
+                  <div style="display:flex;gap:6px;">
+                    <button type="button" class="settings-btn-primary" style="padding:4px 12px;font-size:10px;" @click="saveMemoryCandidate(candidate.id)">记住</button>
+                    <button type="button" class="settings-btn-secondary" style="padding:4px 12px;font-size:10px;" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Semantic Search -->
+              <div style="display:flex;gap:8px;margin-bottom:12px;">
+                <input v-model="memoryQuery" type="text" placeholder="语义搜索记忆..." style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--glass-inner-border);font-size:12px;" @keydown.enter="searchMemory" />
+                <button type="button" class="settings-btn-secondary" @click="searchMemory">搜索</button>
+              </div>
+
+              <!-- Recent Memories -->
+              <div v-if="recentMemories.length || memoryEntries.length" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto;">
+                <div v-for="(mem, idx) in (memoryEntries.length ? memoryEntries : recentMemories)" :key="idx" style="padding:8px 10px;border-radius:8px;background:rgba(0,0,0,0.02);">
+                  <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+                    <span style="font-size:10px;font-weight:600;color:var(--color-primary);">{{ mem.kind || 'note' }}</span>
+                    <div style="display:flex;gap:6px;align-items:center;">
+                      <span style="font-size:10px;color:#9ca3af;">{{ formatMemoryTime(mem.created_at) }}</span>
+                      <button v-if="mem.id" type="button" style="font-size:9px;color:var(--color-error);background:none;border:none;cursor:pointer;" @click="deleteMemory(mem.id)">删除</button>
+                    </div>
+                  </div>
+                  <p style="font-size:11px;color:#374151;margin:0;">{{ mem.text }}</p>
+                </div>
+              </div>
+              <p v-else style="font-size:11px;color:#9ca3af;padding:8px 0;">暂无长期记忆。对话中的重要信息会被自动保存。</p>
+
+              <!-- Vault Browser -->
+              <div v-if="vaultContent?.sections?.length" style="margin-top:12px;border-top:1px solid rgba(0,0,0,0.06);padding-top:12px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                  <span style="font-size:11px;font-weight:600;color:#374151;">📖 记忆仓库</span>
+                  <button type="button" class="settings-btn-secondary" style="padding:2px 8px;font-size:9px;" @click="browseVault">{{ vaultContent ? '刷新' : '加载' }}</button>
+                </div>
+                <div v-for="(section, si) in vaultContent.sections" :key="si" style="margin-bottom:8px;">
+                  <div style="font-size:10px;font-weight:600;color:#6b7280;margin-bottom:4px;">{{ section.title }}</div>
+                  <div v-for="(line, li) in section.lines.filter(l => l.trim())" :key="li" style="font-size:10px;color:#374151;padding:2px 0;border-bottom:1px solid rgba(0,0,0,0.02);">{{ line }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 插件 & 技能 -->
+          <div v-if="activeSettingsTab === 'plugins'" class="settings-section">
+            <div class="settings-group">
+              <div class="settings-group-title">原生技能 ({{ skillManifest?.available || 0 }}/{{ skillManifest?.total || 0 }})</div>
+              <div v-if="skillManifest?.skills?.length" class="settings-plugin-list">
+                <div v-for="skill in skillManifest.skills" :key="skill.name" class="settings-plugin-item">
+                  <div class="plugin-icon">{{ skillIcon(skill.category) }}</div>
+                  <div class="plugin-info">
+                    <span class="plugin-name">{{ skill.name }} <span style="font-size:9px;color:#9ca3af;">v{{ skill.version }}</span></span>
+                    <span class="plugin-adapter">{{ skill.description }}</span>
+                    <div style="display:flex;gap:4px;margin-top:2px;">
+                      <span style="font-size:9px;padding:1px 4px;border-radius:3px;" :style="{ background: skill.available ? 'var(--color-success-bg)' : 'var(--color-error-bg)', color: skill.available ? 'var(--color-success)' : 'var(--color-error)' }">{{ skill.available ? '就绪' : '不可用' }}</span>
+                      <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(0,0,0,0.04);color:#6b7280;">{{ skill.permission_level }}</span>
+                      <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(0,0,0,0.04);color:#6b7280;">{{ skill.risk_level }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p v-else class="settings-empty-hint">技能清单加载中...</p>
+            </div>
+            <div class="settings-group">
+              <div class="settings-group-title">已加载插件 ({{ pluginList.length }})</div>
+              <div v-if="pluginList.length" class="settings-plugin-list">
+                <div v-for="p in pluginList" :key="p.name" class="settings-plugin-item">
+                  <div class="plugin-icon">🧩</div>
+                  <div class="plugin-info"><span class="plugin-name">{{ p.name }}</span><span class="plugin-adapter">{{ p.adapter }}</span></div>
+                </div>
+              </div>
+              <p v-else class="settings-empty-hint">将 ToolPlugin 放入 agent_companion/plugins/ 目录即可自动加载。</p>
+            </div>
+            <div class="settings-group">
+              <div class="settings-group-title">MCP 服务器</div>
+              <p class="settings-empty-hint">暂无外部 MCP 服务器连接。在 config.yaml 中配置 mcpServers 即可。</p>
+            </div>
+          </div>
+
+          <!-- 外观 -->
+          <div v-if="activeSettingsTab === 'appearance'" class="settings-section">
+            <div class="settings-group">
+              <div class="settings-group-title">个性化装扮</div>
+              <div class="settings-accessory-grid">
+                <button type="button" class="settings-accessory-card" :class="{ equipped: equippedAccessories.hat }" @click="toggleAccessory('hat')"><span class="accessory-emoji">🎓</span><span>巫师帽</span></button>
+                <button type="button" class="settings-accessory-card" :class="{ equipped: equippedAccessories.glasses }" @click="toggleAccessory('glasses')"><span class="accessory-emoji">🕶️</span><span>酷墨镜</span></button>
+                <button type="button" class="settings-accessory-card" :class="{ equipped: equippedAccessories.ears }" @click="toggleAccessory('ears')"><span class="accessory-emoji">🐰</span><span>兔耳朵</span></button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 安全 -->
+          <div v-if="activeSettingsTab === 'security'" class="settings-section">
+            <div class="settings-group">
+              <div class="settings-group-title">安全设置</div>
+              <div class="settings-input-row"><span>OCR 超时 (秒)</span><input v-model.number="runtimeDraft.ocr_timeout_seconds" type="number" min="1" max="120" class="settings-number-input" @input="markRuntimeDraftDirty" /></div>
+              <div class="settings-input-row"><span>LLM 温度</span><input v-model.number="runtimeDraft.llm_temperature" type="range" min="0" max="2" step="0.05" class="settings-range" @input="markRuntimeDraftDirty" /><span class="settings-range-value">{{ runtimeDraft.llm_temperature?.toFixed(2) }}</span></div>
+              <div class="settings-toggle-row"><span>Mock 模型</span><label class="settings-switch"><input v-model="runtimeDraft.llm_use_mock" type="checkbox" @change="markRuntimeDraftDirty" /><span class="settings-switch-slider"></span></label></div>
+              <div class="settings-input-row"><span>操作等待 (ms)</span><input v-model.number="runtimeDraft.computer_post_action_settle_ms" type="number" min="0" max="10000" step="25" class="settings-number-input" @input="markRuntimeDraftDirty" /></div>
+            </div>
+          </div>
+
+          <!-- 关于 -->
+          <div v-if="activeSettingsTab === 'about'" class="settings-section">
+            <div class="settings-group">
+              <div class="settings-group-title">关于 Joi</div>
+              <div class="settings-about-card">
+                <div class="about-row"><span>版本</span><span>v0.2.0</span></div>
+                <div class="about-row"><span>分支</span><span>win-desktop-fixes</span></div>
+                <div class="about-row"><span>工作目录</span><span class="about-path">{{ ready?.workspace || '—' }}</span></div>
+                <div class="about-row"><span>连接状态</span><span :class="connected ? 'text-success' : 'text-error'">{{ connectionLabel }}</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Save/Preview Footer -->
+          <div class="settings-footer" v-if="runtimeDraftDirty">
+            <button type="button" class="settings-btn-secondary" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">{{ runtimePreviewLoading ? '预览中' : '预览' }}</button>
+            <button type="button" class="settings-btn-primary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">{{ runtimeApplyLoading ? '提交中' : '提交审批' }}</button>
           </div>
         </div>
       </section>
@@ -2418,7 +2546,7 @@ onBeforeUnmount(() => {
       
       <!-- Mascot Container circles -->
       <div
-        :class="['character', `emotion-${activeExpressionEmotion}`]"
+        :class="['character', `emotion-${activeExpressionEmotion}`, `mood-${mascotMood}`, { 'subconscious-glow': subconsciousActive }]"
         :title="isCompactMode ? '拖拽移动，单击输入，双击恢复主界面' : 'Joi Companion'"
         @mousedown="startMascotDrag"
         @dragstart.capture.prevent
@@ -2470,6 +2598,18 @@ onBeforeUnmount(() => {
       <div class="speech">
         <strong>{{ characterName }}</strong>
         <span>{{ latestSpeech }}</span>
+      </div>
+
+      <!-- Mood Indicator Badge -->
+      <div class="mood-badge" :class="`mood-${mascotMood}`">
+        <span class="mood-icon">{{ moodIcon }}</span>
+        <span class="mood-label">{{ moodLabel }}</span>
+      </div>
+
+      <!-- Subconscious Thinking Bubble -->
+      <div class="subconscious-bubble" :class="{ active: subconsciousActive }">
+        <div class="subconscious-dots"><span></span><span></span><span></span></div>
+        <span>正在整理记忆...</span>
       </div>
 
       <!-- Voice Status Text -->
@@ -2538,11 +2678,17 @@ onBeforeUnmount(() => {
             </svg>
             <span>任务流</span>
           </button>
+          <button type="button" class="dock-btn" :class="{ active: activeCabin === 'memory' }" @click="activeCabin = 'memory'">
+            <svg viewBox="0 0 24 24">
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+            </svg>
+            <span>记忆</span>
+          </button>
           <button type="button" class="dock-btn" :class="{ active: activeCabin === 'inspector' }" @click="activeCabin = 'inspector'">
             <svg viewBox="0 0 24 24">
               <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
             </svg>
-            <span>配置舱</span>
+            <span>设置</span>
           </button>
         </nav>
       </div>

@@ -206,18 +206,20 @@ def _model_status(config: AppConfig | None, use: str) -> RuntimeProviderStatus:
 
 
 def _computer_use_status(config: AppConfig | None) -> RuntimeProviderStatus:
-    windows = sys.platform == "win32"
+    supported = sys.platform in {"win32", "darwin"}
     settle_ms = config.computer_use.post_action_settle_ms if config else 200
+    provider_name = "windows" if sys.platform == "win32" else "mac" if sys.platform == "darwin" else platform.system().lower() or "unknown"
+    summary_msg = "已配置可执行" if supported else "动作执行当前仅支持 Windows/macOS"
     return RuntimeProviderStatus(
         "computer_use",
         "Computer Use",
-        "ready" if windows else "unavailable",
+        "ready" if supported else "unavailable",
         enabled=True,
-        configured=windows,
-        provider="windows" if windows else _safe_identifier(platform.system().lower() or "unknown"),
-        summary="Windows 可用" if windows else "动作执行当前仅支持 Windows",
+        configured=supported,
+        provider=_safe_identifier(provider_name),
+        summary=summary_msg,
         limit=f"settle {max(0, int(settle_ms or 0))}ms",
-        last_error="" if windows else "computer_use_windows_only",
+        last_error="" if supported else "computer_use_windows_only",
         notes=["approval gated", "semi-automatic"],
     )
 

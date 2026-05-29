@@ -86,6 +86,16 @@ class AgentCompanionApp:
         self.approval_history: dict[str, PendingStep] = {}
         self.resolved_approval_ids: set[str] = set()
         self.approval_ttl_seconds = 120.0
+        # Subconscious background loop (P9)
+        from agent_companion.core.subconscious import SubconsciousLoop
+        self.subconscious = SubconsciousLoop(
+            memory=self.memory,
+            interval_seconds=120.0,
+            on_proactive=self._on_subconscious_proactive,
+        )
+        # Skill manifest (P8)
+        from agent_companion.core.skill_manifest import build_default_skill_registry
+        self.skills = build_default_skill_registry()
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
@@ -481,16 +491,37 @@ class AgentCompanionApp:
 
     def _emit_result(self, task_id: str, result: ToolResult, user_text: str = "") -> None:
         event_type = EventType.TOOL_COMPLETED if result.ok else EventType.TOOL_FAILED
+
+        # P6: Compress tool result before emitting
+        from agent_companion.core.tool_compression import compress_tool_result
+        compressed = compress_tool_result(result)
+
+        # Use compressed agent_state for the event (lighter for LLM context)
+        # but keep full display_card and voice_line for UI/TTS
         self._emit(
             AgentEvent(
                 event_type,
                 task_id,
                 result.display_card,
                 result.voice_line,
-                result.agent_state,
+                {
+                    **compressed.agent_state,
+                    "_compression_ratio": round(compressed.compression_ratio, 2),
+                    "_original_size": compressed.original_tokens_estimate,
+                },
             ),
             user_text,
         )
+
+        # Record memory candidate if present
+        if compressed.memory_candidate:
+            self._record_memory_candidate(
+                task_id,
+                str(compressed.memory_candidate.get("kind", "note")),
+                str(compressed.memory_candidate.get("text", "")),
+                str(compressed.memory_candidate.get("source", "tool")),
+                user_text,
+            )
 
     def _emit(self, event: AgentEvent, user_text: str = "") -> None:
         self.bus.emit(self.expression.express(event, user_text))
@@ -636,6 +667,28 @@ class AgentCompanionApp:
             return "操作当前电脑前需要你确认。"
         return f"{self._tool_label(step.name)}需要你确认。"
 
+    def _on_subconscious_proactive(self, message: str, tick_id: str) -> None:
+        """Called by the subconscious loop when it generates a proactive message."""
+        task_id = f"sub-{tick_id}"
+        self._emit(
+            AgentEvent(
+                EventType.TOOL_COMPLETED,
+                task_id,
+                DisplayCard("潜意识", message, status="info"),
+                safe_voice_line(message, sprite="5"),
+                {"subconscious": True, "tick_id": tick_id},
+            ),
+            "",
+        )
+
+    def start_subconscious(self) -> None:
+        """Start the subconscious background loop."""
+        self.subconscious.start()
+
+    def stop_subconscious(self) -> None:
+        """Stop the subconscious background loop."""
+        self.subconscious.stop()
+
     def _register_tools(self) -> None:
         app_config = self._load_runtime_config()
         ocr = self._build_ocr_extractor(app_config)
@@ -663,9 +716,12 @@ class AgentCompanionApp:
         self.tools.register(SemanticTargetSelectionTool(self.semantic_selection))
         for name, action_type in (
             ("computer.click", "click"),
+            ("computer.double_click", "double_click"),
+            ("computer.drag", "drag"),
             ("computer.type_text", "type_text"),
             ("computer.scroll", "scroll"),
             ("computer.hotkey", "hotkey"),
+            ("computer.open_app", "open_app"),
         ):
             self.tools.register(
                 ComputerActionTool(
@@ -681,6 +737,14 @@ class AgentCompanionApp:
         self.tools.register(McpListTool(self.workspace))
         self.tools.register(FileReadTool(self.workspace))
         self.tools.register(RuntimeConfigUpdateTool(self.workspace))
+        # Load plugins from plugins/ directory
+        try:
+            plugin_count = self.tools.load_plugins(self.workspace)
+            if plugin_count > 0:
+                import logging
+                logging.getLogger(__name__).info("Loaded %d plugin tools", plugin_count)
+        except Exception:
+            pass  # Plugin loading is non-fatal
 
     def _load_runtime_config(self) -> AppConfig | None:
         config_path = self.workspace / "config.yaml"
