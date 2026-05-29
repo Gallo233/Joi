@@ -65,7 +65,7 @@ class LlmPlanParser:
         except Exception:
             return None
         try:
-            endpoint = ModelRouter(config.llm).resolve("text")
+            endpoint = ModelRouter(config.llm).resolve("reasoning")
             if self._client is None or self._client.base_url != endpoint.base_url:
                 self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url, timeout=8.0)
             response = self._client.chat.completions.create(

@@ -45,16 +45,20 @@ class WatchRecallTool(ToolAdapter):
         else:
             body_lines.append("最近视觉上下文：暂无")
         has_context = bool(frames)
+        agent_state = {
+            "tool": self.name,
+            "watch_answer": answer,
+            "watch_context": [frame.to_agent_state() for frame in frames],
+            "model_status": status or "no_context",
+            "answer_source": "model" if self._answerer.last_used_model else "template",
+            "artifacts": artifacts,
+        }
+        model_usage = getattr(self._answerer, "last_model_usage", None)
+        if model_usage:
+            agent_state["model_usage"] = model_usage
         return ToolResult(
             ok=True,
-            agent_state={
-                "tool": self.name,
-                "watch_answer": answer,
-                "watch_context": [frame.to_agent_state() for frame in frames],
-                "model_status": status or "no_context",
-                "answer_source": "model" if self._answerer.last_used_model else "template",
-                "artifacts": artifacts,
-            },
+            agent_state=agent_state,
             display_card=DisplayCard(
                 "陪看追问",
                 answer,

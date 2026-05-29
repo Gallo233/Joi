@@ -98,7 +98,7 @@ class WatchCommentaryPlanner:
             from agent_companion.core.config import ModelRouter
 
             router = ModelRouter(config.llm)
-            endpoint = router.resolve("expression" if config.llm.is_expression_configured else "text")
+            endpoint = router.resolve("voice_style")
             if self._client is None or self._client.base_url != endpoint.base_url:
                 self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             character = config.primary_character if config.characters else None

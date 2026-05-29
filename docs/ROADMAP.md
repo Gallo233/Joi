@@ -112,6 +112,7 @@ Status: in progress
 - Record provider, model, latency, and fallback reason.
 - Show current model usage in settings.
 - Keep stable route labels: `fast`, `reasoning`, `vision`, `code`, `summarize`, and `voice_style`.
+- Core router now accepts `llm.routes` overrides, preserves `text`/`expression` aliases, and reports only safe model usage metadata.
 
 ## P8 Voice, Expression, And Skill Manifest
 

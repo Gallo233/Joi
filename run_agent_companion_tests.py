@@ -17,7 +17,7 @@ import yaml
 
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, ComputerAction, ComputerObservation, ComputerUseResult, computer_action_audit_event, verify_post_action
-from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouter, load_app_config
+from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouteConfig, ModelRouter, load_app_config
 from agent_companion.core.llm_planner import plan_from_llm_payload
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
@@ -2061,14 +2061,18 @@ def main() -> int:
         base_url="https://api.base.com/v1", model="gpt-4", api_key="sk-base",
     )
     router = ModelRouter(base_llm)
+    assert_true(ModelRouter.stable_routes() == ("fast", "reasoning", "vision", "code", "summarize", "voice_style"), "ModelRouter should expose stable P7 route labels")
     text_ep = router.resolve("text")
     assert_true(text_ep.base_url == "https://api.base.com/v1", "text should use base_url")
     assert_true(text_ep.model == "gpt-4", "text should use base model")
     assert_true(text_ep.api_key == "sk-base", "text should use base api_key")
+    assert_true(text_ep.route == "fast" and not text_ep.fallback_reason, "legacy text route should map to stable fast route")
+    reasoning_ep = router.resolve("reasoning")
+    assert_true(reasoning_ep.route == "reasoning" and reasoning_ep.fallback_reason == "reasoning_fallback_base", "reasoning route should fall back to base model when not overridden")
 
     # ModelRouter: vision falls back to text when not configured
     vision_ep = router.resolve("vision")
-    assert_true(vision_ep.base_url == "https://api.base.com/v1", "unconfigured vision should fall back to base")
+    assert_true(vision_ep.base_url == "https://api.base.com/v1" and vision_ep.fallback_reason == "vision_fallback_base", "unconfigured vision should fall back to base")
 
     # ModelRouter: vision uses dedicated config when configured
     vision_llm = LlmConfig(
@@ -2100,6 +2104,22 @@ def main() -> int:
     assert_true(expr_ep2.model == "gpt-4", "unconfigured expression should fall back to base model")
     voice_style_ep2 = ModelRouter(base_llm).resolve("voice_style")
     assert_true(voice_style_ep2.model == "gpt-4", "unconfigured voice_style should fall back to base model")
+    route_llm = LlmConfig(
+        provider="openai_compatible",
+        use_mock=False,
+        base_url="https://api.base.com/v1",
+        model="gpt-4",
+        api_key="sk-base",
+        routes={
+            "code": ModelRouteConfig(base_url="https://api.code.com/v1", model="gpt-code", api_key="sk-code"),
+            "summarize": ModelRouteConfig(model="gpt-summary"),
+        },
+    )
+    code_ep = ModelRouter(route_llm).resolve("code")
+    summarize_ep = ModelRouter(route_llm).resolve("summarize")
+    assert_true(code_ep.route == "code" and code_ep.model == "gpt-code" and code_ep.api_key == "sk-code", "code route should use explicit override")
+    assert_true(summarize_ep.route == "summarize" and summarize_ep.model == "gpt-summary" and summarize_ep.api_key == "sk-base", "summarize route should inherit base API key")
+    assert_true("api_key" not in str(code_ep.to_agent_state()) and "sk-code" not in str(code_ep.to_agent_state()), "model usage payload should not expose endpoint secrets")
 
     # Config path: _build_vision_summarizer reads from workspace / config.yaml
     tmpdir = tempfile.mkdtemp()
@@ -2116,6 +2136,12 @@ def main() -> int:
             "  vision_base_url: https://api.vision.com/v1\n"
             "  vision_model: gpt-4o\n"
             "  vision_api_key: sk-vision\n"
+            "  routes:\n"
+            "    reasoning:\n"
+            "      model: gpt-router-reasoning\n"
+            "      api_key: sk-router-reasoning\n"
+            "    code:\n"
+            "      model: gpt-router-code\n"
             "asr:\n"
             "  enabled: true\n"
             "  provider: openai_compatible\n"
@@ -2155,6 +2181,8 @@ def main() -> int:
         assert_true(tmp_config.asr.timeout_seconds == 9, "ASR timeout should parse")
         assert_true(tmp_config.ocr.timeout_seconds == 4, "OCR timeout should parse")
         assert_true(tmp_config.computer_use.post_action_settle_ms == 0, "computer use settle delay should parse")
+        assert_true(ModelRouter(tmp_config.llm).resolve("reasoning").model == "gpt-router-reasoning", "config routes should parse reasoning override")
+        assert_true(ModelRouter(tmp_config.llm).resolve("code").api_key == "sk-test", "route overrides should inherit base credentials when omitted")
         asr_provider, asr_state = build_asr_provider(tmp)
         assert_true(isinstance(asr_provider, OpenAICompatibleAsrProvider), "configured ASR should use OpenAI-compatible provider")
         assert_true(asr_state.configured and asr_state.max_bytes == 4096, "ASR runtime state should expose limits")
@@ -3022,8 +3050,8 @@ asr:
     assert_true(ready_payload["runtime"]["read_only"] and ready_payload["runtime"]["safe_for_display"], "Core ready payload should expose safe read-only runtime status")
     runtime_provider_names = {row["name"] for row in ready_payload["runtime"]["providers"]}
     assert_true(
-        {"asr", "tts", "ocr", "text", "vision", "expression", "computer_use", "audit_verification"}.issubset(runtime_provider_names),
-        "Runtime status should include provider, platform, audit, and verification rows",
+        {"asr", "tts", "ocr", "fast", "reasoning", "vision", "code", "summarize", "voice_style", "computer_use", "audit_verification"}.issubset(runtime_provider_names),
+        "Runtime status should include provider, stable model routes, platform, audit, and verification rows",
     )
     runtime_payload_text = str(ready_payload["runtime"])
     forbidden_runtime_fragments = ["sk-", "server_url", "gpt_sovits_work_path", "base_url", "api_key", "/Users/", "C:\\", "secret"]
@@ -3068,9 +3096,10 @@ computer_use:
         configured_rows = {row["name"]: row for row in configured_runtime["providers"]}
         assert_true(configured_rows["asr"]["state"] == "ready" and configured_rows["asr"]["timeout_seconds"] == 9, "ASR runtime status should show configured fake state")
         assert_true(configured_rows["tts"]["state"] == "ready" and configured_rows["tts"]["last_error"] == "tts_timeout", "TTS runtime status should show sanitized configured state")
-        assert_true(configured_rows["text"]["model"] == "gpt-public-text", "Text model status should expose safe public model name")
+        assert_true(configured_rows["fast"]["model"] == "gpt-public-text", "Fast model status should expose safe public model name")
+        assert_true(configured_rows["reasoning"]["model"] == "gpt-public-text" and configured_rows["reasoning"]["notes"], "Reasoning model status should expose base fallback")
         assert_true(configured_rows["vision"]["model"] == "gpt-public-vision", "Vision model status should expose safe public model name")
-        assert_true(configured_rows["expression"]["model"] == "gpt-public-expression", "Expression model status should expose safe public model name")
+        assert_true(configured_rows["voice_style"]["model"] == "gpt-public-expression", "Voice style model status should expose safe public model name")
         configured_text = str(configured_runtime)
         assert_true(
             "sk-test" not in configured_text
@@ -3101,7 +3130,7 @@ computer_use:
         unconfigured_rows = {row["name"]: row for row in unconfigured_runtime["providers"]}
         assert_true(unconfigured_rows["asr"]["state"] == "off" and unconfigured_rows["tts"]["state"] == "off", "Unconfigured ASR/TTS runtime states should be off")
         assert_true(unconfigured_rows["ocr"]["state"] == "unavailable" and "pytesseract_missing" in unconfigured_rows["ocr"]["last_error"], "OCR runtime status should report missing optional dependencies safely")
-        assert_true(unconfigured_rows["text"]["state"] == "off" and unconfigured_rows["vision"]["state"] == "off" and unconfigured_rows["expression"]["state"] == "off", "Unconfigured model runtime states should be off")
+        assert_true(unconfigured_rows["fast"]["state"] == "off" and unconfigured_rows["vision"]["state"] == "off" and unconfigured_rows["voice_style"]["state"] == "off", "Unconfigured model runtime states should be off")
 
     with tempfile.TemporaryDirectory() as ocr_tmp_name:
         ocr_tmp = Path(ocr_tmp_name)
@@ -3184,7 +3213,7 @@ llm:
             {"enabled": False, "configured": False, "provider": "none", "last_error": ""},
         )
         redacted_rows = {row["name"]: row for row in redacted_runtime["providers"]}
-        assert_true(redacted_rows["text"]["model"] == "redacted", "Local model paths should be redacted from runtime status")
+        assert_true(redacted_rows["fast"]["model"] == "redacted", "Local model paths should be redacted from runtime status")
         assert_true("/Users/private" not in str(redacted_runtime) and "joi.gguf" not in str(redacted_runtime), "Runtime status should not expose local model paths")
 
     shell_api_source = (workspace / "agent_companion" / "shell" / "src" / "api.ts").read_text(encoding="utf-8")
@@ -3417,6 +3446,12 @@ llm:
     assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, semantic recall, local vault browsing/context, and privacy gate")
     chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
     assert_true("memory_context" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context")
+    config_source = (workspace / "agent_companion" / "core" / "config.py").read_text(encoding="utf-8")
+    runtime_status_source = (workspace / "agent_companion" / "core" / "runtime_status.py").read_text(encoding="utf-8")
+    watch_tool_source = (workspace / "agent_companion" / "core" / "tools" / "watch.py").read_text(encoding="utf-8")
+    assert_true("MODEL_ROUTES" in config_source and "ModelRouteConfig" in config_source and "fallback_reason" in config_source and "to_agent_state" in config_source, "P7 model router should expose stable routes and safe model usage metadata")
+    assert_true("ModelRouter.stable_routes()" in runtime_status_source and "MODEL_ROUTE_LABELS" in runtime_status_source, "Runtime status should render stable model route rows")
+    assert_true("model_usage" in chat_source and "model_usage" in watch_tool_source, "Chat and watch tools should attach safe model usage metadata")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
     assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
