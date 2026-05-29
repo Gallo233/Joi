@@ -853,7 +853,8 @@ def main() -> int:
         compressed_events = compression_app.bus.drain()
         compressed_event = [event for event in compressed_events if event.task_id == "compression-test"][-1]
         assert_true("joi_juice" in compressed_event.agent_state, "Tool result events should attach JoiJuice channels")
-        assert_true(compressed_event.agent_state["screenshot_path"] == r"C:\secret\screen.png", "JoiJuice should not remove UI/debug state from emitted events")
+        assert_true("screenshot_path" not in compressed_event.agent_state and "stdout" not in compressed_event.agent_state, "Tool result events should strip raw UI/debug paths and logs")
+        assert_true(compressed_event.agent_state.get("result_channels", {}).get("planner") == "joi_juice.planner_state", "Tool result events should declare the compressed planner channel")
         assert_true("screenshot_path" not in json.dumps(compressed_event.agent_state["joi_juice"]["planner_state"], ensure_ascii=False), "JoiJuice planner channel should stay sanitized")
     finally:
         shutil.rmtree(compression_app_dir, ignore_errors=True)
@@ -916,7 +917,7 @@ def main() -> int:
         assert_true("用户更喜欢原生 CSS 变量" in vault_text, "saved memories should appear in the local vault")
         browsed_vault = memory.browse_vault()
         assert_true(
-            browsed_vault["path"].endswith("joi_memory_vault.md")
+            browsed_vault["path_label"] == "joi_memory_vault.md"
             and any("Saved Memories" == section["title"] and any("原生 CSS 变量" in line for line in section["lines"]) for section in browsed_vault["sections"]),
             "memory vault browsing should expose safe saved-memory sections",
         )
@@ -1713,6 +1714,12 @@ def main() -> int:
     artifact_result = bridge.read_artifact_command("data/agent_companion/vision/artifact-read-test.png")
     assert_true(artifact_result.get("ok") is True and str(artifact_result.get("data_url", "")).startswith("data:image/png;base64,"), "artifact.read should return a data URL for workspace images")
     assert_true(bridge.read_artifact_command("../secret.png").get("error") == "artifact_not_found", "artifact.read must not read outside the workspace")
+    ready_payload = bridge._ready_payload()
+    ready_blob = json.dumps(ready_payload, ensure_ascii=False, default=str)
+    assert_true("workspace_label" in ready_payload and "workspace" not in ready_payload, "ready payload should expose a label instead of an absolute workspace path")
+    assert_true(str(workspace) not in ready_blob, "ready payload must not expose local absolute workspace paths")
+    memory_status = bridge.app.memory.status()
+    assert_true("vault_label" in memory_status and "vault_path" not in memory_status, "memory status should expose a vault label instead of an absolute path")
 
     expired_app = AgentCompanionApp(workspace)
     expired_app.tools.register(
@@ -4089,6 +4096,7 @@ llm:
     assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
     skill_manifest_source = (workspace / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
     assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "KNOWN_SKILL_IDS" in skill_manifest_source and "_apply_skill_setting" in skill_manifest_source and "normalize_skill_id" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
+    assert_true("_computer_use_action_schema" in skill_manifest_source and "llm_driven_action_schema" in skill_manifest_source and "requires_approval_for" in skill_manifest_source, "Computer Use skill should expose a declarative LLM action schema instead of app-specific routes only")
     assert_true('"background.configure"' in skill_manifest_source and '"background.clear"' in skill_manifest_source, "Watch native skill should advertise background context controls")
     assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source and "skill_settings_payload" in server_source and "audit_recent_command" in server_source and '"audit.recent"' in server_source, "Core should expose P8 native skill manifest and P9 audit RPCs")
     audit_store_source = (workspace / "agent_companion" / "core" / "audit_store.py").read_text(encoding="utf-8")
@@ -4101,13 +4109,15 @@ llm:
     assert_true("disabled_skills" in policy_source and "skill_id_for_tool" in policy_source and "skill_disabled" in policy_source, "Policy gate should fail closed for disabled native skills")
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
+    watch_transcript_source = (workspace / "agent_companion" / "core" / "watch_transcript.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
+    assert_true("system_audio_diagnostics" in watch_transcript_source and '"diagnostics"' in watch_transcript_source and "audio_bytes" in watch_transcript_source, "Watch transcript should expose safe system-audio diagnostics")
     screen_observe_source = (workspace / "agent_companion" / "core" / "tools" / "screen_observe.py").read_text(encoding="utf-8")
     assert_true('source in {"auto", "system_audio", "audio"}' in screen_observe_source and "audio_result.error" in screen_observe_source, "Auto transcript source should try system audio and preserve fallback reason")
     commentary_source = (workspace / "agent_companion" / "core" / "watch_commentary.py").read_text(encoding="utf-8")
     assert_true("min_interval_seconds" in commentary_source and "maybe_comment" in commentary_source and "safe_voice_line" in commentary_source, "Watch commentary planner should enforce cooldown and safe voice output")
     tool_compression_source = (workspace / "agent_companion" / "core" / "tool_compression.py").read_text(encoding="utf-8")
-    assert_true("compress_tool_result" in tool_compression_source and "planner_state" in tool_compression_source and "_explicit_memory_candidate" in tool_compression_source, "P6 JoiJuice should expose safe tool-result channels without auto memory")
+    assert_true("compress_tool_result" in tool_compression_source and "build_event_agent_state" in tool_compression_source and "planner_state" in tool_compression_source and "_explicit_memory_candidate" in tool_compression_source, "P6 JoiJuice should expose safe tool-result channels without auto memory")
     memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
     assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, semantic recall, local vault browsing/context, and privacy gate")
     chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
@@ -4141,7 +4151,9 @@ llm:
     assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source and "setSkillEnabled" in shell_source and "skillEnabled" in shell_source and "skillToggleDisabled" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
     assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with recall search and vault preview")
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
-    assert_true("_step_with_memory_context" in app_source and "compress_tool_result" in app_source and '"joi_juice"' in app_source, "App should inject approved memory context and attach JoiJuice channels")
+    assert_true("_step_with_memory_context" in app_source and "build_event_agent_state" in app_source, "App should inject approved memory context and emit safe JoiJuice event channels")
+    desktop_context_source = (workspace / "agent_companion" / "core" / "desktop_context.py").read_text(encoding="utf-8")
+    assert_true("rewrite_plan_for_desktop_context" in desktop_context_source and "record_desktop_context" in desktop_context_source and "DesktopContext" in desktop_context_source, "Desktop context planning should live outside the app orchestrator")
     assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source and "reload_runtime_policy" in app_source and "skill_settings_payload" in app_source and "block_reason" in app_source, "App execution boundary should attach native skill metadata and enforce disabled skills")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
@@ -4157,6 +4169,7 @@ llm:
     handoff_report_source = (workspace / "tools" / "windows_handoff_report.py").read_text(encoding="utf-8")
     release_check_source = (workspace / "tools" / "windows_release_check.py").read_text(encoding="utf-8")
     ci_workflow_source = (workspace / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    release_candidate_workflow_source = (workspace / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8")
     first_run_doc_source = (workspace / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
     start_joi_source = (workspace / "tools" / "start_joi.ps1").read_text(encoding="utf-8")
     assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
@@ -4164,10 +4177,11 @@ llm:
     assert_true("build_windows_setup_plan" in setup_wizard_source and "windows_setup_exit_code" in setup_wizard_source and "config.example.yaml" in setup_wizard_source and "config.yaml" in setup_wizard_source and "safe_for_display" in setup_wizard_source, "P10 setup wizard should create local config safely without secrets")
     assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source and "tools/mvp_demo_check.py" in release_packager_source and "tools/provider_preflight.py" in release_packager_source and "tools/windows_handoff_report.py" in release_packager_source and "tools/windows_release_check.py" in release_packager_source and "tools/windows_setup_wizard.py" in release_packager_source, "P10 release packager should create a safe portable Windows zip and include release/handoff tooling")
     assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source and "release_privacy_policy" in packaging_smoke_source and "mvp_demo_check" in packaging_smoke_source and "provider_preflight" in packaging_smoke_source and "windows_handoff_report" in packaging_smoke_source and "windows_release_check" in packaging_smoke_source and "windows_setup_wizard" in packaging_smoke_source and "setup_launcher" in packaging_smoke_source, "P10 packaging smoke should validate release metadata, Tauri permissions, release privacy policy, MVP demo check, provider preflight, handoff report, setup wizard, and release readiness tooling")
-    assert_true("build_provider_preflight_report" in provider_preflight_source and "build_runtime_status" in provider_preflight_source and "REQUIRED_DEMO_PROVIDERS" in provider_preflight_source and "safe_for_display" in provider_preflight_source, "P10 provider preflight should expose sanitized offline provider readiness")
+    assert_true("build_provider_preflight_report" in provider_preflight_source and "build_runtime_status" in provider_preflight_source and "REQUIRED_DEMO_PROVIDERS" in provider_preflight_source and "probe_system_audio_readiness" in provider_preflight_source and "safe_for_display" in provider_preflight_source, "P10 provider preflight should expose sanitized offline provider and system-audio readiness")
     assert_true("build_windows_handoff_report" in handoff_report_source and "build_windows_release_check_report" in handoff_report_source and "safe_for_display" in handoff_report_source and "handoff_ready" in handoff_report_source and "start_joi.bat -Setup" in handoff_report_source, "P10 handoff report should expose safe cross-machine release readiness")
     assert_true("build_windows_release_check_report" in release_check_source and "build_doctor_report" in release_check_source and "build_mvp_demo_check_report" in release_check_source and "build_provider_preflight_report" in release_check_source and "build_packaging_smoke_report" in release_check_source and "build_windows_release_package" in release_check_source and "build_windows_setup_plan" in release_check_source and "release_ready" in release_check_source, "P10 release check should aggregate doctor, setup, demo, provider, smoke, privacy, and package dry-run status")
     assert_true("run_agent_companion_tests.py" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source and "tools/mvp_demo_check.py" in ci_workflow_source and "tools/provider_preflight.py" in ci_workflow_source and "tools/package_windows_release.py --dry-run" in ci_workflow_source and "tools/windows_handoff_report.py" in ci_workflow_source and "tools/windows_release_check.py" in ci_workflow_source and "tools/windows_setup_wizard.py" in ci_workflow_source, "CI should cover Python tests, frontend build, packaging smoke, MVP demo check, provider preflight, release dry-run, release readiness, handoff report, setup wizard, and Tauri debug smoke build")
+    assert_true("workflow_dispatch" in release_candidate_workflow_source and "npm run tauri -- build" in release_candidate_workflow_source and "tools/package_windows_release.py --output-dir dist" in release_candidate_workflow_source and "actions/upload-artifact" in release_candidate_workflow_source, "Release candidate workflow should build a real Tauri release, package without allow-missing-exe, and upload the zip")
     assert_true("-Doctor" in start_joi_source and "joi_doctor.py" in start_joi_source and "-Setup" in start_joi_source and "windows_setup_wizard.py" in start_joi_source, "Windows launcher should expose doctor and setup modes")
     assert_true("start_joi.bat -Doctor" in first_run_doc_source and "start_joi.bat -Setup" in first_run_doc_source and "windows_setup_wizard.py" in first_run_doc_source and "windows_handoff_report.py" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source and "package_windows_release.py" in first_run_doc_source, "Windows first-run docs should cover setup wizard, doctor, OCR, audio, handoff, and release packaging setup")
 

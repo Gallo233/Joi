@@ -13,11 +13,12 @@ if str(ROOT) not in sys.path:
 from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.speech_input import AsrRuntimeState, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
+from agent_companion.core.watch_transcript import probe_system_audio_readiness
 
 
 PREFLIGHT_VERSION = "joi.provider_preflight.v1"
 REQUIRED_DEMO_PROVIDERS = {"fast", "computer_use", "audit_verification"}
-OPTIONAL_DEMO_PROVIDERS = {"reasoning", "vision", "code", "summarize", "voice_style", "asr", "tts", "ocr"}
+OPTIONAL_DEMO_PROVIDERS = {"reasoning", "vision", "code", "summarize", "voice_style", "asr", "tts", "ocr", "system_audio"}
 
 
 def build_provider_preflight_report(workspace: Path | str | None = None) -> dict[str, Any]:
@@ -27,6 +28,7 @@ def build_provider_preflight_report(workspace: Path | str | None = None) -> dict
     tts_status = _safe_tts_status(root)
     runtime = build_runtime_status(root, asr_state, tts_status)
     rows = [_preflight_row(row) for row in runtime.get("providers", []) if isinstance(row, dict)]
+    rows.append(_system_audio_preflight_row())
     checks = [_check_from_row(row, config_exists=config_exists) for row in rows]
     if not config_exists:
         checks.insert(
@@ -112,6 +114,22 @@ def _preflight_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _system_audio_preflight_row() -> dict[str, Any]:
+    diagnostics = probe_system_audio_readiness()
+    ready = diagnostics.get("status") == "ready"
+    return {
+        "name": "system_audio",
+        "label": "System Audio Transcript",
+        "state": "ready" if ready else "unavailable",
+        "enabled": True,
+        "configured": ready,
+        "provider": "loopback",
+        "model": "",
+        "summary": "Loopback audio source is available." if ready else "Loopback audio source is unavailable.",
+        "last_error": "" if ready else _safe_text(diagnostics.get("status"), "system_audio_unavailable"),
+    }
+
+
 def _check_from_row(row: dict[str, Any], *, config_exists: bool) -> dict[str, str]:
     name = row["name"]
     state = row["state"]
@@ -144,6 +162,7 @@ def _action_for(name: str, config_exists: bool) -> str:
         "asr": "Configure ASR provider credentials before voice-input demos.",
         "tts": "Configure GPT-SoVITS or disable voice output for text-only demos.",
         "ocr": "Install OCR dependencies and Tesseract before visual grounding demos.",
+        "system_audio": "Install requirements-audio.txt and enable a Windows loopback-capable playback device before realtime watch demos.",
         "computer_use": "Run Computer Use on Windows with the desktop shell.",
         "audit_verification": "Restore local audit and verification modules.",
     }

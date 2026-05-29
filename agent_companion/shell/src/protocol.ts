@@ -200,7 +200,8 @@ export interface MemoryCandidate {
 
 export interface MemoryStatus {
   enabled?: boolean
-  vault_path?: string
+  vault_label?: string
+  storage?: string
   recent?: MemoryRecord[]
   pending?: MemoryCandidate[]
 }
@@ -211,7 +212,8 @@ export interface MemoryVaultSection {
 }
 
 export interface MemoryVault {
-  path?: string
+  path_label?: string
+  storage?: string
   updated_at?: number
   sections?: MemoryVaultSection[]
 }
@@ -275,7 +277,8 @@ export interface NativeSkillManifest {
 }
 
 export interface CoreReadyPayload {
-  workspace: string
+  workspace_label?: string
+  workspace_bound?: boolean
   asr?: {
     enabled?: boolean
     configured?: boolean
@@ -339,7 +342,6 @@ export interface CoreReadyPayload {
     sprites?: Array<{
       id: string
       label?: string
-      image_path: string
       image_data_url?: string
     }>
   }

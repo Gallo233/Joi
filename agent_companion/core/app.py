@@ -21,6 +21,12 @@ from agent_companion.core.background_context import BackgroundContextStore
 from agent_companion.core.character import CharacterHarness, load_character
 from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
 from agent_companion.core.codex_events import codex_cancel_run_state
+from agent_companion.core.desktop_context import (
+    DesktopContext,
+    active_desktop_context,
+    record_desktop_context,
+    rewrite_plan_for_desktop_context,
+)
 from agent_companion.core.event_bus import EventBus
 from agent_companion.core.expression import ExpressionEngine
 from agent_companion.core.llm_planner import LlmPlanParser
@@ -43,7 +49,7 @@ from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import PendingSemanticTargetSelection, SemanticTargetSelectionStore, SemanticTargetSelectionTool, SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
-from agent_companion.core.tool_compression import compress_tool_result
+from agent_companion.core.tool_compression import build_event_agent_state
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
@@ -60,14 +66,6 @@ class PendingStep:
     arguments_hash: str
     request_override: ToolRequest | None = None
     created_at: float = 0.0
-
-
-@dataclass
-class DesktopContext:
-    browser: str = ""
-    site: str = ""
-    url: str = ""
-    updated_at: float = 0.0
 
 
 class AgentCompanionApp:
@@ -529,8 +527,7 @@ class AgentCompanionApp:
 
     def _emit_result(self, task_id: str, result: ToolResult, user_text: str = "") -> None:
         event_type = EventType.TOOL_COMPLETED if result.ok else EventType.TOOL_FAILED
-        agent_state = dict(result.agent_state)
-        agent_state["joi_juice"] = compress_tool_result(result).to_agent_state()
+        agent_state = build_event_agent_state(result)
         tool_name = str(agent_state.get("tool") or "")
         if tool_name:
             agent_state = annotate_agent_state_with_skill(agent_state, tool_name)
@@ -866,68 +863,20 @@ class AgentCompanionApp:
 
     def _rewrite_plan_for_desktop_context(self, plan: AgentPlan) -> AgentPlan:
         context = self._active_desktop_context()
-        if context is None or not _looks_like_search_command(plan.user_text):
+        if context is None:
             return plan
-        if not plan.steps:
-            return plan
-        step = plan.steps[0]
-        if step.name not in {"browser.search", "observe.screen"}:
-            return plan
-        if _requests_global_browser_search(plan.user_text):
-            return plan
-        query = _desktop_context_search_query(plan.user_text, step)
-        if not query:
-            return plan
-        return AgentPlan(
-            task_id=plan.task_id,
-            user_text=plan.user_text,
-            intent="desktop_workflow",
-            steps=[
-                ToolRequest(
-                    "computer.workflow",
-                    {
-                        "workflow": "open_web_search",
-                        "browser": context.browser or "edge",
-                        "site": context.site,
-                        "query": query,
-                    },
-                    "继续在当前桌面浏览器站点中搜索，需要确认。",
-                )
-            ],
-        )
+        return rewrite_plan_for_desktop_context(plan, context)
 
     def _active_desktop_context(self) -> DesktopContext | None:
-        if not self.desktop_context.site:
-            return None
-        if time.time() - self.desktop_context.updated_at > self.DESKTOP_CONTEXT_TTL_SECONDS:
+        context = active_desktop_context(self.desktop_context, ttl_seconds=self.DESKTOP_CONTEXT_TTL_SECONDS)
+        if context is None and self.desktop_context.site:
             self.desktop_context = DesktopContext()
-            return None
-        return self.desktop_context
+        return context
 
     def _record_desktop_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
-        if step.name != "computer.workflow":
-            return
-        if not result.ok:
-            return
-        workflow = str(step.arguments.get("workflow") or "").strip()
-        if workflow in {"open_web_search", "open_url"}:
-            raw_site = str(step.arguments.get("site") or "").strip()
-            url = str(step.arguments.get("url") or "").strip()
-            site = raw_site
-            if "://" in raw_site:
-                url = raw_site
-                site = _site_from_url(raw_site)
-            if not site and url:
-                site = _site_from_url(url)
-            self.desktop_context = DesktopContext(
-                browser=str(step.arguments.get("browser") or "edge").strip() or "edge",
-                site=site,
-                url=url,
-                updated_at=time.time(),
-            )
-            return
-        if workflow == "open_app":
-            self.desktop_context = DesktopContext()
+        updated = record_desktop_context(step, result)
+        if updated is not None:
+            self.desktop_context = updated
 
     def _record_watch_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
         if not result.ok:
@@ -1141,31 +1090,6 @@ def _transcript_text_from_state(transcript: dict) -> list[str]:
     return rows
 
 
-def _looks_like_search_command(text: str) -> bool:
-    return re.search(r"(?:搜索|搜一下|查找|搜(?!集))\s*\S+", text) is not None
-
-
-def _requests_global_browser_search(text: str) -> bool:
-    lowered = text.casefold()
-    return any(token in lowered for token in ("baidu", "google", "chrome")) or any(token in text for token in ("百度", "谷歌", "全网搜索"))
-
-
-def _desktop_context_search_query(user_text: str, step: ToolRequest) -> str:
-    query = str(step.arguments.get("query") or "").strip() if isinstance(step.arguments, dict) else ""
-    if not query:
-        query = " ".join((user_text or "").strip().split())
-    query = re.sub(r"^(?:帮我|请|麻烦)?(?:继续)?(?:在当前页面|在这个页面|在当前网站|在这里)?(?:搜索|搜一下|查找|搜(?!集))\s*", "", query).strip()
-    query = re.sub(r"[。！？!?]+$", "", query).strip(" ：:，,")
-    return query[:160]
-
-
-def _site_from_url(url: str) -> str:
-    lowered = url.casefold()
-    if "bilibili.com" in lowered:
-        return "bilibili"
-    return ""
-
-
 def _parse_candidate_selection(text: str) -> int | None:
     value = " ".join((text or "").strip().split())
     if not value:
@@ -1224,7 +1148,7 @@ def _memory_status_body(status: dict[str, object]) -> str:
     enabled = "开启" if status.get("enabled") else "关闭"
     pending = status.get("pending") if isinstance(status.get("pending"), list) else []
     recent = status.get("recent") if isinstance(status.get("recent"), list) else []
-    lines = [f"状态：{enabled}", f"Vault：{status.get('vault_path') or ''}"]
+    lines = [f"状态：{enabled}", f"Vault：{status.get('vault_label') or '本地记忆库'}"]
     if pending:
         lines.append("待确认：")
         for item in pending[:5]:

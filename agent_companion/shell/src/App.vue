@@ -374,7 +374,17 @@ const watchLoopSourceHealth = computed(() => {
   return Object.entries(health)
     .map(([source, raw]) => {
       const row = asRecord(raw)
-      return `${sourceLabel(source)} ${Number(row.count || 0)} 段${stringValue(row.status) ? ` · ${stringValue(row.status)}` : ''}`
+      const count = Number(row.count || 0)
+      const status = stringValue(row.status)
+      const error = stringValue(row.error)
+      const capture = stringValue(row.capture)
+      const bytes = Number(row.audio_bytes || 0)
+      const parts = [`${sourceLabel(source)} ${count ? `${count} 段` : '诊断'}`]
+      if (status) parts.push(errorLabel(status))
+      if (capture) parts.push(`采集 ${capture}`)
+      if (bytes) parts.push(`${Math.round(bytes / 1024)}KB`)
+      if (error) parts.push(errorLabel(error))
+      return parts.join(' · ')
     })
     .slice(0, 3)
 })
@@ -547,8 +557,7 @@ const characterName = computed(() => ready.value?.character?.name || 'Joi')
 const characterImageSrc = computed(() => {
   const sprites = ready.value?.character?.sprites || []
   const active = sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
-  if (active?.image_data_url) return active.image_data_url
-  return active?.image_path ? convertFileSrc(active.image_path) : ''
+  return active?.image_data_url || ''
 })
 
 const currentMode = computed(() => {
@@ -1028,15 +1037,13 @@ function isImageArtifact(artifact: string) {
 }
 
 function artifactPath(artifact: string) {
-  if (/^[a-zA-Z]:[\\/]/.test(artifact) || artifact.startsWith('/')) return artifact
-  const workspace = ready.value?.workspace || ''
-  if (!workspace) return artifact
-  const separator = workspace.includes('\\') ? '\\' : '/'
-  return `${workspace.replace(/[\\/]$/, '')}${separator}${artifact.replace(/[\\/]/g, separator)}`
+  return artifact
 }
 
 function artifactSrc(artifact: string) {
-  return artifactDataUrls.value[artifact] || convertFileSrc(artifactPath(artifact))
+  if (artifactDataUrls.value[artifact]) return artifactDataUrls.value[artifact]
+  if (/^[a-zA-Z]:[\\/]/.test(artifact) || artifact.startsWith('/')) return convertFileSrc(artifactPath(artifact))
+  return ''
 }
 
 function openArtifactPreview(artifact: string, event: AgentEvent) {
@@ -1274,6 +1281,11 @@ function errorLabel(value: string) {
     asr_disabled: 'ASR 未启用',
     asr_timeout: 'ASR 超时',
     empty_transcript: '音频无文本',
+    ready: '就绪',
+    success: '成功',
+    failed: '失败',
+    unavailable: '不可用',
+    ok: '正常',
   }
   return labels[value] || value
 }
@@ -1357,7 +1369,7 @@ function stopWatchLoop() {
 
 function syncMemoryFromEvent(event: AgentEvent) {
   const memory = asRecord(event.agent_state?.memory)
-  if ('recent' in memory || 'pending' in memory || 'vault_path' in memory) {
+  if ('recent' in memory || 'pending' in memory || 'vault_label' in memory) {
     memoryStatus.value = memory as unknown as MemoryStatus
   }
 }
@@ -2516,7 +2528,7 @@ onBeforeUnmount(() => {
         <div class="memory-command-panel">
           <div class="memory-command-copy">
             <strong>{{ memoryEnabled ? '长期记忆开启' : '长期记忆关闭' }}</strong>
-            <span>{{ memoryStatus?.vault_path || '等待核心连接后读取本地记忆库' }}</span>
+            <span>{{ memoryStatus?.vault_label ? `本地记忆库 · ${memoryStatus.vault_label}` : '等待核心连接后读取本地记忆库' }}</span>
           </div>
           <div class="memory-head-actions">
             <label class="memory-enable-toggle">
@@ -2654,7 +2666,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <p class="memory-disabled-note" v-if="!memoryEnabled">长期记忆已关闭，新候选不会写入待确认队列。</p>
-          <div class="memory-vault-path" v-if="memoryStatus?.vault_path">{{ memoryStatus.vault_path }}</div>
+          <div class="memory-vault-path" v-if="memoryStatus?.vault_label">本地记忆库 · {{ memoryStatus.vault_label }}</div>
           <div class="memory-list" v-if="pendingMemories.length">
             <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
               <div>

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Tightened safe UI payload boundaries so `core.ready`, memory status, and character sprites no longer expose absolute local workspace, vault, or sprite paths to the shell by default.
+- Added explicit tool-result channels for UI, planner, memory, and audit use so JoiJuice is the compressed planning boundary instead of a loose sidecar.
+- Added a Windows release-candidate GitHub workflow that builds the real Tauri release, packages without `--allow-missing-exe`, and uploads the release zip artifact.
+- Updated the feedback log schema so every row can be tied to a product branch, fix commit, validation path, and product area.
 - Added project discipline docs: roadmap, changelog, known issues, and feedback log.
 - Started product-shell cleanup: default UI separates chat, task cards, and developer events.
 - Added one-click Windows launch script target for Joi.

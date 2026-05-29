@@ -51,10 +51,28 @@ _PATH_RE = re.compile(
     r"\.(?:png|jpg|jpeg|webp|gif|bmp|ppm|json|jsonl|log|txt|ya?ml|sqlite3?|db)\b)",
     re.IGNORECASE,
 )
+_LOCAL_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/(?:Users|home|private|tmp|var|Volumes)/|\\\\)", re.IGNORECASE)
 _SECRET_RE = re.compile(r"(?:\bsk-[A-Za-z0-9_-]{6,}\b|\b(?:api[_-]?key|token|secret|password|bearer)\b)", re.IGNORECASE)
 _INTERNAL_ID_RE = re.compile(r"\b(?:task|approval|selection|codex|run|resume)[-_]?[0-9a-f]{6,}\b", re.IGNORECASE)
 _JSON_BLOCK_RE = re.compile(r"[\[{][\s\S]{80,}[\]}]")
 _COORD_RE = re.compile(r"\b\d{1,5}\s*,\s*\d{1,5}\b")
+
+_UI_STRIP_KEYS = {
+    "screenshot_path",
+    "raw_log",
+    "stderr",
+    "stdout",
+    "jsonl_path",
+    "log_path",
+    "audio_path",
+    "voice_audio_path",
+    "image_data",
+    "image_data_url",
+    "audio_base64",
+    "base64",
+    "raw_html",
+    "raw_response",
+}
 
 
 @dataclass(frozen=True)
@@ -110,6 +128,23 @@ def compress_tool_result(result: Any) -> CompressedToolResult:
     )
 
 
+def build_event_agent_state(result: Any) -> dict[str, Any]:
+    """Build the UI-safe event channel and attach compressed planner channels."""
+    state = getattr(result, "agent_state", {}) or {}
+    if not isinstance(state, dict):
+        state = {}
+    event_state = _sanitize_ui_state(state)
+    compressed = compress_tool_result(result)
+    event_state["joi_juice"] = compressed.to_agent_state()
+    event_state["result_channels"] = {
+        "ui": "agent_state",
+        "planner": "joi_juice.planner_state",
+        "memory": "joi_juice.memory_candidate",
+        "audit": "joi_juice.audit_log",
+    }
+    return event_state
+
+
 def _compress_state(state: dict[str, Any]) -> dict[str, Any]:
     compressed: dict[str, Any] = {}
     for key, value in state.items():
@@ -133,6 +168,36 @@ def _compress_state(state: dict[str, Any]) -> dict[str, Any]:
         if cleaned not in ({}, [], ""):
             compressed[key] = cleaned
     return compressed
+
+
+def _sanitize_ui_state(state: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key, value in state.items():
+        key_text = str(key)
+        if key_text in _UI_STRIP_KEYS or key_text.startswith("debug_"):
+            continue
+        cleaned = _sanitize_ui_value(value)
+        if cleaned not in ({}, [], ""):
+            output[key_text] = cleaned
+    return output
+
+
+def _sanitize_ui_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _UI_STRIP_KEYS or key_text.startswith("debug_"):
+                continue
+            cleaned = _sanitize_ui_value(item)
+            if cleaned not in ({}, [], ""):
+                output[key_text] = cleaned
+        return output
+    if isinstance(value, list):
+        return [_sanitize_ui_value(item) for item in value]
+    if isinstance(value, str):
+        return _clean_ui_text(value)
+    return value
 
 
 def _compress_value(value: Any) -> Any:
@@ -242,6 +307,17 @@ def _clean_state_text(text: str) -> str:
     if len(value) > 500:
         return value[:500] + f"...({len(value)} chars)"
     return value
+
+
+def _clean_ui_text(text: str) -> str:
+    value = str(text or "")
+    if not value:
+        return ""
+    if value.startswith("data:"):
+        return "[redacted-data-url]"
+    value = _SECRET_RE.sub("[redacted]", value)
+    value = _LOCAL_PATH_RE.sub("[local-path]", value)
+    return value[:2000] + (f"...({len(value)} chars)" if len(value) > 2000 else "")
 
 
 def _unsafe_text(text: str) -> bool:

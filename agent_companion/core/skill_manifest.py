@@ -170,14 +170,14 @@ def _computer_use_skill() -> NativeSkillManifest:
             "computer.hotkey",
             "computer.workflow",
         ),
-        input_schema=_object_schema("query", "target", "action"),
+        input_schema=_computer_use_action_schema(),
         result_schema=_tool_result_schema("computer_use_audit", "artifacts"),
         permission_level="medium",
         local_capability="ready" if windows else "unavailable",
         configured=windows,
         state_policy="audited_session",
         audit="computer_use_audit",
-        notes=("approval_gated", "post_action_verification"),
+        notes=("llm_driven_action_schema", "approval_gated", "post_action_verification"),
     )
 
 
@@ -550,6 +550,23 @@ def _object_schema(*properties: str) -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {name: {"type": "value"} for name in properties if name},
+    }
+
+
+def _computer_use_action_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "description": "LLM chooses constrained desktop actions; app/site routes are data, not new code paths.",
+        "properties": {
+            "intent": {"type": "string", "enum": ["observe", "target", "click", "type_text", "scroll", "hotkey", "workflow"]},
+            "target": {"type": "string"},
+            "text": {"type": "string"},
+            "workflow": {"type": "string", "enum": ["open_app", "open_web_search", "open_url"]},
+            "site": {"type": "string"},
+            "browser": {"type": "string"},
+            "query": {"type": "string"},
+        },
+        "requires_approval_for": ["click", "type_text", "scroll", "hotkey", "workflow"],
     }
 
 

@@ -506,6 +506,19 @@ class JsonRpcBridge:
         visual_summary = str(state.get("sequence_summary") or state.get("vision_summary") or "")
         visual_status = str(state.get("model_status") or "")
         rolling = self.app.watch_session.transcript_state()
+        source_health = rolling.get("source_health") if isinstance(rolling.get("source_health"), dict) else {}
+        diagnostics = transcript.get("diagnostics") if isinstance(transcript.get("diagnostics"), dict) else {}
+        if diagnostics:
+            diagnostic_source = "system_audio" if diagnostics.get("capture") or diagnostics.get("audio_bytes") is not None else str(transcript.get("source") or options.transcript_source)
+            source_health = dict(source_health)
+            existing = source_health.get(diagnostic_source) if isinstance(source_health.get(diagnostic_source), dict) else {}
+            source_health[diagnostic_source] = {
+                **existing,
+                "status": diagnostics.get("status") or transcript.get("status") or "unknown",
+                "error": error,
+                "capture": diagnostics.get("capture") or "",
+                "audio_bytes": diagnostics.get("audio_bytes") or 0,
+            }
         comment = self.watch_commentary.maybe_comment(rolling, min_interval_seconds=options.commentary_interval_seconds) if options.proactive_enabled else None
         tick = WatchLoopTick(
             ok=result.ok,
@@ -516,7 +529,7 @@ class JsonRpcBridge:
             rolling_summary=str(rolling.get("summary") or ""),
             rolling_transcript=[str(text) for text in rolling.get("recent_text", []) if str(text).strip()],
             transcript_window_seconds=_safe_int(rolling.get("window_seconds")) or 0,
-            source_health=rolling.get("source_health") if isinstance(rolling.get("source_health"), dict) else {},
+            source_health=source_health,
             proactive_reply=comment.reply if comment else "",
             proactive_voice_text=comment.voice_text if comment else "",
             proactive_emotion=comment.emotion if comment else "neutral",
@@ -639,7 +652,8 @@ class JsonRpcBridge:
         tts_status = self.tts.status_payload()
         memory_status = self.app.memory.status()
         payload: dict[str, Any] = {
-            "workspace": str(self.workspace),
+            "workspace_label": self.workspace.name,
+            "workspace_bound": True,
             "asr": {
                 "enabled": self.asr_state.enabled,
                 "configured": self.asr_state.configured,
@@ -688,7 +702,6 @@ class JsonRpcBridge:
                     {
                         "id": sprite.id,
                         "label": sprite.label,
-                        "image_path": str(resolved),
                         "image_data_url": self._image_data_url(resolved),
                     }
                 )

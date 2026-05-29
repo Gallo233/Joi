@@ -227,7 +227,8 @@ class MemoryStore:
     def status(self, *, recent_limit: int = 8, pending_limit: int = 8) -> dict[str, Any]:
         return {
             "enabled": self.enabled(),
-            "vault_path": str(self.vault_path),
+            "vault_label": self.vault_path.name,
+            "storage": "local",
             "recent": self.recent(recent_limit),
             "pending": self.pending(pending_limit),
         }
@@ -239,7 +240,7 @@ class MemoryStore:
             text = self.vault_path.read_text(encoding="utf-8")
             updated_at = self.vault_path.stat().st_mtime
         except Exception:
-            return {"path": str(self.vault_path), "updated_at": 0, "sections": []}
+            return {"path_label": self.vault_path.name, "storage": "local", "updated_at": 0, "sections": []}
         sections: list[dict[str, Any]] = []
         current: dict[str, Any] | None = None
         for raw in text.splitlines():
@@ -258,7 +259,7 @@ class MemoryStore:
             lines = current.setdefault("lines", [])
             if len(lines) < max(1, int(max_lines_per_section or 18)):
                 lines.append(cleaned[:500])
-        return {"path": str(self.vault_path), "updated_at": float(updated_at), "sections": sections}
+        return {"path_label": self.vault_path.name, "storage": "local", "updated_at": float(updated_at), "sections": sections}
 
     def clear(self) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:

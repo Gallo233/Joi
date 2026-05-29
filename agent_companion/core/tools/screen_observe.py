@@ -188,13 +188,27 @@ class ScreenObserveTool(ToolAdapter):
                 return audio_result
             fallback = transcript_from_ocr_records(records, sample_interval_ms)
             if fallback.ok:
-                return TranscriptResult(fallback.status, fallback.source, fallback.segments, fallback.summary, audio_result.error)
+                return TranscriptResult(fallback.status, fallback.source, fallback.segments, fallback.summary, audio_result.error, audio_result.diagnostics)
             return audio_result
         if source in {"auto", "system_audio", "audio"}:
             fallback = transcript_from_ocr_records(records, sample_interval_ms)
             if fallback.ok:
-                return TranscriptResult(fallback.status, fallback.source, fallback.segments, fallback.summary, "system_audio_unavailable")
-            return TranscriptResult("unavailable", "system_audio", [], "系统音频转写不可用。", "system_audio_unavailable")
+                return TranscriptResult(
+                    fallback.status,
+                    fallback.source,
+                    fallback.segments,
+                    fallback.summary,
+                    "system_audio_unavailable",
+                    {"status": "unavailable", "platform": "windows", "dependency": "unknown", "device": "unknown", "capture": "failed"},
+                )
+            return TranscriptResult(
+                "unavailable",
+                "system_audio",
+                [],
+                "系统音频转写不可用。",
+                "system_audio_unavailable",
+                {"status": "unavailable", "platform": "windows", "dependency": "unknown", "device": "unknown", "capture": "failed"},
+            )
         return transcript_from_ocr_records(records, sample_interval_ms)
 
     def _run_ocr(self, observation: VisionObservation) -> OcrResult:
