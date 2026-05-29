@@ -30,11 +30,13 @@ The current repository is intentionally focused on the Joi main line.
 
 ```powershell
 cd path\to\Joi
+.\start_joi.bat -Setup
 .\start_joi.bat -Doctor
 .\start_joi.bat
 ```
 
 The launcher starts the Python Core on `ws://127.0.0.1:8765` and opens the Joi desktop shell. Core logs are written to `logs/joi_core.out.log` and `logs/joi_core.err.log`.
+`-Setup` creates a local `config.yaml` from `config.example.yaml` when missing and never writes secrets.
 
 ## Development
 
@@ -93,12 +95,14 @@ Run core tests:
 ```powershell
 .\.venv\Scripts\python.exe run_agent_companion_tests.py
 .\.venv\Scripts\python.exe tools\packaging_smoke.py
+.\.venv\Scripts\python.exe tools\windows_setup_wizard.py
 .\.venv\Scripts\python.exe tools\mvp_demo_check.py
 .\.venv\Scripts\python.exe tools\provider_preflight.py
 .\.venv\Scripts\python.exe tools\windows_release_check.py --allow-missing-exe
 ```
 
 `tools\packaging_smoke.py` also validates the Windows release privacy policy for local config, secrets, runtime data, logs, dependency folders, and build caches.
+`tools\windows_setup_wizard.py` previews first-run setup and can create `config.yaml` from `config.example.yaml` with `--apply`; it never writes secrets.
 `tools\mvp_demo_check.py` prints safe watch/coding/game demo prompts and dependency readiness without starting external actions.
 `tools\provider_preflight.py` runs an offline, sanitized provider readiness check for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification.
 `tools\windows_release_check.py` aggregates doctor, MVP demo check, provider preflight, packaging smoke, release privacy, and portable package dry-run status into one release readiness report.

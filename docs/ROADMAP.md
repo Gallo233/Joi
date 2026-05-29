@@ -157,6 +157,7 @@ Status: in progress
 - Release privacy validation now checks that packaging rules protect local config, secrets, runtime data, logs, dependency folders, and build caches before Windows artifacts are shipped.
 - Release readiness aggregation now combines doctor, packaging smoke, privacy policy, and portable package dry-run status into one safe RC report.
 - First-run setup checklist.
+- First-run setup wizard now exposes `start_joi.bat -Setup` and can create local `config.yaml` from the example without writing secrets.
 - First-run doctor now checks Python packages, optional OCR/audio packages, frontend toolchain, shell build state, `config.yaml`, Tesseract, and Core port readiness.
 - Offline provider preflight now reports sanitized readiness for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification without endpoint or secret probes.
 - MVP demo readiness now covers safe Watch Together, Codex coding, and OK-WW game-skill scripts without launching external actions.

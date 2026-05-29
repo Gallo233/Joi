@@ -54,6 +54,7 @@ TOOLS_FILES = [
     "tools/smoke_ws_bridge.py",
     "tools/start_joi.ps1",
     "tools/windows_release_check.py",
+    "tools/windows_setup_wizard.py",
 ]
 RELEASE_EXE = "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
 FORBIDDEN_NAMES = {"config.yaml", "secrets.yaml", ".env"}

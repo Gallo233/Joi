@@ -4,11 +4,17 @@ This checklist is for a fresh Windows machine or a desktop shortcut that opens a
 
 ## 1. Run Doctor
 
+Create a local config from the checked-in example when needed:
+
+```powershell
+.\start_joi.bat -Setup
+```
+
 ```powershell
 .\start_joi.bat -Doctor
 ```
 
-The doctor checks the local Python environment, required Python packages, optional OCR/audio packages, Node/Rust frontend tooling, shell build state, `config.yaml`, Tesseract availability, and whether the Core port is already in use.
+Setup creates `config.yaml` only if it is missing, and it never writes secrets. The doctor checks the local Python environment, required Python packages, optional OCR/audio packages, Node/Rust frontend tooling, shell build state, `config.yaml`, Tesseract availability, and whether the Core port is already in use.
 
 For machine-readable output:
 
@@ -71,6 +77,14 @@ Packaging metadata smoke:
 ```
 
 This also checks the Windows release privacy policy so local `config.yaml`, `secrets.yaml`, runtime data, logs, dependency folders, and build caches are not eligible for release packaging.
+
+Setup wizard dry-run:
+
+```powershell
+.\.venv\Scripts\python.exe tools\windows_setup_wizard.py
+```
+
+Add `--apply` to create `config.yaml` from `config.example.yaml` when it is missing.
 
 MVP demo readiness:
 

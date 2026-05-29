@@ -42,6 +42,8 @@ jobs:
         run: npm ci
       - name: Run packaging metadata smoke
         run: python tools/packaging_smoke.py
+      - name: Run setup wizard dry-run
+        run: python tools/windows_setup_wizard.py
       - name: Run provider preflight
         run: python tools/provider_preflight.py
       - name: Run MVP demo check

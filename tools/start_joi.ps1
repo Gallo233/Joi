@@ -2,7 +2,8 @@
 param(
   [int]$Port = 8765,
   [switch]$ReuseCore,
-  [switch]$Doctor
+  [switch]$Doctor,
+  [switch]$Setup
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +15,7 @@ $DebugShellExe = Join-Path $ProjectRoot "agent_companion\shell\src-tauri\target\
 $ShellDir = Join-Path $ProjectRoot "agent_companion\shell"
 $LogDir = Join-Path $ProjectRoot "logs"
 $DoctorScript = Join-Path $ProjectRoot "tools\joi_doctor.py"
+$SetupScript = Join-Path $ProjectRoot "tools\windows_setup_wizard.py"
 $NodeBin = "D:\codex游戏\toolchains\node"
 $Npm = Join-Path $NodeBin "npm.cmd"
 $LocalCargoBin = Join-Path $ProjectRoot "..\toolchains\rust\cargo\bin"
@@ -80,6 +82,20 @@ if ($Doctor) {
     exit $LASTEXITCODE
   }
   Write-Host "Python was not found. Install Python 3, then run start_joi.bat -Doctor again."
+  exit 1
+}
+
+if ($Setup) {
+  if (Test-Path $Python) {
+    & $Python $SetupScript --workspace $ProjectRoot --apply
+    exit $LASTEXITCODE
+  }
+  $SystemPython = Get-Command py -ErrorAction SilentlyContinue
+  if ($SystemPython) {
+    & py -3 $SetupScript --workspace $ProjectRoot --apply
+    exit $LASTEXITCODE
+  }
+  Write-Host "Python was not found. Install Python 3, then run start_joi.bat -Setup again."
   exit 1
 }
 

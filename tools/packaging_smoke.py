@@ -35,6 +35,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
     release_packager_path = root / "tools" / "package_windows_release.py"
     provider_preflight_path = root / "tools" / "provider_preflight.py"
     release_check_path = root / "tools" / "windows_release_check.py"
+    setup_wizard_path = root / "tools" / "windows_setup_wizard.py"
 
     package = _read_json(package_path, add, "package_json")
     tauri = _read_json(tauri_path, add, "tauri_config")
@@ -51,6 +52,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
             "windows_release_packager": release_packager_path,
             "provider_preflight": provider_preflight_path,
             "windows_release_check": release_check_path,
+            "windows_setup_wizard": setup_wizard_path,
         },
         add,
     )
@@ -153,6 +155,7 @@ def _check_launcher(start_bat_path: Path, start_ps1_path: Path, add: Any) -> Non
     ps1 = start_ps1_path.read_text(encoding="utf-8", errors="ignore")
     _expect("%*" in bat, add, "bat_argument_forwarding", "start_joi.bat forwards command-line arguments.", "Forward batch arguments so -Doctor and future launch switches work.")
     _expect("-Doctor" in ps1 and "joi_doctor.py" in ps1, add, "doctor_launcher", "PowerShell launcher exposes doctor mode.", "Keep start_joi.ps1 wired to tools/joi_doctor.py.")
+    _expect("-Setup" in ps1 and "windows_setup_wizard.py" in ps1, add, "setup_launcher", "PowerShell launcher exposes first-run setup mode.", "Keep start_joi.ps1 wired to tools/windows_setup_wizard.py.")
     _expect("joi_core.err.log" in ps1 and "joi_core.out.log" in ps1, add, "core_logs", "Core stdout/stderr logs are configured.", "Keep Core logs under logs/ for shortcut debugging.")
 
 

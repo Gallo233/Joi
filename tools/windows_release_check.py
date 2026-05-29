@@ -11,12 +11,14 @@ try:
     from tools.package_windows_release import build_release_privacy_report, build_windows_release_package
     from tools.packaging_smoke import build_packaging_smoke_report
     from tools.provider_preflight import build_provider_preflight_report
+    from tools.windows_setup_wizard import build_windows_setup_plan
 except ModuleNotFoundError:
     from joi_doctor import build_doctor_report
     from mvp_demo_check import build_mvp_demo_check_report
     from package_windows_release import build_release_privacy_report, build_windows_release_package
     from packaging_smoke import build_packaging_smoke_report
     from provider_preflight import build_provider_preflight_report
+    from windows_setup_wizard import build_windows_setup_plan
 
 
 CHECK_VERSION = "joi.windows_release_check.v1"
@@ -35,6 +37,9 @@ def build_windows_release_check_report(
     if include_doctor:
         doctor = build_doctor_report(root, port=port)
         phases.append(_phase("doctor", doctor, _counts_summary(doctor), required=False))
+
+    setup = build_windows_setup_plan(root, apply=False)
+    phases.append(_phase("windows_setup", setup, _counts_summary(setup), required=False))
 
     provider_preflight = build_provider_preflight_report(root)
     phases.append(_phase("provider_preflight", provider_preflight, _counts_summary(provider_preflight), required=False))
