@@ -21,17 +21,23 @@ class WatchRecallTool(ToolAdapter):
         question = str(request.arguments.get("query") or "").strip()
         frames = self._recent_frames(3)
         answer, status = self._answerer.answer(question, frames)
-        artifacts = [frame.artifact for frame in frames[:1] if frame.artifact]
+        artifacts = [frame.artifact for frame in frames if frame.artifact][:1]
         body_lines = [f"问题：{question or '追问'}", f"回答：{answer}"]
         if frames:
             body_lines.append("最近视觉上下文：")
             for index, frame in enumerate(frames, start=1):
                 title = frame.title or "未知窗口"
                 body_lines.append(f"{index}. {title} - {frame.summary}")
+                if frame.sequence_summary:
+                    body_lines.append(f"   连续画面：{frame.sequence_summary}")
+                if frame.sequence_size > 1:
+                    body_lines.append(f"   采样：第 {frame.frame_index}/{frame.sequence_size} 帧")
                 if frame.ocr_text:
                     body_lines.append(f"   可见文字：{' / '.join(frame.ocr_text[:6])}")
                 elif frame.ocr_summary:
                     body_lines.append(f"   OCR：{frame.ocr_summary}")
+                if frame.transcript_text:
+                    body_lines.append(f"   实时转写：{' / '.join(frame.transcript_text[:6])}")
                 if frame.ocr_regions:
                     labels = [str(region.get("label_name") or region.get("label") or "区域") for region in frame.ocr_regions[:4] if isinstance(region, dict)]
                     if labels:
@@ -39,16 +45,20 @@ class WatchRecallTool(ToolAdapter):
         else:
             body_lines.append("最近视觉上下文：暂无")
         has_context = bool(frames)
+        agent_state = {
+            "tool": self.name,
+            "watch_answer": answer,
+            "watch_context": [frame.to_agent_state() for frame in frames],
+            "model_status": status or "no_context",
+            "answer_source": "model" if self._answerer.last_used_model else "template",
+            "artifacts": artifacts,
+        }
+        model_usage = getattr(self._answerer, "last_model_usage", None)
+        if model_usage:
+            agent_state["model_usage"] = model_usage
         return ToolResult(
             ok=True,
-            agent_state={
-                "tool": self.name,
-                "watch_answer": answer,
-                "watch_context": [frame.to_agent_state() for frame in frames],
-                "model_status": status or "no_context",
-                "answer_source": "model" if self._answerer.last_used_model else "template",
-                "artifacts": artifacts,
-            },
+            agent_state=agent_state,
             display_card=DisplayCard(
                 "陪看追问",
                 answer,

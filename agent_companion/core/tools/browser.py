@@ -15,7 +15,7 @@ class BrowserTool(ToolAdapter):
     def __init__(self, workspace: Path, name: str) -> None:
         self.workspace = workspace
         self.name = name
-        self.queue_path = workspace / "data" / "agent_companion" / "browser_requests.jsonl"
+        self.queue_path = workspace / "data" / "agent_events" / "browser_requests.jsonl"
 
     def run(self, request: ToolRequest) -> ToolResult:
         if os.environ.get("AGENT_COMPANION_BROWSER_STUB") != "1":

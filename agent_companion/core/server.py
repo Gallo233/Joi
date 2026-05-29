@@ -16,9 +16,12 @@ from agent_companion.core.runtime_config_writer import preview_runtime_config_up
 from agent_companion.core.schemas import AgentEvent, DisplayCard
 from agent_companion.core.schemas import EventType
 from agent_companion.core.runtime_status import build_runtime_status
+from agent_companion.core.skill_manifest import build_native_skill_manifest
 from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
 from agent_companion.core.voice import safe_voice_line
+from agent_companion.core.watch_commentary import WatchCommentaryPlanner
+from agent_companion.core.watch_loop import WatchLoopController, WatchLoopOptions, WatchLoopTick
 
 
 SPEAKABLE_EVENTS = {
@@ -46,6 +49,8 @@ class JsonRpcBridge:
         self.port = port
         self.app = AgentCompanionApp(self.workspace)
         self.tts = TtsBridge(self.workspace)
+        self.watch_commentary = WatchCommentaryPlanner(self.workspace, self.app.character)
+        self.watch_loop = WatchLoopController(self._watch_loop_tick, self.app.bus.emit)
         if asr_provider is None:
             self.asr, self.asr_state = build_asr_provider(self.workspace, allow_mock=allow_mock_asr)
         else:
@@ -72,6 +77,7 @@ class JsonRpcBridge:
             try:
                 await asyncio.Future()
             finally:
+                self.watch_loop.stop(emit=False)
                 pump.cancel()
                 self.tts.shutdown()
 
@@ -103,6 +109,74 @@ class JsonRpcBridge:
                     return
                 asyncio.create_task(asyncio.to_thread(self.submit_user_text, text))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
+                return
+            if method == "watch.loop.start":
+                result = await asyncio.to_thread(self.watch_loop_start_command, params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "watch.loop.stop":
+                result = await asyncio.to_thread(self.watch_loop_stop_command)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "watch.loop.configure":
+                result = await asyncio.to_thread(self.watch_loop_configure_command, params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "watch.loop.refresh":
+                result = await asyncio.to_thread(self.watch_loop_refresh_command, params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "watch.loop.status":
+                await websocket.send(self._result(request_id, self.watch_loop_status_command()))
+                return
+            if method == "background.status":
+                await websocket.send(self._result(request_id, self.background_status_command()))
+                return
+            if method == "background.configure":
+                result = await asyncio.to_thread(self.background_configure_command, params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "background.clear":
+                result = await asyncio.to_thread(self.background_clear_command)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "skills.list":
+                await websocket.send(self._result(request_id, self.skill_manifest_command()))
+                return
+            if method == "audit.recent":
+                limit = _safe_int(params.get("limit")) or 50
+                await websocket.send(self._result(request_id, self.audit_recent_command(limit)))
+                return
+            if method == "memory.status":
+                await websocket.send(self._result(request_id, self.memory_status_command()))
+                return
+            if method == "memory.recall":
+                result = self.memory_recall_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.browse_vault":
+                result = self.memory_browse_vault_command()
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.save_candidate":
+                result = self.memory_save_candidate_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.reject_candidate":
+                result = self.memory_reject_candidate_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.set_enabled":
+                result = self.memory_set_enabled_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.delete":
+                result = self.memory_delete_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.clear":
+                result = self.memory_clear_command()
+                await websocket.send(self._result(request_id, result))
                 return
             if method == "approval.resolve":
                 approval_id = str(params.get("approval_id") or "")
@@ -167,7 +241,7 @@ class JsonRpcBridge:
                 asyncio.create_task(self._synthesize_voice(event))
 
     async def _synthesize_voice(self, event: AgentEvent) -> None:
-        audio = await asyncio.to_thread(self.tts.synthesize, event.voice_line.text, event.voice_line.sprite)
+        audio = await asyncio.to_thread(self.tts.synthesize, event.voice_line.text, event.voice_line.sprite, event.voice_line.emotion)
         if not audio:
             return
         if not audio.get("voice_audio_path") and not audio.get("voice_audio_error"):
@@ -176,13 +250,16 @@ class JsonRpcBridge:
             "task_id": event.task_id,
             "event_type": event.type.value,
             "event_created_at": event.created_at,
+            "event_tool": str(event.agent_state.get("tool") or ""),
+            "watch_commentary": bool(event.agent_state.get("watch_commentary")),
             "voice_text": event.voice_line.text,
+            "voice_emotion": event.voice_line.emotion,
+            "voice_sprite": event.voice_line.sprite,
             **audio,
         }
         data_url = self._voice_audio_data_url(audio.get("voice_audio_path", ""))
         if data_url:
             payload["voice_audio_data_url"] = data_url
-        self._play_voice_audio_locally(audio.get("voice_audio_path", ""))
         message = json.dumps({"jsonrpc": "2.0", "method": "agent.voice_audio", "params": payload}, ensure_ascii=False)
         await self._broadcast(message)
 
@@ -208,15 +285,145 @@ class JsonRpcBridge:
             "submitted": False,
         }
         if result.ok:
-            sequence, events = self._run_serial("voice.transcribe", lambda: self.app.handle_user_text(result.transcript))
+            submitted = self.submit_user_text(result.transcript)
             payload["submitted"] = True
-            payload["sequence"] = sequence
-            payload["events"] = [event.to_dict() for event in events]
+            payload["sequence"] = submitted.get("sequence")
+            payload["events"] = submitted.get("events", [])
+            if "watch_loop" in submitted:
+                payload["watch_loop"] = submitted["watch_loop"]
         return payload
 
     def submit_user_text(self, text: str) -> dict[str, Any]:
+        if _looks_like_watch_loop_stop(text):
+            return self.watch_loop_stop_command()
         sequence, events = self._run_serial("user.message", lambda: self.app.handle_user_text(text))
-        return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+        payload: dict[str, Any] = {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+        if _looks_like_watch_loop_start(text):
+            self.watch_commentary.reset()
+            payload["watch_loop"] = self.watch_loop.start(self._watch_loop_options_from_params({"query": text})).to_agent_state()
+        return payload
+
+    def watch_loop_start_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.watch_commentary.reset()
+        snapshot = self.watch_loop.start(self._watch_loop_options_from_params(params if isinstance(params, dict) else {}))
+        return {"ok": True, "watch_loop": snapshot.to_agent_state()}
+
+    def watch_loop_stop_command(self) -> dict[str, Any]:
+        snapshot = self.watch_loop.stop()
+        return {"ok": True, "watch_loop": snapshot.to_agent_state()}
+
+    def watch_loop_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        current = self.watch_loop.snapshot()
+        merged: dict[str, Any] = {
+            "query": current.query or "陪我看当前视频",
+            "interval_seconds": current.interval_seconds,
+            "sample_count": current.sample_count,
+            "sample_interval_ms": 700,
+            "transcript_source": current.transcript_source or "system_audio",
+            "transcribe": True,
+            "proactive_enabled": current.proactive_enabled,
+            "commentary_interval_seconds": current.commentary_interval_seconds or 30.0,
+            "vision_interval_ticks": current.vision_interval_ticks,
+        }
+        if isinstance(params, dict):
+            merged.update(params)
+        snapshot = self.watch_loop.configure(self._watch_loop_options_from_params(merged))
+        if not snapshot.proactive_enabled:
+            self.watch_commentary.reset()
+        return {"ok": True, "watch_loop": snapshot.to_agent_state()}
+
+    def watch_loop_refresh_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        current = self.watch_loop.snapshot()
+        if not current.active:
+            return {"ok": False, "error": "watch_loop_inactive", "watch_loop": current.to_agent_state()}
+        force_visual = _safe_bool(params.get("force_visual_summary"), False) if isinstance(params, dict) else False
+        snapshot = self.watch_loop.refresh(force_visual_summary=force_visual)
+        return {"ok": True, "watch_loop": snapshot.to_agent_state()}
+
+    def watch_loop_status_command(self) -> dict[str, Any]:
+        return {"ok": True, "watch_loop": self.watch_loop.snapshot().to_agent_state()}
+
+    def background_status_command(self) -> dict[str, Any]:
+        return {"ok": True, "background": self.app.background_context.status()}
+
+    def background_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        enabled = params.get("enabled") if isinstance(params.get("enabled"), bool) else None
+        result = self.app.background_context.configure(
+            enabled=enabled,
+            scope_type=str(params.get("scope_type") or ""),
+            label=str(params.get("label") or ""),
+            active_scope_id=str(params.get("active_scope_id") or ""),
+        )
+        self._emit_background_audit(
+            "背景上下文设置已更新。" if result.get("ok") else "背景上下文设置没有更新。",
+            result.get("background", {}),
+            status="success" if result.get("ok") else "failed",
+        )
+        return result
+
+    def background_clear_command(self) -> dict[str, Any]:
+        result = self.app.background_context.clear_context()
+        self._emit_background_audit("背景上下文摘要已清空。", result.get("background", {}), status="info")
+        return result
+
+    def memory_status_command(self) -> dict[str, Any]:
+        return {"ok": True, "memory": self.app.memory.status()}
+
+    def skill_manifest_command(self) -> dict[str, Any]:
+        tts_status = self.tts.status_payload()
+        return {
+            "ok": True,
+            "skills": build_native_skill_manifest(
+                self.workspace,
+                asr_state=self.asr_state,
+                tts_status=tts_status,
+                memory_status=self.app.memory.status(),
+                skill_settings=self.app.skill_settings_payload(),
+            ),
+        }
+
+    def audit_recent_command(self, limit: int = 50) -> dict[str, Any]:
+        return {"ok": True, "audit": self.app.audit_store.recent(limit)}
+
+    def memory_recall_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        query = str(params.get("query") or "") if isinstance(params, dict) else ""
+        limit = _safe_int(params.get("limit")) if isinstance(params, dict) else None
+        safe_limit = min(20, max(1, int(limit or 8)))
+        return {"ok": True, "memories": self.app.memory.recall(query, safe_limit), "memory": self.app.memory.status()}
+
+    def memory_browse_vault_command(self) -> dict[str, Any]:
+        return {"ok": True, "vault": self.app.memory.browse_vault(), "memory": self.app.memory.status()}
+
+    def memory_save_candidate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        candidate_id = _safe_int(params.get("candidate_id")) if isinstance(params, dict) else None
+        if candidate_id is None:
+            return {"ok": False, "error": "missing_candidate_id", "memory": self.app.memory.status()}
+        result = self.app.memory.save_candidate(candidate_id)
+        return {**result, "memory": self.app.memory.status()}
+
+    def memory_reject_candidate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        candidate_id = _safe_int(params.get("candidate_id")) if isinstance(params, dict) else None
+        if candidate_id is None:
+            return {"ok": False, "error": "missing_candidate_id", "memory": self.app.memory.status()}
+        reason = str(params.get("reason") or "user_rejected") if isinstance(params, dict) else "user_rejected"
+        result = self.app.memory.reject_candidate(candidate_id, reason)
+        return {**result, "memory": self.app.memory.status()}
+
+    def memory_set_enabled_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        enabled = _safe_bool(params.get("enabled"), True) if isinstance(params, dict) else True
+        return {"ok": True, "memory": self.app.memory.set_enabled(enabled)}
+
+    def memory_delete_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        memory_id = _safe_int(params.get("memory_id")) if isinstance(params, dict) else None
+        if memory_id is None:
+            return {"ok": False, "error": "missing_memory_id", "memory": self.app.memory.status()}
+        result = self.app.memory.delete(memory_id)
+        return {**result, "memory": self.app.memory.status()}
+
+    def memory_clear_command(self) -> dict[str, Any]:
+        result = self.app.memory.clear()
+        return {**result, "memory": self.app.memory.status()}
 
     def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
         sequence, events = self._run_serial("approval.resolve", lambda: self.app.resolve_approval(approval_id, approved))
@@ -255,6 +462,91 @@ class JsonRpcBridge:
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return {"ok": True, "artifact": artifact, "mime": mime, "data_url": f"data:{mime};base64,{encoded}"}
 
+    def _watch_loop_options_from_params(self, params: dict[str, Any]) -> WatchLoopOptions:
+        query = str(params.get("query") or "陪我看当前视频").strip()
+        sample_interval_ms = _safe_int(params.get("sample_interval_ms"))
+        vision_interval_ticks = _safe_int(params.get("vision_interval_ticks"))
+        return WatchLoopOptions(
+            query=query or "陪我看当前视频",
+            interval_seconds=_safe_float(params.get("interval_seconds"), 6.0),
+            sample_count=_safe_int(params.get("sample_count")) or 3,
+            sample_interval_ms=sample_interval_ms if sample_interval_ms is not None else 700,
+            transcript_source=str(params.get("transcript_source") or "system_audio"),
+            transcribe=bool(params.get("transcribe", True)),
+            proactive_enabled=_safe_bool(params.get("proactive_enabled"), True),
+            commentary_interval_seconds=_safe_float(params.get("commentary_interval_seconds"), 30.0),
+            vision_interval_ticks=vision_interval_ticks if vision_interval_ticks is not None else 5,
+        )
+
+    def _watch_loop_tick(self, options: WatchLoopOptions) -> WatchLoopTick:
+        next_iteration = self.watch_loop.snapshot().iterations + 1
+        run_vision_summary = _watch_loop_should_summarize(options, next_iteration)
+        with self._command_lock:
+            result = self.app.refresh_watch_context(
+                options.query,
+                sample_count=options.sample_count,
+                sample_interval_ms=options.sample_interval_ms,
+                transcript_source=options.transcript_source,
+                transcribe=options.transcribe,
+                skip_summary=not run_vision_summary,
+            )
+        state = result.agent_state if isinstance(result.agent_state, dict) else {}
+        transcript = state.get("transcript") if isinstance(state.get("transcript"), dict) else {}
+        segments = transcript.get("segments") if isinstance(transcript.get("segments"), list) else []
+        transcript_text: list[str] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            text = str(segment.get("text") or "").strip()
+            if text:
+                transcript_text.append(text[:180])
+        error = str(transcript.get("error") or "")
+        if not result.ok and not error:
+            error = str(state.get("error") or "watch_loop_failed")
+        visual_summary = str(state.get("sequence_summary") or state.get("vision_summary") or "")
+        visual_status = str(state.get("model_status") or "")
+        rolling = self.app.watch_session.transcript_state()
+        source_health = rolling.get("source_health") if isinstance(rolling.get("source_health"), dict) else {}
+        diagnostics = transcript.get("diagnostics") if isinstance(transcript.get("diagnostics"), dict) else {}
+        if diagnostics:
+            diagnostic_source = "system_audio" if diagnostics.get("capture") or diagnostics.get("audio_bytes") is not None else str(transcript.get("source") or options.transcript_source)
+            source_health = dict(source_health)
+            existing = source_health.get(diagnostic_source) if isinstance(source_health.get(diagnostic_source), dict) else {}
+            source_health[diagnostic_source] = {
+                **existing,
+                "status": diagnostics.get("status") or transcript.get("status") or "unknown",
+                "error": error,
+                "capture": diagnostics.get("capture") or "",
+                "audio_bytes": diagnostics.get("audio_bytes") or 0,
+            }
+        comment = self.watch_commentary.maybe_comment(rolling, min_interval_seconds=options.commentary_interval_seconds) if options.proactive_enabled else None
+        tick = WatchLoopTick(
+            ok=result.ok,
+            summary=result.display_card.summary,
+            transcript_text=transcript_text,
+            transcript_source=str(transcript.get("source") or options.transcript_source),
+            transcript_status=str(transcript.get("status") or ""),
+            rolling_summary=str(rolling.get("summary") or ""),
+            rolling_transcript=[str(text) for text in rolling.get("recent_text", []) if str(text).strip()],
+            transcript_window_seconds=_safe_int(rolling.get("window_seconds")) or 0,
+            source_health=source_health,
+            proactive_reply=comment.reply if comment else "",
+            proactive_voice_text=comment.voice_text if comment else "",
+            proactive_emotion=comment.emotion if comment else "neutral",
+            proactive_sprite=comment.sprite if comment else "1",
+            proactive_reason=comment.reason if comment else "",
+            visual_summary=visual_summary,
+            visual_status=visual_status,
+            error=error,
+        )
+        self.app.background_context.record_summary(
+            tick.rolling_summary or tick.visual_summary or tick.summary,
+            source="watch_loop",
+            visual_status=tick.visual_status,
+            transcript_source=tick.transcript_source,
+        )
+        return tick
+
     def _resolve_artifact_path(self, artifact: str) -> Path | None:
         value = (artifact or "").strip()
         if not value or "\x00" in value:
@@ -268,6 +560,24 @@ class JsonRpcBridge:
         except Exception:
             return None
         return resolved
+
+    def _emit_background_audit(self, summary: str, background: dict[str, Any], *, status: str = "info") -> None:
+        self.app.bus.emit(
+            AgentEvent(
+                EventType.AUDIT_EVENT,
+                f"background-{uuid.uuid4().hex[:8]}",
+                DisplayCard("背景伴随", summary, status=status),
+                safe_voice_line("", fallback=""),
+                {
+                    "tool": "background.context",
+                    "skill_id": "joi.watch",
+                    "skill_category": "watch",
+                    "skill_permission_level": "low",
+                    "skill_audit": "background_context_audit",
+                    "background_context": background,
+                },
+            )
+        )
 
     @staticmethod
     def _voice_audio_data_url(path_text: str) -> str:
@@ -340,8 +650,10 @@ class JsonRpcBridge:
 
     def _ready_payload(self) -> dict[str, Any]:
         tts_status = self.tts.status_payload()
+        memory_status = self.app.memory.status()
         payload: dict[str, Any] = {
-            "workspace": str(self.workspace),
+            "workspace_label": self.workspace.name,
+            "workspace_bound": True,
             "asr": {
                 "enabled": self.asr_state.enabled,
                 "configured": self.asr_state.configured,
@@ -353,6 +665,17 @@ class JsonRpcBridge:
             },
             "tts": tts_status,
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
+            "watch_loop": self.watch_loop.snapshot().to_agent_state(),
+            "memory": memory_status,
+            "audit": self.app.audit_store.status(),
+            "background": self.app.background_context.status(),
+            "skills": build_native_skill_manifest(
+                self.workspace,
+                asr_state=self.asr_state,
+                tts_status=tts_status,
+                memory_status=memory_status,
+                skill_settings=self.app.skill_settings_payload(),
+            ),
             "character": {
                 "name": self.app.character.name,
                 "sprites": [],
@@ -379,7 +702,6 @@ class JsonRpcBridge:
                     {
                         "id": sprite.id,
                         "label": sprite.label,
-                        "image_path": str(resolved),
                         "image_data_url": self._image_data_url(resolved),
                     }
                 )
@@ -391,6 +713,8 @@ class JsonRpcBridge:
     def _reload_runtime_after_config_change(self) -> None:
         self.asr, self.asr_state = build_asr_provider(self.workspace)
         self.tts.reload()
+        self.watch_commentary.reload()
+        self.app.reload_runtime_policy()
 
     @staticmethod
     def _image_data_url(path: Path) -> str:
@@ -468,6 +792,72 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    if text in {"1", "true", "yes", "on", "enabled", "开启"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "关闭"}:
+        return False
+    return default
+
+
+def _watch_loop_should_summarize(options: WatchLoopOptions, next_iteration: int) -> bool:
+    interval = max(0, int(options.vision_interval_ticks or 0))
+    if interval <= 0:
+        return False
+    if next_iteration <= 1:
+        return True
+    return next_iteration % interval == 0
+
+
+def _looks_like_watch_loop_start(text: str) -> bool:
+    value = " ".join((text or "").strip().split()).casefold()
+    if not value:
+        return False
+    start_tokens = (
+        "开始陪看",
+        "持续陪看",
+        "实时陪看",
+        "陪我看",
+        "陪着我看",
+        "一起看",
+        "边看边聊",
+        "陪看这个视频",
+    )
+    if any(token in value for token in start_tokens):
+        return True
+    return ("这个视频" in value or "当前视频" in value or "正在播放" in value) and any(token in value for token in ("实时", "持续", "一直", "边看边"))
+
+
+def _looks_like_watch_loop_stop(text: str) -> bool:
+    value = " ".join((text or "").strip().split()).casefold()
+    if not value:
+        return False
+    return any(
+        token in value
+        for token in (
+            "停止陪看",
+            "结束陪看",
+            "关闭陪看",
+            "停下陪看",
+            "停止实时陪看",
+            "别陪看了",
+            "不用陪看了",
+        )
+    )
+
+
 def _event_applied_runtime_config(event: AgentEvent) -> bool:
     state = event.agent_state or {}
     update = state.get("runtime_config_update")
@@ -498,6 +888,10 @@ def _safe_runtime_settings(config: Any) -> dict[str, Any]:
         },
         "computer_use": {
             "post_action_settle_ms": max(0, int(config.computer_use.post_action_settle_ms or 0)),
+        },
+        "skills": {
+            skill_id: {"enabled": bool(setting.enabled)}
+            for skill_id, setting in sorted(config.skills.items())
         },
     }
 

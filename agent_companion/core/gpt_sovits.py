@@ -9,6 +9,7 @@ import wave
 from pathlib import Path
 
 from agent_companion.core.config import AppConfig, CharacterConfig
+from agent_companion.core.voice import sprite_for_emotion
 
 
 class GptSoVitsClient:
@@ -21,7 +22,7 @@ class GptSoVitsClient:
         self._current_gpt_model_path = ""
         self._current_sovits_model_path = ""
 
-    def synthesize(self, text: str, character: CharacterConfig, sprite_id: str = "1") -> Path:
+    def synthesize(self, text: str, character: CharacterConfig, sprite_id: str = "1", emotion: str = "neutral") -> Path:
         text = (text or "").strip()
         if not text:
             raise ValueError("TTS text is empty")
@@ -32,8 +33,11 @@ class GptSoVitsClient:
         ref_audio_path = character.voice_refer_audio_path()
         prompt_text = character.voice_prompt_text()
         prompt_lang = character.voice_prompt_lang(self._config.tts.prompt_lang)
+        effective_sprite_id = str(sprite_id or "").strip()
+        if not effective_sprite_id or (effective_sprite_id == "1" and sprite_for_emotion(emotion, "1") != "1"):
+            effective_sprite_id = sprite_for_emotion(emotion)
         for sprite in character.sprites:
-            if sprite.id == str(sprite_id):
+            if sprite.id == effective_sprite_id:
                 if sprite.voice_path and sprite.voice_text:
                     ref_audio_path = sprite.voice_path
                     prompt_text = sprite.voice_text

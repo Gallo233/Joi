@@ -1,16 +1,21 @@
 [CmdletBinding()]
 param(
   [int]$Port = 8765,
-  [switch]$ReuseCore
+  [switch]$ReuseCore,
+  [switch]$Doctor,
+  [switch]$Setup
 )
 
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-$ShellExe = Join-Path $ProjectRoot "agent_companion\shell\src-tauri\target\debug\joi-shell.exe"
+$ReleaseShellExe = Join-Path $ProjectRoot "agent_companion\shell\src-tauri\target\release\joi-shell.exe"
+$DebugShellExe = Join-Path $ProjectRoot "agent_companion\shell\src-tauri\target\debug\joi-shell.exe"
 $ShellDir = Join-Path $ProjectRoot "agent_companion\shell"
 $LogDir = Join-Path $ProjectRoot "logs"
+$DoctorScript = Join-Path $ProjectRoot "tools\joi_doctor.py"
+$SetupScript = Join-Path $ProjectRoot "tools\windows_setup_wizard.py"
 $NodeBin = "D:\codex游戏\toolchains\node"
 $Npm = Join-Path $NodeBin "npm.cmd"
 $LocalCargoBin = Join-Path $ProjectRoot "..\toolchains\rust\cargo\bin"
@@ -66,8 +71,36 @@ function Stop-CoreOnPort {
 Set-Location $ProjectRoot
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+if ($Doctor) {
+  if (Test-Path $Python) {
+    & $Python $DoctorScript --workspace $ProjectRoot --port $Port
+    exit $LASTEXITCODE
+  }
+  $SystemPython = Get-Command py -ErrorAction SilentlyContinue
+  if ($SystemPython) {
+    & py -3 $DoctorScript --workspace $ProjectRoot --port $Port
+    exit $LASTEXITCODE
+  }
+  Write-Host "Python was not found. Install Python 3, then run start_joi.bat -Doctor again."
+  exit 1
+}
+
+if ($Setup) {
+  if (Test-Path $Python) {
+    & $Python $SetupScript --workspace $ProjectRoot --apply
+    exit $LASTEXITCODE
+  }
+  $SystemPython = Get-Command py -ErrorAction SilentlyContinue
+  if ($SystemPython) {
+    & py -3 $SetupScript --workspace $ProjectRoot --apply
+    exit $LASTEXITCODE
+  }
+  Write-Host "Python was not found. Install Python 3, then run start_joi.bat -Setup again."
+  exit 1
+}
+
 if (-not (Test-Path $Python)) {
-  Write-Host "Missing .venv\Scripts\python.exe. Run dependency setup first."
+  Write-Host "Missing .venv\Scripts\python.exe. Run start_joi.bat -Doctor for the first-run checklist."
   Read-Host "Press Enter to exit"
   exit 1
 }
@@ -105,8 +138,8 @@ if (-not (Test-LocalPort -PortToCheck $Port)) {
   }
 }
 
-if (Test-Path $ShellExe) {
-  Start-Process -FilePath $ShellExe -WorkingDirectory (Split-Path -Parent $ShellExe)
+if (Test-Path $ReleaseShellExe) {
+  Start-Process -FilePath $ReleaseShellExe -WorkingDirectory (Split-Path -Parent $ReleaseShellExe)
   exit 0
 }
 
@@ -114,6 +147,11 @@ if (Test-Path $Npm) {
   $env:Path = "$NodeBin;$CargoBin;$env:Path"
   Start-Process -FilePath $Npm -ArgumentList @("run", "tauri", "dev") -WorkingDirectory $ShellDir
   exit 0
+}
+
+if (Test-Path $DebugShellExe) {
+  Write-Host "Found a debug shell, but no npm was available to launch its dev server."
+  Write-Host "Build the release shell first so the desktop shortcut does not depend on 127.0.0.1:5173."
 }
 
 Write-Host "Missing built shell and npm. Build the shell first or install the Windows toolchain."

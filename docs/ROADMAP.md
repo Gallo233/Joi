@@ -87,7 +87,7 @@ Remaining P4 closeout risks:
 
 ## P5 Memory Core
 
-Status: planned
+Status: in progress
 
 - Add local SQLite storage for user preferences, project summaries, game habits, recent task outcomes, and companion relationship notes.
 - Add human-readable Markdown summaries for durable handoff, similar to a local memory vault.
@@ -112,6 +112,7 @@ Status: in progress
 - Record provider, model, latency, and fallback reason.
 - Show current model usage in settings.
 - Keep stable route labels: `fast`, `reasoning`, `vision`, `code`, `summarize`, and `voice_style`.
+- Core router now accepts `llm.routes` overrides, preserves `text`/`expression` aliases, and reports only safe model usage metadata.
 
 ## P8 Voice, Expression, And Skill Manifest
 
@@ -128,6 +129,9 @@ Status: in progress
 - Avoid speaking logs, JSON, paths, commands, tool ids, and inflated results.
 - Formalize native Joi skills with manifest, input schema, result schema, permission level, dry-run support, local capability checks, state policy, and tests.
 - Treat Codex, Browser/Computer Use, OK-WW, Memory, ASR, and TTS as native core skills before chasing broad third-party integrations.
+- Native skill manifest V1 now reports built-in skill ids, tool/RPC bindings, permission level, dry-run support, local capability, state policy, and audit policy through safe `core.ready` / `skills.list` payloads.
+- Plan, approval, tool result, task lifecycle, and Computer Use audit events now carry native skill boundary metadata for permission and audit UI work.
+- Native skill enable switches are now safe runtime config fields; disabled skills show as off in the manifest and are blocked by policy before approval or execution.
 
 ## P9 Policy, Audit, And Background Companion Loop
 
@@ -137,15 +141,26 @@ Status: in progress
 - Medium risk actions require task-level confirmation.
 - High risk actions require step-by-step confirmation.
 - Persist audit records for tool actions and approvals.
+- Persistent audit V1 now records approval, tool, task, and policy-block lifecycle rows to a local sanitized JSONL and exposes safe status plus `audit.recent`.
 - Add constrained background observation only for user-approved windows, projects, and games.
+- Background context controls now require an approved window/project/game scope and store summary-only context, with no video recording by default.
 - Summarize approved context without recording video by default.
 - Let users inspect, clear, or disable background context.
+- Shell developer controls now expose background status, approved scopes, recent summaries, disable, clear, and scope approval.
 
 ## P10 Packaging
 
-Status: planned
+Status: in progress
 
 - Windows-first release build.
+- Portable Windows release packager now creates a safe zip from allowlisted runtime files and the release shell.
+- Release privacy validation now checks that packaging rules protect local config, secrets, runtime data, logs, dependency folders, and build caches before Windows artifacts are shipped.
+- Release readiness aggregation now combines doctor, packaging smoke, privacy policy, and portable package dry-run status into one safe RC report.
 - First-run setup checklist.
-- Mac handoff kept current.
-- CI for Python tests, frontend build, and Tauri smoke build.
+- First-run setup wizard now exposes `start_joi.bat -Setup` and can create local `config.yaml` from the example without writing secrets.
+- First-run doctor now checks Python packages, optional OCR/audio packages, frontend toolchain, shell build state, `config.yaml`, Tesseract, and Core port readiness.
+- Offline provider preflight now reports sanitized readiness for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification without endpoint or secret probes.
+- MVP demo readiness now covers safe Watch Together, Codex coding, and OK-WW game-skill scripts without launching external actions.
+- Packaging smoke now validates version alignment, Tauri shell metadata, window permissions, and launcher wiring.
+- Mac handoff kept current through a safe Windows RC handoff report that summarizes release readiness without local paths or secrets.
+- CI workflow now runs Python tests, packaging smoke, frontend build, and Tauri debug no-bundle build on Windows.

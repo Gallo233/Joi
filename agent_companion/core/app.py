@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import time
 import uuid
 
@@ -15,19 +16,31 @@ from agent_companion.core.computer_use import (
     computer_approval_audit_event,
     target_grounding_audit_events,
 )
+from agent_companion.core.audit_store import AuditStore
+from agent_companion.core.background_context import BackgroundContextStore
 from agent_companion.core.character import CharacterHarness, load_character
 from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
 from agent_companion.core.codex_events import codex_cancel_run_state
+from agent_companion.core.desktop_context import (
+    DesktopContext,
+    active_desktop_context,
+    record_desktop_context,
+    rewrite_plan_for_desktop_context,
+)
 from agent_companion.core.event_bus import EventBus
 from agent_companion.core.expression import ExpressionEngine
+from agent_companion.core.llm_planner import LlmPlanParser
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
+from agent_companion.core.skill_manifest import annotate_agent_state_with_skill, skill_boundaries_for_plan, skill_boundary_for_tool
+from agent_companion.core.speech_input import build_asr_provider
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.codex import CodexTool
 from agent_companion.core.tools.computer import ComputerActionTool
+from agent_companion.core.tools.desktop_workflow import DesktopWorkflowTool
 from agent_companion.core.tools.files import FileReadTool
 from agent_companion.core.tools.game_ok_ww import OkWwTool
 from agent_companion.core.tools.mcp import McpListTool
@@ -36,10 +49,12 @@ from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import PendingSemanticTargetSelection, SemanticTargetSelectionStore, SemanticTargetSelectionTool, SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
+from agent_companion.core.tool_compression import build_event_agent_state
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
 from agent_companion.core.watch import WatchAnswerer, WatchFrame, WatchSession
+from agent_companion.core.watch_transcript import SystemAudioTranscriptProvider
 
 
 @dataclass
@@ -54,17 +69,25 @@ class PendingStep:
 
 
 class AgentCompanionApp:
-    def __init__(self, workspace: Path) -> None:
+    DESKTOP_CONTEXT_TTL_SECONDS = 600.0
+
+    def __init__(self, workspace: Path, llm_planner: LlmPlanParser | None = None) -> None:
         self.workspace = workspace.resolve()
         self.root = self.workspace / "agent_companion"
         self.character: CharacterHarness = load_character(self.root / "config" / "default_character.yaml")
         self.expression = ExpressionEngine(self.workspace, self.character)
         self.bus = EventBus(self.workspace / "data" / "agent_companion" / "events.jsonl")
+        self.audit_store = AuditStore(self.workspace / "data" / "agent_companion" / "audit.jsonl")
+        self.bus.subscribe(self.audit_store.record_event)
+        self.background_context = BackgroundContextStore(self.workspace / "data" / "agent_companion" / "background_context.json")
         self.memory = MemoryStore(self.workspace / "data" / "agent_companion" / "memory.sqlite3")
-        self.policy = PolicyGate()
+        self._runtime_config = self._load_runtime_config()
+        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config))
         self.tools = ToolRegistry()
         self.watch_session = WatchSession()
         self.semantic_selection = SemanticTargetSelectionStore()
+        self.desktop_context = DesktopContext()
+        self.llm_planner = llm_planner or LlmPlanParser(self.workspace)
         self.pending_steps: dict[str, PendingStep] = {}
         self.approval_history: dict[str, PendingStep] = {}
         self.resolved_approval_ids: set[str] = set()
@@ -72,6 +95,23 @@ class AgentCompanionApp:
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
+        memory_command = _parse_memory_command(text)
+        if memory_command:
+            task_id = f"task-{uuid.uuid4().hex[:10]}"
+            user_text = " ".join((text or "").strip().split())
+            self._emit(
+                AgentEvent(
+                    EventType.USER_MESSAGE,
+                    task_id,
+                    DisplayCard("用户请求", user_text),
+                    safe_voice_line("我收到了。", sprite="1"),
+                    {"intent": "memory_control"},
+                ),
+                user_text,
+            )
+            self._emit_memory_command(task_id, user_text, memory_command)
+            return self.bus.drain()
+
         selection = _parse_candidate_selection(text)
         if selection is not None and self.semantic_selection.has_pending():
             plan = AgentPlan(
@@ -82,6 +122,8 @@ class AgentCompanionApp:
             )
         else:
             plan = build_plan(text)
+            plan = self._refine_plan_with_llm(text, plan)
+            plan = self._rewrite_plan_for_desktop_context(plan)
         self._emit(
             AgentEvent(
                 EventType.USER_MESSAGE,
@@ -92,6 +134,7 @@ class AgentCompanionApp:
             ),
             plan.user_text,
         )
+        self._record_explicit_memory_candidate(plan)
         if plan.intent != "companion_chat":
             self._emit(
                 AgentEvent(
@@ -99,7 +142,7 @@ class AgentCompanionApp:
                     plan.task_id,
                     DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
                     safe_voice_line("我整理了一下步骤。", sprite="3"),
-                    {"steps": [step.name for step in plan.steps]},
+                    self._plan_agent_state(plan),
                 ),
                 plan.user_text,
             )
@@ -137,7 +180,7 @@ class AgentCompanionApp:
                 plan.task_id,
                 DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
                 safe_voice_line("我整理了一下步骤。", sprite="3"),
-                {"steps": [step.name for step in plan.steps]},
+                self._plan_agent_state(plan),
             ),
             plan.user_text,
         )
@@ -173,12 +216,60 @@ class AgentCompanionApp:
                 plan.task_id,
                 DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
                 safe_voice_line("我整理了一下步骤。", sprite="3"),
-                {"steps": [step.name for step in plan.steps]},
+                self._plan_agent_state(plan),
             ),
             plan.user_text,
         )
         self._run_plan(plan, 0)
         return self.bus.drain()
+
+    def refresh_watch_context(
+        self,
+        query: str,
+        *,
+        sample_count: int = 3,
+        sample_interval_ms: int = 700,
+        transcript_source: str = "auto",
+        transcribe: bool = True,
+        skip_summary: bool = True,
+    ) -> ToolResult:
+        arguments: dict[str, object] = {
+            "query": query,
+            "sample_count": sample_count,
+            "sample_interval_ms": sample_interval_ms,
+            "transcribe": transcribe,
+            "skip_summary": skip_summary,
+        }
+        if transcript_source and transcript_source != "auto":
+            arguments["transcript_source"] = transcript_source
+        step = ToolRequest("observe.screen", arguments, "后台刷新实时陪看上下文。")
+        try:
+            result = self.tools.run(step)
+        except Exception as exc:
+            return ToolResult(
+                ok=False,
+                agent_state={"tool": step.name, "error": type(exc).__name__, "detail": str(exc)[:500]},
+                display_card=DisplayCard("实时陪看", "后台陪看采样失败。", str(exc)[:1800], status="failed"),
+                voice_line=safe_voice_line("后台陪看采样失败。", sprite="4"),
+            )
+        plan = AgentPlan(
+            task_id=f"watch-loop-{uuid.uuid4().hex[:10]}",
+            user_text=query,
+            intent="watch_together",
+            steps=[step],
+        )
+        self._record_watch_context(plan, step, result)
+        return result
+
+    def reload_runtime_policy(self) -> None:
+        self._runtime_config = self._load_runtime_config()
+        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config))
+
+    def skill_settings_payload(self) -> dict[str, bool]:
+        config = self._runtime_config or self._load_runtime_config()
+        if config is None:
+            return {}
+        return {skill_id: bool(setting.enabled) for skill_id, setting in config.skills.items()}
 
     def resolve_approval(self, approval_id: str, approved: bool) -> list[AgentEvent]:
         if not approval_id:
@@ -193,6 +284,7 @@ class AgentCompanionApp:
         self.resolved_approval_ids.add(approval_id)
         if self._pending_step_expired(pending):
             state = {"intent": pending.plan.intent, "approval_expired": True, "approval_id": approval_id}
+            state = annotate_agent_state_with_skill(state, pending.tool)
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval expired before execution.")] if self._is_computer_pending(pending) else [])
             if self._is_codex_permission_pending(pending):
                 state["codex_run"] = codex_cancel_run_state("expired")
@@ -213,6 +305,7 @@ class AgentCompanionApp:
             return self.bus.drain()
         if not approved:
             state = {"intent": pending.plan.intent, "cancelled": True, "approval_id": approval_id}
+            state = annotate_agent_state_with_skill(state, pending.tool)
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "denied", "Approval was denied; no action ran.")] if self._is_computer_pending(pending) else [])
             if self._is_codex_permission_pending(pending):
                 state["codex_run"] = codex_cancel_run_state("denied")
@@ -233,6 +326,7 @@ class AgentCompanionApp:
             return self.bus.drain()
         if not self._pending_step_matches(pending):
             state = {"intent": pending.plan.intent, "approval_id": approval_id, "approval_mismatch": True}
+            state = annotate_agent_state_with_skill(state, pending.tool)
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval no longer matched the pending action.")] if self._is_computer_pending(pending) else [])
             if self._is_codex_permission_pending(pending):
                 state["codex_run"] = codex_cancel_run_state("mismatch")
@@ -256,8 +350,31 @@ class AgentCompanionApp:
         pending_approval = False
         for index, plan_step in enumerate(plan.steps[start_index:], start=start_index):
             step = self._step_for_execution(plan, index, plan_step, approved_step)
+            step = self._step_with_memory_context(step)
             is_approved_step = self._is_approved_step(plan, index, step, approved_step)
             decision = self.policy.classify(step, approved=is_approved_step)
+            if not decision.allowed and not decision.requires_approval:
+                self._emit(
+                    AgentEvent(
+                        EventType.TOOL_FAILED,
+                        plan.task_id,
+                        DisplayCard("能力已关闭", f"{self._tool_label(step.name)} 当前不可用。", status="failed"),
+                        safe_voice_line("这个能力现在是关闭的。", sprite="4"),
+                        annotate_agent_state_with_skill(
+                            {
+                                "tool": step.name,
+                                "policy": self.policy.public_payload(step),
+                                "risk": decision.risk.value,
+                                "blocked": True,
+                                "block_reason": decision.reason,
+                            },
+                            step.name,
+                        ),
+                    ),
+                    plan.user_text,
+                )
+                final_ok = False
+                break
             if decision.requires_approval:
                 pending = self._make_pending_step(plan, index, step)
                 self._store_pending_step(pending)
@@ -272,6 +389,7 @@ class AgentCompanionApp:
                         "arguments_hash": pending.arguments_hash,
                     },
                 }
+                agent_state = annotate_agent_state_with_skill(agent_state, step.name)
                 self._attach_audit_state(
                     agent_state,
                     [
@@ -307,7 +425,7 @@ class AgentCompanionApp:
                         plan.task_id,
                         DisplayCard("执行中", f"正在执行：{self._tool_label(step.name)}"),
                         safe_voice_line("我开始执行这一步。", sprite="3"),
-                        {"tool": step.name},
+                        annotate_agent_state_with_skill({"tool": step.name}, step.name),
                     ),
                     plan.user_text,
                 )
@@ -341,6 +459,10 @@ class AgentCompanionApp:
                         "target_candidate": result.agent_state.get("target_candidate"),
                         "target_candidates": result.agent_state.get("target_candidates"),
                     }
+                    agent_state = annotate_agent_state_with_skill(agent_state, pending_request.name)
+                    source_tool = str(result.agent_state.get("tool") or "")
+                    if source_tool:
+                        agent_state["source_skill"] = skill_boundary_for_tool(source_tool)
                     if "codex_run" in result.agent_state:
                         agent_state["codex_run"] = result.agent_state["codex_run"]
                     audit_entries = target_grounding_audit_events(plan.task_id, result, result.risk)
@@ -374,13 +496,9 @@ class AgentCompanionApp:
             self._attach_result_audit(plan, step, result)
             self._emit_result(plan.task_id, result, plan.user_text)
             self._record_watch_context(plan, step, result)
+            self._record_desktop_context(plan, step, result)
+            self._record_result_memory_candidate(plan, step, result)
             final_ok = final_ok and result.ok
-            self.memory.remember(
-                "task_result",
-                f"{plan.intent}: {result.display_card.summary}",
-                ephemeral=self._is_ephemeral_result(plan, step, result),
-                sensitive=self._is_sensitive_result(plan, step, result),
-            )
             if not result.ok:
                 break
         if final_ok:
@@ -391,7 +509,7 @@ class AgentCompanionApp:
                         plan.task_id,
                         DisplayCard("任务完成", "这轮任务已经处理完。", status="success"),
                         safe_voice_line(self.character.voice.get("done", "做完了。"), sprite="5"),
-                        {"intent": plan.intent},
+                        self._plan_agent_state(plan, include_steps=False),
                     ),
                     plan.user_text,
                 )
@@ -402,26 +520,48 @@ class AgentCompanionApp:
                     plan.task_id,
                     DisplayCard("任务未完成", "这轮任务没有跑通，细节在任务卡里。", status="failed"),
                     safe_voice_line(self.character.voice.get("failed", "没有跑通。"), sprite="4"),
-                    {"intent": plan.intent},
+                    self._plan_agent_state(plan, include_steps=False),
                 ),
                 plan.user_text,
             )
 
     def _emit_result(self, task_id: str, result: ToolResult, user_text: str = "") -> None:
         event_type = EventType.TOOL_COMPLETED if result.ok else EventType.TOOL_FAILED
+        agent_state = build_event_agent_state(result)
+        tool_name = str(agent_state.get("tool") or "")
+        if tool_name:
+            agent_state = annotate_agent_state_with_skill(agent_state, tool_name)
         self._emit(
             AgentEvent(
                 event_type,
                 task_id,
                 result.display_card,
                 result.voice_line,
-                result.agent_state,
+                agent_state,
             ),
             user_text,
         )
 
     def _emit(self, event: AgentEvent, user_text: str = "") -> None:
         self.bus.emit(self.expression.express(event, user_text))
+
+    @staticmethod
+    def _plan_agent_state(plan: AgentPlan, *, include_steps: bool = True) -> dict[str, object]:
+        steps = [step.name for step in plan.steps]
+        state: dict[str, object] = {
+            "intent": plan.intent,
+            "skills": skill_boundaries_for_plan(steps),
+        }
+        if include_steps:
+            state["steps"] = steps
+            state["skill_steps"] = [
+                {
+                    "tool": step.name,
+                    **skill_boundary_for_tool(step.name),
+                }
+                for step in plan.steps
+            ]
+        return state
 
     @staticmethod
     def _tool_label(name: str) -> str:
@@ -439,6 +579,7 @@ class AgentCompanionApp:
             "computer.type_text": "电脑输入",
             "computer.scroll": "电脑滚动",
             "computer.hotkey": "快捷键",
+            "computer.workflow": "桌面自动操作",
             "mcp.list_tools": "工具清单",
             "files.read": "文件读取",
             "runtime.update_config": "运行设置",
@@ -455,6 +596,7 @@ class AgentCompanionApp:
             "watch_followup": "陪看追问",
             "browser": "浏览器",
             "computer_use": "电脑操作",
+            "desktop_workflow": "桌面自动操作",
             "semantic_target": "目标定位",
             "semantic_target_selection": "候选选择",
             "runtime_settings": "运行设置",
@@ -477,6 +619,77 @@ class AgentCompanionApp:
     def _is_sensitive_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
         return step.name.startswith("computer.") and bool(result.display_card.artifacts)
 
+    def _record_explicit_memory_candidate(self, plan: AgentPlan) -> None:
+        fact = _explicit_memory_fact(plan.user_text)
+        if not fact:
+            return
+        self._record_memory_candidate(plan.task_id, "user_note", fact, "chat", plan.user_text)
+
+    def _record_result_memory_candidate(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
+        raw = result.agent_state.get("memory_candidate") if isinstance(result.agent_state, dict) else None
+        if raw is None:
+            return
+        if self._is_ephemeral_result(plan, step, result) or self._is_sensitive_result(plan, step, result):
+            return
+        kind = "tool_note"
+        source = step.name
+        text = ""
+        if isinstance(raw, str):
+            text = raw
+        elif isinstance(raw, dict):
+            text = str(raw.get("fact") or raw.get("text") or "")
+            kind = str(raw.get("kind") or kind)
+            source = str(raw.get("source") or source)
+        self._record_memory_candidate(plan.task_id, kind, text, source, plan.user_text)
+
+    def _record_memory_candidate(self, task_id: str, kind: str, text: str, source: str, user_text: str) -> None:
+        result = self.memory.propose(kind, text, source=source)
+        if not result.get("ok"):
+            return
+        candidate = result.get("candidate") if isinstance(result.get("candidate"), dict) else {}
+        summary = f"待确认记忆：{str(candidate.get('text') or '')[:80]}"
+        self._emit(
+            AgentEvent(
+                EventType.AUDIT_EVENT,
+                task_id,
+                DisplayCard("记忆候选", summary, "这条记忆需要你在记忆舱中确认后才会写入长期记忆。", status="approval"),
+                safe_voice_line(""),
+                {
+                    "tool": "memory.candidate",
+                    "memory_candidate": candidate,
+                    "memory": self.memory.status(),
+                },
+            ),
+            user_text,
+        )
+
+    def _emit_memory_command(self, task_id: str, user_text: str, command: str) -> None:
+        if command == "enable":
+            status = self.memory.set_enabled(True)
+            summary = "长期记忆已开启。"
+            voice = "长期记忆已开启。"
+        elif command == "disable":
+            status = self.memory.set_enabled(False)
+            summary = "长期记忆已关闭。"
+            voice = "长期记忆已关闭。"
+        else:
+            status = self.memory.status()
+            saved = len(status.get("recent", []) if isinstance(status, dict) else [])
+            pending = len(status.get("pending", []) if isinstance(status, dict) else [])
+            state = "开启" if status.get("enabled") else "关闭"
+            summary = f"记忆当前{state}，已保存 {saved} 条，待确认 {pending} 条。"
+            voice = "这是当前记忆状态。"
+        self._emit(
+            AgentEvent(
+                EventType.TOOL_COMPLETED,
+                task_id,
+                DisplayCard("记忆舱", summary, _memory_status_body(status), status="success"),
+                safe_voice_line(voice, sprite="3"),
+                {"tool": "memory.status", "memory": status, "intent": "memory_control"},
+            ),
+            user_text,
+        )
+
     def _plan_body(self, plan: AgentPlan) -> str:
         return "\n".join(self._tool_label(step.name) for step in plan.steps)
 
@@ -492,7 +705,7 @@ class AgentCompanionApp:
         return f"{self._tool_label(step.name)}需要你确认。"
 
     def _register_tools(self) -> None:
-        app_config = self._load_runtime_config()
+        app_config = self._runtime_config
         ocr = self._build_ocr_extractor(app_config)
         post_action_settle_ms = app_config.computer_use.post_action_settle_ms if app_config else 200
         self.tools.register(CompanionChatTool(self.workspace))
@@ -504,12 +717,13 @@ class AgentCompanionApp:
                 self.workspace,
                 summarizer=self._build_vision_summarizer(app_config),
                 ocr=ocr,
+                audio_transcriber=self._build_audio_transcriber(),
             )
         )
         self.tools.register(
             WatchRecallTool(
                 self.workspace,
-                self.watch_session.recent,
+                self.watch_session.recent_with_transcript,
                 WatchAnswerer(self.workspace, self.character.name, self.character.persona),
             )
         )
@@ -530,6 +744,7 @@ class AgentCompanionApp:
                     post_action_settle_ms=post_action_settle_ms,
                 )
             )
+        self.tools.register(DesktopWorkflowTool(self.workspace, ocr=ocr, post_action_settle_ms=max(post_action_settle_ms, 600)))
         self.tools.register(OkWwTool(self.workspace))
         self.tools.register(McpListTool(self.workspace))
         self.tools.register(FileReadTool(self.workspace))
@@ -568,6 +783,10 @@ class AgentCompanionApp:
             tesseract_cmd=config.ocr.tesseract_cmd,
             tessdata_dir=config.ocr.tessdata_dir,
         )
+
+    def _build_audio_transcriber(self) -> SystemAudioTranscriptProvider:
+        asr, state = build_asr_provider(self.workspace)
+        return SystemAudioTranscriptProvider(asr, max_seconds=min(max(1, int(state.max_seconds or 8)), 10))
 
     def _make_pending_step(self, plan: AgentPlan, index: int, step: ToolRequest, request_override: ToolRequest | None = None) -> PendingStep:
         return PendingStep(
@@ -611,6 +830,16 @@ class AgentCompanionApp:
             return pending.request_override
         return step
 
+    def _step_with_memory_context(self, step: ToolRequest) -> ToolRequest:
+        if step.name != "companion.chat":
+            return step
+        context = self.memory.context(8, query=str(step.arguments.get("text") or ""))
+        if not context:
+            return step
+        arguments = dict(step.arguments)
+        arguments["memory_context"] = context
+        return ToolRequest(step.name, arguments, step.reason)
+
     @staticmethod
     def _approval_request_from_result(result: ToolResult) -> ToolRequest | None:
         payload = result.agent_state.get("approval_request")
@@ -623,14 +852,98 @@ class AgentCompanionApp:
         reason = str(payload.get("reason") or result.display_card.summary or "")
         return ToolRequest(tool, arguments, reason)
 
+    def _refine_plan_with_llm(self, text: str, plan: AgentPlan) -> AgentPlan:
+        try:
+            llm_plan = self.llm_planner.plan(text, plan)
+        except Exception:
+            return plan
+        if llm_plan is None:
+            return plan
+        return llm_plan
+
+    def _rewrite_plan_for_desktop_context(self, plan: AgentPlan) -> AgentPlan:
+        context = self._active_desktop_context()
+        if context is None:
+            return plan
+        return rewrite_plan_for_desktop_context(plan, context)
+
+    def _active_desktop_context(self) -> DesktopContext | None:
+        context = active_desktop_context(self.desktop_context, ttl_seconds=self.DESKTOP_CONTEXT_TTL_SECONDS)
+        if context is None and self.desktop_context.site:
+            self.desktop_context = DesktopContext()
+        return context
+
+    def _record_desktop_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
+        updated = record_desktop_context(step, result)
+        if updated is not None:
+            self.desktop_context = updated
+
     def _record_watch_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
-        if plan.intent != "watch_together" or step.name != "observe.screen" or not result.ok:
+        if not result.ok:
+            return
+        if plan.intent == "browser" and step.name in {"browser.search", "browser.observe"}:
+            state = result.agent_state if isinstance(result.agent_state, dict) else {}
+            data = state.get("data") if isinstance(state.get("data"), dict) else {}
+            elements = data.get("elements") if isinstance(data.get("elements"), list) else []
+            snippets: list[str] = []
+            for element in elements[:12]:
+                if not isinstance(element, dict):
+                    continue
+                text = str(element.get("text") or "").strip()
+                if text:
+                    snippets.append(text[:160])
+            artifacts = result.display_card.artifacts or []
+            frame = WatchFrame(
+                user_question=plan.user_text,
+                summary=str(result.display_card.summary or state.get("summary") or "").strip(),
+                title=str(data.get("title") or ""),
+                artifact=artifacts[0] if artifacts else str(data.get("screenshot") or ""),
+                model_status="browser",
+                ocr_summary="",
+                ocr_text=snippets,
+                ocr_regions=[],
+            )
+            self.watch_session.add(frame)
+            return
+        if plan.intent != "watch_together" or step.name != "observe.screen":
             return
         state = result.agent_state
         observation = state.get("observation") if isinstance(state.get("observation"), dict) else {}
         artifacts = result.display_card.artifacts or []
         summary = str(state.get("vision_summary") or result.display_card.summary or "").strip()
         model_status = str(state.get("model_status") or "unknown")
+        transcript = state.get("transcript") if isinstance(state.get("transcript"), dict) else {}
+        transcript_text = _transcript_text_from_state(transcript)
+        transcript_source = str(transcript.get("source") or "")
+        transcript_status = str(transcript.get("status") or "")
+        watch_frames = state.get("watch_frames") if isinstance(state.get("watch_frames"), list) else []
+        if watch_frames:
+            sequence_size = len([row for row in watch_frames if isinstance(row, dict)])
+            for index, frame_state in enumerate(watch_frames, start=1):
+                if not isinstance(frame_state, dict):
+                    continue
+                frame_ocr = frame_state.get("ocr") if isinstance(frame_state.get("ocr"), dict) else {}
+                frame_regions = frame_state.get("ocr_regions") if isinstance(frame_state.get("ocr_regions"), list) else []
+                frame_artifact = str(frame_state.get("screenshot_rel") or frame_state.get("screenshot") or "")
+                self.watch_session.add(
+                    WatchFrame(
+                        user_question=plan.user_text,
+                        summary=summary if index == sequence_size else f"连续采样第 {index} 帧",
+                        title=str(frame_state.get("title") or observation.get("title") or ""),
+                        artifact=frame_artifact,
+                        model_status=model_status,
+                        ocr_summary=str(frame_ocr.get("summary") or ""),
+                        ocr_text=_ocr_text_from_state(frame_ocr),
+                        ocr_regions=frame_regions,
+                        transcript_text=transcript_text,
+                        transcript_source=transcript_source,
+                        transcript_status=transcript_status,
+                        sequence_summary=str(frame_state.get("sequence_summary") or state.get("sequence_summary") or ""),
+                        frame_index=index,
+                        sequence_size=sequence_size,
+                    )
+                )
+            return
         ocr = observation.get("ocr") if isinstance(observation.get("ocr"), dict) else {}
         ocr_regions = observation.get("ocr_regions") if isinstance(observation.get("ocr_regions"), list) else []
         ocr_text = _ocr_text_from_state(ocr)
@@ -643,6 +956,9 @@ class AgentCompanionApp:
             ocr_summary=str(ocr.get("summary") or ""),
             ocr_text=ocr_text,
             ocr_regions=ocr_regions,
+            transcript_text=transcript_text,
+            transcript_source=transcript_source,
+            transcript_status=transcript_status,
         )
         self.watch_session.add(frame)
 
@@ -740,6 +1056,12 @@ def _arguments_hash(arguments: dict) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
 
+def _disabled_skill_ids(config: AppConfig | None) -> set[str]:
+    if config is None:
+        return set()
+    return {skill_id for skill_id, setting in config.skills.items() if not setting.enabled}
+
+
 def _ocr_text_from_state(ocr: dict) -> list[str]:
     blocks = ocr.get("text_blocks") if isinstance(ocr, dict) else []
     if not isinstance(blocks, list):
@@ -750,6 +1072,20 @@ def _ocr_text_from_state(ocr: dict) -> list[str]:
             continue
         text = str(block.get("text") or "").strip()
         if text:
+            rows.append(text[:160])
+    return rows
+
+
+def _transcript_text_from_state(transcript: dict) -> list[str]:
+    rows: list[str] = []
+    segments = transcript.get("segments") if isinstance(transcript, dict) else []
+    if not isinstance(segments, list):
+        return rows
+    for segment in segments[:12]:
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text") or "").strip()
+        if text and text not in rows:
             rows.append(text[:160])
     return rows
 
@@ -777,6 +1113,55 @@ def _parse_candidate_selection(text: str) -> int | None:
         if f"第{token}个" in value or f"选{token}" in value or f"点第{token}" in value:
             return number
     return None
+
+
+def _explicit_memory_fact(text: str) -> str:
+    value = " ".join((text or "").strip().split())
+    if not value:
+        return ""
+    patterns = (
+        r"^(?:请|麻烦)?(?:你)?(?:帮我)?(?:记住|记一下|记录一下|以后记得)\s*[：:，,]?\s*(.+)$",
+        r"^(.+?)\s*(?:请|麻烦)?(?:你)?(?:帮我)?(?:记住|记一下|记录一下)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, value)
+        if match:
+            fact = match.group(1).strip(" 。.!！")
+            return fact[:240]
+    return ""
+
+
+def _parse_memory_command(text: str) -> str:
+    value = " ".join((text or "").strip().split()).casefold()
+    if not value or ("记忆" not in value and "你记得什么" not in value):
+        return ""
+    if any(token in value for token in ("关闭记忆", "停用记忆", "禁用记忆", "不要记忆", "不要再记", "停止记忆")):
+        return "disable"
+    if any(token in value for token in ("开启记忆", "打开记忆", "启用记忆", "恢复记忆", "继续记忆")):
+        return "enable"
+    if any(token in value for token in ("查看记忆", "记忆舱", "当前记忆", "记忆状态", "列出记忆", "你记得什么")):
+        return "status"
+    return ""
+
+
+def _memory_status_body(status: dict[str, object]) -> str:
+    enabled = "开启" if status.get("enabled") else "关闭"
+    pending = status.get("pending") if isinstance(status.get("pending"), list) else []
+    recent = status.get("recent") if isinstance(status.get("recent"), list) else []
+    lines = [f"状态：{enabled}", f"Vault：{status.get('vault_label') or '本地记忆库'}"]
+    if pending:
+        lines.append("待确认：")
+        for item in pending[:5]:
+            if isinstance(item, dict):
+                lines.append(f"- {str(item.get('text') or '')[:120]}")
+    if recent:
+        lines.append("已保存：")
+        for item in recent[:5]:
+            if isinstance(item, dict):
+                lines.append(f"- {str(item.get('text') or '')[:120]}")
+    if not pending and not recent:
+        lines.append("暂无长期记忆。")
+    return "\n".join(lines)
 
 
 def _safe_rank(value: object) -> int:

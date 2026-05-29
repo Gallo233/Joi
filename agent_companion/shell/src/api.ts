@@ -80,6 +80,82 @@ export class CoreClient {
     return this.send('artifact.read', { artifact })
   }
 
+  watchLoopStart(params: Record<string, unknown> = {}) {
+    return this.send('watch.loop.start', params)
+  }
+
+  watchLoopStop() {
+    return this.send('watch.loop.stop', {})
+  }
+
+  watchLoopConfigure(params: Record<string, unknown> = {}) {
+    return this.send('watch.loop.configure', params)
+  }
+
+  watchLoopRefresh(params: Record<string, unknown> = {}) {
+    return this.send(
+      'watch.loop.refresh',
+      params,
+      { timeoutMs: 60000, timeoutMessage: '画面理解耗时较久，我先停下，你可以再点一次。' },
+    )
+  }
+
+  watchLoopStatus() {
+    return this.send('watch.loop.status', {})
+  }
+
+  backgroundStatus() {
+    return this.send('background.status', {})
+  }
+
+  backgroundConfigure(params: Record<string, unknown> = {}) {
+    return this.send('background.configure', params)
+  }
+
+  backgroundClear() {
+    return this.send('background.clear', {})
+  }
+
+  skillsList() {
+    return this.send('skills.list', {})
+  }
+
+  auditRecent(limit = 50) {
+    return this.send('audit.recent', { limit })
+  }
+
+  memoryStatus() {
+    return this.send('memory.status', {})
+  }
+
+  memoryRecall(query: string, limit = 8) {
+    return this.send('memory.recall', { query, limit })
+  }
+
+  memoryBrowseVault() {
+    return this.send('memory.browse_vault', {})
+  }
+
+  memorySaveCandidate(candidateId: number) {
+    return this.send('memory.save_candidate', { candidate_id: candidateId })
+  }
+
+  memoryRejectCandidate(candidateId: number) {
+    return this.send('memory.reject_candidate', { candidate_id: candidateId })
+  }
+
+  memorySetEnabled(enabled: boolean) {
+    return this.send('memory.set_enabled', { enabled })
+  }
+
+  memoryDelete(memoryId: number) {
+    return this.send('memory.delete', { memory_id: memoryId })
+  }
+
+  memoryClear() {
+    return this.send('memory.clear', {})
+  }
+
   private send(method: string, params: Record<string, unknown>, options?: { timeoutMs?: number; timeoutMessage?: string }) {
     const payload = { jsonrpc: '2.0', id: `ui-${this.nextId++}`, method, params }
     if (this.socket?.readyState === WebSocket.OPEN) {

@@ -1,0 +1,5 @@
+# Optional Windows system-audio loopback capture for Joi watch transcription.
+# The app works without these; it falls back to OCR subtitle transcription.
+soundcard>=0.4.6
+sounddevice>=0.4.6
+numpy>=1.24

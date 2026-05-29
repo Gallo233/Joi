@@ -12,12 +12,14 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Joi",
         "width": 1120,
         "height": 760,
         "resizable": true,
         "transparent": true,
-        "decorations": false
+        "decorations": false,
+        "shadow": false
       }
     ]
   }

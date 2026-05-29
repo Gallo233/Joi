@@ -11,24 +11,33 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 import yaml
 
 from agent_companion.core.app import AgentCompanionApp
+from agent_companion.core.audit_store import AUDIT_SCHEMA_VERSION, AuditStore
+from agent_companion.core.background_context import BACKGROUND_CONTEXT_VERSION, BackgroundContextStore
 from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, ComputerAction, ComputerObservation, ComputerUseResult, computer_action_audit_event, verify_post_action
-from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouter, load_app_config
+from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouteConfig, ModelRouter, load_app_config
+from agent_companion.core.llm_planner import plan_from_llm_payload
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core import runtime_status as runtime_status_module
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update, update_runtime_config
 from agent_companion.core.runtime_status import build_runtime_status
-from agent_companion.core.schemas import DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
+from agent_companion.core.schemas import AgentEvent, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.server import JsonRpcBridge
+from agent_companion.core.skill_manifest import SKILL_MANIFEST_VERSION, build_native_skill_manifest
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
+from agent_companion.core.tool_compression import compress_tool_result
+from agent_companion.core.tools.browser import BrowserTool
+from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.codex import CodexTool
+from agent_companion.core.tools.desktop_workflow import DesktopWorkflowTool
 from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import SemanticTargetTool, click_arguments_from_state
@@ -40,9 +49,19 @@ from agent_companion.core.vision.schemas import CaptureRect, VisionObservation
 from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionSummarizer, VisionSummary
 from agent_companion.core.vision.targeting import resolve_target_candidates
 from agent_companion.core.vision.visual_detector import UnavailableVisualDetector, VisualCandidate, VisualDetectionResult
-from agent_companion.core.voice import safe_voice_line
-from agent_companion.core.watch import WatchFrame
+from agent_companion.core.voice import safe_voice_line, sprite_for_emotion, strip_emotion_token
+from agent_companion.core.watch import WatchFrame, WatchSession
+from agent_companion.core.watch_commentary import WatchCommentaryPlanner
+from agent_companion.core.watch_transcript import TranscriptResult, TranscriptSegment
 from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, run_eval as run_visual_detector_eval, run_local_semantic_calibration
+from tools.joi_doctor import build_doctor_report, doctor_exit_code
+from tools.mvp_demo_check import build_mvp_demo_check_report, mvp_demo_check_exit_code
+from tools.package_windows_release import build_release_privacy_report, build_windows_release_package, package_exit_code
+from tools.packaging_smoke import build_packaging_smoke_report, packaging_smoke_exit_code
+from tools.provider_preflight import build_provider_preflight_report, provider_preflight_exit_code
+from tools.windows_release_check import build_windows_release_check_report, windows_release_check_exit_code
+from tools.windows_setup_wizard import build_windows_setup_plan, windows_setup_exit_code
+from tools.windows_handoff_report import build_windows_handoff_report, windows_handoff_exit_code
 
 
 def assert_true(value: bool, message: str) -> None:
@@ -216,6 +235,16 @@ class FakeOcrExtractor:
         return self.result
 
 
+class FakeLlmPlanner:
+    def __init__(self, plan: object | None = None) -> None:
+        self.plan_to_return = plan
+        self.calls: list[tuple[str, str]] = []
+
+    def plan(self, user_text: str, rule_plan: object) -> object | None:
+        self.calls.append((user_text, getattr(rule_plan, "intent", "")))
+        return self.plan_to_return
+
+
 class FakeAccessibilityObserver:
     def __init__(self, snapshot: AccessibilitySnapshot) -> None:
         self.snapshot = snapshot
@@ -291,6 +320,42 @@ class FakeWatchAnswerer:
     def answer(self, question: str, frames: list[WatchFrame]) -> tuple[str, str]:
         summary = frames[0].summary if frames else "没有画面"
         return f"自然回答会针对“{question}”：{summary}", "llm_answer"
+
+
+class SequenceSummarizer:
+    def __init__(self) -> None:
+        self.sequence_calls: list[tuple[int, str, list[str]]] = []
+
+    def summarize(self, observation: VisionObservation, query: str = "") -> VisionSummary:
+        return VisionSummary("单帧摘要不应用于视频采样。", model="fake")
+
+    def summarize_sequence(self, observations: list[VisionObservation], query: str = "", ocr_texts: list[str] | None = None) -> VisionSummary:
+        self.sequence_calls.append((len(observations), query, list(ocr_texts or [])))
+        return VisionSummary("连续画面显示一只猫在做亲身实验，弹幕和字幕都围绕猫的反应展开。", model="fake-sequence")
+
+
+class FakeAudioTranscriber:
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def transcribe(self, seconds: float = 5.0) -> TranscriptResult:
+        self.calls.append(seconds)
+        return TranscriptResult(
+            "success",
+            "system_audio",
+            [TranscriptSegment("系统音频说：小猫正在亲身实验。", 0, int(seconds * 1000), "system_audio", 0.91, 1, "audio")],
+            "识别到 1 段系统音频转写。",
+        )
+
+
+class FailingAudioTranscriber:
+    def __init__(self, error: str = "asr_unconfigured") -> None:
+        self.error = error
+        self.calls: list[float] = []
+
+    def transcribe(self, seconds: float = 5.0) -> TranscriptResult:
+        self.calls.append(seconds)
+        return TranscriptResult("failed", "system_audio", [], "音频转写没有生成文本。", self.error)
 
 
 class FailingAsrProvider:
@@ -600,6 +665,15 @@ def main() -> int:
     watch_plan = build_plan("陪我看这个视频")
     assert_true(watch_plan.intent == "watch_together", "watch route failed")
     assert_true(watch_plan.steps[0].name == "observe.screen", "watch route should use screen observation")
+    live_video_plan = build_plan("这个视频在讲什么")
+    assert_true(live_video_plan.intent == "watch_together", "current video content questions should refresh screen observation")
+    assert_true(live_video_plan.steps[0].name == "observe.screen", "current video questions should observe the active video window")
+    assert_true(live_video_plan.steps[0].arguments.get("sample_count") == 4, "current video questions should request a denser temporal sample")
+    transcript_plan = build_plan("实时转写当前视频")
+    assert_true(transcript_plan.intent == "watch_together", "video transcription should use watch route")
+    assert_true(transcript_plan.steps[0].arguments.get("transcribe") is True and transcript_plan.steps[0].arguments.get("sample_count") == 8, "video transcription should request OCR subtitle transcript sampling")
+    audio_transcript_plan = build_plan("用系统音频听一下这个视频")
+    assert_true(audio_transcript_plan.steps[0].arguments.get("transcript_source") == "system_audio", "system audio requests should select audio transcript source")
     current_page_plan = build_plan("看看当前页面")
     assert_true(current_page_plan.intent == "watch_together" and current_page_plan.steps[0].name == "observe.screen", "current browser page should use screen observation")
     watch_followup_plan = build_plan("你看到了什么")
@@ -619,6 +693,116 @@ def main() -> int:
     assert_true(type_plan.steps[0].arguments.get("text") == "你好世界", "Chinese type text should be preserved")
     assert_true(build_plan("向下滚动").steps[0].name == "computer.scroll", "scroll route failed")
     assert_true(build_plan("按下 Ctrl+L 快捷键").steps[0].name == "computer.hotkey", "hotkey route failed")
+    open_codex_plan = build_plan("请帮我打开codex")
+    assert_true(open_codex_plan.intent == "desktop_workflow", "open app route should use desktop workflow")
+    assert_true(open_codex_plan.steps[0].name == "computer.workflow", "open app should use computer.workflow")
+    assert_true(open_codex_plan.steps[0].arguments.get("workflow") == "open_app", "open app workflow not parsed")
+    edge_bili_plan = build_plan("用edge打开bilibili并搜索猫视频")
+    assert_true(edge_bili_plan.intent == "desktop_workflow", "browser desktop workflow route failed")
+    assert_true(edge_bili_plan.steps[0].arguments.get("workflow") == "open_web_search", "browser workflow not parsed")
+    assert_true(edge_bili_plan.steps[0].arguments.get("site") == "bilibili", "bilibili site not parsed")
+    assert_true(edge_bili_plan.steps[0].arguments.get("query") == "猫视频", "site search query not parsed")
+    short_bili_search_plan = build_plan("打开b站搜猫猫视频")
+    assert_true(short_bili_search_plan.intent == "desktop_workflow", "short Bilibili search should use desktop workflow")
+    assert_true(short_bili_search_plan.steps[0].arguments.get("site") == "bilibili", "short Bilibili site not parsed")
+    assert_true(short_bili_search_plan.steps[0].arguments.get("query") == "猫猫视频", "short Bilibili search query not parsed")
+    explicit_site_search_plan = build_plan("在B站搜猫猫视频")
+    assert_true(explicit_site_search_plan.intent == "desktop_workflow", "site search without open verb should use desktop workflow")
+    assert_true(explicit_site_search_plan.steps[0].arguments.get("query") == "猫猫视频", "site search without open verb query not parsed")
+    open_bili_plan = build_plan("打开B站")
+    assert_true(open_bili_plan.steps[0].arguments.get("workflow") == "open_web_search", "site open should use browser workflow")
+    plain_search_plan = build_plan("搜索猫猫视频")
+    assert_true(plain_search_plan.intent == "browser" and plain_search_plan.steps[0].name == "browser.search", "generic search should still use browser route without desktop context")
+    plain_short_search_plan = build_plan("搜猫猫视频")
+    assert_true(plain_short_search_plan.intent == "browser" and plain_short_search_plan.steps[0].arguments.get("query") == "猫猫视频", "short generic search should still use browser route")
+    llm_bili_plan = plan_from_llm_payload(
+        "帮我在哔哩找猫猫视频",
+        {
+            "intent": "desktop_workflow",
+            "confidence": 0.91,
+            "action": "open_web_search",
+            "slots": {"browser": "edge", "site": "bilibili", "query": "猫猫视频"},
+        },
+        task_id="task-llm-bili",
+    )
+    assert_true(llm_bili_plan is not None and llm_bili_plan.intent == "desktop_workflow", "LLM planner should produce desktop workflow")
+    assert_true(llm_bili_plan.steps[0].name == "computer.workflow", "LLM desktop plan should use computer.workflow")
+    assert_true(llm_bili_plan.steps[0].arguments.get("site") == "bilibili" and llm_bili_plan.steps[0].arguments.get("query") == "猫猫视频", "LLM planner should preserve safe site search slots")
+    llm_video_plan = plan_from_llm_payload(
+        "这个视频在讲什么",
+        {"intent": "watch_together", "confidence": 0.88, "action": "observe_screen", "slots": {"query": "这个视频在讲什么"}},
+        task_id="task-llm-video",
+    )
+    assert_true(llm_video_plan is not None and llm_video_plan.steps[0].name == "observe.screen", "LLM video watch plan should observe screen")
+    assert_true(llm_video_plan.steps[0].arguments.get("sample_count") == 4, "LLM video watch plan should request temporal sampling")
+    llm_transcript_plan = plan_from_llm_payload(
+        "实时转写当前视频",
+        {"intent": "watch_together", "confidence": 0.88, "action": "observe_screen", "slots": {"query": "实时转写当前视频", "transcribe": True}},
+        task_id="task-llm-transcript",
+    )
+    assert_true(llm_transcript_plan is not None and llm_transcript_plan.steps[0].arguments.get("transcribe") is True, "LLM transcript plan should preserve transcript sampling")
+    llm_click_plan = plan_from_llm_payload(
+        "点右上角登录",
+        {"intent": "computer_use", "confidence": 0.86, "action": "click_target", "slots": {"query": "右上角登录"}},
+        task_id="task-llm-click",
+    )
+    assert_true(llm_click_plan is not None and llm_click_plan.intent == "semantic_target", "LLM click plan should route through semantic target grounding")
+    assert_true(llm_click_plan.steps[0].name == "vision.resolve_target" and "x" not in llm_click_plan.steps[0].arguments, "LLM planner must not create raw coordinate clicks")
+    assert_true(plan_from_llm_payload("危险动作", {"intent": "shell.run", "confidence": 0.99, "slots": {"command": "rm -rf ."}}) is None, "LLM planner should reject unsupported tools")
+    assert_true(plan_from_llm_payload("低置信度", {"intent": "desktop_workflow", "confidence": 0.2, "action": "open_app", "slots": {"app": "Codex"}}) is None, "LLM planner should reject low confidence")
+    fake_llm_plan = plan_from_llm_payload(
+        "帮我在哔哩找猫猫视频",
+        {"intent": "desktop_workflow", "confidence": 0.9, "action": "open_web_search", "slots": {"site": "bilibili", "query": "猫猫视频"}},
+        task_id="task-fake-llm",
+    )
+    fake_llm_app = AgentCompanionApp(workspace, llm_planner=FakeLlmPlanner(fake_llm_plan))
+    fake_llm_events = fake_llm_app.handle_user_text("帮我在哔哩找猫猫视频")
+    assert_true(any(event.type == EventType.PLAN_CREATED and event.agent_state.get("steps") == ["computer.workflow"] for event in fake_llm_events), "Agent app should use LLM planner fallback for ambiguous actionable text")
+    fake_plan_event = [event for event in fake_llm_events if event.type == EventType.PLAN_CREATED][-1]
+    assert_true(fake_plan_event.agent_state.get("skill_steps", [{}])[0].get("skill_id") == "joi.computer_use", "Plan events should bind tool steps to native skill ids")
+    fake_llm_approval = _approval_payload(fake_llm_events)
+    assert_true(fake_llm_approval.get("tool") == "computer.workflow", "LLM-planned desktop workflow should still require approval")
+    fake_llm_approval_event = [event for event in fake_llm_events if event.type == EventType.APPROVAL_REQUIRED][-1]
+    assert_true(fake_llm_approval_event.agent_state.get("skill_id") == "joi.computer_use" and fake_llm_approval_event.agent_state.get("skill_permission_level") == "medium", "Approval events should carry native skill boundary metadata")
+    fake_llm_pending = fake_llm_app.pending_steps[fake_llm_approval["approval_id"]]
+    fake_llm_args = fake_llm_pending.plan.steps[fake_llm_pending.index].arguments
+    assert_true(fake_llm_args.get("site") == "bilibili" and fake_llm_args.get("query") == "猫猫视频", "LLM-planned approval should keep validated slots")
+    desktop_context_app = AgentCompanionApp(workspace)
+    desktop_context_app._record_desktop_context(
+        open_bili_plan,
+        open_bili_plan.steps[0],
+        ToolResult(
+            ok=True,
+            agent_state={"tool": "computer.workflow"},
+            display_card=DisplayCard("电脑操作", "已打开 B站。", status="success"),
+            voice_line=safe_voice_line("打开了。"),
+            risk=RiskLevel.MEDIUM,
+        ),
+    )
+    rewritten_search_plan = desktop_context_app._rewrite_plan_for_desktop_context(plain_search_plan)
+    assert_true(rewritten_search_plan.intent == "desktop_workflow", "desktop site context should rewrite follow-up search to desktop workflow")
+    assert_true(rewritten_search_plan.steps[0].name == "computer.workflow", "follow-up site search should not use built-in browser")
+    assert_true(rewritten_search_plan.steps[0].arguments.get("site") == "bilibili", "follow-up site search should keep Bilibili context")
+    assert_true(rewritten_search_plan.steps[0].arguments.get("query") == "猫猫视频", "follow-up site search should preserve query")
+    desktop_search_events = desktop_context_app.handle_user_text("搜索猫猫视频")
+    assert_true(any(event.type == EventType.PLAN_CREATED and event.agent_state.get("steps") == ["computer.workflow"] for event in desktop_search_events), "follow-up site search should plan desktop workflow")
+    assert_true(not any(event.agent_state.get("tool") == "browser.search" for event in desktop_search_events), "follow-up site search should not start built-in browser search")
+    desktop_search_approval = _approval_payload(desktop_search_events)
+    assert_true(desktop_search_approval.get("tool") == "computer.workflow", "follow-up site search should require desktop workflow approval")
+    pending_desktop_search = desktop_context_app.pending_steps[desktop_search_approval["approval_id"]]
+    pending_desktop_args = pending_desktop_search.plan.steps[pending_desktop_search.index].arguments
+    assert_true(pending_desktop_args.get("site") == "bilibili" and pending_desktop_args.get("query") == "猫猫视频", "pending desktop workflow should target Bilibili search")
+    rewritten_short_search = desktop_context_app._rewrite_plan_for_desktop_context(plain_short_search_plan)
+    assert_true(rewritten_short_search.intent == "desktop_workflow", "short follow-up search should rewrite to desktop workflow")
+    assert_true(rewritten_short_search.steps[0].arguments.get("query") == "猫猫视频", "short follow-up search should preserve query")
+    browser_tmpdir = tempfile.mkdtemp()
+    try:
+        browser_tmp = Path(browser_tmpdir)
+        browser_result = BrowserTool(browser_tmp, "browser.search").run(ToolRequest("browser.search", {"query": "bilibili"}))
+        assert_true(browser_result.ok, "browser stub queue should succeed")
+        assert_true((browser_tmp / "data" / "agent_events" / "browser_requests.jsonl").is_file(), "browser stub should use executor request path")
+    finally:
+        shutil.rmtree(browser_tmpdir, ignore_errors=True)
     assert_true(build_plan("帮我刷鸣潮日常").intent == "game_assist", "game route failed")
     blocked = safe_voice_line('{"task_id":"codex2-abcdef1234","path":"data/app.log"}')
     assert_true("codex2-" not in blocked.text and "{" not in blocked.text, "voice sanitizer failed")
@@ -636,6 +820,79 @@ def main() -> int:
         and ".log" not in blocked_runtime_detail.text,
         "voice leaked provider secret, local model path, or log filename",
     )
+    compression_result = ToolResult(
+        ok=True,
+        agent_state={
+            "tool": "observe.screen",
+            "summary": "用户喜欢蓝色主题",
+            "screenshot_path": r"C:\secret\screen.png",
+            "stdout": "raw " * 400,
+            "target_candidate": {
+                "label": "保存",
+                "source": "ocr",
+                "confidence": 0.91,
+                "bbox": [10, 20, 30, 40],
+                "preview": {"artifact": "data/agent_companion/vision/private.png"},
+            },
+        },
+        display_card=DisplayCard("观察", "看到了保存按钮", "路径 data/agent_companion/vision/private.png", artifacts=["data/agent_companion/vision/private.png"]),
+        voice_line=VoiceLine(r"我看到了 C:\secret\screen.png 和 sk-test-token 100,200"),
+    )
+    compressed = compress_tool_result(compression_result)
+    planner_blob = json.dumps(compressed.agent_state, ensure_ascii=False)
+    assert_true("screenshot_path" not in planner_blob and "stdout" not in planner_blob and "bbox" not in planner_blob, "JoiJuice planner state leaked raw path/log/coordinates")
+    assert_true(compressed.agent_state["target_candidate"]["label"] == "保存", "JoiJuice should preserve semantic target label")
+    assert_true("sk-" not in compressed.voice_line and "C:\\" not in compressed.voice_line and "100,200" not in compressed.voice_line, "JoiJuice voice channel leaked sensitive detail")
+    assert_true(compressed.memory_candidate is None, "JoiJuice must not auto-create memory candidates from tool summaries")
+    compression_app_dir = Path(tempfile.mkdtemp())
+    try:
+        (compression_app_dir / "agent_companion" / "config").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(workspace / "agent_companion" / "config" / "default_character.yaml", compression_app_dir / "agent_companion" / "config" / "default_character.yaml")
+        compression_app = AgentCompanionApp(compression_app_dir)
+        compression_app._emit_result("compression-test", compression_result)
+        compressed_events = compression_app.bus.drain()
+        compressed_event = [event for event in compressed_events if event.task_id == "compression-test"][-1]
+        assert_true("joi_juice" in compressed_event.agent_state, "Tool result events should attach JoiJuice channels")
+        assert_true("screenshot_path" not in compressed_event.agent_state and "stdout" not in compressed_event.agent_state, "Tool result events should strip raw UI/debug paths and logs")
+        assert_true(compressed_event.agent_state.get("result_channels", {}).get("planner") == "joi_juice.planner_state", "Tool result events should declare the compressed planner channel")
+        assert_true("screenshot_path" not in json.dumps(compressed_event.agent_state["joi_juice"]["planner_state"], ensure_ascii=False), "JoiJuice planner channel should stay sanitized")
+    finally:
+        shutil.rmtree(compression_app_dir, ignore_errors=True)
+    token_text, token_emotion = strip_emotion_token("<emo: thinking> 我想一下。")
+    assert_true(token_text == "我想一下。" and token_emotion == "thinking", "emotion token should be stripped and normalized")
+    happy_voice = safe_voice_line("<emo: happy> 做完了。")
+    assert_true(happy_voice.text == "做完了。" and happy_voice.emotion == "happy" and happy_voice.sprite == "5", "emotion token should drive sprite sync")
+    alert_voice = safe_voice_line("<emo: alert> 需要你确认。")
+    assert_true(alert_voice.text == "需要你确认。" and alert_voice.emotion == "alert" and alert_voice.sprite == "4", "alert token should map to caution sprite")
+    explicit_sprite_voice = safe_voice_line("<emo: happy> 我在处理。", sprite="3")
+    assert_true(explicit_sprite_voice.emotion == "happy" and explicit_sprite_voice.sprite == "3", "explicit sprite should be preserved while token drives emotion")
+    happy_emotion_voice = safe_voice_line("做完了。", emotion="happy")
+    assert_true(happy_emotion_voice.sprite == "5", "non-neutral emotion should drive sprite even without inline token")
+    assert_true(sprite_for_emotion("thinking") == "3" and sprite_for_emotion("unknown") == "1", "emotion sprite map should be stable")
+
+    chat_emotion_result = CompanionChatTool(workspace).run(ToolRequest("companion.chat", {"text": "你现在开心吗"}))
+    assert_true(chat_emotion_result.voice_line.emotion == "happy", "chat fallback should infer happy emotion from user text")
+    assert_true(chat_emotion_result.voice_line.sprite != "1", "chat emotion should select a non-neutral sprite when available")
+    assert_true(chat_emotion_result.agent_state["expression_sync"]["emotion"] == "happy", "chat should expose expression sync state")
+    chat_memory_result = CompanionChatTool(workspace).run(
+        ToolRequest("companion.chat", {"text": "你知道我喜欢什么吗", "memory_context": [{"text": "用户更喜欢轻量级原生控件", "kind": "preference", "source": "test"}]})
+    )
+    assert_true("轻量级原生控件" in chat_memory_result.display_card.summary, "chat should answer from approved memory context")
+    assert_true(chat_memory_result.agent_state["memory_context"], "chat should expose the approved memory context it used")
+
+    expression_sync_event = AgentCompanionApp(workspace).expression.express(
+        AgentEvent(
+            EventType.TOOL_COMPLETED,
+            "task-expression-sync",
+            DisplayCard("表达同步", "测试情绪 token", status="success"),
+            VoiceLine("<emo: alert> 需要确认。", "neutral", "1"),
+            {"tool": "browser.search"},
+        )
+    )
+    expression_sync = expression_sync_event.agent_state.get("expression_sync", {})
+    assert_true(expression_sync_event.voice_line.text == "需要确认。", "expression sync should strip emotion token before TTS")
+    assert_true(expression_sync_event.voice_line.emotion == "alert" and expression_sync_event.voice_line.sprite == "4", "expression sync should update voice emotion and sprite")
+    assert_true(expression_sync.get("voice_style") == "alert" and expression_sync.get("sprite") == "4", "expression sync state should be sent to frontend")
 
     memory_dir = Path(tempfile.mkdtemp())
     try:
@@ -645,9 +902,84 @@ def main() -> int:
         memory.remember("sensitive", "敏感屏幕内容", sensitive=True)
         recent_memory = memory.recent(10)
         assert_true(len(recent_memory) == 1 and recent_memory[0]["text"] == "可长期保存", "ephemeral/sensitive memories should not be long-term by default")
+        assert_true((memory_dir / "memory" / "joi_memory_vault.md").is_file(), "approved memories should rewrite a human-readable vault")
+        safe_candidate = memory.propose("preference", "用户更喜欢原生 CSS 变量", source="chat")
+        assert_true(safe_candidate["ok"] and memory.pending(10), "safe memory candidates should wait for user authorization")
+        candidate_id = int(safe_candidate["candidate"]["id"])
+        assert_true(not any(row["text"] == "用户更喜欢原生 CSS 变量" for row in memory.recent(10)), "pending memory candidates must not be saved automatically")
+        saved_candidate = memory.save_candidate(candidate_id)
+        assert_true(saved_candidate["ok"] and any(row["text"] == "用户更喜欢原生 CSS 变量" for row in memory.recent(10)), "saving a memory candidate should persist it")
+        recalled_css = memory.recall("CSS 偏好", 5)
+        assert_true(any("原生 CSS 变量" in row["text"] for row in recalled_css), "memory recall should find relevant approved memories")
+        query_context = memory.context(10, query="我有什么 CSS 偏好")
+        assert_true(any(row.get("source") == "semantic_recall" and "原生 CSS 变量" in row["text"] for row in query_context), "query memory context should prioritize semantic recall")
+        vault_text = (memory_dir / "memory" / "joi_memory_vault.md").read_text(encoding="utf-8")
+        assert_true("用户更喜欢原生 CSS 变量" in vault_text, "saved memories should appear in the local vault")
+        browsed_vault = memory.browse_vault()
+        assert_true(
+            browsed_vault["path_label"] == "joi_memory_vault.md"
+            and any("Saved Memories" == section["title"] and any("原生 CSS 变量" in line for line in section["lines"]) for section in browsed_vault["sections"]),
+            "memory vault browsing should expose safe saved-memory sections",
+        )
+        (memory_dir / "memory" / "joi_memory_vault.md").write_text(
+            vault_text + "\n## Manual Notes\n\n- 用户喜欢回答短一点\n- C:\\secret\\raw.log\n",
+            encoding="utf-8",
+        )
+        context_rows = memory.context(10)
+        assert_true(any("回答短一点" in row["text"] for row in context_rows), "manual vault notes should enter memory context")
+        assert_true(not any("secret" in row["text"] or "raw.log" in row["text"] for row in context_rows), "unsafe manual vault notes should be ignored")
+        memory.remember("normal", "用户偏好稳定控件")
+        preserved_vault = (memory_dir / "memory" / "joi_memory_vault.md").read_text(encoding="utf-8")
+        assert_true("用户喜欢回答短一点" in preserved_vault, "vault rewrites should preserve manual notes")
+        rejected_candidate = memory.propose("preference", "用户的 key 是 sk-1234567890abcdef", source="chat")
+        assert_true(not rejected_candidate["ok"] and not memory.pending(10), "unsafe memory candidates should fail closed")
+        disabled_status = memory.set_enabled(False)
+        assert_true(disabled_status["enabled"] is False, "memory store should support a hard disable switch")
+        disabled_candidate = memory.propose("preference", "用户更喜欢极简界面", source="chat")
+        assert_true(not disabled_candidate["ok"] and disabled_candidate["error"] == "memory_disabled", "disabled memory should not accept new candidates")
+        assert_true(memory.remember("preference", "用户更喜欢极简界面") is None, "disabled memory should not save directly")
+        assert_true(memory.set_enabled(True)["enabled"] is True, "memory store should re-enable cleanly")
+        delete_id = int(saved_candidate["memory"]["id"])
+        assert_true(memory.delete(delete_id)["ok"], "approved memories should be deletable")
+        assert_true(all(row["id"] != delete_id for row in memory.recent(10)), "deleted memories should be removed from SQLite")
+        assert_true(memory.propose("preference", "用户喜欢低噪音提醒", source="chat")["ok"], "clear test should have a pending candidate")
+        clear_result = memory.clear()
+        assert_true(clear_result["ok"] and not memory.recent(10) and not memory.pending(10), "memory clear should remove saved and pending rows")
+        assert_true(not memory.recall("低噪音提醒", 5), "memory clear should remove recall index rows")
+        cleared_vault = (memory_dir / "memory" / "joi_memory_vault.md").read_text(encoding="utf-8")
+        assert_true("_No saved memories yet._" in cleared_vault and "用户喜欢回答短一点" in cleared_vault, "memory clear should preserve manual vault notes")
     finally:
-        import shutil
         shutil.rmtree(memory_dir, ignore_errors=True)
+
+    memory_app_dir = Path(tempfile.mkdtemp())
+    try:
+        (memory_app_dir / "agent_companion" / "config").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(workspace / "agent_companion" / "config" / "default_character.yaml", memory_app_dir / "agent_companion" / "config" / "default_character.yaml")
+        memory_app = AgentCompanionApp(memory_app_dir)
+        memory_events = memory_app.handle_user_text("记住我更喜欢轻量级原生控件")
+        memory_candidates = [event.agent_state.get("memory_candidate") for event in memory_events if event.agent_state.get("memory_candidate")]
+        assert_true(memory_candidates and memory_app.memory.pending(10), "explicit remember requests should create pending memory candidates")
+        assert_true(not any("轻量级原生控件" in row["text"] for row in memory_app.memory.recent(20)), "explicit remember requests should still require user save")
+        saved_memory = memory_app.memory.save_candidate(int(memory_candidates[-1]["id"]))
+        assert_true(saved_memory["ok"] and any("轻量级原生控件" in row["text"] for row in memory_app.memory.recent(20)), "approved explicit memory should persist")
+        memory_bridge = JsonRpcBridge(memory_app_dir)
+        recall_rpc = memory_bridge.memory_recall_command({"query": "轻量级偏好", "limit": 5})
+        assert_true(recall_rpc["ok"] and any("轻量级原生控件" in row["text"] for row in recall_rpc["memories"]), "memory recall RPC should return approved semantic matches")
+        vault_rpc = memory_bridge.memory_browse_vault_command()
+        assert_true(vault_rpc["ok"] and vault_rpc["vault"]["sections"], "memory vault RPC should expose browsable vault sections")
+        memory_status_events = memory_app.handle_user_text("你记得什么")
+        assert_true(any(event.agent_state.get("tool") == "memory.status" and event.agent_state.get("memory", {}).get("enabled") is True for event in memory_status_events), "memory status command should expose saved memory state")
+        memory_off_events = memory_app.handle_user_text("关闭记忆")
+        assert_true(any(event.agent_state.get("memory", {}).get("enabled") is False for event in memory_off_events), "memory disable command should update memory state")
+        disabled_memory_events = memory_app.handle_user_text("记住我喜欢透明 UI")
+        assert_true(not any(event.agent_state.get("memory_candidate") for event in disabled_memory_events), "disabled memory should suppress explicit memory candidates")
+        memory_on_events = memory_app.handle_user_text("开启记忆")
+        assert_true(any(event.agent_state.get("memory", {}).get("enabled") is True for event in memory_on_events), "memory enable command should update memory state")
+        personalized_events = memory_app.handle_user_text("你知道我喜欢什么吗")
+        personalized_chat = [event for event in personalized_events if event.agent_state.get("tool") == "companion.chat"]
+        assert_true(personalized_chat and "轻量级原生控件" in personalized_chat[-1].display_card.summary, "approved memories should personalize companion chat")
+    finally:
+        shutil.rmtree(memory_app_dir, ignore_errors=True)
 
     screen_tool = ScreenObserveTool(workspace, FakeVisionObserver(workspace), ocr=UnavailableOcrExtractor())
     screen_result = screen_tool.run(ToolRequest("observe.screen", {"query": "陪我看当前画面", "target": "fullscreen"}))
@@ -658,6 +990,56 @@ def main() -> int:
     assert_true("sample.png" not in screen_result.voice_line.text, "voice should not read screenshot path")
     assert_true(screen_result.agent_state["observation"]["ocr"]["status"] == "unavailable", "OCR should have safe unavailable fallback")
     assert_true("OCR：" in screen_result.display_card.body, "screen card should include OCR status")
+
+    video_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/video-frame-1.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/video-frame-2.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/video-frame-3.png", title="Bilibili Video"),
+        ],
+    )
+    sequence_summarizer = SequenceSummarizer()
+    video_ocr = OcrResult("success", "识别到字幕和弹幕。", [OcrTextBlock("这一条是小猫发的", (12, 80, 160, 24), 0.91), OcrTextBlock("666", (900, 30, 80, 22), 0.88)])
+    video_tool = ScreenObserveTool(workspace, computer_backend=video_backend, summarizer=sequence_summarizer, ocr=FakeOcrExtractor(video_ocr))
+    video_result = video_tool.run(ToolRequest("observe.screen", {"query": "陪我看这个视频", "sample_interval_ms": 0}))
+    assert_true(video_result.ok, "video watch observation should succeed")
+    assert_true(video_backend.observe_calls == 3, "video watch should capture multiple temporal frames")
+    assert_true(video_result.agent_state["temporal_observation"] is True, "video watch should mark temporal observation")
+    assert_true(len(video_result.agent_state["watch_frames"]) == 3, "video watch should expose sampled watch frames")
+    assert_true(len(video_result.display_card.artifacts) == 3, "video watch should expose multiple frame artifacts")
+    assert_true(sequence_summarizer.sequence_calls and sequence_summarizer.sequence_calls[0][0] == 3, "video watch should use sequence vision summarizer")
+    assert_true(any("实时转写" in row for row in sequence_summarizer.sequence_calls[0][2]), "video sequence summary should receive transcript text")
+    assert_true("连续画面显示一只猫" in video_result.agent_state["sequence_summary"], "video watch should preserve sequence summary")
+    assert_true("连续采样" in video_result.display_card.body and "连续帧文本线索" in video_result.display_card.body, "video card should explain temporal sampling")
+    assert_true(video_result.agent_state["transcript"]["status"] == "success", "video watch should expose OCR subtitle transcript state")
+    assert_true("这一条是小猫发的" in video_result.agent_state["transcript"]["segments"][0]["text"], "video transcript should include subtitle-like OCR text")
+    assert_true("实时转写" in video_result.display_card.body, "video card should show transcript snippets")
+
+    audio_transcriber = FakeAudioTranscriber()
+    audio_transcript_tool = ScreenObserveTool(
+        workspace,
+        computer_backend=FakeComputerBackend(workspace),
+        summarizer=SequenceSummarizer(),
+        ocr=FakeOcrExtractor(OcrResult("success", "empty", [])),
+        audio_transcriber=audio_transcriber,
+    )
+    audio_transcript_result = audio_transcript_tool.run(ToolRequest("observe.screen", {"query": "用系统音频听一下这个视频", "sample_count": 2, "sample_interval_ms": 0, "transcribe": True, "transcript_source": "system_audio"}))
+    assert_true(audio_transcript_result.agent_state["transcript"]["source"] == "system_audio", "system audio transcript source should be exposed")
+    assert_true(audio_transcriber.calls, "system audio transcript provider should be invoked when requested")
+
+    auto_fallback_audio = FailingAudioTranscriber("asr_unconfigured")
+    auto_fallback_tool = ScreenObserveTool(
+        workspace,
+        computer_backend=FakeComputerBackend(workspace),
+        summarizer=SequenceSummarizer(),
+        ocr=FakeOcrExtractor(video_ocr),
+        audio_transcriber=auto_fallback_audio,
+    )
+    auto_fallback_result = auto_fallback_tool.run(ToolRequest("observe.screen", {"query": "陪我看这个视频", "sample_count": 2, "sample_interval_ms": 0, "transcribe": True, "transcript_source": "auto"}))
+    assert_true(auto_fallback_audio.calls, "auto transcript source should try system audio first")
+    assert_true(auto_fallback_result.agent_state["transcript"]["source"] == "ocr_subtitle", "auto transcript should fall back to OCR subtitles when audio fails")
+    assert_true(auto_fallback_result.agent_state["transcript"]["error"] == "asr_unconfigured", "auto transcript fallback should preserve audio failure reason")
 
     unavailable_ocr = UnavailableOcrExtractor("OCR 依赖未安装，暂时只能保存截图。")
     unavailable_result = unavailable_ocr.extract(workspace / "missing.png")
@@ -1332,6 +1714,12 @@ def main() -> int:
     artifact_result = bridge.read_artifact_command("data/agent_companion/vision/artifact-read-test.png")
     assert_true(artifact_result.get("ok") is True and str(artifact_result.get("data_url", "")).startswith("data:image/png;base64,"), "artifact.read should return a data URL for workspace images")
     assert_true(bridge.read_artifact_command("../secret.png").get("error") == "artifact_not_found", "artifact.read must not read outside the workspace")
+    ready_payload = bridge._ready_payload()
+    ready_blob = json.dumps(ready_payload, ensure_ascii=False, default=str)
+    assert_true("workspace_label" in ready_payload and "workspace" not in ready_payload, "ready payload should expose a label instead of an absolute workspace path")
+    assert_true(str(workspace) not in ready_blob, "ready payload must not expose local absolute workspace paths")
+    memory_status = bridge.app.memory.status()
+    assert_true("vault_label" in memory_status and "vault_path" not in memory_status, "memory status should expose a vault label instead of an absolute path")
 
     expired_app = AgentCompanionApp(workspace)
     expired_app.tools.register(
@@ -1418,8 +1806,538 @@ def main() -> int:
     click_decision = policy.classify(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true(click_decision.requires_approval, "computer.click should require approval")
     assert_true(policy.classify(ToolRequest("computer.click", {"x": 100, "y": 200}), approved=True).allowed, "approved computer.click should be allowed")
+    workflow_decision = policy.classify(ToolRequest("computer.workflow", {"workflow": "open_app", "app": "Codex"}))
+    assert_true(workflow_decision.requires_approval, "computer.workflow should require approval")
     public_payload = policy.public_payload(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true("100" not in str(public_payload), "policy preview should not expose raw click coordinates")
+
+    audit_tmpdir = tempfile.mkdtemp()
+    try:
+        audit_path = Path(audit_tmpdir) / "audit.jsonl"
+        audit_store = AuditStore(audit_path)
+        audit_store.record_event(
+            AgentEvent(
+                EventType.APPROVAL_REQUIRED,
+                "task-abcdef123456",
+                DisplayCard("需要确认", r"打开 C:\secret\screen.png sk-test-private", status="approval", artifacts=[r"data/agent_companion/vision/private.png"]),
+                VoiceLine("需要确认。"),
+                {
+                    "tool": "computer.click",
+                    "risk": "medium",
+                    "approval": {
+                        "approval_id": "approval-abcdef123456",
+                        "task_id": "task-abcdef123456",
+                        "step_index": 1,
+                        "tool": "computer.click",
+                    },
+                    "policy": {
+                        "tool": "computer.click",
+                        "reason": "medium 风险动作需要确认。",
+                        "arguments_preview": {"target": "指定屏幕位置", "raw": r"C:\secret\screen.png"},
+                    },
+                    "skill_id": "joi.computer_use",
+                    "skill_category": "computer_use",
+                    "skill_permission_level": "medium",
+                    "skill_audit": "computer_use_audit",
+                    COMPUTER_AUDIT_STATE_KEY: [
+                        {
+                            "event_type": "approval_pending",
+                            "sanitized_summary": "Approval is required before this Computer Use action can run.",
+                            "risk_level": "medium",
+                            "approval_id": "approval-abcdef123456",
+                            "approval_status": "pending",
+                            "tool_name": "computer.click",
+                            "skill_id": "joi.computer_use",
+                            "action_name": "click",
+                            "sanitized_arguments": {"target": "screen_position"},
+                            "before_artifacts": [{"ref": r"data/agent_companion/vision/private.png"}],
+                        }
+                    ],
+                },
+            )
+        )
+        audit_payload = audit_store.recent(10)
+        assert_true(audit_payload["version"] == AUDIT_SCHEMA_VERSION and audit_payload["safe_for_display"], "audit store should expose a safe display payload")
+        audit_record = audit_payload["records"][-1]
+        assert_true(audit_record["outcome"] == "approval_pending" and audit_record["approval"]["status"] == "pending", "audit store should persist approval lifecycle records")
+        assert_true(audit_record["skill_id"] == "joi.computer_use" and audit_record["tool"] == "computer.click", "audit store should preserve stable skill/tool ids")
+        assert_true(audit_record["computer_audit"][0]["artifact_counts"]["before"] == 1, "audit store should keep artifact counts without refs")
+        audit_text = audit_path.read_text(encoding="utf-8")
+        forbidden_audit_fragments = ["C:\\", "sk-", "approval-", "task-abcdef", "data/", ".png", "secret"]
+        assert_true(all(fragment not in audit_text for fragment in forbidden_audit_fragments), "persistent audit log leaked private ids, paths, artifacts, or secrets")
+    finally:
+        shutil.rmtree(audit_tmpdir, ignore_errors=True)
+
+    background_tmpdir = tempfile.mkdtemp()
+    try:
+        background_path = Path(background_tmpdir) / "background_context.json"
+        background_store = BackgroundContextStore(background_path)
+        background_config = background_store.configure(enabled=True, scope_type="project", label=r"C:\secret\joi")
+        background_state = background_config["background"]
+        assert_true(background_config["ok"] and background_state["enabled"] and background_state["active"], "background context should enable only after an approved scope")
+        assert_true(background_state["active_scope"]["type"] == "project" and background_state["active_scope"]["label"] == "approved_project", "background scope labels should not expose local project paths")
+        background_record = background_store.record_summary("这段视频正在讨论猫猫实验和观众弹幕。", source="watch_loop", visual_status="ok", transcript_source="system_audio")
+        assert_true(background_record["ok"] and background_record["background"]["recent_count"] == 1, "background context should store summaries for approved scopes")
+        cleared_background = background_store.clear_context()["background"]
+        assert_true(cleared_background["recent_count"] == 0 and cleared_background["scope_count"] == 1, "background clear should remove summaries without deleting approved scopes")
+        disabled_background = background_store.configure(enabled=False)["background"]
+        blocked_background = background_store.record_summary("不会记录", source="watch_loop")
+        assert_true(disabled_background["enabled"] is False and not blocked_background["ok"] and blocked_background["error"] == "background_disabled", "disabled background context should reject new summaries")
+        background_text = background_path.read_text(encoding="utf-8")
+        forbidden_background_fragments = ["C:\\", "secret", ".png", "http", "sk-", "approval-", "task-"]
+        assert_true(all(fragment not in background_text for fragment in forbidden_background_fragments), "background context store leaked private paths, ids, or secrets")
+    finally:
+        shutil.rmtree(background_tmpdir, ignore_errors=True)
+
+    doctor_tmpdir = tempfile.mkdtemp()
+    try:
+        doctor_root = Path(doctor_tmpdir)
+        for relative in (
+            "README.md",
+            "config.example.yaml",
+            "requirements.txt",
+            "agent_companion/shell/package.json",
+            "agent_companion/shell/src-tauri/tauri.conf.json",
+            "tools/start_joi.ps1",
+        ):
+            target = doctor_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}", encoding="utf-8")
+        venv_bin = doctor_root / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        (venv_bin / ("python.exe" if os.name == "nt" else "python")).write_text("", encoding="utf-8")
+        (doctor_root / "agent_companion/shell/node_modules").mkdir(parents=True, exist_ok=True)
+        release_shell = doctor_root / "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
+        release_shell.parent.mkdir(parents=True, exist_ok=True)
+        release_shell.write_text("", encoding="utf-8")
+        (doctor_root / "config.yaml").write_text(
+            """
+llm:
+  use_mock: false
+  base_url: https://api.example.test/v1
+  model: joi-fast
+  api_key: sk-private-do-not-print
+  vision_enabled: true
+  vision_base_url: https://vision.example.test/v1
+  vision_model: joi-vision
+  vision_api_key: ${JOI_VISION_API_KEY}
+asr:
+  enabled: true
+  provider: openai_compatible
+  base_url: https://asr.example.test/v1
+  model: whisper-test
+  api_key: ${JOI_ASR_API_KEY}
+tts:
+  enabled: true
+  provider: gpt-sovits
+  server_url: http://127.0.0.1:9880/
+ocr:
+  tesseract_cmd: C:\\secret\\tesseract.exe
+characters:
+  - name: Joi
+""",
+            encoding="utf-8",
+        )
+        doctor_report = build_doctor_report(
+            doctor_root,
+            import_probe=lambda _name: True,
+            which_probe=lambda name: "tool" if name in {"npm.cmd", "cargo.exe", "tesseract.exe"} else None,
+            port_probe=lambda _port: False,
+            env={"JOI_ASR_API_KEY": "sk-asr-private", "JOI_VISION_API_KEY": "sk-vision-private"},
+        )
+        doctor_text = json.dumps(doctor_report, ensure_ascii=False)
+        assert_true(doctor_report["status"] == "ok" and doctor_exit_code(doctor_report) == 0, "doctor should pass a complete local setup")
+        assert_true("sk-" not in doctor_text and "C:\\" not in doctor_text and "secret" not in doctor_text, "doctor report leaked secrets or local paths")
+        broken_report = build_doctor_report(
+            doctor_root / "missing",
+            import_probe=lambda _name: False,
+            which_probe=lambda _name: None,
+            port_probe=lambda _port: True,
+            env={},
+        )
+        assert_true(broken_report["status"] == "fail" and doctor_exit_code(broken_report) == 1 and broken_report["next_actions"], "doctor should fail closed with actionable first-run next steps")
+    finally:
+        shutil.rmtree(doctor_tmpdir, ignore_errors=True)
+
+    setup_tmpdir = tempfile.mkdtemp()
+    try:
+        setup_root = Path(setup_tmpdir)
+        (setup_root / "config.example.yaml").write_text(
+            """
+llm:
+  use_mock: true
+  api_key: ${JOI_LLM_API_KEY}
+characters:
+  - name: Joi
+    color: "#ff4b91"
+    setting: setup fixture
+""",
+            encoding="utf-8",
+        )
+        dry_setup = build_windows_setup_plan(setup_root)
+        assert_true(dry_setup["status"] == "warn" and windows_setup_exit_code(dry_setup) == 0 and not (setup_root / "config.yaml").exists(), "setup wizard dry-run should not write config.yaml")
+        apply_setup = build_windows_setup_plan(setup_root, apply=True)
+        setup_text = json.dumps(apply_setup, ensure_ascii=False)
+        assert_true(apply_setup["status"] == "ok" and windows_setup_exit_code(apply_setup) == 0 and apply_setup["created"] == ["config.yaml"], "setup wizard apply should create config.yaml from example")
+        config_before = (setup_root / "config.yaml").read_text(encoding="utf-8")
+        second_apply = build_windows_setup_plan(setup_root, apply=True)
+        assert_true(second_apply["status"] == "ok" and not second_apply["created"] and (setup_root / "config.yaml").read_text(encoding="utf-8") == config_before, "setup wizard must not overwrite an existing config.yaml")
+        forbidden_setup_fragments = ["sk-", "https://", "http://", "C:\\", "/Users/", "api_key", "base_url", "server_url", str(setup_root)]
+        assert_true(all(fragment not in setup_text for fragment in forbidden_setup_fragments), "setup wizard leaked secrets, endpoints, or local paths")
+    finally:
+        shutil.rmtree(setup_tmpdir, ignore_errors=True)
+
+    provider_tmpdir = tempfile.mkdtemp()
+    try:
+        provider_root = Path(provider_tmpdir)
+        (provider_root / "config.yaml").write_text(
+            """
+llm:
+  use_mock: false
+  provider: openai_compatible
+  base_url: https://private.example/v1
+  model: deepseek-v4
+  api_key: sk-provider-secret
+  vision_enabled: true
+  vision_base_url: https://vision.example/v1
+  vision_model: vision-model
+  vision_api_key: sk-vision-secret
+  expression_enabled: true
+  expression_model: v4-flash
+  expression_api_key: sk-expression-secret
+asr:
+  enabled: true
+  provider: openai_compatible
+  base_url: https://asr.example/v1
+  model: asr-model
+  api_key: sk-asr-secret
+tts:
+  enabled: true
+  provider: gpt-sovits
+  server_url: http://127.0.0.1:9880
+ocr:
+  tesseract_cmd: C:\\secret\\tesseract.exe
+characters:
+  - name: Joi
+    color: "#ff4b91"
+    setting: test
+""",
+            encoding="utf-8",
+        )
+        provider_report = build_provider_preflight_report(provider_root)
+        provider_text = json.dumps(provider_report, ensure_ascii=False)
+        assert_true(provider_report["status"] in {"ok", "warn"} and provider_preflight_exit_code(provider_report) == 0, "provider preflight should pass or warn on optional provider gaps")
+        assert_true(any(row["name"] == "fast" and row["state"] == "ready" for row in provider_report["providers"]), "provider preflight should report text model readiness")
+        assert_true(any(row["name"] == "asr" and row["configured"] for row in provider_report["providers"]), "provider preflight should report ASR readiness")
+        assert_true(any(row["name"] == "tts" and row["configured"] for row in provider_report["providers"]), "provider preflight should report TTS readiness")
+        forbidden_provider_fragments = ["sk-", "https://", "http://", "C:\\", "/Users/", "secret", "api_key", "base_url", "server_url"]
+        assert_true(all(fragment not in provider_text for fragment in forbidden_provider_fragments), "provider preflight leaked secrets, endpoints, or local paths")
+        missing_provider_report = build_provider_preflight_report(provider_root / "missing")
+        assert_true(missing_provider_report["status"] == "warn" and provider_preflight_exit_code(missing_provider_report) == 0 and missing_provider_report["next_actions"], "provider preflight should warn with setup actions when config is missing")
+    finally:
+        shutil.rmtree(provider_tmpdir, ignore_errors=True)
+
+    demo_tmpdir = tempfile.mkdtemp()
+    old_codex_bin = os.environ.get("AGENT_COMPANION_CODEX_BIN")
+    old_ok_ww_runner = os.environ.get("OK_WW_RUNNER")
+    try:
+        demo_root = Path(demo_tmpdir)
+        (demo_root / "config.yaml").write_text(
+            """
+llm:
+  use_mock: true
+characters:
+  - name: Joi
+    color: "#ff4b91"
+    setting: demo fixture
+""",
+            encoding="utf-8",
+        )
+        fake_codex = demo_root / ("codex.cmd" if os.name == "nt" else "codex")
+        fake_codex.write_text("@echo off\r\n" if os.name == "nt" else "#!/bin/sh\n", encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(fake_codex, 0o755)
+        fake_ok_ww = demo_root / "run_ok_ww.ps1"
+        fake_ok_ww.write_text("# dry-run fixture\n", encoding="utf-8")
+        os.environ["AGENT_COMPANION_CODEX_BIN"] = str(fake_codex)
+        os.environ["OK_WW_RUNNER"] = str(fake_ok_ww)
+        demo_report = build_mvp_demo_check_report(demo_root)
+        demo_text = json.dumps(demo_report, ensure_ascii=False)
+        assert_true(demo_report["status"] in {"ok", "warn"} and mvp_demo_check_exit_code(demo_report) == 0, "MVP demo check should pass or warn when local optional providers are missing")
+        assert_true({row["id"] for row in demo_report["demos"]} == {"watch_together", "coding_task", "game_skill"}, "MVP demo check should cover watch, coding, and game demos")
+        assert_true(all(row["prompts"] for row in demo_report["demos"]), "MVP demo check should expose safe demo prompts")
+        forbidden_demo_fragments = ["sk-", "https://", "http://", "C:\\", "/Users/", "secret", "api_key", "base_url", "server_url", str(demo_root)]
+        assert_true(all(fragment not in demo_text for fragment in forbidden_demo_fragments), "MVP demo check leaked secrets, endpoints, or local paths")
+        missing_demo_report = build_mvp_demo_check_report(demo_root / "missing")
+        assert_true(missing_demo_report["status"] in {"warn", "fail"} and missing_demo_report["next_actions"], "MVP demo check should explain missing local demo dependencies")
+    finally:
+        if old_codex_bin is None:
+            os.environ.pop("AGENT_COMPANION_CODEX_BIN", None)
+        else:
+            os.environ["AGENT_COMPANION_CODEX_BIN"] = old_codex_bin
+        if old_ok_ww_runner is None:
+            os.environ.pop("OK_WW_RUNNER", None)
+        else:
+            os.environ["OK_WW_RUNNER"] = old_ok_ww_runner
+        shutil.rmtree(demo_tmpdir, ignore_errors=True)
+
+    packaging_tmpdir = tempfile.mkdtemp()
+    try:
+        packaging_root = Path(packaging_tmpdir)
+        shell_dir = packaging_root / "agent_companion" / "shell"
+        tauri_dir = shell_dir / "src-tauri"
+        (tauri_dir / "capabilities").mkdir(parents=True, exist_ok=True)
+        (packaging_root / "tools").mkdir(parents=True, exist_ok=True)
+        (shell_dir / "package-lock.json").write_text("{}", encoding="utf-8")
+        (shell_dir / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "joi-shell",
+                    "private": True,
+                    "version": "0.1.0",
+                    "scripts": {"build": "vue-tsc --noEmit && vite build", "tauri": "tauri"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tauri_dir / "Cargo.toml").write_text(
+            """
+[package]
+name = "joi-shell"
+version = "0.1.0"
+edition = "2021"
+""",
+            encoding="utf-8",
+        )
+        (tauri_dir / "tauri.conf.json").write_text(
+            json.dumps(
+                {
+                    "productName": "Joi",
+                    "version": "0.1.0",
+                    "identifier": "local.joi",
+                    "build": {"beforeBuildCommand": "npm run build", "frontendDist": "../dist"},
+                    "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": False}]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tauri_dir / "capabilities" / "default.json").write_text(
+            json.dumps(
+                {
+                    "identifier": "default",
+                    "windows": ["main"],
+                    "permissions": [
+                        "core:window:allow-close",
+                        "core:window:allow-minimize",
+                        "core:window:allow-start-dragging",
+                        "core:window:allow-set-always-on-top",
+                        "core:window:allow-set-skip-taskbar",
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (packaging_root / "start_joi.bat").write_text("powershell -File tools\\start_joi.ps1 %*", encoding="utf-8")
+        (packaging_root / "tools" / "start_joi.ps1").write_text("-Doctor\n-Setup\njoi_doctor.py\nwindows_setup_wizard.py\njoi_core.err.log\njoi_core.out.log", encoding="utf-8")
+        (packaging_root / "tools" / "joi_doctor.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "mvp_demo_check.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "package_windows_release.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "provider_preflight.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "windows_handoff_report.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "windows_release_check.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "windows_setup_wizard.py").write_text("", encoding="utf-8")
+        packaging_report = build_packaging_smoke_report(packaging_root)
+        assert_true(packaging_report["status"] == "ok" and packaging_smoke_exit_code(packaging_report) == 0, "packaging smoke should pass valid release metadata")
+        assert_true(any(item["name"] == "mvp_demo_check" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require MVP demo check tooling")
+        assert_true(any(item["name"] == "provider_preflight" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require provider preflight tooling")
+        assert_true(any(item["name"] == "windows_handoff_report" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require the Windows handoff report")
+        assert_true(any(item["name"] == "windows_release_check" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require the release readiness aggregator")
+        assert_true(any(item["name"] == "windows_setup_wizard" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require the setup wizard")
+        privacy_smoke = {item["name"]: item for item in packaging_report["items"]}.get("release_privacy_policy", {})
+        assert_true(privacy_smoke.get("status") == "ok", "packaging smoke should validate the release privacy policy")
+        (tauri_dir / "tauri.conf.json").write_text(
+            json.dumps({"productName": "Joi", "version": "0.2.0", "identifier": "", "build": {}, "app": {"windows": [{"label": "other"}]}}),
+            encoding="utf-8",
+        )
+        broken_packaging_report = build_packaging_smoke_report(packaging_root)
+        assert_true(broken_packaging_report["status"] == "fail" and packaging_smoke_exit_code(broken_packaging_report) == 1 and broken_packaging_report["next_actions"], "packaging smoke should fail closed on release metadata drift")
+    finally:
+        shutil.rmtree(packaging_tmpdir, ignore_errors=True)
+
+    release_tmpdir = tempfile.mkdtemp()
+    try:
+        release_root = Path(release_tmpdir)
+        for relative in (
+            "README.md",
+            "config.example.yaml",
+            "secrets.example.yaml",
+            "requirements.txt",
+            "requirements-accessibility.txt",
+            "requirements-audio.txt",
+            "requirements-ocr.txt",
+            "start_joi.bat",
+            "agent_companion/README.md",
+            "agent_companion/shell/index.html",
+            "agent_companion/shell/package.json",
+            "agent_companion/shell/package-lock.json",
+            "agent_companion/shell/tsconfig.json",
+            "agent_companion/shell/vite.config.ts",
+            "agent_companion/shell/src-tauri/build.rs",
+            "agent_companion/shell/src-tauri/Cargo.lock",
+            "agent_companion/shell/src-tauri/Cargo.toml",
+            "agent_companion/shell/src-tauri/tauri.conf.json",
+            "run_agent_companion_tests.py",
+            "tools/joi_doctor.py",
+            "tools/mvp_demo_check.py",
+            "tools/package_windows_release.py",
+            "tools/packaging_smoke.py",
+            "tools/provider_preflight.py",
+            "tools/smoke_ws_bridge.py",
+            "tools/start_joi.ps1",
+            "tools/windows_handoff_report.py",
+            "tools/windows_release_check.py",
+            "tools/windows_setup_wizard.py",
+        ):
+            target = release_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if relative.endswith("package.json"):
+                target.write_text(
+                    json.dumps(
+                        {
+                            "name": "joi-shell",
+                            "private": True,
+                            "version": "0.1.0",
+                            "scripts": {"build": "vue-tsc --noEmit && vite build", "tauri": "tauri"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            elif relative.endswith("Cargo.toml"):
+                target.write_text(
+                    """
+[package]
+name = "joi-shell"
+version = "0.1.0"
+edition = "2021"
+""",
+                    encoding="utf-8",
+                )
+            elif relative.endswith("tauri.conf.json"):
+                target.write_text(
+                    json.dumps(
+                        {
+                            "productName": "Joi",
+                            "version": "0.1.0",
+                            "identifier": "local.joi",
+                            "build": {"beforeBuildCommand": "npm run build", "frontendDist": "../dist"},
+                            "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": False}]},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            elif relative == "start_joi.bat":
+                target.write_text("powershell -File tools\\start_joi.ps1 %*", encoding="utf-8")
+            elif relative == "tools/start_joi.ps1":
+                target.write_text("-Doctor\n-Setup\njoi_doctor.py\nwindows_setup_wizard.py\njoi_core.err.log\njoi_core.out.log", encoding="utf-8")
+            else:
+                target.write_text("release input", encoding="utf-8")
+        for relative in (
+            "agent_companion/config/default_character.yaml",
+            "agent_companion/core/app.py",
+            "agent_companion/docs/architecture.md",
+            "docs/WINDOWS_FIRST_RUN.md",
+            "agent_companion/shell/src/App.vue",
+            "agent_companion/shell/src-tauri/capabilities/default.json",
+            "agent_companion/shell/src-tauri/icons/icon.png",
+            "agent_companion/shell/src-tauri/src/main.rs",
+        ):
+            target = release_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if relative.endswith("capabilities/default.json"):
+                target.write_text(
+                    json.dumps(
+                        {
+                            "identifier": "default",
+                            "windows": ["main"],
+                            "permissions": [
+                                "core:window:allow-close",
+                                "core:window:allow-minimize",
+                                "core:window:allow-start-dragging",
+                                "core:window:allow-set-always-on-top",
+                                "core:window:allow-set-skip-taskbar",
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                target.write_text("release input", encoding="utf-8")
+        release_exe = release_root / "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
+        release_exe.parent.mkdir(parents=True, exist_ok=True)
+        release_exe.write_bytes(b"fake exe")
+        for forbidden in (
+            "config.yaml",
+            "secrets.yaml",
+            ".env",
+            "config.local.yaml",
+            "data/local.db",
+            "data/local_visual_eval/private_manifest.json",
+            "logs/joi_core.err.log",
+            "agent_companion/shell/node_modules/private.txt",
+            "agent_companion/shell/dist/index.html",
+            "agent_companion/shell/src-tauri/target/debug/joi-shell.exe",
+            "agent_companion/shell/src-tauri/target/release/private.pdb",
+            "agent_companion/core/__pycache__/app.pyc",
+        ):
+            target = release_root / forbidden
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if forbidden == "config.yaml":
+                target.write_text(
+                    """
+llm:
+  use_mock: true
+characters:
+  - name: Joi
+    color: "#ff4b91"
+    setting: release fixture
+""",
+                    encoding="utf-8",
+                )
+            else:
+                target.write_text("private", encoding="utf-8")
+        privacy_report = build_release_privacy_report()
+        assert_true(privacy_report["status"] == "ok" and not privacy_report["unprotected_samples"] and privacy_report["protected_sample_count"] >= 10, "Release privacy policy should protect local-only config, data, logs, dependency, and build paths")
+        release_report = build_windows_release_package(release_root, output_dir=release_root / "out")
+        assert_true(release_report["status"] == "ok" and package_exit_code(release_report) == 0 and release_report["sha256"], "Windows release packager should create a portable zip")
+        assert_true(release_report["privacy_policy"]["status"] == "ok", "Windows release report should include a passing privacy policy check")
+        readiness_report = build_windows_release_check_report(release_root, include_doctor=False)
+        readiness_phases = {phase["name"]: phase for phase in readiness_report["phases"]}
+        assert_true(readiness_report["status"] in {"ok", "warn"} and windows_release_check_exit_code(readiness_report) == 0, "Windows release readiness check should pass or warn when only advisory provider gaps remain")
+        assert_true(readiness_phases["provider_preflight"]["status"] in {"ok", "warn"} and readiness_phases["mvp_demo_check"]["status"] in {"ok", "warn"} and readiness_phases["release_privacy_policy"]["status"] == "ok" and readiness_phases["release_package_dry_run"]["status"] == "ok", "Windows release readiness check should aggregate provider, demo, privacy, and release dry-run status")
+        handoff_report = build_windows_handoff_report(release_root, include_doctor=False, branch="win-desktop-fixes", commit="abc1234")
+        handoff_text = json.dumps(handoff_report, ensure_ascii=False)
+        assert_true(handoff_report["status"] in {"ok", "warn"} and windows_handoff_exit_code(handoff_report) == 0 and handoff_report["branch"] == "win-desktop-fixes" and handoff_report["commit"] == "abc1234", "Windows handoff report should expose safe branch, commit, and readiness state")
+        assert_true(any(phase["name"] == "release_package_dry_run" for phase in handoff_report["phases"]) and "start_joi.bat -Setup" in handoff_report["commands"], "Windows handoff report should include release phases and first-run commands")
+        assert_true(all(fragment not in handoff_text for fragment in [str(release_root), "config.yaml", "secrets.yaml", ".env", "logs/", "data/"]), "Windows handoff report leaked local paths or private release inputs")
+        zip_path = release_root / release_report["zip"]
+        with zipfile.ZipFile(zip_path) as archive:
+            names = archive.namelist()
+        names_text = "\n".join(names)
+        assert_true(any(name.endswith("agent_companion/shell/src-tauri/target/release/joi-shell.exe") for name in names), "Release zip should include the built shell exe")
+        assert_true(any(name.endswith("tools/windows_handoff_report.py") for name in names), "Release zip should include the Windows handoff report")
+        assert_true("RELEASE_MANIFEST.json" in names_text, "Release zip should include a safe manifest")
+        assert_true(not any(fragment in names_text for fragment in ["config.yaml", "secrets.yaml", ".env", "node_modules", "logs/", "data/", "__pycache__", "private.pdb", "target/debug"]), "Release zip leaked local config, runtime data, dependency folders, or debug artifacts")
+        release_exe.unlink()
+        missing_exe_report = build_windows_release_package(release_root, output_dir=release_root / "out3", require_exe=True)
+        assert_true(missing_exe_report["status"] == "fail" and "release_exe_missing" in missing_exe_report["errors"], "Release packager should require the release shell by default")
+        missing_exe_readiness = build_windows_release_check_report(release_root, include_doctor=False)
+        assert_true(missing_exe_readiness["status"] == "fail" and windows_release_check_exit_code(missing_exe_readiness) == 1, "Release readiness check should fail when the release shell is missing")
+        ci_readiness = build_windows_release_check_report(release_root, include_doctor=False, allow_missing_exe=True)
+        assert_true(ci_readiness["status"] in {"ok", "warn"} and windows_release_check_exit_code(ci_readiness) == 0 and not ci_readiness["release_ready"] and ci_readiness["next_actions"], "CI readiness mode should allow metadata checks before the release shell exists")
+        ci_handoff = build_windows_handoff_report(release_root, include_doctor=False, allow_missing_exe=True, branch="ci", commit="def5678")
+        assert_true(ci_handoff["status"] == "warn" and windows_handoff_exit_code(ci_handoff) == 0 and ci_handoff["next_actions"], "Windows handoff should warn, not fail, when CI allows a missing release shell")
+    finally:
+        shutil.rmtree(release_tmpdir, ignore_errors=True)
 
     changed_verification = verify_post_action(
         _fake_computer_observation(workspace, title="Before", ocr_text=["登录"]),
@@ -1506,7 +2424,6 @@ def main() -> int:
         unreadable_verification = verify_post_action(unreadable_before, unreadable_after)
         assert_true(unreadable_verification.signals.screenshot_changed is None and unreadable_verification.signals.image_changed is None, "unreadable screenshots should fall back safely")
     finally:
-        import shutil
         shutil.rmtree(image_test_dir, ignore_errors=True)
 
     fake_backend = FakeComputerBackend(workspace)
@@ -1622,6 +2539,37 @@ def main() -> int:
     assert_true(hotkey_result.ok, "computer.hotkey tool should succeed with fake backend")
     assert_true("Ctrl" not in hotkey_result.voice_line.text, "hotkey voice should not read key names")
 
+    workflow_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/workflow-before.png", title="Before"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/workflow-after.png", title="After"),
+        ],
+    )
+    workflow_tool = DesktopWorkflowTool(workspace, workflow_backend, post_action_settle_ms=0, sleep_fn=lambda seconds: None)
+    workflow_result = workflow_tool.run(ToolRequest("computer.workflow", {"workflow": "open_app", "app": "Codex"}))
+    assert_true(workflow_result.ok, "computer.workflow open_app should succeed with fake backend")
+    assert_true([action.action_type for action in workflow_backend.actions] == ["hotkey", "type_text", "hotkey"], "open_app workflow should use start search, typing, enter")
+    assert_true(workflow_backend.actions[1].text == "Codex", "open_app workflow should type app name")
+    assert_true(workflow_result.agent_state["computer_use"]["action"]["type"] == "workflow", "workflow action state should be recorded")
+    assert_true(workflow_result.agent_state["post_action_verification"]["status"] == "changed", "workflow should verify after observation")
+    workflow_audit = computer_action_audit_event("task-workflow", workflow_result)
+    assert_true(workflow_audit is not None and workflow_audit.sanitized_arguments.get("workflow") == "open_app", "workflow audit should be sanitized")
+    bili_workflow_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/bili-before.png", title="Before"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/bili-after.png", title="Bilibili Search"),
+        ],
+    )
+    bili_workflow_tool = DesktopWorkflowTool(workspace, bili_workflow_backend, post_action_settle_ms=0, sleep_fn=lambda seconds: None)
+    bili_workflow_result = bili_workflow_tool.run(ToolRequest("computer.workflow", {"workflow": "open_web_search", "browser": "edge", "site": "bilibili", "query": "猫猫视频"}))
+    typed_values = [action.text or "" for action in bili_workflow_backend.actions if action.action_type == "type_text"]
+    assert_true(bili_workflow_result.ok, "Bilibili desktop workflow search should succeed with fake backend")
+    assert_true(any(value == "Microsoft Edge" for value in typed_values), "Bilibili workflow should launch Edge")
+    assert_true(any(value.startswith("https://search.bilibili.com/all?keyword=") for value in typed_values), "Bilibili workflow should navigate to site search URL")
+    assert_true(not any(value == "https://www.bilibili.com" for value in typed_values), "Bilibili search workflow should not stop on homepage when a query exists")
+
     # VisionSummarizer: MockSummarizer
     mock_summarizer = MockSummarizer()
     mock_vs = mock_summarizer.summarize(FakeVisionObserver(workspace).observe())
@@ -1664,14 +2612,18 @@ def main() -> int:
         base_url="https://api.base.com/v1", model="gpt-4", api_key="sk-base",
     )
     router = ModelRouter(base_llm)
+    assert_true(ModelRouter.stable_routes() == ("fast", "reasoning", "vision", "code", "summarize", "voice_style"), "ModelRouter should expose stable P7 route labels")
     text_ep = router.resolve("text")
     assert_true(text_ep.base_url == "https://api.base.com/v1", "text should use base_url")
     assert_true(text_ep.model == "gpt-4", "text should use base model")
     assert_true(text_ep.api_key == "sk-base", "text should use base api_key")
+    assert_true(text_ep.route == "fast" and not text_ep.fallback_reason, "legacy text route should map to stable fast route")
+    reasoning_ep = router.resolve("reasoning")
+    assert_true(reasoning_ep.route == "reasoning" and reasoning_ep.fallback_reason == "reasoning_fallback_base", "reasoning route should fall back to base model when not overridden")
 
     # ModelRouter: vision falls back to text when not configured
     vision_ep = router.resolve("vision")
-    assert_true(vision_ep.base_url == "https://api.base.com/v1", "unconfigured vision should fall back to base")
+    assert_true(vision_ep.base_url == "https://api.base.com/v1" and vision_ep.fallback_reason == "vision_fallback_base", "unconfigured vision should fall back to base")
 
     # ModelRouter: vision uses dedicated config when configured
     vision_llm = LlmConfig(
@@ -1695,10 +2647,30 @@ def main() -> int:
     assert_true(expr_ep.base_url == "https://api.base.com/v1", "expression should fall back base_url")
     assert_true(expr_ep.model == "gpt-4.1-mini", "expression should use expression_model")
     assert_true(expr_ep.api_key == "sk-base", "expression should fall back api_key")
+    voice_style_ep = ModelRouter(expr_llm).resolve("voice_style")
+    assert_true(voice_style_ep.model == "gpt-4.1-mini", "voice_style route should use expression model")
 
     # ModelRouter: expression falls back when not enabled
     expr_ep2 = ModelRouter(base_llm).resolve("expression")
     assert_true(expr_ep2.model == "gpt-4", "unconfigured expression should fall back to base model")
+    voice_style_ep2 = ModelRouter(base_llm).resolve("voice_style")
+    assert_true(voice_style_ep2.model == "gpt-4", "unconfigured voice_style should fall back to base model")
+    route_llm = LlmConfig(
+        provider="openai_compatible",
+        use_mock=False,
+        base_url="https://api.base.com/v1",
+        model="gpt-4",
+        api_key="sk-base",
+        routes={
+            "code": ModelRouteConfig(base_url="https://api.code.com/v1", model="gpt-code", api_key="sk-code"),
+            "summarize": ModelRouteConfig(model="gpt-summary"),
+        },
+    )
+    code_ep = ModelRouter(route_llm).resolve("code")
+    summarize_ep = ModelRouter(route_llm).resolve("summarize")
+    assert_true(code_ep.route == "code" and code_ep.model == "gpt-code" and code_ep.api_key == "sk-code", "code route should use explicit override")
+    assert_true(summarize_ep.route == "summarize" and summarize_ep.model == "gpt-summary" and summarize_ep.api_key == "sk-base", "summarize route should inherit base API key")
+    assert_true("api_key" not in str(code_ep.to_agent_state()) and "sk-code" not in str(code_ep.to_agent_state()), "model usage payload should not expose endpoint secrets")
 
     # Config path: _build_vision_summarizer reads from workspace / config.yaml
     tmpdir = tempfile.mkdtemp()
@@ -1715,6 +2687,12 @@ def main() -> int:
             "  vision_base_url: https://api.vision.com/v1\n"
             "  vision_model: gpt-4o\n"
             "  vision_api_key: sk-vision\n"
+            "  routes:\n"
+            "    reasoning:\n"
+            "      model: gpt-router-reasoning\n"
+            "      api_key: sk-router-reasoning\n"
+            "    code:\n"
+            "      model: gpt-router-code\n"
             "asr:\n"
             "  enabled: true\n"
             "  provider: openai_compatible\n"
@@ -1754,6 +2732,8 @@ def main() -> int:
         assert_true(tmp_config.asr.timeout_seconds == 9, "ASR timeout should parse")
         assert_true(tmp_config.ocr.timeout_seconds == 4, "OCR timeout should parse")
         assert_true(tmp_config.computer_use.post_action_settle_ms == 0, "computer use settle delay should parse")
+        assert_true(ModelRouter(tmp_config.llm).resolve("reasoning").model == "gpt-router-reasoning", "config routes should parse reasoning override")
+        assert_true(ModelRouter(tmp_config.llm).resolve("code").api_key == "sk-test", "route overrides should inherit base credentials when omitted")
         asr_provider, asr_state = build_asr_provider(tmp)
         assert_true(isinstance(asr_provider, OpenAICompatibleAsrProvider), "configured ASR should use OpenAI-compatible provider")
         assert_true(asr_state.configured and asr_state.max_bytes == 4096, "ASR runtime state should expose limits")
@@ -1763,8 +2743,9 @@ def main() -> int:
         tmp_click_tool = tmp_app.tools._tools.get("computer.click")
         assert_true(tmp_click_tool is not None and tmp_click_tool.ocr is observe_tool.ocr, "computer tool should reuse observe.screen OCR extractor")
         assert_true(tmp_click_tool.post_action_settle_ms == 0, "computer tool should use configured settle delay")
+        tmp_workflow_tool = tmp_app.tools._tools.get("computer.workflow")
+        assert_true(tmp_workflow_tool is not None and tmp_workflow_tool.ocr is observe_tool.ocr, "desktop workflow should reuse observe.screen OCR extractor")
     finally:
-        import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     mutation_tmpdir = tempfile.mkdtemp()
@@ -1855,6 +2836,10 @@ asr:
                 "temperature": 0.3,
                 "use_mock": False,
             },
+            "skills": {
+                "joi.computer_use": {"enabled": False},
+                "joi.local_files": {"enabled": False},
+            },
         }
         preview_mutation = preview_runtime_config_update(mutation_tmp, safe_updates)
         assert_true(preview_mutation.ok and preview_mutation.changed and preview_mutation.dry_run, "safe config mutation preview should report changes")
@@ -1870,6 +2855,7 @@ asr:
         assert_true(mutated_config["tts"]["fallback_to_system"] is True and mutated_config["tts"]["volume"] == 0.7, "TTS allowlist fields should update")
         assert_true(mutated_config["ocr"]["timeout_seconds"] == 8 and mutated_config["computer_use"]["post_action_settle_ms"] == 325, "runtime numeric allowlist fields should update")
         assert_true(mutated_config["llm"]["model"] == "gpt-public-next" and mutated_config["llm"]["use_mock"] is False, "LLM allowlist fields should update")
+        assert_true(mutated_config["skills"]["joi.computer_use"]["enabled"] is False and mutated_config["skills"]["joi.local_files"]["enabled"] is False, "native skill enabled flags should update through safe runtime config")
         assert_true(mutated_config["custom_section"]["unknown_flag"] == "keep-me", "unknown config fields must be preserved")
         assert_true(mutated_config["llm"]["api_key"] == "${JOI_LLM_API_KEY}" and mutated_config["asr"]["api_key"] == "${JOI_ASR_API_KEY}", "env placeholders must be preserved")
         assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "secrets.yaml must not be rewritten")
@@ -1903,9 +2889,11 @@ asr:
         invalid_mutation = update_runtime_config(mutation_tmp, {"ocr": {"timeout_seconds": 0}, "tts": {"volume": "loud"}}, dry_run=False)
         assert_true(not invalid_mutation.ok, "invalid type/range config mutation should fail")
         assert_true(config_path.read_text(encoding="utf-8") == before_invalid, "invalid config mutation must not touch config.yaml")
+        invalid_skill_mutation = update_runtime_config(mutation_tmp, {"skills": {"joi.unknown": {"enabled": False}}}, dry_run=False)
+        assert_true(not invalid_skill_mutation.ok and invalid_skill_mutation.errors[0]["code"] == "unknown_skill", "unknown skill toggles should fail closed")
+        protected_skill_mutation = update_runtime_config(mutation_tmp, {"skills": {"joi.runtime_config": {"enabled": False}}}, dry_run=False)
+        assert_true(not protected_skill_mutation.ok and protected_skill_mutation.errors[0]["code"] == "protected_skill", "runtime config skill should not be disabled through runtime config")
     finally:
-        import shutil
-
         shutil.rmtree(mutation_tmpdir, ignore_errors=True)
 
     p4_20_tmpdir = tempfile.mkdtemp()
@@ -1989,6 +2977,7 @@ asr:
             "ocr": {"timeout_seconds": 7},
             "computer_use": {"post_action_settle_ms": 350},
             "llm": {"temperature": 0.4, "use_mock": False},
+            "skills": {"joi.mcp": {"enabled": False}},
         }
         preview_payload = bridge.preview_runtime_config_update_command(safe_panel_updates)
         assert_true(preview_payload["ok"] and preview_payload["preview"]["dry_run"], "runtime config preview RPC should be read-only")
@@ -2057,25 +3046,30 @@ asr:
         assert_true(mutated_runtime_config["tts"]["volume"] == 0.75 and mutated_runtime_config["tts"]["fallback_to_system"] is True, "approved runtime config update should write TTS safe fields")
         assert_true(mutated_runtime_config["ocr"]["timeout_seconds"] == 7 and mutated_runtime_config["computer_use"]["post_action_settle_ms"] == 350, "approved runtime config update should write local runtime safe fields")
         assert_true(mutated_runtime_config["llm"]["temperature"] == 0.4 and mutated_runtime_config["llm"]["use_mock"] is False, "approved runtime config update should write LLM safe fields")
+        assert_true(mutated_runtime_config["skills"]["joi.mcp"]["enabled"] is False, "approved runtime config update should write native skill switches")
         assert_true(secrets_path.read_text(encoding="utf-8") == secrets_before, "approved runtime config update must preserve secrets.yaml byte-for-byte")
         assert_true("sk-runtime" not in config_path.read_text(encoding="utf-8"), "runtime config apply must not copy secrets into config.yaml")
         ready_payload = applied_payload.get("ready") or {}
         assert_true(ready_payload.get("runtime_settings", {}).get("asr", {}).get("max_seconds") == 42, "runtime ready payload should refresh ASR safe settings after apply")
         assert_true(ready_payload.get("runtime_settings", {}).get("tts", {}).get("volume") == 0.75, "runtime ready payload should refresh TTS safe settings after apply")
         assert_true(ready_payload.get("runtime_settings", {}).get("llm", {}).get("temperature") == 0.4, "runtime ready payload should refresh LLM safe settings after apply")
+        assert_true(ready_payload.get("runtime_settings", {}).get("skills", {}).get("joi.mcp", {}).get("enabled") is False, "runtime ready payload should refresh native skill switches after apply")
+        ready_skill_rows = {row["id"]: row for row in ready_payload.get("skills", {}).get("skills", [])}
+        assert_true(ready_skill_rows["joi.mcp"]["enabled"] is False and ready_skill_rows["joi.mcp"]["local_capability"] == "off", "runtime ready skill manifest should mirror disabled native skills")
+        assert_true(not bridge.app.policy.classify(ToolRequest("mcp.list_tools", {})).allowed, "runtime reload should apply disabled native skill policy")
         assert_true(ready_payload.get("runtime", {}).get("safe_for_display") is True, "runtime status payload should remain marked safe for display")
         _assert_config_mutation_payload_safe(ready_payload.get("runtime"), "runtime status payload leaked sensitive detail after config apply")
         _assert_config_mutation_payload_safe(ready_payload.get("runtime_settings"), "runtime settings payload leaked sensitive detail after config apply")
         _assert_config_mutation_payload_safe(applied_payload["events"], "approved runtime config events leaked sensitive detail")
         _assert_config_mutation_payload_safe(bridge.app.memory.recent(10), "runtime config memory leaked sensitive detail")
     finally:
-        import shutil
-
         shutil.rmtree(p4_20_tmpdir, ignore_errors=True)
 
     chat_app = AgentCompanionApp(workspace)
     chat_events = chat_app.handle_user_text("你好")
     assert_true(any(event.display_card.title == "对话" for event in chat_events), "chat should produce a dialogue card")
+    chat_tool_event = [event for event in chat_events if event.display_card.title == "对话"][-1]
+    assert_true(chat_tool_event.agent_state.get("skill_id") == "joi.companion.chat", "Tool result events should carry native skill ids")
     assert_true(not any(event.type == EventType.PLAN_CREATED for event in chat_events), "chat should not show plan events")
     assert_true(not any(event.type == EventType.TASK_COMPLETED for event in chat_events), "chat should not show task completion")
 
@@ -2083,6 +3077,30 @@ asr:
     assert_true(any(event.agent_state.get("tool") == "watch.recall" for event in empty_watch_events), "empty watch follow-up should use recall")
     assert_true(not any(event.type == EventType.TASK_FAILED for event in empty_watch_events), "empty watch follow-up should answer naturally, not fail")
     assert_true(not any(event.type == EventType.TASK_COMPLETED for event in empty_watch_events), "watch follow-up should not add generic task completion voice")
+
+    browser_watch_app = AgentCompanionApp(workspace)
+    browser_plan = build_plan("搜索 bilibili")
+    browser_watch_app._record_watch_context(
+        browser_plan,
+        browser_plan.steps[0],
+        ToolResult(
+            ok=True,
+            agent_state={
+                "tool": "browser.search",
+                "data": {
+                    "title": "Bilibili",
+                    "elements": [{"text": "搜索"}, {"text": "首页"}],
+                    "screenshot": "data/cache/browser/browser-smoke.png",
+                },
+            },
+            display_card=DisplayCard("网页搜索", "已观察到页面《Bilibili》。", status="success", artifacts=["data/cache/browser/browser-smoke.png"]),
+            voice_line=safe_voice_line("我看到页面内容了。"),
+            risk=RiskLevel.LOW,
+        ),
+    )
+    browser_watch_events = browser_watch_app.handle_user_text("你看到了什么")
+    assert_true(any(event.agent_state.get("tool") == "watch.recall" for event in browser_watch_events), "browser watch follow-up should use recall")
+    assert_true(any("Bilibili" in event.display_card.body for event in browser_watch_events if event.agent_state.get("tool") == "watch.recall"), "browser observation should be available to watch recall")
 
     answer_frames = [
         WatchFrame(
@@ -2126,6 +3144,153 @@ asr:
     assert_true(recall_cards[-1].agent_state["artifacts"] == ["data/agent_companion/vision/sample.png"], "watch recall should expose artifact preview data")
     assert_true(all("sample.png" not in event.voice_line.text for event in recall_events), "watch recall voice should not read artifact path")
     assert_true(watch_app.memory.recent(200) == before_watch_memory, "watch observations should not enter long-term memory by default")
+
+    video_watch_app = AgentCompanionApp(workspace)
+    video_watch_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-video-1.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-video-2.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-video-3.png", title="Bilibili Video"),
+        ],
+    )
+    video_watch_app.tools.register(
+        ScreenObserveTool(
+            workspace,
+            computer_backend=video_watch_backend,
+            summarizer=SequenceSummarizer(),
+            ocr=FakeOcrExtractor(video_ocr),
+        )
+    )
+    video_watch_app.handle_user_text("陪我看这个视频")
+    video_frames = video_watch_app.watch_session.recent(5)
+    assert_true(len(video_frames) >= 3 and video_frames[0].sequence_size == 3, "video watch session should keep sampled frames")
+    assert_true(video_frames[0].transcript_text and "这一条是小猫发的" in video_frames[0].transcript_text[0], "video watch session should keep transcript snippets")
+    video_recall_result = WatchRecallTool(workspace, video_watch_app.watch_session.recent).run(ToolRequest("watch.recall", {"query": "这个视频在讲什么"}))
+    assert_true("这一条是小猫发的" in video_recall_result.display_card.summary, "video recall should answer from transcript context")
+    assert_true("第 3/3 帧" in video_recall_result.display_card.body or "第 2/3 帧" in video_recall_result.display_card.body, "video recall should expose temporal frame context")
+    assert_true("实时转写" in video_recall_result.display_card.body, "video recall should expose transcript context")
+
+    live_video_watch_app = AgentCompanionApp(workspace)
+    live_video_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/live-video-1.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/live-video-2.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/live-video-3.png", title="Bilibili Video"),
+            _fake_computer_observation(workspace, rel="data/agent_companion/vision/live-video-4.png", title="Bilibili Video"),
+        ],
+    )
+    live_video_watch_app.tools.register(
+        ScreenObserveTool(
+            workspace,
+            computer_backend=live_video_backend,
+            summarizer=SequenceSummarizer(),
+            ocr=FakeOcrExtractor(video_ocr),
+        )
+    )
+    live_video_watch_app.handle_user_text("这个视频在讲什么")
+    live_video_frames = live_video_watch_app.watch_session.recent(5)
+    assert_true(live_video_backend.observe_calls == 4, "current video questions should refresh with four sampled frames")
+    assert_true(live_video_frames and live_video_frames[0].sequence_size == 4, "current video refresh should store dense temporal context")
+
+    rolling_session = WatchSession(limit=2, transcript_limit=8, transcript_window_seconds=300)
+    for index, text in enumerate(
+        [
+            "第一段说小猫正在靠近实验道具。",
+            "第二段说小猫开始观察主人的动作。",
+            "第三段说小猫做出了反应。",
+            "第四段说实验结束，小猫很喜欢。",
+        ],
+        start=1,
+    ):
+        rolling_session.add(
+            WatchFrame(
+                user_question="陪我看这个视频",
+                summary=f"连续采样第 {index} 帧",
+                title="Bilibili Video",
+                artifact=f"data/agent_companion/vision/rolling-{index}.png",
+                model_status="skipped",
+                transcript_text=[text],
+                transcript_source="system_audio",
+                transcript_status="success",
+            )
+        )
+    rolling_state = rolling_session.transcript_state()
+    assert_true(len(rolling_session.recent(5)) == 2, "visual watch frames should stay bounded")
+    assert_true(rolling_state["segment_count"] == 4 and "第一段" in " ".join(rolling_state["recent_text"]), "rolling transcript memory should outlive the short frame buffer")
+    rolling_context = rolling_session.recent_with_transcript(3)
+    assert_true(rolling_context[0].model_status == "transcript_memory", "watch recall should receive a synthetic rolling transcript context frame")
+    rolling_recall = WatchRecallTool(workspace, rolling_session.recent_with_transcript).run(ToolRequest("watch.recall", {"query": "刚才视频在讲什么"}))
+    assert_true("第一段" in rolling_recall.display_card.summary and "第四段" in rolling_recall.display_card.body, "watch recall should answer from rolling transcript memory")
+    assert_true(rolling_recall.display_card.artifacts == ["data/agent_companion/vision/rolling-4.png"], "rolling transcript recall should still keep the latest visual artifact")
+
+    commentary = WatchCommentaryPlanner(workspace, AgentCompanionApp(workspace).character, min_interval_seconds=5)
+    commentary.reset(now=100)
+    assert_true(commentary.maybe_comment({"recent_text": ["第一段说小猫正在靠近实验道具。"], "summary": "最近 5 分钟的转写线索：第一段"}, now=103) is None, "watch commentary should respect cooldown")
+    first_comment = commentary.maybe_comment({"recent_text": ["第一段说小猫正在靠近实验道具。"], "summary": "最近 5 分钟的转写线索：第一段"}, now=106)
+    assert_true(first_comment is not None and first_comment.voice_text and first_comment.emotion in {"neutral", "happy", "thinking", "alert", "worried", "serious"}, "watch commentary should produce a safe short proactive comment")
+    repeated_comment = commentary.maybe_comment({"recent_text": ["第一段说小猫正在靠近实验道具。"], "summary": "最近 5 分钟的转写线索：第一段"}, now=160)
+    assert_true(repeated_comment is None, "watch commentary should not repeat unchanged transcript")
+    next_comment = commentary.maybe_comment({"recent_text": ["第一段说小猫正在靠近实验道具。", "第二段说小猫开始观察主人的动作。"], "summary": "最近 5 分钟的转写线索：第一段 / 第二段"}, now=170)
+    assert_true(next_comment is not None and "{" not in next_comment.voice_text, "watch commentary should react only to new transcript content")
+    commentary.reset(now=200)
+    assert_true(commentary.maybe_comment({"recent_text": ["第三段说小猫做出了反应。"], "summary": "第三段"}, now=230, min_interval_seconds=60) is None, "watch commentary should respect runtime interval overrides")
+
+    watch_loop_bridge = JsonRpcBridge(workspace)
+    watch_loop_summarizer = SequenceSummarizer()
+    watch_loop_bridge.app.tools.register(
+        ScreenObserveTool(
+            workspace,
+            computer_backend=FakeComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-loop-1.png", title="Bilibili Video"),
+                    _fake_computer_observation(workspace, rel="data/agent_companion/vision/watch-loop-2.png", title="Bilibili Video"),
+                ],
+            ),
+            summarizer=watch_loop_summarizer,
+            ocr=FakeOcrExtractor(video_ocr),
+        )
+    )
+    try:
+        background_loop_config = watch_loop_bridge.background_configure_command({"enabled": True, "scope_type": "window", "label": "Bilibili Video"})
+        assert_true(background_loop_config["ok"] and background_loop_config["background"]["active"], "background context should accept an approved watch window scope")
+        loop_start = watch_loop_bridge.watch_loop_start_command({"query": "陪我看这个视频", "interval_seconds": 60, "sample_count": 2, "sample_interval_ms": 0})
+        loop_state = loop_start["watch_loop"]
+        assert_true(loop_state["active"] is True and loop_state["iterations"] >= 1, "watch loop start should capture immediately")
+        assert_true(watch_loop_bridge.app.watch_session.has_context(), "watch loop should refresh watch session context")
+        assert_true("这一条是小猫发的" in " ".join(loop_state["last_transcript"]), "watch loop should expose latest transcript snippets")
+        assert_true("这一条是小猫发的" in " ".join(loop_state["rolling_transcript"]) and loop_state["rolling_summary"], "watch loop should expose rolling transcript memory")
+        assert_true(watch_loop_summarizer.sequence_calls and "连续画面显示一只猫" in loop_state["last_visual_summary"], "watch loop first tick should capture a low-frequency visual summary")
+        assert_true(loop_state["visual_status"] == "ok", "watch loop should expose visual summary status")
+        background_after_tick = watch_loop_bridge.background_status_command()["background"]
+        assert_true(background_after_tick["recent_count"] >= 1 and not background_after_tick["video_recording"], "watch loop should record only approved background summaries, not video")
+        cleared_loop_background = watch_loop_bridge.background_clear_command()["background"]
+        assert_true(cleared_loop_background["recent_count"] == 0 and cleared_loop_background["scope_count"] == 1, "background clear RPC should keep approved scopes while clearing summaries")
+        loop_events = watch_loop_bridge.app.bus.drain()
+        assert_true(any(event.agent_state.get("tool") == "watch.loop" for event in loop_events), "watch loop should emit status events without task cards")
+        assert_true(any(event.agent_state.get("tool") == "background.context" for event in loop_events), "background configure/clear should emit auditable background events")
+        loop_config = watch_loop_bridge.watch_loop_configure_command({"transcript_source": "ocr_subtitle", "proactive_enabled": False, "commentary_interval_seconds": 60, "vision_interval_ticks": 3})["watch_loop"]
+        assert_true(loop_config["transcript_source"] == "ocr_subtitle" and loop_config["proactive_enabled"] is False, "watch loop should hot-update transcript source and proactive setting")
+        assert_true(loop_config["commentary_interval_seconds"] == 60, "watch loop should expose proactive commentary interval")
+        assert_true(loop_config["vision_interval_ticks"] == 3, "watch loop should expose low-frequency visual summary interval")
+        assert_true("active_transcript_source" in loop_config, "watch loop should distinguish configured and active transcript sources")
+        loop_status = watch_loop_bridge.watch_loop_status_command()["watch_loop"]
+        assert_true(loop_status["active"] is True and loop_status["transcript_status"], "watch loop status RPC should expose current state")
+        manual_visual = watch_loop_bridge.watch_loop_refresh_command({"force_visual_summary": True})["watch_loop"]
+        assert_true(manual_visual["iterations"] > loop_status["iterations"], "watch loop manual refresh should run an immediate sample")
+        assert_true(len(watch_loop_summarizer.sequence_calls) >= 2 and manual_visual["visual_status"] == "ok", "watch loop manual refresh should force a visual summary")
+        loop_manual_config = watch_loop_bridge.watch_loop_configure_command({"vision_interval_ticks": 0})["watch_loop"]
+        assert_true(loop_manual_config["vision_interval_ticks"] == 0, "watch loop should preserve manual-only visual summary mode")
+        loop_recall = WatchRecallTool(workspace, watch_loop_bridge.app.watch_session.recent_with_transcript).run(ToolRequest("watch.recall", {"query": "刚才视频在讲什么"}))
+        assert_true("这一条是小猫发的" in loop_recall.display_card.summary and "连续画面显示一只猫" in loop_recall.display_card.summary, "watch loop context should combine transcript and low-frequency vision summary")
+        loop_stop = watch_loop_bridge.watch_loop_stop_command()["watch_loop"]
+        assert_true(loop_stop["active"] is False, "watch loop stop should deactivate the session")
+        inactive_refresh = watch_loop_bridge.watch_loop_refresh_command({"force_visual_summary": True})
+        assert_true(inactive_refresh["ok"] is False and inactive_refresh["error"] == "watch_loop_inactive", "watch loop refresh should reject inactive sessions")
+    finally:
+        watch_loop_bridge.watch_loop.stop(emit=False)
 
     fallback_watch_app = AgentCompanionApp(workspace)
     fallback_watch_app.tools.register(ScreenObserveTool(workspace, FakeVisionObserver(workspace), summarizer=None))
@@ -2267,8 +3432,6 @@ asr:
             os.environ.pop("JOI_FAKE_CODEX_MODE", None)
         else:
             os.environ["JOI_FAKE_CODEX_MODE"] = previous_mode
-        import shutil
-
         shutil.rmtree(fake_codex_dir, ignore_errors=True)
 
     app = AgentCompanionApp(workspace)
@@ -2304,6 +3467,7 @@ asr:
     semantic_audit = _audit_rows(semantic_events)
     evidence_audit_rows = [row for row in semantic_audit if row.get("event_type") == "target_candidates"]
     assert_true(evidence_audit_rows and evidence_audit_rows[-1].get("candidate_evidence"), "semantic audit should record sanitized candidate evidence")
+    assert_true(evidence_audit_rows[-1].get("skill_id") == "joi.computer_use", "Semantic grounding audit should carry native skill id")
     audit_evidence_text = str(evidence_audit_rows[-1].get("candidate_evidence"))
     assert_true(not any(fragment in audit_evidence_text for fragment in ["bbox", "screen_center", "data/", ".png", "approval-", "task-", "ButtonControl", "TextControl"]), "semantic audit evidence leaked raw target details")
     assert_true(all("登录" not in event.voice_line.text and "semantic-app.png" not in event.voice_line.text for event in semantic_events), "semantic approval voice should stay immersive")
@@ -2318,9 +3482,10 @@ asr:
     computer_audit = _audit_rows(computer_events)
     assert_true(any(row.get("event_type") == "approval_pending" for row in computer_audit), "computer approval should create an audit event")
     approval_audit = [row for row in computer_audit if row.get("event_type") == "approval_pending"][-1]
-    for field in ("task_id", "event_type", "timestamp", "sanitized_summary", "risk_level", "approval_id", "approval_status", "tool_name", "action_name", "sanitized_arguments", "before_artifacts", "after_artifacts", "verification_result"):
+    for field in ("task_id", "event_type", "timestamp", "sanitized_summary", "risk_level", "approval_id", "approval_status", "tool_name", "skill_id", "action_name", "sanitized_arguments", "before_artifacts", "after_artifacts", "verification_result"):
         assert_true(field in approval_audit, f"audit event missing stable field: {field}")
     assert_true(approval_audit["risk_level"] == "medium", "computer approval audit should preserve risk")
+    assert_true(approval_audit["skill_id"] == "joi.computer_use", "computer approval audit should carry native skill id")
     assert_true(approval_audit["sanitized_arguments"].get("target") == "screen_position", "click audit should sanitize target coordinates")
     assert_true("100" not in str(approval_audit["sanitized_arguments"]) and "200" not in str(approval_audit["sanitized_arguments"]), "click audit leaked raw coordinates")
     assert_true(str(computer_approval.get("approval_id", "")).startswith("approval-"), "computer approval should include approval_id")
@@ -2361,6 +3526,7 @@ asr:
     assert_true(any(row.get("event_type") == "approval_approved" for row in action_rows), "approved action should record approval lifecycle")
     noop_rows = [row for row in action_rows if row.get("event_type") == "verification_noop"]
     assert_true(noop_rows, "likely no-op verification should create an audit entry")
+    assert_true(noop_rows[-1].get("skill_id") == "joi.computer_use", "action verification audit should carry native skill id")
     assert_true(noop_rows[-1].get("verification_result", {}).get("status") == "likely_noop", "no-op audit should preserve verification status")
     assert_true(noop_rows[-1].get("before_artifacts") and noop_rows[-1].get("after_artifacts"), "confirmed action audit should include before/after screenshots")
     assert_true(not any(event.type == EventType.AUDIT_EVENT and event.voice_line.text for event in action_audit_result if "approval-" in event.voice_line.text), "audit events should not speak approval ids")
@@ -2392,7 +3558,11 @@ asr:
     duplicate = app.resolve_approval(str(game_approval["approval_id"]), approved=False)
     assert_true(not duplicate, "duplicate approval responses should be ignored")
 
-    unconfigured_bridge = JsonRpcBridge(workspace)
+    unconfigured_bridge = JsonRpcBridge(
+        workspace,
+        asr_provider=FailingAsrProvider("asr_unconfigured"),
+        asr_state=AsrRuntimeState(False, False, "none", error="asr_unconfigured"),
+    )
     unconfigured_payload = unconfigured_bridge.transcribe_and_submit("", "audio/webm")
     assert_true(not unconfigured_payload["ok"] and unconfigured_payload["error"] == "asr_unconfigured", "unconfigured ASR should fail clearly")
     assert_true(not unconfigured_payload["submitted"], "unconfigured ASR should not submit user.message")
@@ -2456,10 +3626,90 @@ asr:
     assert_true("tts" in ready_payload and "provider" in ready_payload["tts"], "Core ready payload should expose safe TTS status")
     assert_true("server_url" not in ready_payload["tts"] and "gpt_sovits_work_path" not in ready_payload["tts"], "TTS status should not expose paths or endpoints")
     assert_true(ready_payload["runtime"]["read_only"] and ready_payload["runtime"]["safe_for_display"], "Core ready payload should expose safe read-only runtime status")
+    assert_true(ready_payload["audit"]["version"] == AUDIT_SCHEMA_VERSION and ready_payload["audit"]["safe_for_display"], "Core ready payload should expose safe audit status")
+    assert_true(ready_payload["background"]["version"] == BACKGROUND_CONTEXT_VERSION and ready_payload["background"]["safe_for_display"] and ready_payload["background"]["video_recording"] is False, "Core ready payload should expose safe background context status")
+    assert_true(ready_payload["skills"]["version"] == SKILL_MANIFEST_VERSION and ready_payload["skills"]["safe_for_display"], "Core ready payload should expose safe native skill manifest")
+    skill_ids = {row["id"] for row in ready_payload["skills"]["skills"]}
+    assert_true(
+        {"joi.codex", "joi.browser", "joi.computer_use", "joi.memory", "joi.voice_input", "joi.voice_output", "joi.ok_ww"}.issubset(skill_ids),
+        "P8 skill manifest should include native Codex, Browser/Computer Use, Memory, ASR/TTS, and OK-WW skills",
+    )
+    skill_rows = {row["id"]: row for row in ready_payload["skills"]["skills"]}
+    assert_true(skill_rows["joi.computer_use"]["permission_level"] == "medium" and "computer.click" in skill_rows["joi.computer_use"]["tools"], "Computer Use skill should be medium-risk and tool-bound")
+    assert_true("background.configure" in skill_rows["joi.watch"]["rpc_methods"] and "background.clear" in skill_rows["joi.watch"]["rpc_methods"], "Watch skill should include constrained background context controls")
+    assert_true(skill_rows["joi.voice_input"]["configured"] and skill_rows["joi.voice_input"]["local_capability"] == "ready", "Voice input skill should mirror ASR runtime readiness")
+    assert_true(skill_rows["joi.ok_ww"]["supports_dry_run"], "OK-WW skill should advertise dry-run first")
+    assert_true("runtime.update_config" in skill_rows["joi.runtime_config"]["tools"], "Runtime config should be bound to a native skill")
+    skill_manifest_payload = ready_bridge.skill_manifest_command()
+    assert_true(skill_manifest_payload["ok"] and skill_manifest_payload["skills"]["version"] == SKILL_MANIFEST_VERSION, "skills.list RPC should return the native skill manifest")
+    audit_recent_payload = ready_bridge.audit_recent_command(5)
+    assert_true(audit_recent_payload["ok"] and audit_recent_payload["audit"]["version"] == AUDIT_SCHEMA_VERSION and audit_recent_payload["audit"]["safe_for_display"], "audit.recent RPC should return safe persisted audit records")
+    direct_skill_rows = {
+        row["id"]: row
+        for row in build_native_skill_manifest(
+            workspace,
+            asr_state=AsrRuntimeState(False, False, "none", error="asr_unconfigured"),
+            tts_status={"enabled": False, "configured": False, "provider": "none"},
+            memory_status={"enabled": False},
+        )["skills"]
+    }
+    assert_true(direct_skill_rows["joi.voice_input"]["local_capability"] == "off" and direct_skill_rows["joi.memory"]["enabled"] is False, "Skill manifest should mirror disabled ASR and memory states")
+
+    disabled_skill_tmpdir = tempfile.mkdtemp()
+    try:
+        disabled_skill_tmp = Path(disabled_skill_tmpdir)
+        disabled_character_dir = disabled_skill_tmp / "agent_companion" / "config"
+        disabled_character_dir.mkdir(parents=True, exist_ok=True)
+        (disabled_character_dir / "default_character.yaml").write_text(
+            """
+id: test-joi
+name: Joi
+asset_policy: test
+style:
+  tone: concise
+  speech: safe
+  boundaries: []
+persona: "Test companion."
+voice:
+  default_lang: zh
+  start: "开始。"
+  progress: "处理中。"
+  done: "完成。"
+  failed: "失败。"
+""",
+            encoding="utf-8",
+        )
+        (disabled_skill_tmp / "config.yaml").write_text(
+            """
+llm:
+  use_mock: true
+characters:
+  - name: Joi
+    color: "#d76f8f"
+    setting: "local test companion"
+skills:
+  joi.computer_use:
+    enabled: false
+""",
+            encoding="utf-8",
+        )
+        disabled_app = AgentCompanionApp(disabled_skill_tmp)
+        disabled_events = disabled_app.handle_user_text("点击 100,200")
+        blocked_events = [event for event in disabled_events if event.type == EventType.TOOL_FAILED and event.agent_state.get("block_reason") == "skill_disabled"]
+        assert_true(blocked_events and blocked_events[-1].agent_state.get("skill_id") == "joi.computer_use", "Disabled native skills should block execution before approval")
+        assert_true(not any(event.type == EventType.APPROVAL_REQUIRED for event in disabled_events), "Disabled native skills should not create approval requests")
+        assert_true(not any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("tool") == "computer.click" for event in disabled_events), "Disabled native skills must not run bound tools")
+        disabled_audit = disabled_app.audit_store.recent(20)["records"]
+        assert_true(any(row.get("outcome") == "blocked" and row.get("block_reason") == "skill_disabled" and row.get("skill_id") == "joi.computer_use" for row in disabled_audit), "Persistent audit should record disabled skill policy blocks")
+    finally:
+        shutil.rmtree(disabled_skill_tmpdir, ignore_errors=True)
+
+    skill_payload_text = str(ready_payload["skills"])
+    assert_true(all(fragment not in skill_payload_text for fragment in ["sk-", "api_key", "base_url", "/Users/", "C:\\", "secret"]), "Skill manifest leaked secrets, endpoints, or private paths")
     runtime_provider_names = {row["name"] for row in ready_payload["runtime"]["providers"]}
     assert_true(
-        {"asr", "tts", "ocr", "text", "vision", "expression", "computer_use", "audit_verification"}.issubset(runtime_provider_names),
-        "Runtime status should include provider, platform, audit, and verification rows",
+        {"asr", "tts", "ocr", "fast", "reasoning", "vision", "code", "summarize", "voice_style", "computer_use", "audit_verification"}.issubset(runtime_provider_names),
+        "Runtime status should include provider, stable model routes, platform, audit, and verification rows",
     )
     runtime_payload_text = str(ready_payload["runtime"])
     forbidden_runtime_fragments = ["sk-", "server_url", "gpt_sovits_work_path", "base_url", "api_key", "/Users/", "C:\\", "secret"]
@@ -2504,9 +3754,10 @@ computer_use:
         configured_rows = {row["name"]: row for row in configured_runtime["providers"]}
         assert_true(configured_rows["asr"]["state"] == "ready" and configured_rows["asr"]["timeout_seconds"] == 9, "ASR runtime status should show configured fake state")
         assert_true(configured_rows["tts"]["state"] == "ready" and configured_rows["tts"]["last_error"] == "tts_timeout", "TTS runtime status should show sanitized configured state")
-        assert_true(configured_rows["text"]["model"] == "gpt-public-text", "Text model status should expose safe public model name")
+        assert_true(configured_rows["fast"]["model"] == "gpt-public-text", "Fast model status should expose safe public model name")
+        assert_true(configured_rows["reasoning"]["model"] == "gpt-public-text" and configured_rows["reasoning"]["notes"], "Reasoning model status should expose base fallback")
         assert_true(configured_rows["vision"]["model"] == "gpt-public-vision", "Vision model status should expose safe public model name")
-        assert_true(configured_rows["expression"]["model"] == "gpt-public-expression", "Expression model status should expose safe public model name")
+        assert_true(configured_rows["voice_style"]["model"] == "gpt-public-expression", "Voice style model status should expose safe public model name")
         configured_text = str(configured_runtime)
         assert_true(
             "sk-test" not in configured_text
@@ -2537,7 +3788,7 @@ computer_use:
         unconfigured_rows = {row["name"]: row for row in unconfigured_runtime["providers"]}
         assert_true(unconfigured_rows["asr"]["state"] == "off" and unconfigured_rows["tts"]["state"] == "off", "Unconfigured ASR/TTS runtime states should be off")
         assert_true(unconfigured_rows["ocr"]["state"] == "unavailable" and "pytesseract_missing" in unconfigured_rows["ocr"]["last_error"], "OCR runtime status should report missing optional dependencies safely")
-        assert_true(unconfigured_rows["text"]["state"] == "off" and unconfigured_rows["vision"]["state"] == "off" and unconfigured_rows["expression"]["state"] == "off", "Unconfigured model runtime states should be off")
+        assert_true(unconfigured_rows["fast"]["state"] == "off" and unconfigured_rows["vision"]["state"] == "off" and unconfigured_rows["voice_style"]["state"] == "off", "Unconfigured model runtime states should be off")
 
     with tempfile.TemporaryDirectory() as ocr_tmp_name:
         ocr_tmp = Path(ocr_tmp_name)
@@ -2620,13 +3871,17 @@ llm:
             {"enabled": False, "configured": False, "provider": "none", "last_error": ""},
         )
         redacted_rows = {row["name"]: row for row in redacted_runtime["providers"]}
-        assert_true(redacted_rows["text"]["model"] == "redacted", "Local model paths should be redacted from runtime status")
+        assert_true(redacted_rows["fast"]["model"] == "redacted", "Local model paths should be redacted from runtime status")
         assert_true("/Users/private" not in str(redacted_runtime) and "joi.gguf" not in str(redacted_runtime), "Runtime status should not expose local model paths")
 
     shell_api_source = (workspace / "agent_companion" / "shell" / "src" / "api.ts").read_text(encoding="utf-8")
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
+    assert_true("skills.list" in shell_api_source and "skillsList()" in shell_api_source and "audit.recent" in shell_api_source and "auditRecent" in shell_api_source, "Shell API should expose native skill manifest and audit RPCs")
+    assert_true("background.status" in shell_api_source and "background.configure" in shell_api_source and "background.clear" in shell_api_source, "Shell API should expose constrained background context RPCs")
+    assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source and "watch.loop.configure" in shell_api_source and "watch.loop.refresh" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
+    assert_true("memory.status" in shell_api_source and "memory.recall" in shell_api_source and "memory.browse_vault" in shell_api_source and "memory.save_candidate" in shell_api_source and "memory.reject_candidate" in shell_api_source and "memory.set_enabled" in shell_api_source and "memory.delete" in shell_api_source and "memory.clear" in shell_api_source, "Shell API should expose memory authorization and recall RPC methods")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
     assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
     assert_true("event_created_at" in voice_runtime_source, "voice runtime key should include event identity")
@@ -2827,14 +4082,108 @@ llm:
     assert_true(run_visual_detector_eval(workspace, verbose=False) == 0, "visual/image verification eval should pass committed suites and skip or run local private suites safely")
     windows_focus_source = (workspace / "agent_companion" / "core" / "windows_focus.py").read_text(encoding="utf-8")
     assert_true("WindowFromPoint" in windows_focus_source and "GetAncestor" in windows_focus_source, "Windows focus helper should resolve the window underneath hidden Joi")
+    assert_true("joi desktop" in windows_focus_source, "Windows focus helper should recognize the Tauri Joi Desktop title")
     windows_observer_source = (workspace / "agent_companion" / "core" / "vision" / "windows.py").read_text(encoding="utf-8")
     assert_true("window_from_point" in windows_observer_source and "hide_foreground_companion_window" in windows_observer_source, "Screen observe should hide Joi and capture the underlying content window")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
+    assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop_configure_command" in server_source and "watch_loop_refresh_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
+    assert_true("background_status_command" in server_source and "background_configure_command" in server_source and "background_clear_command" in server_source and '"background.configure"' in server_source, "Core should expose constrained background context controls")
+    assert_true("_watch_loop_should_summarize" in server_source and "skip_summary=not run_vision_summary" in server_source, "Core watch loop should run low-frequency visual summaries")
+    assert_true("force_visual_summary" in server_source and '"watch.loop.refresh"' in server_source, "Core watch loop should expose forced visual refresh")
+    assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
+    skill_manifest_source = (workspace / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
+    assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "KNOWN_SKILL_IDS" in skill_manifest_source and "_apply_skill_setting" in skill_manifest_source and "normalize_skill_id" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
+    assert_true("_computer_use_action_schema" in skill_manifest_source and "llm_driven_action_schema" in skill_manifest_source and "requires_approval_for" in skill_manifest_source, "Computer Use skill should expose a declarative LLM action schema instead of app-specific routes only")
+    assert_true('"background.configure"' in skill_manifest_source and '"background.clear"' in skill_manifest_source, "Watch native skill should advertise background context controls")
+    assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source and "skill_settings_payload" in server_source and "audit_recent_command" in server_source and '"audit.recent"' in server_source, "Core should expose P8 native skill manifest and P9 audit RPCs")
+    audit_store_source = (workspace / "agent_companion" / "core" / "audit_store.py").read_text(encoding="utf-8")
+    assert_true("AUDIT_SCHEMA_VERSION" in audit_store_source and "AuditStore" in audit_store_source and "record_event" in audit_store_source and "audit_record_from_event" in audit_store_source and "safe_for_display" in audit_store_source, "Core should persist sanitized P9 audit records")
+    background_context_source = (workspace / "agent_companion" / "core" / "background_context.py").read_text(encoding="utf-8")
+    assert_true("BACKGROUND_CONTEXT_VERSION" in background_context_source and "BackgroundContextStore" in background_context_source and "record_summary" in background_context_source and "video_recording" in background_context_source and "summaries_only" in background_context_source, "Core should keep constrained background context as approved summaries only")
+    runtime_config_writer_source = (workspace / "agent_companion" / "core" / "runtime_config_writer.py").read_text(encoding="utf-8")
+    policy_source = (workspace / "agent_companion" / "core" / "policy.py").read_text(encoding="utf-8")
+    assert_true("_prepare_skill_update" in runtime_config_writer_source and "unknown_skill" in runtime_config_writer_source and "protected_skill" in runtime_config_writer_source and "joi.local_files" not in runtime_config_writer_source, "Runtime config writer should support dynamic native skill toggles without hardcoding path-sensitive ids")
+    assert_true("disabled_skills" in policy_source and "skill_id_for_tool" in policy_source and "skill_disabled" in policy_source, "Policy gate should fail closed for disabled native skills")
+    assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
+    watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
+    watch_transcript_source = (workspace / "agent_companion" / "core" / "watch_transcript.py").read_text(encoding="utf-8")
+    assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
+    assert_true("system_audio_diagnostics" in watch_transcript_source and '"diagnostics"' in watch_transcript_source and "audio_bytes" in watch_transcript_source, "Watch transcript should expose safe system-audio diagnostics")
+    screen_observe_source = (workspace / "agent_companion" / "core" / "tools" / "screen_observe.py").read_text(encoding="utf-8")
+    assert_true('source in {"auto", "system_audio", "audio"}' in screen_observe_source and "audio_result.error" in screen_observe_source, "Auto transcript source should try system audio and preserve fallback reason")
+    commentary_source = (workspace / "agent_companion" / "core" / "watch_commentary.py").read_text(encoding="utf-8")
+    assert_true("min_interval_seconds" in commentary_source and "maybe_comment" in commentary_source and "safe_voice_line" in commentary_source, "Watch commentary planner should enforce cooldown and safe voice output")
+    tool_compression_source = (workspace / "agent_companion" / "core" / "tool_compression.py").read_text(encoding="utf-8")
+    assert_true("compress_tool_result" in tool_compression_source and "build_event_agent_state" in tool_compression_source and "planner_state" in tool_compression_source and "_explicit_memory_candidate" in tool_compression_source, "P6 JoiJuice should expose safe tool-result channels without auto memory")
+    memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
+    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, disable switch, semantic recall, local vault browsing/context, and privacy gate")
+    chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
+    assert_true("memory_context" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context")
+    config_source = (workspace / "agent_companion" / "core" / "config.py").read_text(encoding="utf-8")
+    runtime_status_source = (workspace / "agent_companion" / "core" / "runtime_status.py").read_text(encoding="utf-8")
+    watch_tool_source = (workspace / "agent_companion" / "core" / "tools" / "watch.py").read_text(encoding="utf-8")
+    assert_true("MODEL_ROUTES" in config_source and "ModelRouteConfig" in config_source and "fallback_reason" in config_source and "to_agent_state" in config_source, "P7 model router should expose stable routes and safe model usage metadata")
+    assert_true("SkillSettingConfig" in config_source and "_parse_skill_settings" in config_source and "skill_enabled" in config_source, "Config should parse safe native skill enabled flags")
+    assert_true("ModelRouter.stable_routes()" in runtime_status_source and "MODEL_ROUTE_LABELS" in runtime_status_source, "Runtime status should render stable model route rows")
+    assert_true("model_usage" in chat_source and "model_usage" in watch_tool_source, "Chat and watch tools should attach safe model usage metadata")
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
+    assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
+    shell_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
+    shell_style_source = (workspace / "agent_companion" / "shell" / "src" / "styles.css").read_text(encoding="utf-8")
+    assert_true("activeExpressionEmotion" in shell_source and "expression_sync" in shell_source and "emotion-${activeExpressionEmotion}" in shell_source, "Shell should bind expression sync to character emotion class")
+    assert_true("emotion-status-card" in shell_source and "当前情绪" in shell_source, "Chat cabin should expose a compact emotion status module")
+    assert_true("stage-emotion-pill" in shell_source and "情绪 {{ activeEmotionStatus.label }}" in shell_source, "Stage should surface current emotion outside the chat cabin")
+    assert_true("accessoryFitStyle" in shell_source and "--acc-hat-top" in shell_source and ":style=\"accessoryFitStyle\"" in shell_source, "Accessory overlays should use adaptive anchor variables")
+    assert_true("preventNativeAssetDrag" in shell_source and "@dragstart.capture.prevent" in shell_source, "Compact mascot should block native asset dragging")
+    assert_true("miniBubbleHasActions" in shell_source and "mini-approval-actions" in shell_source and "requestMiniChange" in shell_source, "Compact speech bubble should expose approval and change actions")
+    assert_true("watchLoopStatus" in shell_source and "watch-session-strip" in shell_source and "stopWatchLoop" in shell_source, "Shell should show and control realtime watch loop state")
+    assert_true("rolling_transcript" in shell_source and "transcript_window_seconds" in shell_source and "active_transcript_source" in shell_source and "last_visual_summary" in shell_source, "Shell should display rolling transcript and visual state")
+    assert_true("shouldSuppressProactiveVoice" in shell_source and "watch_commentary" in shell_source, "Shell should suppress proactive watch voice while the user is typing")
+    assert_true("watchTranscriptSource" in shell_source and "configureWatchLoop" in shell_source and "watchProactiveEnabled" in shell_source, "Shell should expose realtime watch controls")
+    assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
+    assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory candidate controls and stage authorization bubble")
+    assert_true("backgroundStatus" in shell_source and "background-context-panel" in shell_source and "configureBackgroundScope" in shell_source and "clearBackgroundContext" in shell_source and "syncBackgroundFromEvent" in shell_source, "Shell developer panel should expose constrained background context inspection and controls")
+    assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
+    assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source and "setSkillEnabled" in shell_source and "skillEnabled" in shell_source and "skillToggleDisabled" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
+    assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with recall search and vault preview")
+    app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
+    assert_true("_step_with_memory_context" in app_source and "build_event_agent_state" in app_source, "App should inject approved memory context and emit safe JoiJuice event channels")
+    desktop_context_source = (workspace / "agent_companion" / "core" / "desktop_context.py").read_text(encoding="utf-8")
+    assert_true("rewrite_plan_for_desktop_context" in desktop_context_source and "record_desktop_context" in desktop_context_source and "DesktopContext" in desktop_context_source, "Desktop context planning should live outside the app orchestrator")
+    assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source and "reload_runtime_policy" in app_source and "skill_settings_payload" in app_source and "block_reason" in app_source, "App execution boundary should attach native skill metadata and enforce disabled skills")
+    assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
+    assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
+    assert_true("skill-grid" in shell_style_source and "skill-card" in shell_style_source and "skill-actions" in shell_style_source, "Shell styles should include native skill manifest cards")
+    assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
+    assert_true("background-status-grid" in shell_style_source and "background-scope-form" in shell_style_source and "background-row" in shell_style_source, "Shell styles should include background context settings and summary rows")
+    doctor_source = (workspace / "tools" / "joi_doctor.py").read_text(encoding="utf-8")
+    demo_check_source = (workspace / "tools" / "mvp_demo_check.py").read_text(encoding="utf-8")
+    setup_wizard_source = (workspace / "tools" / "windows_setup_wizard.py").read_text(encoding="utf-8")
+    release_packager_source = (workspace / "tools" / "package_windows_release.py").read_text(encoding="utf-8")
+    packaging_smoke_source = (workspace / "tools" / "packaging_smoke.py").read_text(encoding="utf-8")
+    provider_preflight_source = (workspace / "tools" / "provider_preflight.py").read_text(encoding="utf-8")
+    handoff_report_source = (workspace / "tools" / "windows_handoff_report.py").read_text(encoding="utf-8")
+    release_check_source = (workspace / "tools" / "windows_release_check.py").read_text(encoding="utf-8")
+    ci_workflow_source = (workspace / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    release_candidate_workflow_source = (workspace / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8")
+    first_run_doc_source = (workspace / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
+    start_joi_source = (workspace / "tools" / "start_joi.ps1").read_text(encoding="utf-8")
+    assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
+    assert_true("build_mvp_demo_check_report" in demo_check_source and "watch_together" in demo_check_source and "coding_task" in demo_check_source and "game_skill" in demo_check_source and "privacy_boundary" in demo_check_source, "P10 MVP demo check should expose safe watch/coding/game demo scripts")
+    assert_true("build_windows_setup_plan" in setup_wizard_source and "windows_setup_exit_code" in setup_wizard_source and "config.example.yaml" in setup_wizard_source and "config.yaml" in setup_wizard_source and "safe_for_display" in setup_wizard_source, "P10 setup wizard should create local config safely without secrets")
+    assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source and "tools/mvp_demo_check.py" in release_packager_source and "tools/provider_preflight.py" in release_packager_source and "tools/windows_handoff_report.py" in release_packager_source and "tools/windows_release_check.py" in release_packager_source and "tools/windows_setup_wizard.py" in release_packager_source, "P10 release packager should create a safe portable Windows zip and include release/handoff tooling")
+    assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source and "release_privacy_policy" in packaging_smoke_source and "mvp_demo_check" in packaging_smoke_source and "provider_preflight" in packaging_smoke_source and "windows_handoff_report" in packaging_smoke_source and "windows_release_check" in packaging_smoke_source and "windows_setup_wizard" in packaging_smoke_source and "setup_launcher" in packaging_smoke_source, "P10 packaging smoke should validate release metadata, Tauri permissions, release privacy policy, MVP demo check, provider preflight, handoff report, setup wizard, and release readiness tooling")
+    assert_true("build_provider_preflight_report" in provider_preflight_source and "build_runtime_status" in provider_preflight_source and "REQUIRED_DEMO_PROVIDERS" in provider_preflight_source and "probe_system_audio_readiness" in provider_preflight_source and "safe_for_display" in provider_preflight_source, "P10 provider preflight should expose sanitized offline provider and system-audio readiness")
+    assert_true("build_windows_handoff_report" in handoff_report_source and "build_windows_release_check_report" in handoff_report_source and "safe_for_display" in handoff_report_source and "handoff_ready" in handoff_report_source and "start_joi.bat -Setup" in handoff_report_source, "P10 handoff report should expose safe cross-machine release readiness")
+    assert_true("build_windows_release_check_report" in release_check_source and "build_doctor_report" in release_check_source and "build_mvp_demo_check_report" in release_check_source and "build_provider_preflight_report" in release_check_source and "build_packaging_smoke_report" in release_check_source and "build_windows_release_package" in release_check_source and "build_windows_setup_plan" in release_check_source and "release_ready" in release_check_source, "P10 release check should aggregate doctor, setup, demo, provider, smoke, privacy, and package dry-run status")
+    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "PYTHONUTF8" in ci_workflow_source and "python -m pip install -r requirements.txt" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source and "tools/mvp_demo_check.py" in ci_workflow_source and "tools/provider_preflight.py" in ci_workflow_source and "tools/package_windows_release.py --dry-run" in ci_workflow_source and "tools/windows_handoff_report.py" in ci_workflow_source and "tools/windows_release_check.py" in ci_workflow_source and "tools/windows_setup_wizard.py" in ci_workflow_source, "CI should force UTF-8 output, install Python dependencies, and cover Python tests, frontend build, packaging smoke, MVP demo check, provider preflight, release dry-run, release readiness, handoff report, setup wizard, and Tauri debug smoke build")
+    assert_true("workflow_dispatch" in release_candidate_workflow_source and "PYTHONUTF8" in release_candidate_workflow_source and "npm run tauri -- build" in release_candidate_workflow_source and "tools/package_windows_release.py --output-dir dist" in release_candidate_workflow_source and "actions/upload-artifact" in release_candidate_workflow_source, "Release candidate workflow should force UTF-8 output, build a real Tauri release, package without allow-missing-exe, and upload the zip")
+    assert_true("-Doctor" in start_joi_source and "joi_doctor.py" in start_joi_source and "-Setup" in start_joi_source and "windows_setup_wizard.py" in start_joi_source, "Windows launcher should expose doctor and setup modes")
+    assert_true("start_joi.bat -Doctor" in first_run_doc_source and "start_joi.bat -Setup" in first_run_doc_source and "windows_setup_wizard.py" in first_run_doc_source and "windows_handoff_report.py" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source and "package_windows_release.py" in first_run_doc_source, "Windows first-run docs should cover setup wizard, doctor, OCR, audio, handoff, and release packaging setup")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")

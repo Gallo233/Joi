@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Tightened safe UI payload boundaries so `core.ready`, memory status, and character sprites no longer expose absolute local workspace, vault, or sprite paths to the shell by default.
+- Added explicit tool-result channels for UI, planner, memory, and audit use so JoiJuice is the compressed planning boundary instead of a loose sidecar.
+- Added a Windows release-candidate GitHub workflow that builds the real Tauri release, packages without `--allow-missing-exe`, and uploads the release zip artifact.
+- Updated the feedback log schema so every row can be tied to a product branch, fix commit, validation path, and product area.
 - Added project discipline docs: roadmap, changelog, known issues, and feedback log.
 - Started product-shell cleanup: default UI separates chat, task cards, and developer events.
 - Added one-click Windows launch script target for Joi.
@@ -73,6 +77,22 @@
 - Added an OpenHuman-inspired product plan that refines Joi's post-P4 direction around local memory, JoiJuice tool compression, model routing, native skills, and a constrained background companion loop.
 - Added semantic target evidence cards: candidates now expose sanitized source/confidence/ambiguity/actionability/capture-trust summaries, the shell renders evidence chips plus confirmation reasons, and Computer Use audit records candidate evidence without raw bbox/path/id details.
 - Added a P4 closeout experience harness with four real-task scripts and a local-only sanitized report tool for browser target clicks, Watch Together, canvas/video controls, and game/HUD dry-run flows.
+- Added P7 stable model routes for fast chat, reasoning, vision, code, summarization, and voice style usage, with sanitized runtime status and per-call model usage metadata.
+- Added P8 native skill manifest V1 for Joi's built-in Codex, Browser, Computer Use, Watch, Memory, ASR, TTS, and OK-WW capabilities, exposed through `core.ready`, `skills.list`, and a settings skill panel.
+- Bound native skill metadata to plan, approval, tool result, task lifecycle, and Computer Use audit events so runtime execution can be traced back to a stable skill id and permission policy.
+- Added safe native skill enable switches through runtime config, with the shell submitting skill changes and Core fail-closed policy blocking disabled skill execution before approval or tool calls.
+- Added a P9 persistent audit store for approval, tool, task, and policy-block events, exposed through safe audit status and `audit.recent` without storing raw task ids, approval ids, paths, artifacts, or secrets.
+- Added constrained background context controls for approved window/project/game scopes, storing summaries only through `background.status`, `background.configure`, and `background.clear`.
+- Exposed background context inspection in the shell developer panel, including enable/disable, scope approval, recent summary review, and summary clearing controls.
+- Added a Windows first-run doctor and setup checklist for Python, frontend tooling, config, OCR, audio transcription, shell build state, and Core port diagnostics.
+- Added a packaging metadata smoke check and Windows GitHub Actions workflow for Python tests, frontend build, and Tauri debug no-bundle build.
+- Added a Windows portable release packager that zips only allowlisted runtime files plus the release shell and excludes local config, secrets, logs, data, dependency folders, and build caches.
+- Added release privacy policy validation so packaging smoke and portable package reports verify that local config, secrets, runtime data, logs, dependency folders, and build caches stay out of Windows release artifacts.
+- Added a Windows release readiness aggregator that combines doctor, packaging smoke, release privacy, and portable package dry-run status into a safe RC report for local release checks and CI metadata validation.
+- Added an offline provider preflight for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification, with sanitized output and release-readiness integration.
+- Added an MVP demo readiness check that exposes safe Watch Together, Codex coding, and OK-WW game-skill demo prompts plus local dependency readiness without starting external actions.
+- Added a Windows first-run setup wizard and `start_joi.bat -Setup` launcher path that can create `config.yaml` from the example without writing secrets.
+- Added a safe Windows RC handoff report that summarizes release readiness for cross-machine review without exposing local paths or secrets.
 
 ## 2026-05-14
 

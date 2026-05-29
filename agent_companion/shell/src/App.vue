@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload } from './protocol'
+import type { AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -15,37 +15,215 @@ const ready = ref<CoreReadyPayload | null>(null)
 const failedImageSrc = ref('')
 const previewArtifact = ref('')
 const previewArtifactEvent = ref<AgentEvent | null>(null)
-const activeCabin = ref<'workspace' | 'chat' | 'inspector'>('workspace')
+const activeCabin = ref<'workspace' | 'chat' | 'memory' | 'inspector'>('workspace')
 const artifactDialog = ref<HTMLDialogElement | null>(null)
+const memoryStatus = ref<MemoryStatus | null>(null)
+type SettingsTabId = 'runtime' | 'skills' | 'memory' | 'appearance' | 'developer'
+const activeSettingsTab = ref<SettingsTabId>('runtime')
+const settingsTabs: Array<{ id: SettingsTabId; label: string; icon: string }> = [
+  { id: 'runtime', label: '运行', icon: '⚡' },
+  { id: 'skills', label: '技能', icon: '▣' },
+  { id: 'memory', label: '记忆', icon: '🧠' },
+  { id: 'appearance', label: '外观', icon: '🎨' },
+  { id: 'developer', label: '审计', icon: '🧾' },
+]
+const memoryQuery = ref('')
+const memorySearchResults = ref<MemoryRecord[]>([])
+const memorySearchLoading = ref(false)
+const memoryVault = ref<MemoryVault | null>(null)
+const backgroundStatus = ref<BackgroundContextStatus | null>(null)
+const backgroundScopeType = ref<'window' | 'project' | 'game'>('window')
+const backgroundScopeLabel = ref('当前窗口')
+const backgroundLoading = ref(false)
+const skillManifest = ref<NativeSkillManifest | null>(null)
+const skillRefreshLoading = ref(false)
 
 const isCompactMode = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
 const miniSpeechActive = ref(false)
 const miniDashboardActive = ref(false)
+const watchTranscriptSource = ref<'system_audio' | 'ocr_subtitle' | 'auto'>('system_audio')
+const watchProactiveEnabled = ref(true)
+const watchCommentaryInterval = ref(30)
+const watchVisionInterval = ref(5)
+let miniSpeechTimer: number | null = null
 
 async function toggleCompactMode() {
-  isCompactMode.value = !isCompactMode.value
+  const nextCompactMode = !isCompactMode.value
+  isCompactMode.value = nextCompactMode
+  clearMiniSpeechTimer()
+  miniSpeechActive.value = false
+  miniDashboardActive.value = false
+  document.body.classList.toggle('transparent-active', nextCompactMode)
+  await applyWindowShellMode(nextCompactMode)
+}
+
+async function applyWindowShellMode(compact: boolean) {
   try {
     const appWindow = getCurrentWindow()
-    if (isCompactMode.value) {
-      document.body.classList.add('transparent-active')
-      await appWindow.setSize(new LogicalSize(580, 480))
+    if (compact) {
+      await safeWindowCall(() => appWindow.setShadow(false))
+      await safeWindowCall(() => appWindow.setAlwaysOnTop(true))
+      await safeWindowCall(() => appWindow.setSkipTaskbar(true))
+      await safeWindowCall(() => appWindow.setResizable(false))
+      await safeWindowCall(() => appWindow.setSize(compactWindowSize()))
+      return
+    }
+    await safeWindowCall(() => appWindow.setSize(new LogicalSize(1080, 780)))
+    await safeWindowCall(() => appWindow.setResizable(true))
+    await safeWindowCall(() => appWindow.setSkipTaskbar(false))
+    await safeWindowCall(() => appWindow.setAlwaysOnTop(false))
+    await safeWindowCall(() => appWindow.setShadow(true))
+  } catch (e) {
+    // Browser preview fallback.
+  }
+}
+
+function compactWindowSize() {
+  if (miniDashboardActive.value && miniSpeechActive.value && miniBubbleHasActions.value) return new LogicalSize(390, 540)
+  if (miniDashboardActive.value && miniSpeechActive.value) return new LogicalSize(380, 520)
+  if (miniSpeechActive.value && miniBubbleHasActions.value) return new LogicalSize(360, 460)
+  if (miniDashboardActive.value || miniSpeechActive.value) return new LogicalSize(360, 430)
+  return new LogicalSize(300, 340)
+}
+
+async function syncCompactWindowSize() {
+  if (!isCompactMode.value) return
+  await safeWindowCall(() => getCurrentWindow().setSize(compactWindowSize()))
+}
+
+async function safeWindowCall(action: () => Promise<void>) {
+  try {
+    await action()
+  } catch (e) {
+    // Some window APIs are unavailable in browser preview or unsupported platforms.
+  }
+}
+
+async function closeWindow() {
+  try {
+    await getCurrentWindow().close()
+  } catch (e) {
+    // Browser preview fallback: the button is decorative when no Tauri shell is present.
+  }
+}
+
+async function minimizeWindow() {
+  try {
+    await getCurrentWindow().minimize()
+  } catch (e) {
+    // Browser preview fallback.
+  }
+}
+
+async function toggleMaximizeWindow() {
+  try {
+    const appWindow = getCurrentWindow()
+    if (await appWindow.isMaximized()) {
+      await appWindow.unmaximize()
     } else {
-      document.body.classList.remove('transparent-active')
-      await appWindow.setSize(new LogicalSize(1080, 780))
+      await appWindow.maximize()
     }
   } catch (e) {
-    // Standard web fallback
+    // Browser preview fallback.
+  }
+}
+
+async function startWindowDrag(event: MouseEvent) {
+  if (event.button !== 0) return
+  const target = event.target as HTMLElement | null
+  if (target?.closest('button, input, select, textarea, a, [role="button"], .topbar-actions, .traffic-lights')) return
+  try {
+    await getCurrentWindow().startDragging()
+  } catch (e) {
+    // Browser preview fallback.
+  }
+}
+
+function startMascotDrag(event: MouseEvent) {
+  if (!isCompactMode.value || event.button !== 0) return
+  if ((event.target as HTMLElement | null)?.closest('.mini-speech-bubble, .mini-control-dashboard')) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (event.detail >= 2) {
+    clearMascotClickTimer()
+    void toggleCompactMode()
+    return
+  }
+  stopMascotDragWatch()
+  mascotDragMoved = false
+  mascotDragStart = { x: event.screenX, y: event.screenY }
+  window.addEventListener('mousemove', maybeStartMascotDrag)
+  window.addEventListener('mouseup', stopMascotDragWatch, { once: true })
+}
+
+async function maybeStartMascotDrag(event: MouseEvent) {
+  if (!mascotDragStart) return
+  const distance = Math.hypot(event.screenX - mascotDragStart.x, event.screenY - mascotDragStart.y)
+  if (distance < 6) return
+  event.preventDefault()
+  event.stopPropagation()
+  mascotDragMoved = true
+  stopMascotDragWatch()
+  try {
+    await getCurrentWindow().startDragging()
+  } catch (e) {
+    // Browser preview fallback.
+  }
+}
+
+function stopMascotDragWatch() {
+  mascotDragStart = null
+  window.removeEventListener('mousemove', maybeStartMascotDrag)
+}
+
+function handleMascotClick(event: MouseEvent) {
+  if (!isCompactMode.value) return
+  if (event.detail >= 2) {
+    clearMascotClickTimer()
+    void toggleCompactMode()
+    return
+  }
+  if (mascotDragMoved) {
+    mascotDragMoved = false
+    return
+  }
+  clearMascotClickTimer()
+  mascotClickTimer = window.setTimeout(() => {
+    mascotClickTimer = null
+    if (!isCompactMode.value) return
+    miniDashboardActive.value = !miniDashboardActive.value
+    void syncCompactWindowSize()
+  }, 220)
+}
+
+function handleMascotDoubleClick() {
+  clearMascotClickTimer()
+  if (isCompactMode.value) void toggleCompactMode()
+}
+
+function clearMascotClickTimer() {
+  if (mascotClickTimer === null) return
+  window.clearTimeout(mascotClickTimer)
+  mascotClickTimer = null
+}
+
+function preventNativeAssetDrag(event: DragEvent) {
+  if ((event.target as HTMLElement | null)?.closest('.character, .stage')) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+}
+
+function preventCompactSelection(event: Event) {
+  if (!isCompactMode.value) return
+  if ((event.target as HTMLElement | null)?.closest('.character')) {
+    event.preventDefault()
   }
 }
 
 function toggleAccessory(acc: 'hat' | 'glasses' | 'ears') {
   equippedAccessories.value[acc] = !equippedAccessories.value[acc]
-}
-
-function handleMascotClick() {
-  if (!isCompactMode.value) return
-  miniDashboardActive.value = !miniDashboardActive.value
 }
 
 watch(previewArtifact, (newVal) => {
@@ -76,6 +254,10 @@ let currentAudio: HTMLAudioElement | null = null
 let voiceEpoch = 0
 const taskVoiceEpochs = new Map<string, number>()
 const voiceEventEpochs = new Map<string, number>()
+const playedVoiceAudioKeys = new Set<string>()
+let mascotDragStart: { x: number; y: number } | null = null
+let mascotDragMoved = false
+let mascotClickTimer: number | null = null
 
 const client = new CoreClient({
   url: 'ws://127.0.0.1:8765',
@@ -83,10 +265,15 @@ const client = new CoreClient({
   onEvent: (event) => {
     rememberVoiceEventEpoch(event)
     events.value.push(event)
+    syncMemoryFromEvent(event)
+    syncBackgroundFromEvent(event)
     preloadImageArtifacts(event)
   },
   onReady: (payload) => {
     ready.value = payload
+    memoryStatus.value = payload.memory || memoryStatus.value
+    backgroundStatus.value = payload.background || backgroundStatus.value
+    skillManifest.value = payload.skills || skillManifest.value
     syncRuntimeDraft(payload)
   },
   onVoiceAudio: (payload) => void playVoiceAudio(payload),
@@ -144,6 +331,113 @@ const taskRows = computed(() => {
 
 const activeTask = computed(() => taskRows.value[0])
 
+const latestWatchLoopStatus = computed<WatchLoopStatus | undefined>(() => {
+  for (let index = events.value.length - 1; index >= 0; index -= 1) {
+    const loop = asRecord(events.value[index].agent_state?.watch_loop)
+    if ('active' in loop || stringValue(loop.session_id)) return loop as WatchLoopStatus
+  }
+  return ready.value?.watch_loop
+})
+
+const watchLoopStatus = computed<WatchLoopStatus>(() => latestWatchLoopStatus.value || ready.value?.watch_loop || {})
+const watchLoopActive = computed(() => Boolean(watchLoopStatus.value.active))
+const watchLoopTranscript = computed(() => {
+  const rows = Array.isArray(watchLoopStatus.value.rolling_transcript) && watchLoopStatus.value.rolling_transcript.length
+    ? watchLoopStatus.value.rolling_transcript
+    : Array.isArray(watchLoopStatus.value.last_transcript)
+      ? watchLoopStatus.value.last_transcript
+      : []
+  return rows.filter(Boolean).slice(0, 3).join(' / ')
+})
+const watchLoopMeta = computed(() => {
+  const status = watchLoopStatus.value
+  const pieces: string[] = []
+  const iterations = Number(status.iterations || 0)
+  if (iterations) pieces.push(`${iterations} 次采样`)
+  const windowSeconds = Number(status.transcript_window_seconds || 0)
+  if (windowSeconds) pieces.push(`最近 ${Math.max(1, Math.round(windowSeconds / 60))} 分钟`)
+  pieces.push(status.proactive_enabled === false ? '主动发言关闭' : '主动发言开启')
+  const visionInterval = Number(status.vision_interval_ticks ?? watchVisionInterval.value)
+  pieces.push(visionInterval <= 0 ? '视觉手动' : `视觉每 ${visionInterval} 轮`)
+  if (status.transcript_source) {
+    const configured = String(status.transcript_source)
+    const active = String(status.active_transcript_source || configured)
+    pieces.push(active && active !== configured ? `${sourceLabel(configured)}→${sourceLabel(active)}` : sourceLabel(configured))
+  }
+  if (status.transcript_status) pieces.push(String(status.transcript_status))
+  if (status.last_error) pieces.push(errorLabel(String(status.last_error)))
+  if (status.visual_status) pieces.push(`视觉 ${status.visual_status}`)
+  return pieces.join(' · ') || '等待采样'
+})
+const watchLoopSourceHealth = computed(() => {
+  const health = asRecord(watchLoopStatus.value.source_health)
+  return Object.entries(health)
+    .map(([source, raw]) => {
+      const row = asRecord(raw)
+      const count = Number(row.count || 0)
+      const status = stringValue(row.status)
+      const error = stringValue(row.error)
+      const capture = stringValue(row.capture)
+      const bytes = Number(row.audio_bytes || 0)
+      const parts = [`${sourceLabel(source)} ${count ? `${count} 段` : '诊断'}`]
+      if (status) parts.push(errorLabel(status))
+      if (capture) parts.push(`采集 ${capture}`)
+      if (bytes) parts.push(`${Math.round(bytes / 1024)}KB`)
+      if (error) parts.push(errorLabel(error))
+      return parts.join(' · ')
+    })
+    .slice(0, 3)
+})
+const pendingMemories = computed(() => (memoryStatus.value?.pending || []).filter((item) => item.status === 'pending'))
+const recentMemories = computed(() => memoryStatus.value?.recent || [])
+const memoryEnabled = computed(() => memoryStatus.value?.enabled !== false)
+const topPendingMemory = computed(() => pendingMemories.value[0] || null)
+const memoryAuthorizeText = computed(() => topPendingMemory.value?.text || '')
+const memoryQueryText = computed(() => memoryQuery.value.trim())
+const displayedMemoryRows = computed(() => (memoryQueryText.value ? memorySearchResults.value : recentMemories.value))
+const memoryVaultSections = computed(() => memoryVault.value?.sections || [])
+const memorySearchEmptyText = computed(() => (memoryQueryText.value ? '没有找到相关记忆' : '暂无长期记忆'))
+const backgroundEnabled = computed(() => backgroundStatus.value?.enabled === true)
+const backgroundActive = computed(() => backgroundStatus.value?.active === true)
+const backgroundScopes = computed<BackgroundContextScope[]>(() => backgroundStatus.value?.approved_scopes || [])
+const backgroundRecentRows = computed<BackgroundContextEntry[]>(() => backgroundStatus.value?.recent_context || [])
+const backgroundStateText = computed(() => {
+  if (!backgroundStatus.value) return '未连接'
+  if (!backgroundEnabled.value) return '已关闭'
+  return backgroundActive.value ? '已批准' : '等待范围'
+})
+const backgroundSummaryText = computed(() => {
+  if (!backgroundStatus.value) return '等待核心状态'
+  if (!backgroundEnabled.value) return '后台上下文关闭'
+  const scope = backgroundStatus.value.active_scope
+  if (!scope) return '需要批准窗口、项目或游戏范围'
+  return `${backgroundScopeTypeLabel(scope.type)} · ${scope.label || '已批准范围'}`
+})
+const backgroundRetentionText = computed(() => backgroundRetentionLabel(backgroundStatus.value?.retention))
+
+watch(watchLoopStatus, (status) => {
+  const source = stringValue(status.transcript_source)
+  if (source === 'system_audio' || source === 'ocr_subtitle' || source === 'auto') watchTranscriptSource.value = source
+  if (typeof status.proactive_enabled === 'boolean') watchProactiveEnabled.value = status.proactive_enabled
+  if (status.commentary_interval_seconds) watchCommentaryInterval.value = Number(status.commentary_interval_seconds)
+  const visionInterval = Number(status.vision_interval_ticks)
+  if (Number.isFinite(visionInterval)) watchVisionInterval.value = Math.max(0, visionInterval)
+})
+
+watch(activeCabin, (cabin) => {
+  if (cabin !== 'memory') return
+  void refreshMemoryStatus()
+  void browseMemoryVault()
+})
+
+watch(activeSettingsTab, (tab) => {
+  if (tab === 'memory') {
+    void refreshMemoryStatus()
+    void browseMemoryVault()
+  }
+  if (tab === 'developer') void refreshBackgroundStatus()
+})
+
 const latestSpeech = computed(() => {
   const latest = [...events.value]
     .reverse()
@@ -151,20 +445,111 @@ const latestSpeech = computed(() => {
   return latest?.voice_line.text || '我在。要看、要玩、要写代码，都可以直接告诉我。'
 })
 
-watch(latestSpeech, (newVal) => {
-  if (newVal) {
-    miniSpeechActive.value = true
-    setTimeout(() => {
-      miniSpeechActive.value = false
-    }, 8000)
-  }
+const miniBubbleHasActions = computed(() => Boolean(isCompactMode.value && pendingApproval.value && approvalIdFor(pendingApproval.value)))
+
+const miniBubbleText = computed(() => {
+  const approval = pendingApproval.value
+  if (!approval) return latestSpeech.value
+  return approval.display_card.summary || latestSpeech.value
 })
 
-const activeSpriteId = computed(() => {
-  const latest = [...events.value]
+watch(latestSpeech, (newVal) => {
+  if (newVal) showMiniSpeech()
+})
+
+watch(pendingApproval, (approval) => {
+  if (approval && isCompactMode.value) showMiniSpeech()
+})
+
+function showMiniSpeech() {
+  clearMiniSpeechTimer()
+  miniSpeechActive.value = true
+  void syncCompactWindowSize()
+  if (pendingApproval.value) return
+  miniSpeechTimer = window.setTimeout(() => {
+    miniSpeechTimer = null
+    miniSpeechActive.value = false
+    void syncCompactWindowSize()
+  }, 8000)
+}
+
+function clearMiniSpeechTimer() {
+  if (miniSpeechTimer === null) return
+  window.clearTimeout(miniSpeechTimer)
+  miniSpeechTimer = null
+}
+
+const latestExpressionEvent = computed(() =>
+  [...events.value]
     .reverse()
-    .find((event) => event.voice_line?.sprite && isSpeakableEvent(event))
-  return latest?.voice_line.sprite || '1'
+    .find((event) => {
+      const sync = asRecord(event.agent_state?.expression_sync)
+      return isSpeakableEvent(event) && (event.voice_line?.sprite || event.voice_line?.emotion || sync.sprite || sync.emotion)
+    }),
+)
+
+const activeSpriteId = computed(() => {
+  const latest = latestExpressionEvent.value
+  const sync = asRecord(latest?.agent_state?.expression_sync)
+  return stringValue(sync.sprite) || latest?.voice_line?.sprite || '1'
+})
+
+const activeExpressionEmotion = computed(() => {
+  const latest = latestExpressionEvent.value
+  const sync = asRecord(latest?.agent_state?.expression_sync)
+  return expressionEmotionClass(stringValue(sync.emotion) || latest?.voice_line?.emotion || 'neutral')
+})
+
+const activeEmotionStatus = computed(() => ({
+  emotion: activeExpressionEmotion.value,
+  label: expressionEmotionLabel(activeExpressionEmotion.value),
+  sprite: activeSpriteId.value,
+}))
+
+const activeSpriteMeta = computed(() => {
+  const sprites = ready.value?.character?.sprites || []
+  return sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
+})
+
+const accessoryFitStyle = computed(() => {
+  const label = activeSpriteMeta.value?.label || ''
+  const emotion = activeExpressionEmotion.value
+  const hasHatAndEars = equippedAccessories.value.hat && equippedAccessories.value.ears
+  const style: Record<string, string> = {
+    '--acc-hat-top': '-14%',
+    '--acc-hat-left': '50%',
+    '--acc-hat-width': '42%',
+    '--acc-hat-rotate': '0deg',
+    '--acc-glasses-top': '35%',
+    '--acc-glasses-left': '50%',
+    '--acc-glasses-width': '34%',
+    '--acc-glasses-rotate': '0deg',
+    '--acc-ears-top': '-21%',
+    '--acc-ears-left': '50%',
+    '--acc-ears-width': '44%',
+    '--acc-ears-rotate': '0deg',
+  }
+  if (label.includes('歪头') || label.includes('好奇') || emotion === 'thinking') {
+    style['--acc-hat-left'] = '51.5%'
+    style['--acc-glasses-left'] = '51%'
+    style['--acc-glasses-top'] = '34%'
+    style['--acc-hat-rotate'] = '2deg'
+  }
+  if (label.includes('低头') || label.includes('困倦') || label.includes('疲')) {
+    style['--acc-hat-top'] = '-10%'
+    style['--acc-glasses-top'] = '38%'
+  }
+  if (label.includes('兴奋') || emotion === 'happy') {
+    style['--acc-ears-top'] = '-23%'
+    style['--acc-ears-width'] = '46%'
+  }
+  if (hasHatAndEars) {
+    style['--acc-hat-width'] = '38%'
+    style['--acc-hat-top'] = '-10%'
+    style['--acc-ears-width'] = '48%'
+    style['--acc-ears-top'] = '-24%'
+  }
+  return style
 })
 
 const characterName = computed(() => ready.value?.character?.name || 'Joi')
@@ -172,12 +557,12 @@ const characterName = computed(() => ready.value?.character?.name || 'Joi')
 const characterImageSrc = computed(() => {
   const sprites = ready.value?.character?.sprites || []
   const active = sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
-  if (active?.image_data_url) return active.image_data_url
-  return active?.image_path ? convertFileSrc(active.image_path) : ''
+  return active?.image_data_url || ''
 })
 
 const currentMode = computed(() => {
   if (pendingApproval.value) return '等待确认'
+  if (watchLoopActive.value) return '陪看'
   const latest = [...events.value].reverse().find((event) => intentName(event) || toolName(event))
   const intent = latest ? intentName(latest) : ''
   const tool = latest ? toolName(latest) : ''
@@ -233,6 +618,11 @@ function toolName(event: AgentEvent) {
 function intentName(event: AgentEvent) {
   const intent = event.agent_state?.intent
   return typeof intent === 'string' ? intent : ''
+}
+
+function skillName(event: AgentEvent) {
+  const skillId = event.agent_state?.skill_id
+  return typeof skillId === 'string' ? skillId : ''
 }
 
 function isCompanionChat(event: AgentEvent) {
@@ -647,15 +1037,13 @@ function isImageArtifact(artifact: string) {
 }
 
 function artifactPath(artifact: string) {
-  if (/^[a-zA-Z]:[\\/]/.test(artifact) || artifact.startsWith('/')) return artifact
-  const workspace = ready.value?.workspace || ''
-  if (!workspace) return artifact
-  const separator = workspace.includes('\\') ? '\\' : '/'
-  return `${workspace.replace(/[\\/]$/, '')}${separator}${artifact.replace(/[\\/]/g, separator)}`
+  return artifact
 }
 
 function artifactSrc(artifact: string) {
-  return artifactDataUrls.value[artifact] || convertFileSrc(artifactPath(artifact))
+  if (artifactDataUrls.value[artifact]) return artifactDataUrls.value[artifact]
+  if (/^[a-zA-Z]:[\\/]/.test(artifact) || artifact.startsWith('/')) return convertFileSrc(artifactPath(artifact))
+  return ''
 }
 
 function openArtifactPreview(artifact: string, event: AgentEvent) {
@@ -873,6 +1261,51 @@ function stringValue(value: unknown) {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+function sourceLabel(value: string) {
+  const labels: Record<string, string> = {
+    system_audio: '系统音频',
+    ocr_subtitle: '字幕/OCR',
+    auto: '自动',
+  }
+  return labels[value] || value
+}
+
+function errorLabel(value: string) {
+  const labels: Record<string, string> = {
+    system_audio_unavailable: '音频不可用',
+    system_audio_windows_only: '仅 Windows 音频',
+    system_audio_dependency_missing: '音频依赖缺失',
+    system_audio_device_missing: '无回环设备',
+    system_audio_capture_failed: '音频捕获失败',
+    asr_unconfigured: 'ASR 未配置',
+    asr_disabled: 'ASR 未启用',
+    asr_timeout: 'ASR 超时',
+    empty_transcript: '音频无文本',
+    ready: '就绪',
+    success: '成功',
+    failed: '失败',
+    unavailable: '不可用',
+    ok: '正常',
+  }
+  return labels[value] || value
+}
+
+function expressionEmotionClass(value: string) {
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, '_')
+  return ['happy', 'thinking', 'alert', 'worried', 'serious', 'neutral'].includes(normalized) ? normalized : 'neutral'
+}
+
+function expressionEmotionLabel(value: string) {
+  return {
+    happy: '开心',
+    thinking: '思考',
+    alert: '警觉',
+    worried: '担心',
+    serious: '专注',
+    neutral: '平静',
+  }[expressionEmotionClass(value)]
+}
+
 function trimText(value: string, max: number) {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value
 }
@@ -891,14 +1324,283 @@ function submit() {
   input.value = ''
 }
 
+function startWatchLoop() {
+  errorText.value = ''
+  void client.watchLoopStart({
+    query: '陪我看当前视频',
+    interval_seconds: 6,
+    sample_count: 3,
+    sample_interval_ms: 700,
+    transcript_source: watchTranscriptSource.value,
+    proactive_enabled: watchProactiveEnabled.value,
+    commentary_interval_seconds: watchCommentaryInterval.value,
+    vision_interval_ticks: watchVisionInterval.value,
+  }).catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '实时陪看启动失败'
+  })
+}
+
+function configureWatchLoop() {
+  errorText.value = ''
+  void client.watchLoopConfigure({
+    transcript_source: watchTranscriptSource.value,
+    proactive_enabled: watchProactiveEnabled.value,
+    commentary_interval_seconds: watchCommentaryInterval.value,
+    vision_interval_ticks: watchVisionInterval.value,
+  }).catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '实时陪看设置失败'
+  })
+}
+
+function refreshWatchVision() {
+  if (!watchLoopActive.value) return
+  errorText.value = ''
+  void client.watchLoopRefresh({ force_visual_summary: true }).catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '画面理解失败'
+  })
+}
+
+function stopWatchLoop() {
+  errorText.value = ''
+  void client.watchLoopStop().catch((error) => {
+    errorText.value = error instanceof Error ? error.message : '实时陪看停止失败'
+  })
+}
+
+function syncMemoryFromEvent(event: AgentEvent) {
+  const memory = asRecord(event.agent_state?.memory)
+  if ('recent' in memory || 'pending' in memory || 'vault_label' in memory) {
+    memoryStatus.value = memory as unknown as MemoryStatus
+  }
+}
+
+function syncBackgroundFromEvent(event: AgentEvent) {
+  const background = asRecord(event.agent_state?.background_context)
+  if ('safe_for_display' in background || 'recent_context' in background || 'recent_count' in background || 'scope_count' in background) {
+    backgroundStatus.value = background as unknown as BackgroundContextStatus
+  }
+}
+
+async function refreshBackgroundStatus() {
+  backgroundLoading.value = true
+  try {
+    const result = (await client.backgroundStatus()) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景上下文读取失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景上下文读取失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+async function configureBackgroundScope() {
+  backgroundLoading.value = true
+  try {
+    const label = backgroundScopeLabel.value.trim() || backgroundScopeTypeLabel(backgroundScopeType.value)
+    const result = (await client.backgroundConfigure({
+      enabled: true,
+      scope_type: backgroundScopeType.value,
+      label,
+    })) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景范围批准失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景范围批准失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+async function toggleBackgroundEnabled(event: Event) {
+  const enabled = Boolean((event.target as HTMLInputElement | null)?.checked)
+  backgroundLoading.value = true
+  try {
+    const result = (await client.backgroundConfigure({ enabled })) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景上下文开关更新失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景上下文开关更新失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+async function clearBackgroundContext() {
+  if (!backgroundRecentRows.value.length) return
+  if (!window.confirm(`清空 ${backgroundRecentRows.value.length} 条背景摘要？批准范围会保留。`)) return
+  backgroundLoading.value = true
+  try {
+    const result = (await client.backgroundClear()) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景摘要清空失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景摘要清空失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+function backgroundScopeTypeLabel(value?: string) {
+  const labels: Record<string, string> = {
+    window: '窗口',
+    project: '项目',
+    game: '游戏',
+  }
+  return labels[value || ''] || '范围'
+}
+
+function backgroundRetentionLabel(value?: string) {
+  const labels: Record<string, string> = {
+    summaries_only: '仅摘要',
+  }
+  return labels[value || ''] || value || '仅摘要'
+}
+
+function backgroundScopeMeta(scope: BackgroundContextScope) {
+  const pieces = [backgroundScopeTypeLabel(scope.type)]
+  if (scope.approved_at) pieces.push(new Date(scope.approved_at * 1000).toLocaleString([], { hour12: false }))
+  pieces.push(scope.enabled === false ? '关闭' : '启用')
+  return pieces.join(' · ')
+}
+
+function backgroundEntryTime(row: BackgroundContextEntry) {
+  if (!row.created_at) return '刚刚'
+  return new Date(row.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function backgroundEntryMeta(row: BackgroundContextEntry) {
+  const pieces = [backgroundScopeTypeLabel(row.scope_type)]
+  const source = stringValue(row.source)
+  if (source) pieces.push(source === 'watch_loop' ? '陪看' : source)
+  const transcript = stringValue(row.transcript_source)
+  if (transcript) pieces.push(sourceLabel(transcript))
+  const visual = stringValue(row.visual_status)
+  if (visual) pieces.push(`视觉 ${visual}`)
+  return pieces.join(' · ')
+}
+
+async function refreshMemoryStatus() {
+  try {
+    const result = (await client.memoryStatus()) as { ok?: boolean; memory?: MemoryStatus }
+    if (result.memory) memoryStatus.value = result.memory
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆状态读取失败'
+  }
+}
+
+async function searchMemory() {
+  const query = memoryQueryText.value
+  if (!query) {
+    memorySearchResults.value = []
+    return
+  }
+  memorySearchLoading.value = true
+  try {
+    const result = (await client.memoryRecall(query, 12)) as { ok?: boolean; memories?: MemoryRecord[]; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    memorySearchResults.value = result.memories || []
+    if (!result.ok) errorText.value = result.error || '记忆检索失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆检索失败'
+  } finally {
+    memorySearchLoading.value = false
+  }
+}
+
+async function browseMemoryVault() {
+  try {
+    const result = (await client.memoryBrowseVault()) as { ok?: boolean; vault?: MemoryVault; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (result.vault) memoryVault.value = result.vault
+    if (!result.ok) errorText.value = result.error || '记忆库读取失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆库读取失败'
+  }
+}
+
+async function saveMemoryCandidate(candidateId: number) {
+  try {
+    const result = (await client.memorySaveCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (memoryQueryText.value) void searchMemory()
+    void browseMemoryVault()
+    if (!result.ok) errorText.value = result.error || '记忆保存失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆保存失败'
+  }
+}
+
+async function rejectMemoryCandidate(candidateId: number) {
+  try {
+    const result = (await client.memoryRejectCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (!result.ok) errorText.value = result.error || '记忆已忽略'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆忽略失败'
+  }
+}
+
+async function toggleMemoryEnabled(event: Event) {
+  const enabled = Boolean((event.target as HTMLInputElement | null)?.checked)
+  try {
+    const result = (await client.memorySetEnabled(enabled)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (!result.ok) errorText.value = result.error || '记忆开关更新失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆开关更新失败'
+  }
+}
+
+async function deleteMemory(memoryId: number) {
+  try {
+    const result = (await client.memoryDelete(memoryId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (memoryQueryText.value) void searchMemory()
+    void browseMemoryVault()
+    if (!result.ok) errorText.value = result.error || '记忆删除失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆删除失败'
+  }
+}
+
+async function clearMemory() {
+  const count = pendingMemories.value.length + recentMemories.value.length
+  if (!count) return
+  if (!window.confirm(`清空 ${count} 条记忆和待确认候选？此操作不会删除手动编辑区。`)) return
+  try {
+    const result = (await client.memoryClear()) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    memorySearchResults.value = []
+    void browseMemoryVault()
+    if (!result.ok) errorText.value = result.error || '记忆清空失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆清空失败'
+  }
+}
+
 function resolveApproval(approved: boolean) {
   if (!pendingApproval.value) return
   const approvalId = approvalIdFor(pendingApproval.value)
   if (!approvalId) return
   const epoch = beginNewVoiceIntent()
   taskVoiceEpochs.set(pendingApproval.value.task_id, epoch)
+  clearMiniSpeechTimer()
+  miniSpeechActive.value = false
+  void syncCompactWindowSize()
   void client.resolveApproval(approvalId, approved).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '审批提交失败'
+  })
+}
+
+function requestMiniChange() {
+  if (pendingApproval.value) resolveApproval(false)
+  clearMiniSpeechTimer()
+  miniSpeechActive.value = false
+  miniDashboardActive.value = true
+  void syncCompactWindowSize()
+  void nextTick(() => {
+    document.querySelector<HTMLInputElement>('.mini-input')?.focus()
   })
 }
 
@@ -940,9 +1642,27 @@ function playVoiceAudio(payload: VoiceAudioPayload) {
   if (payload.voice_audio_error) {
     lastTtsError.value = ttsErrorLabel(payload.voice_audio_error)
   }
-  const eventEpoch = voiceEventEpochs.get(voiceAudioKey(payload))
+  if (shouldSuppressProactiveVoice(payload)) return
+  const audioKey = voiceAudioKey(payload)
+  const eventEpoch = voiceEventEpochs.get(audioKey)
   if (!shouldPlayVoiceAudio(eventEpoch, voiceEpoch)) return
+  if (playedVoiceAudioKeys.has(audioKey)) return
+  rememberPlayedVoiceAudioKey(audioKey)
   void playAudioPath(payload.voice_audio_path, payload.voice_audio_data_url)
+}
+
+function shouldSuppressProactiveVoice(payload: VoiceAudioPayload) {
+  if (!payload.watch_commentary) return false
+  if (input.value.trim()) return true
+  const active = document.activeElement
+  return active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
+}
+
+function rememberPlayedVoiceAudioKey(key: string) {
+  playedVoiceAudioKeys.add(key)
+  if (playedVoiceAudioKeys.size <= 80) return
+  const oldest = playedVoiceAudioKeys.values().next().value
+  if (oldest) playedVoiceAudioKeys.delete(oldest)
 }
 
 function rememberVoiceEventEpoch(event: AgentEvent) {
@@ -1030,6 +1750,95 @@ function providerMeta(row: RuntimeProviderStatus) {
   return meta
 }
 
+function nativeSkills(): NativeSkill[] {
+  return skillManifest.value?.skills || ready.value?.skills?.skills || []
+}
+
+function skillManifestVersion() {
+  return skillManifest.value?.version || ready.value?.skills?.version || 'joi.skill_manifest.v1'
+}
+
+function skillCapabilityLabel(value?: string) {
+  const labels: Record<string, string> = {
+    ready: '可用',
+    off: '关闭',
+    unavailable: '不可用',
+    degraded: '降级',
+  }
+  return labels[value || ''] || '未知'
+}
+
+function skillPermissionLabel(value?: string) {
+  const labels: Record<string, string> = {
+    low: '低风险',
+    medium: '需确认',
+    high: '高风险',
+  }
+  return labels[value || ''] || '需确认'
+}
+
+function skillMeta(skill: NativeSkill) {
+  const meta: string[] = []
+  if (skill.category) meta.push(skill.category)
+  if (skill.permission_level) meta.push(skillPermissionLabel(skill.permission_level))
+  if (skill.state_policy) meta.push(skill.state_policy)
+  if (skill.audit) meta.push(skill.audit)
+  if (skill.supports_dry_run) meta.push('dry-run')
+  return meta
+}
+
+function skillTools(skill: NativeSkill) {
+  return [...(skill.tools || []), ...(skill.rpc_methods || [])].slice(0, 10)
+}
+
+function skillEnabled(skill: NativeSkill) {
+  return skill.enabled !== false
+}
+
+function skillToggleDisabled(skill: NativeSkill) {
+  return !connected.value || skillRefreshLoading.value || skill.id === 'joi.runtime_config'
+}
+
+function skillActionLabel(skill: NativeSkill) {
+  if (skill.id === 'joi.runtime_config') return '核心'
+  return skillEnabled(skill) ? '关闭' : '开启'
+}
+
+async function setSkillEnabled(skill: NativeSkill, enabled: boolean) {
+  if (!skill.id) return
+  skillRefreshLoading.value = true
+  try {
+    const result = (await client.applyRuntimeConfig({ skills: { [skill.id]: { enabled } } })) as {
+      ok?: boolean
+      preview?: RuntimeConfigMutationResult
+      ready?: CoreReadyPayload
+    }
+    if (result.preview) runtimePreview.value = result.preview
+    if (result.ok === false) errorText.value = result.preview?.summary || '技能开关没有提交'
+    if (result.ready) {
+      ready.value = result.ready
+      skillManifest.value = result.ready.skills || skillManifest.value
+      syncRuntimeDraft(result.ready)
+    }
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '技能开关提交失败'
+  } finally {
+    skillRefreshLoading.value = false
+  }
+}
+
+async function refreshSkills() {
+  skillRefreshLoading.value = true
+  try {
+    const result = (await client.skillsList()) as { ok?: boolean; skills?: NativeSkillManifest }
+    if (result.skills) skillManifest.value = result.skills
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '技能清单刷新失败'
+  } finally {
+    skillRefreshLoading.value = false
+  }
+}
+
 function defaultRuntimeDraft() {
   return {
     asr_enabled: false,
@@ -1068,9 +1877,9 @@ function syncRuntimeDraft(payload: CoreReadyPayload) {
   const settleMs = computerUse.post_action_settle_ms ?? (parseSettleMs(runtimeProvider(payload, 'computer_use')?.limit) || draft.computer_post_action_settle_ms)
   draft.computer_post_action_settle_ms = Math.max(0, Number(settleMs))
   const llmSettings = settings.llm || {}
-  const text = runtimeProvider(payload, 'text')
+  const fastModel = runtimeProvider(payload, 'fast')
   draft.llm_temperature = Math.max(0, Number(llmSettings.temperature ?? draft.llm_temperature))
-  draft.llm_use_mock = typeof llmSettings.use_mock === 'boolean' ? llmSettings.use_mock : text?.state === 'mock'
+  draft.llm_use_mock = typeof llmSettings.use_mock === 'boolean' ? llmSettings.use_mock : fastModel?.state === 'mock'
   runtimeDraft.value = draft
 }
 
@@ -1355,8 +2164,16 @@ onMounted(() => {
   clockTimer = window.setInterval(() => {
     nowSeconds.value = Date.now() / 1000
   }, 5000)
+  window.addEventListener('dragstart', preventNativeAssetDrag, true)
+  window.addEventListener('selectstart', preventCompactSelection, true)
 })
 onBeforeUnmount(() => {
+  document.body.classList.remove('transparent-active')
+  window.removeEventListener('dragstart', preventNativeAssetDrag, true)
+  window.removeEventListener('selectstart', preventCompactSelection, true)
+  stopMascotDragWatch()
+  clearMascotClickTimer()
+  clearMiniSpeechTimer()
   if (clockTimer !== null) {
     window.clearInterval(clockTimer)
     clockTimer = null
@@ -1368,18 +2185,22 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="shell" :class="{ 'compact-active': isCompactMode }">
-    <!-- Custom overlay close button in compact mode -->
-    <button type="button" class="exit-compact-btn" @click="toggleCompactMode" title="退出微缩模式">
-      ✕
-    </button>
-
+  <main
+    class="shell"
+    :class="{
+      'compact-active': isCompactMode,
+      'mini-dashboard-active': isCompactMode && miniDashboardActive,
+      'mini-speech-active': isCompactMode && miniSpeechActive,
+    }"
+    @dragstart.capture="preventNativeAssetDrag"
+    @drop.capture.prevent
+  >
     <!-- Header Titlebar -->
-    <header class="titlebar" data-tauri-drag-region>
+    <header class="titlebar" @mousedown="startWindowDrag">
       <div class="traffic-lights">
-        <div class="light close" title="关闭"></div>
-        <div class="light minimize" title="最小化"></div>
-        <div class="light zoom" title="缩放"></div>
+        <button type="button" class="light close" title="关闭" aria-label="关闭窗口" @mousedown.stop @click.stop="closeWindow"></button>
+        <button type="button" class="light minimize" title="最小化" aria-label="最小化窗口" @mousedown.stop @click.stop="minimizeWindow"></button>
+        <button type="button" class="light zoom" title="缩放" aria-label="缩放窗口" @mousedown.stop @click.stop="toggleMaximizeWindow"></button>
       </div>
       <div class="window-title">Joi Desktop</div>
       
@@ -1397,13 +2218,16 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <section class="workspace">
+    <section class="workspace" :class="`cabin-${activeCabin}`">
       <div class="topbar">
         <div>
           <span class="brand">Joi</span>
           <span class="mode">{{ currentMode }}</span>
         </div>
         <div class="top-actions">
+          <button type="button" class="ghost-button watch-loop-action" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()" v-if="activeCabin === 'workspace'">
+            {{ watchLoopActive ? '停止陪看' : '实时陪看' }}
+          </button>
           <button type="button" class="ghost-button" @click="developerMode = !developerMode" v-if="activeCabin === 'workspace'">
             {{ developerMode ? '隐藏审计' : '显示审计' }}
           </button>
@@ -1412,6 +2236,57 @@ onBeforeUnmount(() => {
       </div>
 
       <p class="error" v-if="errorText">{{ errorText }}</p>
+
+      <section class="watch-session-strip" :class="{ active: watchLoopActive }" v-if="activeCabin === 'workspace' && (watchLoopActive || watchLoopStatus.iterations)">
+        <div class="watch-session-main">
+          <span class="watch-session-dot"></span>
+          <div>
+            <strong>{{ watchLoopActive ? '实时陪看运行中' : '实时陪看已停止' }}</strong>
+            <span>{{ watchLoopMeta }}</span>
+          </div>
+        </div>
+        <p v-if="watchLoopTranscript">{{ watchLoopTranscript }}</p>
+        <p v-else>{{ watchLoopStatus.last_visual_summary || watchLoopStatus.rolling_summary || watchLoopStatus.last_summary || '后台会持续捕获当前视频画面、字幕和系统音频转写上下文。' }}</p>
+        <div class="watch-session-controls">
+          <label>
+            <span>源</span>
+            <select v-model="watchTranscriptSource" @change="configureWatchLoop">
+              <option value="system_audio">系统音频</option>
+              <option value="ocr_subtitle">字幕/OCR</option>
+              <option value="auto">自动</option>
+            </select>
+          </label>
+          <label class="watch-session-toggle">
+            <input type="checkbox" v-model="watchProactiveEnabled" @change="configureWatchLoop" />
+            <span>主动发言</span>
+          </label>
+          <label>
+            <span>间隔</span>
+            <select v-model.number="watchCommentaryInterval" :disabled="!watchProactiveEnabled" @change="configureWatchLoop">
+              <option :value="20">20s</option>
+              <option :value="30">30s</option>
+              <option :value="45">45s</option>
+              <option :value="60">60s</option>
+            </select>
+          </label>
+          <label>
+            <span>视觉</span>
+            <select v-model.number="watchVisionInterval" @change="configureWatchLoop">
+              <option :value="0">手动</option>
+              <option :value="3">3轮</option>
+              <option :value="5">5轮</option>
+              <option :value="10">10轮</option>
+            </select>
+          </label>
+          <button type="button" class="watch-inline-button" :disabled="!watchLoopActive" title="立即理解当前画面" @click="refreshWatchVision">
+            立即理解
+          </button>
+          <small v-if="watchLoopSourceHealth.length">{{ watchLoopSourceHealth.join(' / ') }}</small>
+        </div>
+        <button type="button" class="ghost-button watch-session-stop" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()">
+          {{ watchLoopActive ? '停止' : '重新开始' }}
+        </button>
+      </section>
 
       <section class="hero-panel" v-if="activeCabin === 'workspace' && !taskRows.length">
         <p class="eyebrow">Joi Agent</p>
@@ -1592,6 +2467,14 @@ onBeforeUnmount(() => {
           <span v-if="chatRows.length">最近 {{ Math.min(chatRows.length, 8) }} 条</span>
           <span v-else>暂无记录</span>
         </div>
+        <div class="emotion-status-card" :class="`emotion-${activeEmotionStatus.emotion}`">
+          <div class="emotion-status-dot"></div>
+          <div class="emotion-status-copy">
+            <span>当前情绪</span>
+            <strong>{{ activeEmotionStatus.label }}</strong>
+          </div>
+          <span class="emotion-status-sprite">立绘 {{ activeEmotionStatus.sprite }}</span>
+        </div>
         <div class="chat-scroll-area" v-if="chatRows.length">
           <div
             v-for="event in chatRows.slice(-8)"
@@ -1636,9 +2519,108 @@ onBeforeUnmount(() => {
         </form>
       </section>
 
+      <section class="memory-section" v-if="activeCabin === 'memory'">
+        <div class="section-title">
+          <h2>记忆舱</h2>
+          <span>{{ pendingMemories.length }} 待确认 · {{ recentMemories.length }} 已保存</span>
+        </div>
+
+        <div class="memory-command-panel">
+          <div class="memory-command-copy">
+            <strong>{{ memoryEnabled ? '长期记忆开启' : '长期记忆关闭' }}</strong>
+            <span>{{ memoryStatus?.vault_label ? `本地记忆库 · ${memoryStatus.vault_label}` : '等待核心连接后读取本地记忆库' }}</span>
+          </div>
+          <div class="memory-head-actions">
+            <label class="memory-enable-toggle">
+              <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
+              <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
+            </label>
+            <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+            <button type="button" class="memory-link-button" @click="browseMemoryVault">读取库</button>
+            <button type="button" class="memory-link-button danger" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
+          </div>
+        </div>
+
+        <form class="memory-search-bar" @submit.prevent="searchMemory">
+          <input v-model="memoryQuery" type="search" placeholder="搜索 Joi 已获授权的长期记忆..." />
+          <button type="submit" :disabled="memorySearchLoading || !memoryQueryText">
+            {{ memorySearchLoading ? '检索中' : '检索' }}
+          </button>
+        </form>
+
+        <div class="memory-grid">
+          <div class="memory-panel">
+            <header>
+              <strong>待确认</strong>
+              <span>{{ pendingMemories.length }}</span>
+            </header>
+            <div class="memory-list" v-if="pendingMemories.length">
+              <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
+                <div>
+                  <strong>{{ candidate.kind || 'note' }}</strong>
+                  <p>{{ candidate.text }}</p>
+                  <span>{{ candidate.source || 'candidate' }}</span>
+                </div>
+                <div class="memory-actions">
+                  <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
+                  <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
+                </div>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>没有待确认记忆</p>
+          </div>
+
+          <div class="memory-panel">
+            <header>
+              <strong>{{ memoryQueryText ? '检索结果' : '最近记忆' }}</strong>
+              <span>{{ displayedMemoryRows.length }}</span>
+            </header>
+            <div class="memory-list" v-if="displayedMemoryRows.length">
+              <article v-for="memory in displayedMemoryRows" :key="memory.id" class="memory-row">
+                <div>
+                  <strong>{{ memory.kind || 'note' }}</strong>
+                  <p>{{ memory.text }}</p>
+                  <span>{{ memory.source || 'manual' }}<template v-if="memory.relevance"> · 相关 {{ Math.round(memory.relevance) }}</template></span>
+                </div>
+                <button type="button" class="memory-delete" @click="deleteMemory(memory.id)">删除</button>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>{{ memorySearchEmptyText }}</p>
+          </div>
+
+          <div class="memory-panel memory-vault-panel">
+            <header>
+              <strong>本地 Vault</strong>
+              <button type="button" class="memory-link-button" @click="browseMemoryVault">刷新</button>
+            </header>
+            <div class="memory-vault-sections" v-if="memoryVaultSections.length">
+              <section v-for="section in memoryVaultSections" :key="section.title">
+                <strong>{{ section.title }}</strong>
+                <p v-for="line in section.lines.slice(0, 6)" :key="`${section.title}-${line}`">{{ line }}</p>
+              </section>
+            </div>
+            <p class="memory-empty" v-else>还没有可展示的本地记忆库内容</p>
+          </div>
+        </div>
+      </section>
+
       <section class="debug-section" v-if="activeCabin === 'inspector'">
+        <nav class="settings-tabbar">
+          <button
+            v-for="tab in settingsTabs"
+            :key="tab.id"
+            type="button"
+            class="settings-tab"
+            :class="{ active: activeSettingsTab === tab.id }"
+            @click="activeSettingsTab = tab.id"
+          >
+            <span>{{ tab.icon }}</span>
+            {{ tab.label }}
+          </button>
+        </nav>
+
         <!-- Closet Wardrobe -->
-        <div class="runtime-settings" style="margin-bottom: 20px;">
+        <div class="runtime-settings" v-if="activeSettingsTab === 'appearance'">
           <div class="runtime-settings-head">
             <strong>个性化装扮 (Cosplay Closet)</strong>
             <span>点击进行穿戴</span>
@@ -1671,23 +2653,101 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="section-title">
-          <h2>运行设置</h2>
-          <span>{{ ready?.runtime?.read_only ? '只读' : '状态' }}</span>
-        </div>
-        <div class="provider-grid">
-          <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
-            <header>
-              <strong>{{ row.label || row.name }}</strong>
-              <span>{{ providerStateLabel(row.state) }}</span>
-            </header>
-            <p>{{ providerSummary(row) }}</p>
-            <div class="provider-meta" v-if="providerMeta(row).length">
-              <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+        <div class="runtime-settings memory-settings" v-if="activeSettingsTab === 'memory'">
+          <div class="runtime-settings-head">
+            <strong>记忆舱</strong>
+            <div class="memory-head-actions">
+              <label class="memory-enable-toggle">
+                <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
+                <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
+              </label>
+              <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+              <button type="button" class="memory-link-button danger" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
             </div>
           </div>
+          <p class="memory-disabled-note" v-if="!memoryEnabled">长期记忆已关闭，新候选不会写入待确认队列。</p>
+          <div class="memory-vault-path" v-if="memoryStatus?.vault_label">本地记忆库 · {{ memoryStatus.vault_label }}</div>
+          <div class="memory-list" v-if="pendingMemories.length">
+            <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
+              <div>
+                <strong>{{ candidate.kind || 'note' }}</strong>
+                <p>{{ candidate.text }}</p>
+                <span>{{ candidate.source || 'candidate' }}</span>
+              </div>
+              <div class="memory-actions">
+                <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
+                <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
+              </div>
+            </article>
+          </div>
+          <div class="memory-list" v-if="recentMemories.length">
+            <article v-for="memory in recentMemories" :key="memory.id" class="memory-row">
+              <div>
+                <strong>{{ memory.kind || 'note' }}</strong>
+                <p>{{ memory.text }}</p>
+                <span>{{ memory.source || 'manual' }}</span>
+              </div>
+              <button type="button" class="memory-delete" @click="deleteMemory(memory.id)">删除</button>
+            </article>
+          </div>
+          <p class="memory-empty" v-if="!pendingMemories.length && !recentMemories.length">暂无长期记忆</p>
         </div>
-        <div class="runtime-settings">
+
+        <div class="runtime-settings skill-manifest-section" v-if="activeSettingsTab === 'skills'">
+          <div class="runtime-settings-head">
+            <strong>原生技能</strong>
+            <div class="memory-head-actions">
+              <span>{{ skillManifestVersion() }}</span>
+              <button type="button" class="memory-link-button" :disabled="skillRefreshLoading" @click="refreshSkills">
+                {{ skillRefreshLoading ? '刷新中' : '刷新' }}
+              </button>
+            </div>
+          </div>
+          <div class="skill-grid" v-if="nativeSkills().length">
+            <article
+              v-for="skill in nativeSkills()"
+              :key="skill.id"
+              class="skill-card"
+              :class="skill.local_capability || 'unavailable'"
+            >
+              <header>
+                <strong>{{ skill.label || skill.id }}</strong>
+                <span>{{ skillCapabilityLabel(skill.local_capability) }}</span>
+              </header>
+              <div class="provider-meta" v-if="skillMeta(skill).length">
+                <span v-for="item in skillMeta(skill)" :key="`${skill.id}-${item}`">{{ item }}</span>
+              </div>
+              <div class="skill-tool-list" v-if="skillTools(skill).length">
+                <code v-for="tool in skillTools(skill)" :key="`${skill.id}-${tool}`">{{ tool }}</code>
+              </div>
+              <div class="skill-actions">
+                <button type="button" :disabled="skillToggleDisabled(skill)" @click="setSkillEnabled(skill, !skillEnabled(skill))">
+                  {{ skillActionLabel(skill) }}
+                </button>
+              </div>
+            </article>
+          </div>
+          <p class="memory-empty" v-else>暂无技能清单</p>
+        </div>
+
+        <template v-if="activeSettingsTab === 'runtime'">
+          <div class="section-title">
+            <h2>运行设置</h2>
+            <span>{{ ready?.runtime?.read_only ? '只读' : '状态' }}</span>
+          </div>
+          <div class="provider-grid">
+            <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
+              <header>
+                <strong>{{ row.label || row.name }}</strong>
+                <span>{{ providerStateLabel(row.state) }}</span>
+              </header>
+              <p>{{ providerSummary(row) }}</p>
+              <div class="provider-meta" v-if="providerMeta(row).length">
+                <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="runtime-settings">
           <div class="runtime-settings-head">
             <strong>安全设置</strong>
             <span>非密钥字段</span>
@@ -1763,67 +2823,157 @@ onBeforeUnmount(() => {
               </span>
             </div>
           </div>
-        </div>
-        <div class="section-title debug-title">
-          <h2>开发者事件</h2>
-          <span>{{ events.length }} 条</span>
-        </div>
-        <div class="debug-list">
-          <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">
-            <span>{{ eventTime(event) }}</span>
-            <strong>{{ event.type }}</strong>
-            <code>{{ toolName(event) || intentName(event) || event.display_card.status }}</code>
-            <p>{{ event.display_card.summary }}</p>
           </div>
-        </div>
+        </template>
+
+        <template v-if="activeSettingsTab === 'developer'">
+          <div class="runtime-settings background-context-panel">
+            <div class="runtime-settings-head">
+              <strong>背景上下文</strong>
+              <div class="memory-head-actions">
+                <label class="memory-enable-toggle">
+                  <input type="checkbox" :checked="backgroundEnabled" :disabled="backgroundLoading" @change="toggleBackgroundEnabled" />
+                  <span>{{ backgroundEnabled ? '已开启' : '已关闭' }}</span>
+                </label>
+                <button type="button" class="memory-link-button" :disabled="backgroundLoading" @click="refreshBackgroundStatus">
+                  {{ backgroundLoading ? '同步中' : '刷新' }}
+                </button>
+                <button type="button" class="memory-link-button danger" :disabled="backgroundLoading || !backgroundRecentRows.length" @click="clearBackgroundContext">清空</button>
+              </div>
+            </div>
+            <div class="background-status-grid">
+              <article class="background-status-card" :class="{ active: backgroundActive }">
+                <span>状态</span>
+                <strong>{{ backgroundStateText }}</strong>
+                <small>{{ backgroundSummaryText }}</small>
+              </article>
+              <article class="background-status-card">
+                <span>范围</span>
+                <strong>{{ backgroundStatus?.scope_count ?? backgroundScopes.length }}</strong>
+                <small>已批准</small>
+              </article>
+              <article class="background-status-card">
+                <span>摘要</span>
+                <strong>{{ backgroundStatus?.recent_count ?? backgroundRecentRows.length }}</strong>
+                <small>{{ backgroundRetentionText }}</small>
+              </article>
+              <article class="background-status-card">
+                <span>录制</span>
+                <strong>{{ backgroundStatus?.video_recording ? '开启' : '关闭' }}</strong>
+                <small>{{ backgroundStatus?.safe_for_display === false ? '不可展示' : '安全展示' }}</small>
+              </article>
+            </div>
+            <div class="background-scope-form">
+              <select v-model="backgroundScopeType" :disabled="backgroundLoading">
+                <option value="window">窗口</option>
+                <option value="project">项目</option>
+                <option value="game">游戏</option>
+              </select>
+              <input v-model="backgroundScopeLabel" :disabled="backgroundLoading" type="text" placeholder="批准范围名称" />
+              <button type="button" :disabled="!connected || backgroundLoading" @click="configureBackgroundScope">批准</button>
+            </div>
+            <div class="background-list" v-if="backgroundScopes.length">
+              <article v-for="scope in backgroundScopes" :key="scope.id || `${scope.type}-${scope.label}`" class="background-row">
+                <header>
+                  <strong>{{ scope.label || '已批准范围' }}</strong>
+                  <span>{{ backgroundScopeMeta(scope) }}</span>
+                </header>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>暂无批准范围</p>
+            <div class="background-list recent" v-if="backgroundRecentRows.length">
+              <article v-for="row in backgroundRecentRows" :key="`${row.created_at}-${row.scope_id}`" class="background-row">
+                <header>
+                  <strong>{{ backgroundEntryTime(row) }}</strong>
+                  <span>{{ backgroundEntryMeta(row) }}</span>
+                </header>
+                <p>{{ trimText(row.summary || '', 140) }}</p>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>暂无背景摘要</p>
+          </div>
+          <div class="section-title debug-title">
+            <h2>开发者事件</h2>
+            <span>{{ events.length }} 条</span>
+          </div>
+          <div class="debug-list">
+            <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">
+              <span>{{ eventTime(event) }}</span>
+              <strong>{{ event.type }}</strong>
+              <code>{{ skillName(event) || toolName(event) || intentName(event) || event.display_card.status }}</code>
+              <p>{{ event.display_card.summary }}</p>
+            </div>
+          </div>
+        </template>
       </section>
     </section>
 
     <aside class="stage">
       <div class="stage-top">
         <span>Joi Companion</span>
+        <span class="stage-emotion-pill">情绪 {{ activeEmotionStatus.label }} · 立绘 {{ activeEmotionStatus.sprite }}</span>
         <strong>{{ activeTask?.latest.display_card.status || currentMode }}</strong>
       </div>
       <div class="scene-line"></div>
+
+      <div class="memory-authorize-bubble" v-if="topPendingMemory">
+        <div>
+          <strong>待确认记忆</strong>
+          <p>{{ memoryAuthorizeText }}</p>
+        </div>
+        <div class="memory-authorize-actions">
+          <button type="button" @mousedown.stop @click.stop="saveMemoryCandidate(topPendingMemory.id)">记住</button>
+          <button type="button" class="secondary" @mousedown.stop @click.stop="rejectMemoryCandidate(topPendingMemory.id)">忽略</button>
+        </div>
+      </div>
       
       <!-- Mascot Container circles -->
-      <div class="character" @click="handleMascotClick" title="点击召唤微缩面板">
-        <img
-          v-if="characterImageSrc && failedImageSrc !== characterImageSrc"
-          class="character-art"
-          :src="characterImageSrc"
-          alt="Joi Mascot Digital Companion"
-          @load="failedImageSrc = ''"
-          @error="failedImageSrc = characterImageSrc"
-        />
-        <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
-        
-        <!-- Customizable Cosplay Accessories overlays -->
-        <!-- 1. Wizard hat -->
-        <svg class="accessory-item wizard-hat" :style="{ display: equippedAccessories.hat ? 'block' : 'none' }" viewBox="0 0 140 100" fill="none">
-          <path d="M70 10 L40 65 L100 65 Z" fill="#4f46e5"/>
-          <ellipse cx="70" cy="70" rx="60" ry="12" fill="#312e81"/>
-          <path d="M48 50 Q70 45 92 50 L89 56 Q70 51 51 56 Z" fill="#facc15"/>
-          <polygon points="70,18 73,26 81,26 74,31 77,39 70,34 63,39 66,31 59,26 67,26" fill="#facc15"/>
-        </svg>
-        
-        <!-- 2. Pixel glasses -->
-        <svg class="accessory-item glasses" :style="{ display: equippedAccessories.glasses ? 'block' : 'none' }" viewBox="0 0 100 30" fill="none">
-          <rect x="10" y="5" width="30" height="20" rx="3" fill="#111827"/>
-          <rect x="60" y="5" width="30" height="20" rx="3" fill="#111827"/>
-          <rect x="40" y="12" width="20" height="6" fill="#111827"/>
-          <rect x="15" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
-          <rect x="65" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
-        </svg>
-        
-        <!-- 3. Cute bunny ears -->
-        <svg class="accessory-item bunny-ears" :style="{ display: equippedAccessories.ears ? 'block' : 'none' }" viewBox="0 0 130 80" fill="none">
-          <ellipse cx="40" cy="40" rx="14" ry="35" transform="rotate(-15 40 40)" fill="#fbcfe8"/>
-          <ellipse cx="38" cy="40" rx="8" ry="25" transform="rotate(-15 38 40)" fill="#f472b6"/>
-          <ellipse cx="90" cy="40" rx="14" ry="35" transform="rotate(15 90 40)" fill="#fbcfe8"/>
-          <ellipse cx="92" cy="40" rx="8" ry="25" transform="rotate(15 92 40)" fill="#f472b6"/>
-        </svg>
-
+      <div
+        :class="['character', `emotion-${activeExpressionEmotion}`]"
+        :title="isCompactMode ? '拖拽移动，单击输入，双击恢复主界面' : 'Joi Companion'"
+        @mousedown="startMascotDrag"
+        @dragstart.capture.prevent
+        @selectstart.prevent
+        @click.stop="handleMascotClick"
+        @dblclick.stop.prevent="handleMascotDoubleClick"
+      >
+        <div class="character-fit" :style="accessoryFitStyle" @dragstart.capture.prevent @selectstart.prevent>
+          <img
+            v-if="characterImageSrc && failedImageSrc !== characterImageSrc"
+            class="character-art"
+            :src="characterImageSrc"
+            alt="Joi Mascot Digital Companion"
+            draggable="false"
+            @load="failedImageSrc = ''"
+            @error="failedImageSrc = characterImageSrc"
+            @dragstart.prevent
+            @mousedown.prevent
+          />
+          <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
+          
+          <!-- Customizable Cosplay Accessories overlays -->
+          <svg class="accessory-item wizard-hat" :style="{ display: equippedAccessories.hat ? 'block' : 'none' }" viewBox="0 0 140 100" fill="none" draggable="false" aria-hidden="true">
+            <path d="M70 10 L40 65 L100 65 Z" fill="#4f46e5"/>
+            <ellipse cx="70" cy="70" rx="60" ry="12" fill="#312e81"/>
+            <path d="M48 50 Q70 45 92 50 L89 56 Q70 51 51 56 Z" fill="#facc15"/>
+            <polygon points="70,18 73,26 81,26 74,31 77,39 70,34 63,39 66,31 59,26 67,26" fill="#facc15"/>
+          </svg>
+          
+          <svg class="accessory-item glasses" :style="{ display: equippedAccessories.glasses ? 'block' : 'none' }" viewBox="0 0 100 30" fill="none" draggable="false" aria-hidden="true">
+            <rect x="10" y="5" width="30" height="20" rx="3" fill="#111827"/>
+            <rect x="60" y="5" width="30" height="20" rx="3" fill="#111827"/>
+            <rect x="40" y="12" width="20" height="6" fill="#111827"/>
+            <rect x="15" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
+            <rect x="65" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
+          </svg>
+          
+          <svg class="accessory-item bunny-ears" :style="{ display: equippedAccessories.ears ? 'block' : 'none' }" viewBox="0 0 130 80" fill="none" draggable="false" aria-hidden="true">
+            <ellipse cx="40" cy="40" rx="14" ry="35" transform="rotate(-15 40 40)" fill="#fbcfe8"/>
+            <ellipse cx="38" cy="40" rx="8" ry="25" transform="rotate(-15 38 40)" fill="#f472b6"/>
+            <ellipse cx="90" cy="40" rx="14" ry="35" transform="rotate(15 90 40)" fill="#fbcfe8"/>
+            <ellipse cx="92" cy="40" rx="8" ry="25" transform="rotate(15 92 40)" fill="#f472b6"/>
+          </svg>
+        </div>
         <div class="character-shadow"></div>
       </div>
 
@@ -1837,8 +2987,18 @@ onBeforeUnmount(() => {
       <div class="voice-status" v-if="voiceStatusText">{{ voiceStatusText }}</div>
 
       <!-- Floating Comic Speech Bubble (Only compact mode) -->
-      <div class="mini-speech-bubble" :class="{ active: miniSpeechActive && isCompactMode }">
-        {{ latestSpeech }}
+      <div
+        class="mini-speech-bubble"
+        :class="{ active: miniSpeechActive && isCompactMode, actionable: miniBubbleHasActions }"
+        @mousedown.stop
+        @click.stop
+      >
+        <div class="mini-speech-text">{{ miniBubbleText }}</div>
+        <div class="mini-approval-actions" v-if="miniBubbleHasActions">
+          <button type="button" @click="resolveApproval(true)">允许执行</button>
+          <button type="button" class="secondary" @click="requestMiniChange">改需求</button>
+          <button type="button" class="secondary" @click="resolveApproval(false)">停下</button>
+        </div>
       </div>
 
       <!-- Compact Mode Mini Control Dashboard -->
@@ -1848,7 +3008,7 @@ onBeforeUnmount(() => {
             <div class="mini-pulse-dot" :style="{ backgroundColor: connected ? 'var(--color-primary)' : 'var(--color-error)' }"></div>
             <span>{{ connected ? 'Joi online' : 'Core offline' }}</span>
           </div>
-          <span style="color:var(--color-pink); font-size:10px; font-weight:700;">ACTIVE</span>
+          <button type="button" class="mini-restore-btn" title="恢复主界面" @click="toggleCompactMode">还原</button>
         </div>
         <form class="mini-composer" @submit.prevent="submit">
           <button
@@ -1888,6 +3048,12 @@ onBeforeUnmount(() => {
               <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
             </svg>
             <span>任务流</span>
+          </button>
+          <button type="button" class="dock-btn" :class="{ active: activeCabin === 'memory' }" @click="activeCabin = 'memory'">
+            <svg viewBox="0 0 24 24">
+              <path d="M12 3c-2.76 0-5 1.9-5 4.25 0 .55.13 1.08.36 1.56C5.91 9.43 5 10.72 5 12.25c0 1.76 1.22 3.24 2.88 3.67C8.42 17.71 10.05 19 12 19s3.58-1.29 4.12-3.08C17.78 15.49 19 14.01 19 12.25c0-1.53-.91-2.82-2.36-3.44.23-.48.36-1.01.36-1.56C17 4.9 14.76 3 12 3zm-2.5 7.75a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5zm5 0a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5zM12 16.5c-1.4 0-2.55-.83-2.9-2h5.8c-.35 1.17-1.5 2-2.9 2z"/>
+            </svg>
+            <span>记忆舱</span>
           </button>
           <button type="button" class="dock-btn" :class="{ active: activeCabin === 'inspector' }" @click="activeCabin = 'inspector'">
             <svg viewBox="0 0 24 24">
