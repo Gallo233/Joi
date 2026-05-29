@@ -17,6 +17,7 @@ from agent_companion.core.computer_use import (
     target_grounding_audit_events,
 )
 from agent_companion.core.audit_store import AuditStore
+from agent_companion.core.background_context import BackgroundContextStore
 from agent_companion.core.character import CharacterHarness, load_character
 from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
 from agent_companion.core.codex_events import codex_cancel_run_state
@@ -80,6 +81,7 @@ class AgentCompanionApp:
         self.bus = EventBus(self.workspace / "data" / "agent_companion" / "events.jsonl")
         self.audit_store = AuditStore(self.workspace / "data" / "agent_companion" / "audit.jsonl")
         self.bus.subscribe(self.audit_store.record_event)
+        self.background_context = BackgroundContextStore(self.workspace / "data" / "agent_companion" / "background_context.json")
         self.memory = MemoryStore(self.workspace / "data" / "agent_companion" / "memory.sqlite3")
         self._runtime_config = self._load_runtime_config()
         self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config))

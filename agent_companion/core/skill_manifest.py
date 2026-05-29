@@ -188,12 +188,21 @@ def _watch_skill() -> NativeSkillManifest:
         category="watch",
         description="Session-scoped visual and transcript context for current media or page.",
         tools=("observe.screen", "watch.recall"),
-        rpc_methods=("watch.loop.start", "watch.loop.stop", "watch.loop.configure", "watch.loop.refresh", "watch.loop.status"),
+        rpc_methods=(
+            "watch.loop.start",
+            "watch.loop.stop",
+            "watch.loop.configure",
+            "watch.loop.refresh",
+            "watch.loop.status",
+            "background.status",
+            "background.configure",
+            "background.clear",
+        ),
         input_schema=_object_schema("query", "transcript_source", "sample_count"),
-        result_schema=_tool_result_schema("watch_context", "transcript", "model_usage"),
+        result_schema=_tool_result_schema("watch_context", "transcript", "model_usage", "background"),
         permission_level="low",
         state_policy="session_window",
-        notes=("user_started_loop", "no_video_recording_by_default"),
+        notes=("user_started_loop", "approved_background_scopes", "no_video_recording_by_default"),
     )
 
 

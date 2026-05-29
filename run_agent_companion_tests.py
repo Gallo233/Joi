@@ -17,6 +17,7 @@ import yaml
 
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.audit_store import AUDIT_SCHEMA_VERSION, AuditStore
+from agent_companion.core.background_context import BACKGROUND_CONTEXT_VERSION, BackgroundContextStore
 from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, ComputerAction, ComputerObservation, ComputerUseResult, computer_action_audit_event, verify_post_action
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouteConfig, ModelRouter, load_app_config
 from agent_companion.core.llm_planner import plan_from_llm_payload
@@ -1851,6 +1852,27 @@ def main() -> int:
     finally:
         shutil.rmtree(audit_tmpdir, ignore_errors=True)
 
+    background_tmpdir = tempfile.mkdtemp()
+    try:
+        background_path = Path(background_tmpdir) / "background_context.json"
+        background_store = BackgroundContextStore(background_path)
+        background_config = background_store.configure(enabled=True, scope_type="project", label=r"C:\secret\joi")
+        background_state = background_config["background"]
+        assert_true(background_config["ok"] and background_state["enabled"] and background_state["active"], "background context should enable only after an approved scope")
+        assert_true(background_state["active_scope"]["type"] == "project" and background_state["active_scope"]["label"] == "approved_project", "background scope labels should not expose local project paths")
+        background_record = background_store.record_summary("这段视频正在讨论猫猫实验和观众弹幕。", source="watch_loop", visual_status="ok", transcript_source="system_audio")
+        assert_true(background_record["ok"] and background_record["background"]["recent_count"] == 1, "background context should store summaries for approved scopes")
+        cleared_background = background_store.clear_context()["background"]
+        assert_true(cleared_background["recent_count"] == 0 and cleared_background["scope_count"] == 1, "background clear should remove summaries without deleting approved scopes")
+        disabled_background = background_store.configure(enabled=False)["background"]
+        blocked_background = background_store.record_summary("不会记录", source="watch_loop")
+        assert_true(disabled_background["enabled"] is False and not blocked_background["ok"] and blocked_background["error"] == "background_disabled", "disabled background context should reject new summaries")
+        background_text = background_path.read_text(encoding="utf-8")
+        forbidden_background_fragments = ["C:\\", "secret", ".png", "http", "sk-", "approval-", "task-"]
+        assert_true(all(fragment not in background_text for fragment in forbidden_background_fragments), "background context store leaked private paths, ids, or secrets")
+    finally:
+        shutil.rmtree(background_tmpdir, ignore_errors=True)
+
     changed_verification = verify_post_action(
         _fake_computer_observation(workspace, title="Before", ocr_text=["登录"]),
         _fake_computer_observation(workspace, title="After", ocr_text=["仪表盘"]),
@@ -2766,6 +2788,8 @@ asr:
         )
     )
     try:
+        background_loop_config = watch_loop_bridge.background_configure_command({"enabled": True, "scope_type": "window", "label": "Bilibili Video"})
+        assert_true(background_loop_config["ok"] and background_loop_config["background"]["active"], "background context should accept an approved watch window scope")
         loop_start = watch_loop_bridge.watch_loop_start_command({"query": "陪我看这个视频", "interval_seconds": 60, "sample_count": 2, "sample_interval_ms": 0})
         loop_state = loop_start["watch_loop"]
         assert_true(loop_state["active"] is True and loop_state["iterations"] >= 1, "watch loop start should capture immediately")
@@ -2774,8 +2798,13 @@ asr:
         assert_true("这一条是小猫发的" in " ".join(loop_state["rolling_transcript"]) and loop_state["rolling_summary"], "watch loop should expose rolling transcript memory")
         assert_true(watch_loop_summarizer.sequence_calls and "连续画面显示一只猫" in loop_state["last_visual_summary"], "watch loop first tick should capture a low-frequency visual summary")
         assert_true(loop_state["visual_status"] == "ok", "watch loop should expose visual summary status")
+        background_after_tick = watch_loop_bridge.background_status_command()["background"]
+        assert_true(background_after_tick["recent_count"] >= 1 and not background_after_tick["video_recording"], "watch loop should record only approved background summaries, not video")
+        cleared_loop_background = watch_loop_bridge.background_clear_command()["background"]
+        assert_true(cleared_loop_background["recent_count"] == 0 and cleared_loop_background["scope_count"] == 1, "background clear RPC should keep approved scopes while clearing summaries")
         loop_events = watch_loop_bridge.app.bus.drain()
         assert_true(any(event.agent_state.get("tool") == "watch.loop" for event in loop_events), "watch loop should emit status events without task cards")
+        assert_true(any(event.agent_state.get("tool") == "background.context" for event in loop_events), "background configure/clear should emit auditable background events")
         loop_config = watch_loop_bridge.watch_loop_configure_command({"transcript_source": "ocr_subtitle", "proactive_enabled": False, "commentary_interval_seconds": 60, "vision_interval_ticks": 3})["watch_loop"]
         assert_true(loop_config["transcript_source"] == "ocr_subtitle" and loop_config["proactive_enabled"] is False, "watch loop should hot-update transcript source and proactive setting")
         assert_true(loop_config["commentary_interval_seconds"] == 60, "watch loop should expose proactive commentary interval")
@@ -3132,6 +3161,7 @@ asr:
     assert_true("server_url" not in ready_payload["tts"] and "gpt_sovits_work_path" not in ready_payload["tts"], "TTS status should not expose paths or endpoints")
     assert_true(ready_payload["runtime"]["read_only"] and ready_payload["runtime"]["safe_for_display"], "Core ready payload should expose safe read-only runtime status")
     assert_true(ready_payload["audit"]["version"] == AUDIT_SCHEMA_VERSION and ready_payload["audit"]["safe_for_display"], "Core ready payload should expose safe audit status")
+    assert_true(ready_payload["background"]["version"] == BACKGROUND_CONTEXT_VERSION and ready_payload["background"]["safe_for_display"] and ready_payload["background"]["video_recording"] is False, "Core ready payload should expose safe background context status")
     assert_true(ready_payload["skills"]["version"] == SKILL_MANIFEST_VERSION and ready_payload["skills"]["safe_for_display"], "Core ready payload should expose safe native skill manifest")
     skill_ids = {row["id"] for row in ready_payload["skills"]["skills"]}
     assert_true(
@@ -3140,6 +3170,7 @@ asr:
     )
     skill_rows = {row["id"]: row for row in ready_payload["skills"]["skills"]}
     assert_true(skill_rows["joi.computer_use"]["permission_level"] == "medium" and "computer.click" in skill_rows["joi.computer_use"]["tools"], "Computer Use skill should be medium-risk and tool-bound")
+    assert_true("background.configure" in skill_rows["joi.watch"]["rpc_methods"] and "background.clear" in skill_rows["joi.watch"]["rpc_methods"], "Watch skill should include constrained background context controls")
     assert_true(skill_rows["joi.voice_input"]["configured"] and skill_rows["joi.voice_input"]["local_capability"] == "ready", "Voice input skill should mirror ASR runtime readiness")
     assert_true(skill_rows["joi.ok_ww"]["supports_dry_run"], "OK-WW skill should advertise dry-run first")
     assert_true("runtime.update_config" in skill_rows["joi.runtime_config"]["tools"], "Runtime config should be bound to a native skill")
@@ -3382,6 +3413,7 @@ llm:
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
     assert_true("skills.list" in shell_api_source and "skillsList()" in shell_api_source and "audit.recent" in shell_api_source and "auditRecent" in shell_api_source, "Shell API should expose native skill manifest and audit RPCs")
+    assert_true("background.status" in shell_api_source and "background.configure" in shell_api_source and "background.clear" in shell_api_source, "Shell API should expose constrained background context RPCs")
     assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source and "watch.loop.configure" in shell_api_source and "watch.loop.refresh" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
     assert_true("memory.status" in shell_api_source and "memory.recall" in shell_api_source and "memory.browse_vault" in shell_api_source and "memory.save_candidate" in shell_api_source and "memory.reject_candidate" in shell_api_source and "memory.set_enabled" in shell_api_source and "memory.delete" in shell_api_source and "memory.clear" in shell_api_source, "Shell API should expose memory authorization and recall RPC methods")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
@@ -3592,14 +3624,18 @@ llm:
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
     assert_true("watch.loop.start" in server_source and "watch_loop_start_command" in server_source and "watch_loop_configure_command" in server_source and "watch_loop_refresh_command" in server_source and "watch_loop" in server_source, "Core should expose realtime watch loop RPC and ready state")
+    assert_true("background_status_command" in server_source and "background_configure_command" in server_source and "background_clear_command" in server_source and '"background.configure"' in server_source, "Core should expose constrained background context controls")
     assert_true("_watch_loop_should_summarize" in server_source and "skip_summary=not run_vision_summary" in server_source, "Core watch loop should run low-frequency visual summaries")
     assert_true("force_visual_summary" in server_source and '"watch.loop.refresh"' in server_source, "Core watch loop should expose forced visual refresh")
     assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
     skill_manifest_source = (workspace / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
     assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "KNOWN_SKILL_IDS" in skill_manifest_source and "_apply_skill_setting" in skill_manifest_source and "normalize_skill_id" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
+    assert_true('"background.configure"' in skill_manifest_source and '"background.clear"' in skill_manifest_source, "Watch native skill should advertise background context controls")
     assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source and "skill_settings_payload" in server_source and "audit_recent_command" in server_source and '"audit.recent"' in server_source, "Core should expose P8 native skill manifest and P9 audit RPCs")
     audit_store_source = (workspace / "agent_companion" / "core" / "audit_store.py").read_text(encoding="utf-8")
     assert_true("AUDIT_SCHEMA_VERSION" in audit_store_source and "AuditStore" in audit_store_source and "record_event" in audit_store_source and "audit_record_from_event" in audit_store_source and "safe_for_display" in audit_store_source, "Core should persist sanitized P9 audit records")
+    background_context_source = (workspace / "agent_companion" / "core" / "background_context.py").read_text(encoding="utf-8")
+    assert_true("BACKGROUND_CONTEXT_VERSION" in background_context_source and "BackgroundContextStore" in background_context_source and "record_summary" in background_context_source and "video_recording" in background_context_source and "summaries_only" in background_context_source, "Core should keep constrained background context as approved summaries only")
     runtime_config_writer_source = (workspace / "agent_companion" / "core" / "runtime_config_writer.py").read_text(encoding="utf-8")
     policy_source = (workspace / "agent_companion" / "core" / "policy.py").read_text(encoding="utf-8")
     assert_true("_prepare_skill_update" in runtime_config_writer_source and "unknown_skill" in runtime_config_writer_source and "protected_skill" in runtime_config_writer_source and "joi.local_files" not in runtime_config_writer_source, "Runtime config writer should support dynamic native skill toggles without hardcoding path-sensitive ids")

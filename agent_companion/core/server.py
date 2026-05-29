@@ -129,6 +129,17 @@ class JsonRpcBridge:
             if method == "watch.loop.status":
                 await websocket.send(self._result(request_id, self.watch_loop_status_command()))
                 return
+            if method == "background.status":
+                await websocket.send(self._result(request_id, self.background_status_command()))
+                return
+            if method == "background.configure":
+                result = await asyncio.to_thread(self.background_configure_command, params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "background.clear":
+                result = await asyncio.to_thread(self.background_clear_command)
+                await websocket.send(self._result(request_id, result))
+                return
             if method == "skills.list":
                 await websocket.send(self._result(request_id, self.skill_manifest_command()))
                 return
@@ -332,6 +343,30 @@ class JsonRpcBridge:
     def watch_loop_status_command(self) -> dict[str, Any]:
         return {"ok": True, "watch_loop": self.watch_loop.snapshot().to_agent_state()}
 
+    def background_status_command(self) -> dict[str, Any]:
+        return {"ok": True, "background": self.app.background_context.status()}
+
+    def background_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        enabled = params.get("enabled") if isinstance(params.get("enabled"), bool) else None
+        result = self.app.background_context.configure(
+            enabled=enabled,
+            scope_type=str(params.get("scope_type") or ""),
+            label=str(params.get("label") or ""),
+            active_scope_id=str(params.get("active_scope_id") or ""),
+        )
+        self._emit_background_audit(
+            "背景上下文设置已更新。" if result.get("ok") else "背景上下文设置没有更新。",
+            result.get("background", {}),
+            status="success" if result.get("ok") else "failed",
+        )
+        return result
+
+    def background_clear_command(self) -> dict[str, Any]:
+        result = self.app.background_context.clear_context()
+        self._emit_background_audit("背景上下文摘要已清空。", result.get("background", {}), status="info")
+        return result
+
     def memory_status_command(self) -> dict[str, Any]:
         return {"ok": True, "memory": self.app.memory.status()}
 
@@ -472,7 +507,7 @@ class JsonRpcBridge:
         visual_status = str(state.get("model_status") or "")
         rolling = self.app.watch_session.transcript_state()
         comment = self.watch_commentary.maybe_comment(rolling, min_interval_seconds=options.commentary_interval_seconds) if options.proactive_enabled else None
-        return WatchLoopTick(
+        tick = WatchLoopTick(
             ok=result.ok,
             summary=result.display_card.summary,
             transcript_text=transcript_text,
@@ -491,6 +526,13 @@ class JsonRpcBridge:
             visual_status=visual_status,
             error=error,
         )
+        self.app.background_context.record_summary(
+            tick.rolling_summary or tick.visual_summary or tick.summary,
+            source="watch_loop",
+            visual_status=tick.visual_status,
+            transcript_source=tick.transcript_source,
+        )
+        return tick
 
     def _resolve_artifact_path(self, artifact: str) -> Path | None:
         value = (artifact or "").strip()
@@ -505,6 +547,24 @@ class JsonRpcBridge:
         except Exception:
             return None
         return resolved
+
+    def _emit_background_audit(self, summary: str, background: dict[str, Any], *, status: str = "info") -> None:
+        self.app.bus.emit(
+            AgentEvent(
+                EventType.AUDIT_EVENT,
+                f"background-{uuid.uuid4().hex[:8]}",
+                DisplayCard("背景伴随", summary, status=status),
+                safe_voice_line("", fallback=""),
+                {
+                    "tool": "background.context",
+                    "skill_id": "joi.watch",
+                    "skill_category": "watch",
+                    "skill_permission_level": "low",
+                    "skill_audit": "background_context_audit",
+                    "background_context": background,
+                },
+            )
+        )
 
     @staticmethod
     def _voice_audio_data_url(path_text: str) -> str:
@@ -594,6 +654,7 @@ class JsonRpcBridge:
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
             "memory": memory_status,
             "audit": self.app.audit_store.status(),
+            "background": self.app.background_context.status(),
             "skills": build_native_skill_manifest(
                 self.workspace,
                 asr_state=self.asr_state,

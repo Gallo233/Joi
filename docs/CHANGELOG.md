@@ -78,6 +78,7 @@
 - Bound native skill metadata to plan, approval, tool result, task lifecycle, and Computer Use audit events so runtime execution can be traced back to a stable skill id and permission policy.
 - Added safe native skill enable switches through runtime config, with the shell submitting skill changes and Core fail-closed policy blocking disabled skill execution before approval or tool calls.
 - Added a P9 persistent audit store for approval, tool, task, and policy-block events, exposed through safe audit status and `audit.recent` without storing raw task ids, approval ids, paths, artifacts, or secrets.
+- Added constrained background context controls for approved window/project/game scopes, storing summaries only through `background.status`, `background.configure`, and `background.clear`.
 
 ## 2026-05-14
 

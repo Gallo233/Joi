@@ -216,6 +216,38 @@ export interface MemoryVault {
   sections?: MemoryVaultSection[]
 }
 
+export interface BackgroundContextScope {
+  id?: string
+  type?: 'window' | 'project' | 'game' | string
+  label?: string
+  approved_at?: number
+  enabled?: boolean
+}
+
+export interface BackgroundContextEntry {
+  created_at?: number
+  scope_id?: string
+  scope_type?: string
+  source?: string
+  summary?: string
+  visual_status?: string
+  transcript_source?: string
+}
+
+export interface BackgroundContextStatus {
+  version?: string
+  safe_for_display?: boolean
+  enabled?: boolean
+  active?: boolean
+  active_scope?: BackgroundContextScope
+  approved_scopes?: BackgroundContextScope[]
+  scope_count?: number
+  recent_context?: BackgroundContextEntry[]
+  recent_count?: number
+  retention?: string
+  video_recording?: boolean
+}
+
 export interface NativeSkill {
   id: string
   label: string
@@ -275,6 +307,7 @@ export interface CoreReadyPayload {
     record_count?: number
     storage?: string
   }
+  background?: BackgroundContextStatus
   skills?: NativeSkillManifest
   runtime_settings?: {
     asr?: {

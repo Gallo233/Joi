@@ -143,6 +143,7 @@ Status: in progress
 - Persist audit records for tool actions and approvals.
 - Persistent audit V1 now records approval, tool, task, and policy-block lifecycle rows to a local sanitized JSONL and exposes safe status plus `audit.recent`.
 - Add constrained background observation only for user-approved windows, projects, and games.
+- Background context controls now require an approved window/project/game scope and store summary-only context, with no video recording by default.
 - Summarize approved context without recording video by default.
 - Let users inspect, clear, or disable background context.
 

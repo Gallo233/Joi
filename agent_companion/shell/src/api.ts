@@ -104,6 +104,18 @@ export class CoreClient {
     return this.send('watch.loop.status', {})
   }
 
+  backgroundStatus() {
+    return this.send('background.status', {})
+  }
+
+  backgroundConfigure(params: Record<string, unknown> = {}) {
+    return this.send('background.configure', params)
+  }
+
+  backgroundClear() {
+    return this.send('background.clear', {})
+  }
+
   skillsList() {
     return this.send('skills.list', {})
   }
