@@ -70,6 +70,14 @@ Packaging metadata smoke:
 .\.venv\Scripts\python.exe tools\packaging_smoke.py
 ```
 
+Portable release zip:
+
+```powershell
+npm run tauri -- build
+cd ..\..
+.\.venv\Scripts\python.exe tools\package_windows_release.py
+```
+
 ## 5. Launch
 
 ```powershell

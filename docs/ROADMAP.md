@@ -153,6 +153,7 @@ Status: in progress
 Status: in progress
 
 - Windows-first release build.
+- Portable Windows release packager now creates a safe zip from allowlisted runtime files and the release shell.
 - First-run setup checklist.
 - First-run doctor now checks Python packages, optional OCR/audio packages, frontend toolchain, shell build state, `config.yaml`, Tesseract, and Core port readiness.
 - Packaging smoke now validates version alignment, Tauri shell metadata, window permissions, and launcher wiring.

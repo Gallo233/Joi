@@ -95,6 +95,15 @@ Run core tests:
 .\.venv\Scripts\python.exe tools\packaging_smoke.py
 ```
 
+Build a Windows portable release zip after the Tauri release shell exists:
+
+```powershell
+cd agent_companion\shell
+npm run tauri -- build
+cd ..\..
+.\.venv\Scripts\python.exe tools\package_windows_release.py
+```
+
 Run a single core request:
 
 ```powershell

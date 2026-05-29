@@ -82,6 +82,7 @@
 - Exposed background context inspection in the shell developer panel, including enable/disable, scope approval, recent summary review, and summary clearing controls.
 - Added a Windows first-run doctor and setup checklist for Python, frontend tooling, config, OCR, audio transcription, shell build state, and Core port diagnostics.
 - Added a packaging metadata smoke check and Windows GitHub Actions workflow for Python tests, frontend build, and Tauri debug no-bundle build.
+- Added a Windows portable release packager that zips only allowlisted runtime files plus the release shell and excludes local config, secrets, logs, data, dependency folders, and build caches.
 
 ## 2026-05-14
 

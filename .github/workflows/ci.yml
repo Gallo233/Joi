@@ -42,6 +42,8 @@ jobs:
         run: npm ci
       - name: Run packaging metadata smoke
         run: python tools/packaging_smoke.py
+      - name: Run release packager dry-run
+        run: python tools/package_windows_release.py --dry-run --allow-missing-exe
       - name: Build frontend
         working-directory: agent_companion/shell
         run: npm run build

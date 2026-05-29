@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 import yaml
@@ -54,6 +55,7 @@ from agent_companion.core.watch_commentary import WatchCommentaryPlanner
 from agent_companion.core.watch_transcript import TranscriptResult, TranscriptSegment
 from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, run_eval as run_visual_detector_eval, run_local_semantic_calibration
 from tools.joi_doctor import build_doctor_report, doctor_exit_code
+from tools.package_windows_release import build_windows_release_package, package_exit_code
 from tools.packaging_smoke import build_packaging_smoke_report, packaging_smoke_exit_code
 
 
@@ -2004,6 +2006,7 @@ edition = "2021"
         (packaging_root / "start_joi.bat").write_text("powershell -File tools\\start_joi.ps1 %*", encoding="utf-8")
         (packaging_root / "tools" / "start_joi.ps1").write_text("-Doctor\njoi_doctor.py\njoi_core.err.log\njoi_core.out.log", encoding="utf-8")
         (packaging_root / "tools" / "joi_doctor.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "package_windows_release.py").write_text("", encoding="utf-8")
         packaging_report = build_packaging_smoke_report(packaging_root)
         assert_true(packaging_report["status"] == "ok" and packaging_smoke_exit_code(packaging_report) == 0, "packaging smoke should pass valid release metadata")
         (tauri_dir / "tauri.conf.json").write_text(
@@ -2014,6 +2017,83 @@ edition = "2021"
         assert_true(broken_packaging_report["status"] == "fail" and packaging_smoke_exit_code(broken_packaging_report) == 1 and broken_packaging_report["next_actions"], "packaging smoke should fail closed on release metadata drift")
     finally:
         shutil.rmtree(packaging_tmpdir, ignore_errors=True)
+
+    release_tmpdir = tempfile.mkdtemp()
+    try:
+        release_root = Path(release_tmpdir)
+        for relative in (
+            "README.md",
+            "config.example.yaml",
+            "secrets.example.yaml",
+            "requirements.txt",
+            "requirements-accessibility.txt",
+            "requirements-audio.txt",
+            "requirements-ocr.txt",
+            "start_joi.bat",
+            "agent_companion/README.md",
+            "agent_companion/shell/index.html",
+            "agent_companion/shell/package.json",
+            "agent_companion/shell/package-lock.json",
+            "agent_companion/shell/tsconfig.json",
+            "agent_companion/shell/vite.config.ts",
+            "agent_companion/shell/src-tauri/build.rs",
+            "agent_companion/shell/src-tauri/Cargo.lock",
+            "agent_companion/shell/src-tauri/Cargo.toml",
+            "agent_companion/shell/src-tauri/tauri.conf.json",
+            "run_agent_companion_tests.py",
+            "tools/joi_doctor.py",
+            "tools/package_windows_release.py",
+            "tools/packaging_smoke.py",
+            "tools/smoke_ws_bridge.py",
+            "tools/start_joi.ps1",
+        ):
+            target = release_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if relative.endswith("tauri.conf.json"):
+                target.write_text(json.dumps({"version": "0.1.0"}), encoding="utf-8")
+            else:
+                target.write_text("release input", encoding="utf-8")
+        for relative in (
+            "agent_companion/config/default_character.yaml",
+            "agent_companion/core/app.py",
+            "agent_companion/docs/architecture.md",
+            "docs/WINDOWS_FIRST_RUN.md",
+            "agent_companion/shell/src/App.vue",
+            "agent_companion/shell/src-tauri/capabilities/default.json",
+            "agent_companion/shell/src-tauri/icons/icon.png",
+            "agent_companion/shell/src-tauri/src/main.rs",
+        ):
+            target = release_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("release input", encoding="utf-8")
+        release_exe = release_root / "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
+        release_exe.parent.mkdir(parents=True, exist_ok=True)
+        release_exe.write_bytes(b"fake exe")
+        for forbidden in (
+            "config.yaml",
+            "secrets.yaml",
+            "data/local.db",
+            "logs/joi_core.err.log",
+            "agent_companion/shell/node_modules/private.txt",
+            "agent_companion/shell/src-tauri/target/release/private.pdb",
+        ):
+            target = release_root / forbidden
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("private", encoding="utf-8")
+        release_report = build_windows_release_package(release_root, output_dir=release_root / "out")
+        assert_true(release_report["status"] == "ok" and package_exit_code(release_report) == 0 and release_report["sha256"], "Windows release packager should create a portable zip")
+        zip_path = release_root / release_report["zip"]
+        with zipfile.ZipFile(zip_path) as archive:
+            names = archive.namelist()
+        names_text = "\n".join(names)
+        assert_true(any(name.endswith("agent_companion/shell/src-tauri/target/release/joi-shell.exe") for name in names), "Release zip should include the built shell exe")
+        assert_true("RELEASE_MANIFEST.json" in names_text, "Release zip should include a safe manifest")
+        assert_true(not any(fragment in names_text for fragment in ["config.yaml", "secrets.yaml", "node_modules", "logs/", "data/", "private.pdb"]), "Release zip leaked local config, runtime data, dependency folders, or debug artifacts")
+        release_exe.unlink()
+        missing_exe_report = build_windows_release_package(release_root, output_dir=release_root / "out3", require_exe=True)
+        assert_true(missing_exe_report["status"] == "fail" and "release_exe_missing" in missing_exe_report["errors"], "Release packager should require the release shell by default")
+    finally:
+        shutil.rmtree(release_tmpdir, ignore_errors=True)
 
     changed_verification = verify_post_action(
         _fake_computer_observation(workspace, title="Before", ocr_text=["登录"]),
@@ -3832,15 +3912,17 @@ llm:
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
     assert_true("background-status-grid" in shell_style_source and "background-scope-form" in shell_style_source and "background-row" in shell_style_source, "Shell styles should include background context settings and summary rows")
     doctor_source = (workspace / "tools" / "joi_doctor.py").read_text(encoding="utf-8")
+    release_packager_source = (workspace / "tools" / "package_windows_release.py").read_text(encoding="utf-8")
     packaging_smoke_source = (workspace / "tools" / "packaging_smoke.py").read_text(encoding="utf-8")
     ci_workflow_source = (workspace / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     first_run_doc_source = (workspace / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
     start_joi_source = (workspace / "tools" / "start_joi.ps1").read_text(encoding="utf-8")
     assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
+    assert_true("build_windows_release_package" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source, "P10 release packager should create a safe portable Windows zip")
     assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source, "P10 packaging smoke should validate release metadata and Tauri permissions")
-    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source, "CI should cover Python tests, frontend build, packaging smoke, and Tauri debug smoke build")
+    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source and "tools/package_windows_release.py --dry-run" in ci_workflow_source, "CI should cover Python tests, frontend build, packaging smoke, release dry-run, and Tauri debug smoke build")
     assert_true("-Doctor" in start_joi_source and "joi_doctor.py" in start_joi_source, "Windows launcher should expose a doctor mode")
-    assert_true("start_joi.bat -Doctor" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source, "Windows first-run docs should cover doctor, OCR, and audio setup")
+    assert_true("start_joi.bat -Doctor" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source and "package_windows_release.py" in first_run_doc_source, "Windows first-run docs should cover doctor, OCR, audio, and release packaging setup")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")
