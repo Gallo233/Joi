@@ -74,6 +74,7 @@
 - Added semantic target evidence cards: candidates now expose sanitized source/confidence/ambiguity/actionability/capture-trust summaries, the shell renders evidence chips plus confirmation reasons, and Computer Use audit records candidate evidence without raw bbox/path/id details.
 - Added a P4 closeout experience harness with four real-task scripts and a local-only sanitized report tool for browser target clicks, Watch Together, canvas/video controls, and game/HUD dry-run flows.
 - Added P7 stable model routes for fast chat, reasoning, vision, code, summarization, and voice style usage, with sanitized runtime status and per-call model usage metadata.
+- Added P8 native skill manifest V1 for Joi's built-in Codex, Browser, Computer Use, Watch, Memory, ASR, TTS, and OK-WW capabilities, exposed through `core.ready`, `skills.list`, and a settings skill panel.
 
 ## 2026-05-14
 

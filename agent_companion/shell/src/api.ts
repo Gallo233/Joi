@@ -104,6 +104,10 @@ export class CoreClient {
     return this.send('watch.loop.status', {})
   }
 
+  skillsList() {
+    return this.send('skills.list', {})
+  }
+
   memoryStatus() {
     return this.send('memory.status', {})
   }

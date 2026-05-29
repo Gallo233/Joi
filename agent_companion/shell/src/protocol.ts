@@ -215,6 +215,32 @@ export interface MemoryVault {
   sections?: MemoryVaultSection[]
 }
 
+export interface NativeSkill {
+  id: string
+  label: string
+  category?: string
+  description?: string
+  tools?: string[]
+  rpc_methods?: string[]
+  input_schema?: Record<string, unknown>
+  result_schema?: Record<string, unknown>
+  permission_level?: 'low' | 'medium' | 'high' | string
+  supports_dry_run?: boolean
+  local_capability?: 'ready' | 'off' | 'unavailable' | 'degraded' | string
+  enabled?: boolean
+  configured?: boolean
+  state_policy?: string
+  audit?: string
+  notes?: string[]
+}
+
+export interface NativeSkillManifest {
+  version?: string
+  safe_for_display?: boolean
+  workspace_bound?: boolean
+  skills?: NativeSkill[]
+}
+
 export interface CoreReadyPayload {
   workspace: string
   asr?: {
@@ -242,6 +268,7 @@ export interface CoreReadyPayload {
   }
   watch_loop?: WatchLoopStatus
   memory?: MemoryStatus
+  skills?: NativeSkillManifest
   runtime_settings?: {
     asr?: {
       enabled?: boolean

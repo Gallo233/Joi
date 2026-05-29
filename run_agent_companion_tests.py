@@ -27,6 +27,7 @@ from agent_companion.core.runtime_config_writer import preview_runtime_config_up
 from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.schemas import AgentEvent, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.server import JsonRpcBridge
+from agent_companion.core.skill_manifest import SKILL_MANIFEST_VERSION, build_native_skill_manifest
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
 from agent_companion.core.tool_compression import compress_tool_result
 from agent_companion.core.tools.browser import BrowserTool
@@ -3048,6 +3049,30 @@ asr:
     assert_true("tts" in ready_payload and "provider" in ready_payload["tts"], "Core ready payload should expose safe TTS status")
     assert_true("server_url" not in ready_payload["tts"] and "gpt_sovits_work_path" not in ready_payload["tts"], "TTS status should not expose paths or endpoints")
     assert_true(ready_payload["runtime"]["read_only"] and ready_payload["runtime"]["safe_for_display"], "Core ready payload should expose safe read-only runtime status")
+    assert_true(ready_payload["skills"]["version"] == SKILL_MANIFEST_VERSION and ready_payload["skills"]["safe_for_display"], "Core ready payload should expose safe native skill manifest")
+    skill_ids = {row["id"] for row in ready_payload["skills"]["skills"]}
+    assert_true(
+        {"joi.codex", "joi.browser", "joi.computer_use", "joi.memory", "joi.voice_input", "joi.voice_output", "joi.ok_ww"}.issubset(skill_ids),
+        "P8 skill manifest should include native Codex, Browser/Computer Use, Memory, ASR/TTS, and OK-WW skills",
+    )
+    skill_rows = {row["id"]: row for row in ready_payload["skills"]["skills"]}
+    assert_true(skill_rows["joi.computer_use"]["permission_level"] == "medium" and "computer.click" in skill_rows["joi.computer_use"]["tools"], "Computer Use skill should be medium-risk and tool-bound")
+    assert_true(skill_rows["joi.voice_input"]["configured"] and skill_rows["joi.voice_input"]["local_capability"] == "ready", "Voice input skill should mirror ASR runtime readiness")
+    assert_true(skill_rows["joi.ok_ww"]["supports_dry_run"], "OK-WW skill should advertise dry-run first")
+    skill_manifest_payload = ready_bridge.skill_manifest_command()
+    assert_true(skill_manifest_payload["ok"] and skill_manifest_payload["skills"]["version"] == SKILL_MANIFEST_VERSION, "skills.list RPC should return the native skill manifest")
+    direct_skill_rows = {
+        row["id"]: row
+        for row in build_native_skill_manifest(
+            workspace,
+            asr_state=AsrRuntimeState(False, False, "none", error="asr_unconfigured"),
+            tts_status={"enabled": False, "configured": False, "provider": "none"},
+            memory_status={"enabled": False},
+        )["skills"]
+    }
+    assert_true(direct_skill_rows["joi.voice_input"]["local_capability"] == "off" and direct_skill_rows["joi.memory"]["enabled"] is False, "Skill manifest should mirror disabled ASR and memory states")
+    skill_payload_text = str(ready_payload["skills"])
+    assert_true(all(fragment not in skill_payload_text for fragment in ["sk-", "api_key", "base_url", "/Users/", "C:\\", "secret"]), "Skill manifest leaked secrets, endpoints, or private paths")
     runtime_provider_names = {row["name"] for row in ready_payload["runtime"]["providers"]}
     assert_true(
         {"asr", "tts", "ocr", "fast", "reasoning", "vision", "code", "summarize", "voice_style", "computer_use", "audit_verification"}.issubset(runtime_provider_names),
@@ -3220,6 +3245,7 @@ llm:
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
+    assert_true("skills.list" in shell_api_source and "skillsList()" in shell_api_source, "Shell API should expose native skill manifest RPC")
     assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source and "watch.loop.configure" in shell_api_source and "watch.loop.refresh" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
     assert_true("memory.status" in shell_api_source and "memory.recall" in shell_api_source and "memory.browse_vault" in shell_api_source and "memory.save_candidate" in shell_api_source and "memory.reject_candidate" in shell_api_source and "memory.set_enabled" in shell_api_source and "memory.delete" in shell_api_source and "memory.clear" in shell_api_source, "Shell API should expose memory authorization and recall RPC methods")
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
@@ -3433,6 +3459,9 @@ llm:
     assert_true("_watch_loop_should_summarize" in server_source and "skip_summary=not run_vision_summary" in server_source, "Core watch loop should run low-frequency visual summaries")
     assert_true("force_visual_summary" in server_source and '"watch.loop.refresh"' in server_source, "Core watch loop should expose forced visual refresh")
     assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
+    skill_manifest_source = (workspace / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
+    assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests")
+    assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source, "Core should expose P8 native skill manifest RPC and ready payload")
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
@@ -3470,11 +3499,13 @@ llm:
     assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
     assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory candidate controls and stage authorization bubble")
     assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
+    assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source, "Shell should expose P8 native skill manifest status")
     assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with recall search and vault preview")
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
     assert_true("_step_with_memory_context" in app_source and "compress_tool_result" in app_source and '"joi_juice"' in app_source, "App should inject approved memory context and attach JoiJuice channels")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
+    assert_true("skill-grid" in shell_style_source and "skill-card" in shell_style_source, "Shell styles should include native skill manifest cards")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
 
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))

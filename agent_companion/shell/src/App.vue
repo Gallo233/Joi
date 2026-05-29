@@ -3,7 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -18,10 +18,11 @@ const previewArtifactEvent = ref<AgentEvent | null>(null)
 const activeCabin = ref<'workspace' | 'chat' | 'memory' | 'inspector'>('workspace')
 const artifactDialog = ref<HTMLDialogElement | null>(null)
 const memoryStatus = ref<MemoryStatus | null>(null)
-type SettingsTabId = 'runtime' | 'memory' | 'appearance' | 'developer'
+type SettingsTabId = 'runtime' | 'skills' | 'memory' | 'appearance' | 'developer'
 const activeSettingsTab = ref<SettingsTabId>('runtime')
 const settingsTabs: Array<{ id: SettingsTabId; label: string; icon: string }> = [
   { id: 'runtime', label: '运行', icon: '⚡' },
+  { id: 'skills', label: '技能', icon: '▣' },
   { id: 'memory', label: '记忆', icon: '🧠' },
   { id: 'appearance', label: '外观', icon: '🎨' },
   { id: 'developer', label: '审计', icon: '🧾' },
@@ -30,6 +31,8 @@ const memoryQuery = ref('')
 const memorySearchResults = ref<MemoryRecord[]>([])
 const memorySearchLoading = ref(false)
 const memoryVault = ref<MemoryVault | null>(null)
+const skillManifest = ref<NativeSkillManifest | null>(null)
+const skillRefreshLoading = ref(false)
 
 const isCompactMode = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
@@ -264,6 +267,7 @@ const client = new CoreClient({
   onReady: (payload) => {
     ready.value = payload
     memoryStatus.value = payload.memory || memoryStatus.value
+    skillManifest.value = payload.skills || skillManifest.value
     syncRuntimeDraft(payload)
   },
   onVoiceAudio: (payload) => void playVoiceAudio(payload),
@@ -1598,6 +1602,59 @@ function providerMeta(row: RuntimeProviderStatus) {
   return meta
 }
 
+function nativeSkills(): NativeSkill[] {
+  return skillManifest.value?.skills || ready.value?.skills?.skills || []
+}
+
+function skillManifestVersion() {
+  return skillManifest.value?.version || ready.value?.skills?.version || 'joi.skill_manifest.v1'
+}
+
+function skillCapabilityLabel(value?: string) {
+  const labels: Record<string, string> = {
+    ready: '可用',
+    off: '关闭',
+    unavailable: '不可用',
+    degraded: '降级',
+  }
+  return labels[value || ''] || '未知'
+}
+
+function skillPermissionLabel(value?: string) {
+  const labels: Record<string, string> = {
+    low: '低风险',
+    medium: '需确认',
+    high: '高风险',
+  }
+  return labels[value || ''] || '需确认'
+}
+
+function skillMeta(skill: NativeSkill) {
+  const meta: string[] = []
+  if (skill.category) meta.push(skill.category)
+  if (skill.permission_level) meta.push(skillPermissionLabel(skill.permission_level))
+  if (skill.state_policy) meta.push(skill.state_policy)
+  if (skill.audit) meta.push(skill.audit)
+  if (skill.supports_dry_run) meta.push('dry-run')
+  return meta
+}
+
+function skillTools(skill: NativeSkill) {
+  return [...(skill.tools || []), ...(skill.rpc_methods || [])].slice(0, 10)
+}
+
+async function refreshSkills() {
+  skillRefreshLoading.value = true
+  try {
+    const result = (await client.skillsList()) as { ok?: boolean; skills?: NativeSkillManifest }
+    if (result.skills) skillManifest.value = result.skills
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '技能清单刷新失败'
+  } finally {
+    skillRefreshLoading.value = false
+  }
+}
+
 function defaultRuntimeDraft() {
   return {
     asr_enabled: false,
@@ -1636,9 +1693,9 @@ function syncRuntimeDraft(payload: CoreReadyPayload) {
   const settleMs = computerUse.post_action_settle_ms ?? (parseSettleMs(runtimeProvider(payload, 'computer_use')?.limit) || draft.computer_post_action_settle_ms)
   draft.computer_post_action_settle_ms = Math.max(0, Number(settleMs))
   const llmSettings = settings.llm || {}
-  const text = runtimeProvider(payload, 'text')
+  const fastModel = runtimeProvider(payload, 'fast')
   draft.llm_temperature = Math.max(0, Number(llmSettings.temperature ?? draft.llm_temperature))
-  draft.llm_use_mock = typeof llmSettings.use_mock === 'boolean' ? llmSettings.use_mock : text?.state === 'mock'
+  draft.llm_use_mock = typeof llmSettings.use_mock === 'boolean' ? llmSettings.use_mock : fastModel?.state === 'mock'
   runtimeDraft.value = draft
 }
 
@@ -2450,6 +2507,38 @@ onBeforeUnmount(() => {
             </article>
           </div>
           <p class="memory-empty" v-if="!pendingMemories.length && !recentMemories.length">暂无长期记忆</p>
+        </div>
+
+        <div class="runtime-settings skill-manifest-section" v-if="activeSettingsTab === 'skills'">
+          <div class="runtime-settings-head">
+            <strong>原生技能</strong>
+            <div class="memory-head-actions">
+              <span>{{ skillManifestVersion() }}</span>
+              <button type="button" class="memory-link-button" :disabled="skillRefreshLoading" @click="refreshSkills">
+                {{ skillRefreshLoading ? '刷新中' : '刷新' }}
+              </button>
+            </div>
+          </div>
+          <div class="skill-grid" v-if="nativeSkills().length">
+            <article
+              v-for="skill in nativeSkills()"
+              :key="skill.id"
+              class="skill-card"
+              :class="skill.local_capability || 'unavailable'"
+            >
+              <header>
+                <strong>{{ skill.label || skill.id }}</strong>
+                <span>{{ skillCapabilityLabel(skill.local_capability) }}</span>
+              </header>
+              <div class="provider-meta" v-if="skillMeta(skill).length">
+                <span v-for="item in skillMeta(skill)" :key="`${skill.id}-${item}`">{{ item }}</span>
+              </div>
+              <div class="skill-tool-list" v-if="skillTools(skill).length">
+                <code v-for="tool in skillTools(skill)" :key="`${skill.id}-${tool}`">{{ tool }}</code>
+              </div>
+            </article>
+          </div>
+          <p class="memory-empty" v-else>暂无技能清单</p>
         </div>
 
         <template v-if="activeSettingsTab === 'runtime'">

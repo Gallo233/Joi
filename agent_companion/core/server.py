@@ -16,6 +16,7 @@ from agent_companion.core.runtime_config_writer import preview_runtime_config_up
 from agent_companion.core.schemas import AgentEvent, DisplayCard
 from agent_companion.core.schemas import EventType
 from agent_companion.core.runtime_status import build_runtime_status
+from agent_companion.core.skill_manifest import build_native_skill_manifest
 from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
 from agent_companion.core.voice import safe_voice_line
@@ -127,6 +128,9 @@ class JsonRpcBridge:
                 return
             if method == "watch.loop.status":
                 await websocket.send(self._result(request_id, self.watch_loop_status_command()))
+                return
+            if method == "skills.list":
+                await websocket.send(self._result(request_id, self.skill_manifest_command()))
                 return
             if method == "memory.status":
                 await websocket.send(self._result(request_id, self.memory_status_command()))
@@ -326,6 +330,18 @@ class JsonRpcBridge:
 
     def memory_status_command(self) -> dict[str, Any]:
         return {"ok": True, "memory": self.app.memory.status()}
+
+    def skill_manifest_command(self) -> dict[str, Any]:
+        tts_status = self.tts.status_payload()
+        return {
+            "ok": True,
+            "skills": build_native_skill_manifest(
+                self.workspace,
+                asr_state=self.asr_state,
+                tts_status=tts_status,
+                memory_status=self.app.memory.status(),
+            ),
+        }
 
     def memory_recall_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         query = str(params.get("query") or "") if isinstance(params, dict) else ""
@@ -553,6 +569,7 @@ class JsonRpcBridge:
 
     def _ready_payload(self) -> dict[str, Any]:
         tts_status = self.tts.status_payload()
+        memory_status = self.app.memory.status()
         payload: dict[str, Any] = {
             "workspace": str(self.workspace),
             "asr": {
@@ -567,7 +584,8 @@ class JsonRpcBridge:
             "tts": tts_status,
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
-            "memory": self.app.memory.status(),
+            "memory": memory_status,
+            "skills": build_native_skill_manifest(self.workspace, asr_state=self.asr_state, tts_status=tts_status, memory_status=memory_status),
             "character": {
                 "name": self.app.character.name,
                 "sprites": [],

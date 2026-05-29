@@ -129,6 +129,7 @@ Status: in progress
 - Avoid speaking logs, JSON, paths, commands, tool ids, and inflated results.
 - Formalize native Joi skills with manifest, input schema, result schema, permission level, dry-run support, local capability checks, state policy, and tests.
 - Treat Codex, Browser/Computer Use, OK-WW, Memory, ASR, and TTS as native core skills before chasing broad third-party integrations.
+- Native skill manifest V1 now reports built-in skill ids, tool/RPC bindings, permission level, dry-run support, local capability, state policy, and audit policy through safe `core.ready` / `skills.list` payloads.
 
 ## P9 Policy, Audit, And Background Companion Loop
 
