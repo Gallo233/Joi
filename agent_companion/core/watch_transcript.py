@@ -39,6 +39,7 @@ class TranscriptResult:
     segments: list[TranscriptSegment] = field(default_factory=list)
     summary: str = ""
     error: str = ""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -65,6 +66,7 @@ class TranscriptResult:
             "summary": self.summary[:300],
             "error": _safe_error(self.error),
             "segments": [segment.to_agent_state() for segment in self.segments[:12]],
+            "diagnostics": _safe_diagnostics(self.diagnostics),
         }
 
 
@@ -89,10 +91,12 @@ class SystemAudioTranscriptProvider:
     def transcribe(self, seconds: float = 5.0) -> TranscriptResult:
         duration = max(1.0, min(float(seconds or 5.0), float(self.max_seconds)))
         audio, error = capture_system_audio_wav(duration)
+        diagnostics = system_audio_diagnostics(error=error, seconds=duration, byte_count=len(audio))
         if error:
-            return TranscriptResult("unavailable", "system_audio", [], "系统音频没有捕获到。", error)
+            return TranscriptResult("unavailable", "system_audio", [], "系统音频没有捕获到。", error, diagnostics)
         result = self.asr.transcribe(audio, "audio/wav")
-        return transcript_from_asr_result(result, source="system_audio", duration_ms=int(duration * 1000))
+        transcript = transcript_from_asr_result(result, source="system_audio", duration_ms=int(duration * 1000))
+        return TranscriptResult(transcript.status, transcript.source, transcript.segments, transcript.summary, transcript.error, diagnostics)
 
 
 def transcript_from_asr_result(result: AsrResult, *, source: str = "system_audio", duration_ms: int = 0) -> TranscriptResult:
@@ -103,6 +107,36 @@ def transcript_from_asr_result(result: AsrResult, *, source: str = "system_audio
         return TranscriptResult("failed", source, [], "音频转写没有生成文本。", "empty_transcript")
     segment = TranscriptSegment(text, 0, max(0, int(duration_ms or 0)), source, result.confidence, 1, "audio")
     return TranscriptResult("success", source, [segment], f"识别到 1 段系统音频转写。")
+
+
+def system_audio_diagnostics(*, error: str = "", seconds: float = 0.0, byte_count: int = 0) -> dict[str, Any]:
+    status = "ready" if not error else _safe_error(error)
+    return {
+        "status": status,
+        "platform": "windows" if sys.platform == "win32" else "unsupported",
+        "dependency": "missing" if error == "system_audio_dependency_missing" else "available",
+        "device": "missing" if error == "system_audio_device_missing" else ("unknown" if error else "available"),
+        "capture": "failed" if error else "ok",
+        "seconds": round(max(0.0, float(seconds or 0.0)), 2),
+        "audio_bytes": max(0, int(byte_count or 0)),
+    }
+
+
+def probe_system_audio_readiness() -> dict[str, Any]:
+    if sys.platform != "win32":
+        return system_audio_diagnostics(error="system_audio_windows_only")
+    try:
+        import numpy  # noqa: F401
+        import soundcard as sc
+    except Exception:
+        return system_audio_diagnostics(error="system_audio_dependency_missing")
+    try:
+        microphone = _default_soundcard_loopback(sc)
+    except Exception:
+        microphone = None
+    if microphone is None:
+        return system_audio_diagnostics(error="system_audio_device_missing")
+    return system_audio_diagnostics()
 
 
 def transcript_from_ocr_records(records: list[dict[str, Any]], sample_interval_ms: int = 900) -> TranscriptResult:
@@ -285,6 +319,30 @@ def _safe_error(value: str) -> str:
         "openai_package_missing",
     }
     return text if text in allowed else "transcript_unavailable" if text else ""
+
+
+def _safe_diagnostics(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    output: dict[str, Any] = {}
+    for key in ("status", "platform", "dependency", "device", "capture"):
+        raw = str(value.get(key) or "").strip().casefold()
+        text = _safe_error(raw)
+        if key == "status" and text == "transcript_unavailable":
+            text = raw if raw in {"ready", "failed", "unavailable"} else "unavailable"
+        if key == "platform" and text == "transcript_unavailable":
+            text = raw if raw in {"windows", "unsupported"} else "unsupported"
+        if key in {"dependency", "device", "capture"} and text == "transcript_unavailable":
+            text = raw if raw in {"available", "missing", "unknown", "ok", "failed"} else "unknown"
+        if text:
+            output[key] = text
+    for key in ("seconds", "audio_bytes"):
+        try:
+            number = float(value.get(key) or 0)
+        except (TypeError, ValueError):
+            number = 0.0
+        output[key] = round(max(0.0, number), 2) if key == "seconds" else int(max(0, number))
+    return output
 
 
 _UI_NOISE = {

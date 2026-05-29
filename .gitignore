@@ -14,6 +14,7 @@ assets/preview_final.png
 data/
 data/local_visual_eval/
 logs/
+/dist/
 --output-last-message
 agent_companion/shell/node_modules/
 agent_companion/shell/dist/

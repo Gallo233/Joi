@@ -153,6 +153,7 @@ Use the local environment if already set up. Adjust Python/Node commands to the 
 ```bash
 python -m compileall -q agent_companion run_agent_companion_tests.py tools/smoke_ws_bridge.py
 python run_agent_companion_tests.py
+python tools/windows_handoff_report.py --skip-doctor --allow-missing-exe
 cd agent_companion/shell
 npm run build
 npm run tauri -- build --debug

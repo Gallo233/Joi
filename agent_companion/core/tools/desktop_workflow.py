@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+import sys
 import time
 from typing import Any
 from urllib.parse import quote_plus
@@ -13,9 +14,9 @@ from agent_companion.core.computer_use import (
     ComputerUseBackend,
     ComputerUseResult,
     PostActionVerification,
-    WindowsComputerUseBackend,
     verify_post_action,
 )
+from agent_companion.core.platform_factory import get_computer_backend
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.vision import OcrExtractor
@@ -35,7 +36,7 @@ class DesktopWorkflowTool(ToolAdapter):
         sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
-        self.backend = backend or WindowsComputerUseBackend(workspace)
+        self.backend = backend or get_computer_backend(workspace)
         self.ocr = ocr
         self.post_action_settle_ms = max(0, int(post_action_settle_ms or 0))
         self._sleep = sleep_fn or time.sleep
@@ -63,23 +64,24 @@ class DesktopWorkflowTool(ToolAdapter):
     def _actions_from_request(self, request: ToolRequest) -> list[ComputerAction]:
         args = request.arguments
         workflow = str(args.get("workflow") or "").strip()
+        mac_backend = _is_macos_backend(self.backend)
         if workflow == "open_app":
             app = str(args.get("app") or "").strip()
             if not app:
                 return []
-            return _open_app_actions(app)
+            return _open_app_actions(app, mac_backend=mac_backend)
         if workflow == "open_web_search":
-            browser = _browser_search_name(str(args.get("browser") or "edge"))
+            browser = _browser_search_name(str(args.get("browser") or "edge"), mac_backend=mac_backend)
             site = str(args.get("site") or "").strip()
             query = str(args.get("query") or "").strip()
             url = _site_url(site, query)
-            return _open_url_in_browser_actions(browser, url)
+            return _open_url_in_browser_actions(browser, url, mac_backend=mac_backend)
         if workflow == "open_url":
-            browser = _browser_search_name(str(args.get("browser") or "edge"))
+            browser = _browser_search_name(str(args.get("browser") or "edge"), mac_backend=mac_backend)
             url = str(args.get("url") or "").strip()
             if not url:
                 return []
-            return _open_url_in_browser_actions(browser, _normalize_url(url))
+            return _open_url_in_browser_actions(browser, _normalize_url(url), mac_backend=mac_backend)
         return []
 
     def _perform_workflow(self, actions: list[ComputerAction]) -> ComputerUseResult:
@@ -171,7 +173,16 @@ class DesktopWorkflowTool(ToolAdapter):
         )
 
 
-def _open_app_actions(app: str) -> list[ComputerAction]:
+def _is_macos_backend(backend: ComputerUseBackend) -> bool:
+    return sys.platform == "darwin" and backend.__class__.__name__ == "MacComputerUseBackend"
+
+
+def _open_app_actions(app: str, *, mac_backend: bool = False) -> list[ComputerAction]:
+    if mac_backend:
+        return [
+            ComputerAction("open_app", app_name=app),
+            ComputerAction("wait", delta=1200),
+        ]
     return [
         ComputerAction("hotkey", keys=("win",)),
         ComputerAction("wait", delta=260),
@@ -182,11 +193,11 @@ def _open_app_actions(app: str) -> list[ComputerAction]:
     ]
 
 
-def _open_url_in_browser_actions(browser: str, url: str) -> list[ComputerAction]:
+def _open_url_in_browser_actions(browser: str, url: str, *, mac_backend: bool = False) -> list[ComputerAction]:
     return [
-        *_open_app_actions(browser),
+        *_open_app_actions(browser, mac_backend=mac_backend),
         ComputerAction("wait", delta=1500),
-        ComputerAction("hotkey", keys=("ctrl", "l")),
+        ComputerAction("hotkey", keys=("cmd" if mac_backend else "ctrl", "l")),
         ComputerAction("wait", delta=100),
         ComputerAction("type_text", text=url),
         ComputerAction("wait", delta=100),
@@ -195,10 +206,12 @@ def _open_url_in_browser_actions(browser: str, url: str) -> list[ComputerAction]
     ]
 
 
-def _browser_search_name(value: str) -> str:
+def _browser_search_name(value: str, *, mac_backend: bool = False) -> str:
     lowered = value.strip().casefold()
     if lowered in {"chrome", "谷歌", "google chrome"}:
         return "Google Chrome"
+    if mac_backend and lowered in {"", "edge", "microsoft edge", "默认", "default"}:
+        return "Safari"
     return "Microsoft Edge"
 
 

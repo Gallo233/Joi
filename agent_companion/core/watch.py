@@ -214,10 +214,12 @@ class WatchAnswerer:
         self._config: Any | None = self._load_config()
         self._client: Any | None = None
         self.last_used_model = False
+        self.last_model_usage: dict[str, Any] | None = None
 
     def answer(self, question: str, frames: list[WatchFrame]) -> tuple[str, str]:
         fallback, status = answer_from_recent_frames(question, frames)
         self.last_used_model = False
+        self.last_model_usage = None
         if not frames or os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
             return fallback, status
         config = self._config
@@ -229,7 +231,7 @@ class WatchAnswerer:
             from agent_companion.core.config import ModelRouter
 
             router = ModelRouter(config.llm)
-            endpoint = router.resolve("expression" if config.llm.is_expression_configured else "text")
+            endpoint = router.resolve("summarize")
             if self._client is None or self._client.base_url != endpoint.base_url:
                 self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             character = config.primary_character if config.characters else None
@@ -254,6 +256,7 @@ class WatchAnswerer:
                 }
                 for frame in frames[:3]
             ]
+            started = time.perf_counter()
             response = self._client.chat.completions.create(
                 model=endpoint.model,
                 messages=[
@@ -276,11 +279,13 @@ class WatchAnswerer:
                 temperature=min(max(config.llm.temperature, 0.2), 0.9),
                 response_format={"type": "json_object"},
             )
+            latency_ms = (time.perf_counter() - started) * 1000
             payload = json.loads(response.choices[0].message.content or "{}")
             answer = str(payload.get("answer") or "").strip()
             if not answer:
                 return fallback, status
             self.last_used_model = True
+            self.last_model_usage = endpoint.to_agent_state(latency_ms=latency_ms)
             return answer[:900], "llm_answer"
         except Exception:
             return fallback, status

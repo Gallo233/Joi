@@ -39,6 +39,7 @@ export interface ComputerUseAuditEvent {
   approval_id?: string
   approval_status?: string
   tool_name?: string
+  skill_id?: string
   action_name?: string
   sanitized_arguments?: Record<string, unknown>
   before_artifacts?: ComputerUseAuditArtifact[]
@@ -183,6 +184,7 @@ export interface MemoryRecord {
   text?: string
   source?: string
   created_at?: number
+  relevance?: number
 }
 
 export interface MemoryCandidate {
@@ -194,17 +196,106 @@ export interface MemoryCandidate {
   created_at?: number
   resolved_at?: number
   rejection_reason?: string
+  priority?: 'high' | 'medium' | 'low' | string
+  priority_score?: number
+  priority_reason?: string
+}
+
+export interface MemoryProfile {
+  version?: string
+  enabled?: boolean
+  summary?: string
+  highlights?: string[]
+  preferences?: string[]
+  habits?: string[]
+  relationship?: string[]
+  recent_focus?: string[]
+  counts?: Record<string, number>
+  updated_at?: number
 }
 
 export interface MemoryStatus {
   enabled?: boolean
-  vault_path?: string
+  vault_label?: string
+  storage?: string
   recent?: MemoryRecord[]
   pending?: MemoryCandidate[]
+  profile?: MemoryProfile
+}
+
+export interface MemoryVaultSection {
+  title: string
+  lines: string[]
+}
+
+export interface MemoryVault {
+  path_label?: string
+  storage?: string
+  updated_at?: number
+  sections?: MemoryVaultSection[]
+}
+
+export interface BackgroundContextScope {
+  id?: string
+  type?: 'window' | 'project' | 'game' | string
+  label?: string
+  approved_at?: number
+  enabled?: boolean
+}
+
+export interface BackgroundContextEntry {
+  created_at?: number
+  scope_id?: string
+  scope_type?: string
+  source?: string
+  summary?: string
+  visual_status?: string
+  transcript_source?: string
+}
+
+export interface BackgroundContextStatus {
+  version?: string
+  safe_for_display?: boolean
+  enabled?: boolean
+  active?: boolean
+  active_scope?: BackgroundContextScope
+  approved_scopes?: BackgroundContextScope[]
+  scope_count?: number
+  recent_context?: BackgroundContextEntry[]
+  recent_count?: number
+  retention?: string
+  video_recording?: boolean
+}
+
+export interface NativeSkill {
+  id: string
+  label: string
+  category?: string
+  description?: string
+  tools?: string[]
+  rpc_methods?: string[]
+  input_schema?: Record<string, unknown>
+  result_schema?: Record<string, unknown>
+  permission_level?: 'low' | 'medium' | 'high' | string
+  supports_dry_run?: boolean
+  local_capability?: 'ready' | 'off' | 'unavailable' | 'degraded' | string
+  enabled?: boolean
+  configured?: boolean
+  state_policy?: string
+  audit?: string
+  notes?: string[]
+}
+
+export interface NativeSkillManifest {
+  version?: string
+  safe_for_display?: boolean
+  workspace_bound?: boolean
+  skills?: NativeSkill[]
 }
 
 export interface CoreReadyPayload {
-  workspace: string
+  workspace_label?: string
+  workspace_bound?: boolean
   asr?: {
     enabled?: boolean
     configured?: boolean
@@ -230,6 +321,14 @@ export interface CoreReadyPayload {
   }
   watch_loop?: WatchLoopStatus
   memory?: MemoryStatus
+  audit?: {
+    version?: string
+    safe_for_display?: boolean
+    record_count?: number
+    storage?: string
+  }
+  background?: BackgroundContextStatus
+  skills?: NativeSkillManifest
   runtime_settings?: {
     asr?: {
       enabled?: boolean
@@ -253,13 +352,13 @@ export interface CoreReadyPayload {
     computer_use?: {
       post_action_settle_ms?: number
     }
+    skills?: Record<string, { enabled?: boolean }>
   }
   character?: {
     name?: string
     sprites?: Array<{
       id: string
       label?: string
-      image_path: string
       image_data_url?: string
     }>
   }

@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from agent_companion.core.schemas import RiskLevel, ToolRequest, ToolResult
+from agent_companion.core.skill_manifest import skill_id_for_tool
 
 
 COMPUTER_AUDIT_STATE_KEY = "computer_use_audit"
@@ -31,6 +32,7 @@ class ComputerUseAuditEvent:
     approval_id: str = ""
     approval_status: str = ""
     tool_name: str = ""
+    skill_id: str = ""
     action_name: str = ""
     sanitized_arguments: dict[str, Any] = field(default_factory=dict)
     before_artifacts: list[ComputerUseAuditArtifact] = field(default_factory=list)
@@ -67,6 +69,7 @@ def computer_approval_audit_event(
         approval_id=approval_id,
         approval_status=status,
         tool_name=request.name,
+        skill_id=skill_id_for_tool(request.name),
         action_name=_action_name(request.name),
         sanitized_arguments=sanitize_tool_arguments(request.name, request.arguments),
         before_artifacts=_artifact_list(artifacts or [], "before"),
@@ -100,6 +103,7 @@ def computer_action_audit_event(task_id: str, result: ToolResult, risk: RiskLeve
         sanitized_summary=sanitize_summary(result.display_card.summary or "Computer Use action recorded."),
         risk_level=_risk_value(risk),
         tool_name=tool_name,
+        skill_id=skill_id_for_tool(tool_name),
         action_name=action_type,
         sanitized_arguments=sanitize_action_state(action),
         before_artifacts=_artifact_list([before_ref], "before"),
@@ -125,6 +129,7 @@ def target_grounding_audit_events(task_id: str, result: ToolResult, risk: RiskLe
                 sanitized_summary="Observed the active window for Computer Use grounding.",
                 risk_level=_risk_value(risk),
                 tool_name=tool_name,
+                skill_id=skill_id_for_tool(tool_name),
                 action_name="observe",
                 sanitized_arguments={"target": "active_window"},
                 before_artifacts=_artifact_list(artifacts, "before"),
@@ -141,6 +146,7 @@ def target_grounding_audit_events(task_id: str, result: ToolResult, risk: RiskLe
                 sanitized_summary=_target_summary(state),
                 risk_level=_risk_value(risk),
                 tool_name=tool_name,
+                skill_id=skill_id_for_tool(tool_name),
                 action_name="target_candidate",
                 sanitized_arguments=_target_arguments(state, candidates, candidate),
                 before_artifacts=_artifact_list(artifacts, "before"),
@@ -157,6 +163,7 @@ def target_grounding_audit_events(task_id: str, result: ToolResult, risk: RiskLe
                 sanitized_summary="Candidate selection could not continue; a fresh observation is required.",
                 risk_level=_risk_value(risk),
                 tool_name=tool_name,
+                skill_id=skill_id_for_tool(tool_name),
                 action_name="target_selection",
                 sanitized_arguments={"selection_status": status},
             )

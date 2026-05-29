@@ -41,12 +41,15 @@ class MemoryStore:
         cleaned = _clean_memory_text(text)
         if not self.enabled() or not cleaned or ephemeral or sensitive or _rejection_reason(cleaned):
             return None
+        safe_kind = _safe_label(kind, "note")
+        safe_source = _safe_label(source, "manual")
         with sqlite3.connect(self.path) as db:
             cursor = db.execute(
                 "insert into memories(kind, text, source, created_at, ephemeral, sensitive) values (?, ?, ?, ?, ?, ?)",
-                (_safe_label(kind, "note"), cleaned[:1200], _safe_label(source, "manual"), time.time(), int(ephemeral), int(sensitive)),
+                (safe_kind, cleaned[:1200], safe_source, time.time(), int(ephemeral), int(sensitive)),
             )
             memory_id = int(cursor.lastrowid)
+            self._index_memory(db, memory_id, safe_kind, cleaned[:1200])
         self._rewrite_vault()
         return self.memory(memory_id)
 
@@ -69,6 +72,15 @@ class MemoryStore:
             return {"ok": False, "error": "sensitive_memory_candidate", "reason": "ephemeral_or_sensitive"}
         if reason:
             return {"ok": False, "error": "unsafe_memory_candidate", "reason": reason}
+        duplicate = self._candidate_duplicate(cleaned)
+        if duplicate is not None:
+            return {
+                "ok": False,
+                "error": "duplicate_memory_candidate",
+                "reason": str(duplicate.get("reason") or "duplicate"),
+                "candidate": duplicate.get("candidate"),
+                "memory": duplicate.get("memory"),
+            }
         now = time.time()
         with sqlite3.connect(self.path) as db:
             cursor = db.execute(
@@ -103,6 +115,7 @@ class MemoryStore:
     def delete(self, memory_id: int) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:
             cursor = db.execute("delete from memories where id = ?", (int(memory_id),))
+            self._delete_memory_index(db, int(memory_id))
         self._rewrite_vault()
         return {"ok": bool(cursor.rowcount), "deleted": int(memory_id)}
 
@@ -136,6 +149,49 @@ class MemoryStore:
             ).fetchall()
         return [_candidate_row(row) for row in rows]
 
+    def profile(self, *, recent_limit: int = 80, manual_limit: int = 24) -> dict[str, Any]:
+        if not self.enabled():
+            return {
+                "version": "joi.memory_profile.v1",
+                "enabled": False,
+                "summary": "长期记忆已关闭",
+                "highlights": [],
+                "preferences": [],
+                "habits": [],
+                "relationship": [],
+                "recent_focus": [],
+                "counts": {"saved": 0, "manual_notes": 0, "pending": 0},
+                "updated_at": 0.0,
+            }
+        memories = self.recent(recent_limit)
+        manual_notes = [
+            note
+            for note in self._manual_vault_notes(limit=manual_limit)
+            if note and not _rejection_reason(note)
+        ]
+        preferences = _profile_bucket_items(memories, manual_notes, "preferences", limit=6)
+        habits = _profile_bucket_items(memories, manual_notes, "habits", limit=5)
+        relationship = _profile_bucket_items(memories, manual_notes, "relationship", limit=5)
+        recent_focus = _profile_bucket_items(memories, manual_notes, "recent_focus", limit=5)
+        highlights = _profile_highlights(preferences, habits, relationship, recent_focus)
+        updated_at = max([float(row.get("created_at") or 0) for row in memories] or [0.0])
+        return {
+            "version": "joi.memory_profile.v1",
+            "enabled": True,
+            "summary": _profile_summary(highlights, len(memories), len(manual_notes)),
+            "highlights": highlights,
+            "preferences": preferences,
+            "habits": habits,
+            "relationship": relationship,
+            "recent_focus": recent_focus,
+            "counts": {
+                "saved": len(memories),
+                "manual_notes": len(manual_notes),
+                "pending": len(self.pending(50)),
+            },
+            "updated_at": updated_at,
+        }
+
     def recent(self, limit: int = 12, *, include_ephemeral: bool = False, include_sensitive: bool = False) -> list[dict[str, Any]]:
         filters = []
         if not include_ephemeral:
@@ -153,33 +209,45 @@ class MemoryStore:
     def context(self, limit: int = 8, query: str = "") -> list[dict[str, Any]]:
         if not self.enabled():
             return []
+        safe_limit = max(1, int(limit or 8))
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
-
-        # If query provided, use FTS5 semantic recall first
-        if query:
-            for mem in self.recall(query, limit=limit):
-                cleaned = _clean_memory_text(str(mem.get("text") or ""))
-                if not cleaned or cleaned in seen:
-                    continue
-                rows.append({
-                    "kind": str(mem.get("kind") or "note"),
+        profile_text = _profile_context_text(self.profile())
+        if profile_text:
+            rows.append(
+                {
+                    "kind": "profile",
+                    "text": profile_text[:400],
+                    "source": "memory_profile",
+                    "relevance": 20.0,
+                }
+            )
+            seen.add(profile_text)
+        for memory in self.recall(query, safe_limit) if query else []:
+            text = str(memory.get("text") or "")
+            cleaned = _clean_memory_text(text)
+            if not cleaned or cleaned in seen:
+                continue
+            rows.append(
+                {
+                    "kind": str(memory.get("kind") or "note"),
                     "text": cleaned[:400],
                     "source": "semantic_recall",
-                    "relevance": mem.get("relevance", 0),
-                })
-                seen.add(cleaned)
-
-        # Vault notes
-        for note in self._manual_vault_notes(limit=limit):
+                    "relevance": memory.get("relevance", 0),
+                }
+            )
+            seen.add(cleaned)
+            if len(rows) >= safe_limit:
+                return rows[:safe_limit]
+        for note in self._manual_vault_notes(limit=safe_limit):
             cleaned = _clean_memory_text(note)
             if not cleaned or _rejection_reason(cleaned) or cleaned in seen:
                 continue
             rows.append({"kind": "vault", "text": cleaned[:400], "source": "vault"})
             seen.add(cleaned)
-
-        # Recent memories
-        for memory in self.recent(limit):
+            if len(rows) >= safe_limit:
+                return rows[:safe_limit]
+        for memory in self.recent(safe_limit):
             text = str(memory.get("text") or "")
             cleaned = _clean_memory_text(text)
             if not cleaned or cleaned in seen:
@@ -192,59 +260,22 @@ class MemoryStore:
                 }
             )
             seen.add(cleaned)
-            if len(rows) >= limit:
+            if len(rows) >= safe_limit:
                 break
-        return rows[: max(1, int(limit or 8))]
+        return rows[:safe_limit]
 
-    def browse_vault(self) -> dict[str, Any]:
-        """Return vault content as structured data for frontend browsing."""
-        try:
-            content = self.vault_path.read_text(encoding="utf-8") if self.vault_path.exists() else ""
-        except Exception:
-            content = ""
-        sections: list[dict[str, Any]] = []
-        current_section = ""
-        current_lines: list[str] = []
-        for line in content.split("\n"):
-            if line.startswith("## "):
-                if current_section:
-                    sections.append({"title": current_section, "lines": current_lines})
-                current_section = line[3:].strip()
-                current_lines = []
-            elif line.startswith("# "):
-                continue  # skip h1
-            else:
-                current_lines.append(line)
-        if current_section:
-            sections.append({"title": current_section, "lines": current_lines})
-        return {
-            "path": str(self.vault_path),
-            "exists": self.vault_path.exists(),
-            "sections": sections,
-            "raw": content,
-        }
-
-    def remember_preference(self, key: str, value: str) -> dict[str, Any] | None:
-        """Store a user preference (e.g., 'theme', 'dark')."""
-        return self.remember("preference", f"{key}: {value}", source="preference")
-
-    def remember_fact(self, fact: str, topic: str = "") -> dict[str, Any] | None:
-        """Store a factual note about a topic."""
-        kind = f"fact:{topic}" if topic else "fact"
-        return self.remember(kind, fact, source="fact")
-
-    def remember_relationship(self, entity: str, note: str) -> dict[str, Any] | None:
-        """Store a relationship note (e.g., 'Alice: colleague who likes Python')."""
-        return self.remember("relationship", f"{entity}: {note}", source="relationship")
-
-    def search_by_kind(self, kind_prefix: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Search memories by kind prefix (e.g., 'preference', 'fact', 'relationship')."""
-        with sqlite3.connect(self.path) as db:
-            rows = db.execute(
-                "select kind, text, source, created_at from memories where kind like ? and ephemeral = 0 and sensitive = 0 order by id desc limit ?",
-                (f"{kind_prefix}%", limit),
-            ).fetchall()
-        return [{"kind": k, "text": t, "source": s, "created_at": c} for k, t, s, c in rows]
+    def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        if not self.enabled():
+            return []
+        cleaned = _clean_memory_text(query)
+        if not cleaned:
+            return self.recent(limit)
+        rows = self._recall_fts(cleaned, max(1, int(limit or 5)))
+        seen_ids = {int(row.get("id") or 0) for row in rows}
+        fallback = self._recall_by_score(cleaned, max(1, int(limit or 5)) * 2, seen_ids)
+        combined = [*rows, *fallback]
+        combined.sort(key=lambda row: (float(row.get("relevance") or 0), float(row.get("created_at") or 0)), reverse=True)
+        return combined[: max(1, int(limit or 5))]
 
     def enabled(self) -> bool:
         with sqlite3.connect(self.path) as db:
@@ -259,45 +290,120 @@ class MemoryStore:
             )
         return self.status()
 
-    def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        """Semantic recall: find memories related to query using FTS5."""
-        cleaned_query = " ".join((query or "").split()).strip()
-        if not cleaned_query:
-            return self.recent(limit)
-        try:
-            with sqlite3.connect(self.path) as db:
-                words = [w for w in cleaned_query.split() if len(w) > 1]
-                fts_query = " OR ".join(f'"{w}"' for w in words) if words else f'"{cleaned_query}"'
-                rows = db.execute(
-                    """SELECT m.kind, m.text, m.created_at, rank
-                       FROM memories_fts fts
-                       JOIN memories m ON m.id = fts.rowid
-                       WHERE memories_fts MATCH ?
-                         AND m.ephemeral = 0 AND m.sensitive = 0
-                       ORDER BY rank LIMIT ?""",
-                    (fts_query, limit),
-                ).fetchall()
-            return [
-                {"kind": kind, "text": text, "created_at": created_at, "relevance": -rank}
-                for kind, text, created_at, rank in rows
-            ]
-        except Exception:
-            return self.recent(limit)
-
     def status(self, *, recent_limit: int = 8, pending_limit: int = 8) -> dict[str, Any]:
         return {
             "enabled": self.enabled(),
-            "vault_path": str(self.vault_path),
+            "vault_label": self.vault_path.name,
+            "storage": "local",
             "recent": self.recent(recent_limit),
             "pending": self.pending(pending_limit),
+            "profile": self.profile(recent_limit=max(40, recent_limit * 8)),
         }
+
+    def browse_vault(self, *, max_lines_per_section: int = 18) -> dict[str, Any]:
+        if not self.vault_path.is_file():
+            self._rewrite_vault()
+        try:
+            text = self.vault_path.read_text(encoding="utf-8")
+            updated_at = self.vault_path.stat().st_mtime
+        except Exception:
+            return {"path_label": self.vault_path.name, "storage": "local", "updated_at": 0, "sections": []}
+        sections: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("## "):
+                current = {"title": _clean_memory_text(line[3:])[:80] or "Section", "lines": []}
+                sections.append(current)
+                continue
+            if current is None or not line or line.startswith("#") or line.startswith("_"):
+                continue
+            if line.startswith("-"):
+                line = line[1:].strip()
+            cleaned = _clean_memory_text(line)
+            if not cleaned or _rejection_reason(cleaned):
+                continue
+            lines = current.setdefault("lines", [])
+            if len(lines) < max(1, int(max_lines_per_section or 18)):
+                lines.append(cleaned[:500])
+        return {"path_label": self.vault_path.name, "storage": "local", "updated_at": float(updated_at), "sections": sections}
 
     def clear(self) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:
             db.execute("delete from memories")
             db.execute("delete from memory_candidates")
+            self._clear_memory_index(db)
         self._rewrite_vault()
         return {"ok": True}
+
+    def _recall_fts(self, query: str, limit: int) -> list[dict[str, Any]]:
+        terms = _fts_query_terms(query)
+        if not terms:
+            return []
+        fts_query = " OR ".join(f'"{term}"' for term in terms[:8])
+        try:
+            with sqlite3.connect(self.path) as db:
+                rows = db.execute(
+                    """
+                    select m.id, m.kind, m.text, m.source, m.created_at, bm25(memories_fts) as rank
+                    from memories_fts
+                    join memories m on m.id = memories_fts.rowid
+                    where memories_fts match ?
+                      and m.ephemeral = 0
+                      and m.sensitive = 0
+                    order by rank
+                    limit ?
+                    """,
+                    (fts_query, limit),
+                ).fetchall()
+        except Exception:
+            return []
+        return [
+            {
+                "id": int(memory_id),
+                "kind": kind,
+                "text": text,
+                "source": source,
+                "created_at": float(created_at),
+                "relevance": max(0.0, 10.0 - float(rank or 0)),
+            }
+            for memory_id, kind, text, source, created_at, rank in rows
+        ]
+
+    def _recall_by_score(self, query: str, limit: int, exclude_ids: set[int] | None = None) -> list[dict[str, Any]]:
+        exclude_ids = exclude_ids or set()
+        scored: list[dict[str, Any]] = []
+        for memory in self.recent(200):
+            memory_id = int(memory.get("id") or 0)
+            if memory_id in exclude_ids:
+                continue
+            score = _memory_recall_score(query, memory)
+            if score <= 0:
+                continue
+            scored.append({**memory, "relevance": score})
+        scored.sort(key=lambda row: (float(row.get("relevance") or 0), float(row.get("created_at") or 0)), reverse=True)
+        return scored[:limit]
+
+    @staticmethod
+    def _index_memory(db: sqlite3.Connection, memory_id: int, kind: str, text: str) -> None:
+        try:
+            db.execute("insert or replace into memories_fts(rowid, kind, text) values (?, ?, ?)", (memory_id, kind, text))
+        except Exception:
+            return
+
+    @staticmethod
+    def _delete_memory_index(db: sqlite3.Connection, memory_id: int) -> None:
+        try:
+            db.execute("delete from memories_fts where rowid = ?", (memory_id,))
+        except Exception:
+            return
+
+    @staticmethod
+    def _clear_memory_index(db: sqlite3.Connection) -> None:
+        try:
+            db.execute("delete from memories_fts")
+        except Exception:
+            return
 
     def _resolve_candidate(self, candidate_id: int, status: str, reason: str) -> None:
         with sqlite3.connect(self.path) as db:
@@ -305,6 +411,20 @@ class MemoryStore:
                 "update memory_candidates set status = ?, resolved_at = ?, rejection_reason = ? where id = ?",
                 (status, time.time(), reason[:80], int(candidate_id)),
             )
+
+    def _candidate_duplicate(self, text: str) -> dict[str, Any] | None:
+        fingerprint = _memory_fingerprint(text)
+        if not fingerprint:
+            return None
+        for candidate in self.pending(50):
+            candidate_text = str(candidate.get("text") or "")
+            if _memory_fingerprint(candidate_text) == fingerprint:
+                return {"reason": "pending_duplicate", "candidate": candidate}
+        for memory in self.recent(200):
+            memory_text = str(memory.get("text") or "")
+            if _memory_fingerprint(memory_text) == fingerprint:
+                return {"reason": "already_saved", "memory": memory}
+        return None
 
     def _rewrite_vault(self) -> None:
         manual_notes = self._manual_vault_notes(limit=80)
@@ -379,26 +499,24 @@ class MemoryStore:
                 db.execute("alter table memories add column sensitive integer not null default 0")
             if "source" not in columns:
                 db.execute("alter table memories add column source text not null default 'legacy'")
-            if "importance" not in columns:
-                db.execute("alter table memories add column importance real not null default 0.5")
-            if "tags" not in columns:
-                db.execute("alter table memories add column tags text not null default '[]'")
-            # FTS5 full-text search index
             try:
                 db.execute(
                     """
                     create virtual table if not exists memories_fts using fts5(
-                        kind, text,
+                        kind,
+                        text,
                         content='memories',
                         content_rowid='id'
                     )
                     """
                 )
-                db.execute("""
-                    INSERT INTO memories_fts(rowid, kind, text)
-                    SELECT id, kind, text FROM memories
-                    WHERE id NOT IN (SELECT rowid FROM memories_fts)
-                """)
+                db.execute(
+                    """
+                    insert into memories_fts(rowid, kind, text)
+                    select id, kind, text from memories
+                    where id not in (select rowid from memories_fts)
+                    """
+                )
             except Exception:
                 pass
             db.execute(
@@ -442,6 +560,7 @@ def _memory_row(row: tuple) -> dict[str, Any]:
 
 def _candidate_row(row: tuple) -> dict[str, Any]:
     candidate_id, kind, text, source, status, created_at, resolved_at, rejection_reason = row
+    priority = _candidate_priority(str(kind or ""), str(text or ""), str(source or ""))
     return {
         "id": int(candidate_id),
         "kind": kind,
@@ -451,11 +570,145 @@ def _candidate_row(row: tuple) -> dict[str, Any]:
         "created_at": float(created_at),
         "resolved_at": float(resolved_at or 0),
         "rejection_reason": rejection_reason,
+        **priority,
     }
+
+
+def _candidate_priority(kind: str, text: str, source: str) -> dict[str, Any]:
+    value = _clean_memory_text(text)
+    lowered_kind = (kind or "").casefold()
+    lowered_source = (source or "").casefold()
+    score = 15
+    reasons: list[str] = []
+    if lowered_kind.startswith(("preference", "habit", "relationship", "identity")):
+        score += 28
+        reasons.append("长期画像字段")
+    if lowered_source in {"chat", "manual", "candidate", "explicit"}:
+        score += 8
+    if any(token in value for token in ("更喜欢", "偏好", "不喜欢", "讨厌", "习惯", "默认", "希望", "不要", "总是")):
+        score += 30
+        reasons.append("稳定偏好")
+    if any(token in value for token in ("称呼", "名字", "关系", "角色", "语气", "回答", "界面", "UI", "ui")):
+        score += 12
+        reasons.append("会影响体验")
+    if any(token in value for token in ("今天", "现在", "刚刚", "这次", "临时")):
+        score -= 18
+        reasons.append("可能是短期状态")
+    if len(value) < 8:
+        score -= 12
+    score = max(0, min(100, score))
+    if score >= 62:
+        priority = "high"
+    elif score >= 38:
+        priority = "medium"
+    else:
+        priority = "low"
+    return {
+        "priority": priority,
+        "priority_score": score,
+        "priority_reason": " / ".join(reasons[:2]) or "普通候选",
+    }
+
+
+PROFILE_BUCKETS: dict[str, tuple[str, ...]] = {
+    "preferences": ("喜欢", "更喜欢", "偏好", "不喜欢", "讨厌", "倾向", "爱用", "想要"),
+    "habits": ("习惯", "经常", "总是", "默认", "希望", "不要", "短一点", "长一点", "先", "每次"),
+    "relationship": ("称呼", "叫我", "名字", "关系", "陪", "角色", "语气", "态度", "对话"),
+    "recent_focus": ("正在", "最近", "关注", "开发", "修复", "优化", "前端", "后端", "UI", "ui", "B站", "bilibili"),
+}
+
+
+def _profile_bucket_items(
+    memories: list[dict[str, Any]],
+    manual_notes: list[str],
+    bucket: str,
+    *,
+    limit: int,
+) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+    for memory in memories:
+        text = _clean_memory_text(str(memory.get("text") or ""))
+        if not text or _rejection_reason(text) or text in seen:
+            continue
+        if _profile_bucket_matches(bucket, str(memory.get("kind") or ""), text):
+            items.append(text[:180])
+            seen.add(text)
+        if len(items) >= limit:
+            return items
+    for note in manual_notes:
+        text = _clean_memory_text(note)
+        if not text or _rejection_reason(text) or text in seen:
+            continue
+        if _profile_bucket_matches(bucket, "vault", text):
+            items.append(text[:180])
+            seen.add(text)
+        if len(items) >= limit:
+            break
+    if bucket == "recent_focus" and len(items) < limit:
+        for memory in memories:
+            text = _clean_memory_text(str(memory.get("text") or ""))
+            if not text or _rejection_reason(text) or text in seen:
+                continue
+            items.append(text[:180])
+            seen.add(text)
+            if len(items) >= limit:
+                break
+    return items
+
+
+def _profile_bucket_matches(bucket: str, kind: str, text: str) -> bool:
+    normalized_kind = (kind or "").casefold()
+    if bucket == "preferences" and normalized_kind.startswith("preference"):
+        return True
+    if bucket == "habits" and normalized_kind.startswith(("habit", "routine")):
+        return True
+    if bucket == "relationship" and normalized_kind.startswith(("relationship", "identity", "persona")):
+        return True
+    if bucket == "recent_focus" and normalized_kind.startswith(("project", "focus", "task", "note")):
+        return True
+    return any(token in text for token in PROFILE_BUCKETS.get(bucket, ()))
+
+
+def _profile_highlights(*groups: list[str]) -> list[str]:
+    highlights: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            cleaned = _clean_memory_text(item)
+            if not cleaned or cleaned in seen:
+                continue
+            highlights.append(cleaned[:180])
+            seen.add(cleaned)
+            if len(highlights) >= 5:
+                return highlights
+    return highlights
+
+
+def _profile_summary(highlights: list[str], saved_count: int, manual_count: int) -> str:
+    if not highlights:
+        if saved_count or manual_count:
+            return f"已保存 {saved_count} 条长期记忆，正在等待更多偏好信号形成画像。"
+        return "还没有足够的长期记忆形成用户画像。"
+    return "；".join(highlights[:3])
+
+
+def _profile_context_text(profile: dict[str, Any]) -> str:
+    highlights = [str(item).strip() for item in profile.get("highlights", []) if str(item).strip()]
+    if not highlights:
+        return ""
+    return "用户画像：" + "；".join(highlights[:4])
 
 
 def _clean_memory_text(text: str) -> str:
     return " ".join((text or "").split()).strip()
+
+
+def _memory_fingerprint(text: str) -> str:
+    cleaned = _clean_memory_text(text).casefold()
+    if not cleaned or _rejection_reason(cleaned):
+        return ""
+    return re.sub(r"[\s，。,.!！?？:：;；\"'“”‘’（）()【】\[\]<>《》]+", "", cleaned)
 
 
 def _rejection_reason(text: str) -> str:
@@ -472,6 +725,54 @@ def _rejection_reason(text: str) -> str:
     if _RAW_SCREEN_RE.search(text):
         return "raw_screen_or_log_like"
     return ""
+
+
+def _fts_query_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for term in _recall_terms(query):
+        if '"' in term:
+            term = term.replace('"', '""')
+        if term and term not in terms:
+            terms.append(term)
+    return terms
+
+
+def _recall_terms(query: str) -> list[str]:
+    value = (query or "").casefold()
+    terms: list[str] = []
+    for raw in re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", value, re.IGNORECASE):
+        token = raw.strip()
+        if not token:
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fff]+", token):
+            if len(token) <= 3:
+                terms.append(token)
+            else:
+                terms.extend(token[index : index + 2] for index in range(len(token) - 1))
+                terms.append(token)
+        elif len(token) > 1:
+            terms.append(token)
+    stopwords = {"知道", "什么", "这个", "那个", "一下", "帮我", "请你"}
+    return [term for term in terms if term not in stopwords]
+
+
+def _memory_recall_score(query: str, memory: dict[str, Any]) -> float:
+    terms = _recall_terms(query)
+    text = str(memory.get("text") or "").casefold()
+    kind = str(memory.get("kind") or "").casefold()
+    haystack = f"{kind} {text}"
+    score = 0.0
+    for term in terms:
+        if term in haystack:
+            score += max(1.0, min(4.0, len(term) * 0.8))
+    if any(token in query for token in ("喜欢", "偏好", "习惯", "更喜欢")):
+        if kind.startswith("preference"):
+            score += 4.0
+        if any(token in text for token in ("喜欢", "偏好", "习惯", "更喜欢")):
+            score += 2.0
+    if any(token in query for token in ("记得", "知道我", "了解我")) and text:
+        score += 0.75
+    return score
 
 
 def _safe_label(value: str, fallback: str) -> str:

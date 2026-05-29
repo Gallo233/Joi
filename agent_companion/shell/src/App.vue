@@ -3,7 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ArtifactReadResult, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryStatus, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -15,23 +15,28 @@ const ready = ref<CoreReadyPayload | null>(null)
 const failedImageSrc = ref('')
 const previewArtifact = ref('')
 const previewArtifactEvent = ref<AgentEvent | null>(null)
-const activeCabin = ref<'workspace' | 'chat' | 'inspector' | 'memory'>('workspace')
+const activeCabin = ref<'workspace' | 'chat' | 'memory' | 'inspector'>('workspace')
 const artifactDialog = ref<HTMLDialogElement | null>(null)
-
-// ---- Settings Panel Navigation ----
-type SettingsTabId = 'execution' | 'voice' | 'memory' | 'plugins' | 'appearance' | 'security' | 'about'
-const activeSettingsTab = ref<SettingsTabId>('execution')
-const settingsTabs: { id: SettingsTabId; icon: string; label: string; description: string }[] = [
-  { id: 'execution', icon: '⚡', label: '执行模式', description: '模型路由与提供商状态。在本机 CLI 与 BYOK 之间选择。' },
-  { id: 'voice', icon: '🎙️', label: '语音', description: '语音识别与合成设置。ASR/TTS 配置与状态。' },
-  { id: 'memory', icon: '🧠', label: '记忆', description: '语义记忆搜索、候选审批与仓库浏览。' },
-  { id: 'plugins', icon: '🧩', label: '技能', description: '原生技能清单、插件与 MCP 服务器。' },
-  { id: 'appearance', icon: '🎨', label: '外观', description: '个性化装扮、配件与显示偏好。' },
-  { id: 'security', icon: '🔒', label: '安全', description: '安全策略、参数限制与审计设置。' },
-  { id: 'about', icon: 'ℹ️', label: '关于', description: '版本信息、连接状态与项目链接。' },
-]
-const currentSettingsTab = computed(() => settingsTabs.find(t => t.id === activeSettingsTab.value))
 const memoryStatus = ref<MemoryStatus | null>(null)
+type SettingsTabId = 'runtime' | 'skills' | 'memory' | 'appearance' | 'developer'
+const activeSettingsTab = ref<SettingsTabId>('runtime')
+const settingsTabs: Array<{ id: SettingsTabId; label: string; icon: string }> = [
+  { id: 'runtime', label: '运行', icon: '⚡' },
+  { id: 'skills', label: '技能', icon: '▣' },
+  { id: 'memory', label: '记忆', icon: '🧠' },
+  { id: 'appearance', label: '外观', icon: '🎨' },
+  { id: 'developer', label: '审计', icon: '🧾' },
+]
+const memoryQuery = ref('')
+const memorySearchResults = ref<MemoryRecord[]>([])
+const memorySearchLoading = ref(false)
+const memoryVault = ref<MemoryVault | null>(null)
+const backgroundStatus = ref<BackgroundContextStatus | null>(null)
+const backgroundScopeType = ref<'window' | 'project' | 'game'>('window')
+const backgroundScopeLabel = ref('当前窗口')
+const backgroundLoading = ref(false)
+const skillManifest = ref<NativeSkillManifest | null>(null)
+const skillRefreshLoading = ref(false)
 
 const isCompactMode = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
@@ -42,75 +47,6 @@ const watchProactiveEnabled = ref(true)
 const watchCommentaryInterval = ref(30)
 const watchVisionInterval = ref(5)
 let miniSpeechTimer: number | null = null
-
-// ---- Mascot Mood State Machine (inspired by OpenHuman) ----
-type MascotMood = 'idle' | 'thinking' | 'listening' | 'talking' | 'surprised' | 'dreaming'
-const mascotMood = ref<MascotMood>('idle')
-const moodTransitionTimer = ref<number | null>(null)
-const subconsciousActive = ref(false)
-
-function deriveMoodFromEvents(): MascotMood {
-  const latest = events.value[events.value.length - 1]
-  if (!latest) return 'idle'
-  const t = latest.type
-  const status = latest.display_card?.status
-  if (t === 'user_message') return 'listening'
-  if (t === 'plan_created' || t === 'tool_started') return 'thinking'
-  if (t === 'tool_completed') { if (status === 'success') return 'talking'; if (status === 'failed') return 'surprised' }
-  if (t === 'approval_required') return 'surprised'
-  if (t === 'task_completed') return 'talking'
-  if (t === 'task_failed') return 'surprised'
-  return 'idle'
-}
-
-watch(events, () => {
-  const newMood = deriveMoodFromEvents()
-  if (newMood !== mascotMood.value) {
-    mascotMood.value = newMood
-    if (moodTransitionTimer.value) clearTimeout(moodTransitionTimer.value)
-    if (newMood !== 'thinking' && newMood !== 'listening') {
-      moodTransitionTimer.value = window.setTimeout(() => { mascotMood.value = 'idle'; moodTransitionTimer.value = null }, newMood === 'talking' ? 5000 : 3000)
-    }
-  }
-}, { deep: true })
-
-let idleTimer: number | null = null
-watch(mascotMood, (mood) => {
-  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
-  if (mood === 'idle') { idleTimer = window.setTimeout(() => { mascotMood.value = 'dreaming'; subconsciousActive.value = true }, 30000) }
-  else { subconsciousActive.value = false }
-})
-
-const moodIcon = computed(() => ({ idle: '😊', thinking: '🤔', listening: '👂', talking: '💬', surprised: '😮', dreaming: '💤' }[mascotMood.value] || '😊'))
-const moodLabel = computed(() => ({ idle: '空闲', thinking: '思考中', listening: '倾听', talking: '说话中', surprised: '惊讶', dreaming: '发呆' }[mascotMood.value] || '空闲'))
-
-// ---- Memory Panel ----
-interface MemoryEntry { kind: string; text: string; importance: number; tags: string[]; created_at: number; relevance?: number }
-const memoryQuery = ref('')
-const memoryEntries = ref<MemoryEntry[]>([])
-const vaultContent = ref<any>(null)
-async function searchMemory() {
-  const q = memoryQuery.value.trim()
-  try { const r = await coreClient.value?.rpc(q ? 'memory.recall' : 'memory.recent', q ? { query: q, limit: 10 } : { limit: 20 }); if (r?.entries) memoryEntries.value = r.entries } catch { memoryEntries.value = [] }
-}
-async function browseVault() {
-  try { const r = await coreClient.value?.rpc('memory.browse_vault', {}); if (r?.vault) vaultContent.value = r.vault } catch { vaultContent.value = null }
-}
-function formatMemoryTime(ts: number): string {
-  if (!ts) return ''; const d = new Date(ts * 1000), now = new Date(), diff = now.getTime() - d.getTime()
-  if (diff < 60000) return '刚刚'; if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`; if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`; return d.toLocaleDateString('zh-CN')
-}
-watch(activeCabin, (cabin) => { if (cabin === 'memory' && memoryEntries.value.length === 0) searchMemory() })
-
-// ---- Plugin List & Model Router ----
-const pluginList = computed(() => (ready.value?.tools || []).map((t: any) => ({ name: t.name, adapter: t.adapter, plugin: t.plugin || '' })))
-const skillManifest = computed(() => ready.value?.skills || { total: 0, available: 0, skills: [] })
-function skillIcon(category: string): string {
-  const icons: Record<string, string> = { coding: '💻', vision: '👁️', computer_use: '🖱️', memory: '🧠', watch: '📺', browser: '🌐', game: '🎮', chat: '💬', voice: '🎙️' }
-  return icons[category] || '⚡'
-}
-const modelRouteLabel = computed(() => ready.value?.runtime?.model || '未配置')
-const modelRoutes = computed(() => { const r = ready.value?.runtime; if (!r) return []; return [{ label: 'fast', model: r.model || '' }, { label: 'vision', model: r.vision_model || r.model || '' }, { label: 'expression', model: r.expression_model || '' }].filter(r => r.model) })
 
 async function toggleCompactMode() {
   const nextCompactMode = !isCompactMode.value
@@ -330,11 +266,14 @@ const client = new CoreClient({
     rememberVoiceEventEpoch(event)
     events.value.push(event)
     syncMemoryFromEvent(event)
+    syncBackgroundFromEvent(event)
     preloadImageArtifacts(event)
   },
   onReady: (payload) => {
     ready.value = payload
     memoryStatus.value = payload.memory || memoryStatus.value
+    backgroundStatus.value = payload.background || backgroundStatus.value
+    skillManifest.value = payload.skills || skillManifest.value
     syncRuntimeDraft(payload)
   },
   onVoiceAudio: (payload) => void playVoiceAudio(payload),
@@ -435,15 +374,62 @@ const watchLoopSourceHealth = computed(() => {
   return Object.entries(health)
     .map(([source, raw]) => {
       const row = asRecord(raw)
-      return `${sourceLabel(source)} ${Number(row.count || 0)} 段${stringValue(row.status) ? ` · ${stringValue(row.status)}` : ''}`
+      const count = Number(row.count || 0)
+      const status = stringValue(row.status)
+      const error = stringValue(row.error)
+      const capture = stringValue(row.capture)
+      const bytes = Number(row.audio_bytes || 0)
+      const parts = [`${sourceLabel(source)} ${count ? `${count} 段` : '诊断'}`]
+      if (status) parts.push(errorLabel(status))
+      if (capture) parts.push(`采集 ${capture}`)
+      if (bytes) parts.push(`${Math.round(bytes / 1024)}KB`)
+      if (error) parts.push(errorLabel(error))
+      return parts.join(' · ')
     })
     .slice(0, 3)
 })
 const pendingMemories = computed(() => (memoryStatus.value?.pending || []).filter((item) => item.status === 'pending'))
 const recentMemories = computed(() => memoryStatus.value?.recent || [])
 const memoryEnabled = computed(() => memoryStatus.value?.enabled !== false)
+const memoryProfile = computed(() => memoryStatus.value?.profile || null)
+const memoryProfileHighlights = computed(() => memoryProfile.value?.highlights || [])
+const memoryProfileSections = computed(() =>
+  [
+    { key: 'preferences', label: '偏好', rows: memoryProfile.value?.preferences || [] },
+    { key: 'habits', label: '习惯', rows: memoryProfile.value?.habits || [] },
+    { key: 'relationship', label: '关系', rows: memoryProfile.value?.relationship || [] },
+    { key: 'recent_focus', label: '关注', rows: memoryProfile.value?.recent_focus || [] },
+  ].filter((section) => section.rows.length),
+)
+const memoryProfileCountText = computed(() => {
+  const counts = memoryProfile.value?.counts || {}
+  const saved = Number(counts.saved || recentMemories.value.length || 0)
+  const pending = Number(counts.pending || pendingMemories.value.length || 0)
+  return `${saved} 已保存 · ${pending} 待确认`
+})
 const topPendingMemory = computed(() => pendingMemories.value[0] || null)
 const memoryAuthorizeText = computed(() => topPendingMemory.value?.text || '')
+const memoryQueryText = computed(() => memoryQuery.value.trim())
+const displayedMemoryRows = computed(() => (memoryQueryText.value ? memorySearchResults.value : recentMemories.value))
+const memoryVaultSections = computed(() => memoryVault.value?.sections || [])
+const memorySearchEmptyText = computed(() => (memoryQueryText.value ? '没有找到相关记忆' : '暂无长期记忆'))
+const backgroundEnabled = computed(() => backgroundStatus.value?.enabled === true)
+const backgroundActive = computed(() => backgroundStatus.value?.active === true)
+const backgroundScopes = computed<BackgroundContextScope[]>(() => backgroundStatus.value?.approved_scopes || [])
+const backgroundRecentRows = computed<BackgroundContextEntry[]>(() => backgroundStatus.value?.recent_context || [])
+const backgroundStateText = computed(() => {
+  if (!backgroundStatus.value) return '未连接'
+  if (!backgroundEnabled.value) return '已关闭'
+  return backgroundActive.value ? '已批准' : '等待范围'
+})
+const backgroundSummaryText = computed(() => {
+  if (!backgroundStatus.value) return '等待核心状态'
+  if (!backgroundEnabled.value) return '后台上下文关闭'
+  const scope = backgroundStatus.value.active_scope
+  if (!scope) return '需要批准窗口、项目或游戏范围'
+  return `${backgroundScopeTypeLabel(scope.type)} · ${scope.label || '已批准范围'}`
+})
+const backgroundRetentionText = computed(() => backgroundRetentionLabel(backgroundStatus.value?.retention))
 
 watch(watchLoopStatus, (status) => {
   const source = stringValue(status.transcript_source)
@@ -452,6 +438,20 @@ watch(watchLoopStatus, (status) => {
   if (status.commentary_interval_seconds) watchCommentaryInterval.value = Number(status.commentary_interval_seconds)
   const visionInterval = Number(status.vision_interval_ticks)
   if (Number.isFinite(visionInterval)) watchVisionInterval.value = Math.max(0, visionInterval)
+})
+
+watch(activeCabin, (cabin) => {
+  if (cabin !== 'memory') return
+  void refreshMemoryStatus()
+  void browseMemoryVault()
+})
+
+watch(activeSettingsTab, (tab) => {
+  if (tab === 'memory') {
+    void refreshMemoryStatus()
+    void browseMemoryVault()
+  }
+  if (tab === 'developer') void refreshBackgroundStatus()
 })
 
 const latestSpeech = computed(() => {
@@ -573,8 +573,7 @@ const characterName = computed(() => ready.value?.character?.name || 'Joi')
 const characterImageSrc = computed(() => {
   const sprites = ready.value?.character?.sprites || []
   const active = sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
-  if (active?.image_data_url) return active.image_data_url
-  return active?.image_path ? convertFileSrc(active.image_path) : ''
+  return active?.image_data_url || ''
 })
 
 const currentMode = computed(() => {
@@ -635,6 +634,11 @@ function toolName(event: AgentEvent) {
 function intentName(event: AgentEvent) {
   const intent = event.agent_state?.intent
   return typeof intent === 'string' ? intent : ''
+}
+
+function skillName(event: AgentEvent) {
+  const skillId = event.agent_state?.skill_id
+  return typeof skillId === 'string' ? skillId : ''
 }
 
 function isCompanionChat(event: AgentEvent) {
@@ -1049,15 +1053,13 @@ function isImageArtifact(artifact: string) {
 }
 
 function artifactPath(artifact: string) {
-  if (/^[a-zA-Z]:[\\/]/.test(artifact) || artifact.startsWith('/')) return artifact
-  const workspace = ready.value?.workspace || ''
-  if (!workspace) return artifact
-  const separator = workspace.includes('\\') ? '\\' : '/'
-  return `${workspace.replace(/[\\/]$/, '')}${separator}${artifact.replace(/[\\/]/g, separator)}`
+  return artifact
 }
 
 function artifactSrc(artifact: string) {
-  return artifactDataUrls.value[artifact] || convertFileSrc(artifactPath(artifact))
+  if (artifactDataUrls.value[artifact]) return artifactDataUrls.value[artifact]
+  if (/^[a-zA-Z]:[\\/]/.test(artifact) || artifact.startsWith('/')) return convertFileSrc(artifactPath(artifact))
+  return ''
 }
 
 function openArtifactPreview(artifact: string, event: AgentEvent) {
@@ -1295,6 +1297,11 @@ function errorLabel(value: string) {
     asr_disabled: 'ASR 未启用',
     asr_timeout: 'ASR 超时',
     empty_transcript: '音频无文本',
+    ready: '就绪',
+    success: '成功',
+    failed: '失败',
+    unavailable: '不可用',
+    ok: '正常',
   }
   return labels[value] || value
 }
@@ -1378,9 +1385,122 @@ function stopWatchLoop() {
 
 function syncMemoryFromEvent(event: AgentEvent) {
   const memory = asRecord(event.agent_state?.memory)
-  if ('recent' in memory || 'pending' in memory || 'vault_path' in memory) {
+  if ('recent' in memory || 'pending' in memory || 'vault_label' in memory) {
     memoryStatus.value = memory as unknown as MemoryStatus
   }
+}
+
+function syncBackgroundFromEvent(event: AgentEvent) {
+  const background = asRecord(event.agent_state?.background_context)
+  if ('safe_for_display' in background || 'recent_context' in background || 'recent_count' in background || 'scope_count' in background) {
+    backgroundStatus.value = background as unknown as BackgroundContextStatus
+  }
+}
+
+async function refreshBackgroundStatus() {
+  backgroundLoading.value = true
+  try {
+    const result = (await client.backgroundStatus()) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景上下文读取失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景上下文读取失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+async function configureBackgroundScope() {
+  backgroundLoading.value = true
+  try {
+    const label = backgroundScopeLabel.value.trim() || backgroundScopeTypeLabel(backgroundScopeType.value)
+    const result = (await client.backgroundConfigure({
+      enabled: true,
+      scope_type: backgroundScopeType.value,
+      label,
+    })) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景范围批准失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景范围批准失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+async function toggleBackgroundEnabled(event: Event) {
+  const enabled = Boolean((event.target as HTMLInputElement | null)?.checked)
+  backgroundLoading.value = true
+  try {
+    const result = (await client.backgroundConfigure({ enabled })) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景上下文开关更新失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景上下文开关更新失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+async function clearBackgroundContext() {
+  if (!backgroundRecentRows.value.length) return
+  if (!window.confirm(`清空 ${backgroundRecentRows.value.length} 条背景摘要？批准范围会保留。`)) return
+  backgroundLoading.value = true
+  try {
+    const result = (await client.backgroundClear()) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
+    if (result.background) backgroundStatus.value = result.background
+    if (!result.ok) errorText.value = result.error || '背景摘要清空失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '背景摘要清空失败'
+  } finally {
+    backgroundLoading.value = false
+  }
+}
+
+function backgroundScopeTypeLabel(value?: string) {
+  const labels: Record<string, string> = {
+    window: '窗口',
+    project: '项目',
+    game: '游戏',
+  }
+  return labels[value || ''] || '范围'
+}
+
+function backgroundRetentionLabel(value?: string) {
+  const labels: Record<string, string> = {
+    summaries_only: '仅摘要',
+  }
+  return labels[value || ''] || value || '仅摘要'
+}
+
+function backgroundScopeMeta(scope: BackgroundContextScope) {
+  const pieces = [backgroundScopeTypeLabel(scope.type)]
+  if (scope.approved_at) pieces.push(new Date(scope.approved_at * 1000).toLocaleString([], { hour12: false }))
+  pieces.push(scope.enabled === false ? '关闭' : '启用')
+  return pieces.join(' · ')
+}
+
+function backgroundEntryTime(row: BackgroundContextEntry) {
+  if (!row.created_at) return '刚刚'
+  return new Date(row.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function backgroundEntryMeta(row: BackgroundContextEntry) {
+  const pieces = [backgroundScopeTypeLabel(row.scope_type)]
+  const source = stringValue(row.source)
+  if (source) pieces.push(source === 'watch_loop' ? '陪看' : source)
+  const transcript = stringValue(row.transcript_source)
+  if (transcript) pieces.push(sourceLabel(transcript))
+  const visual = stringValue(row.visual_status)
+  if (visual) pieces.push(`视觉 ${visual}`)
+  return pieces.join(' · ')
+}
+
+function memoryPriorityLabel(value?: string) {
+  if (value === 'high') return '高优先'
+  if (value === 'medium') return '中优先'
+  if (value === 'low') return '低优先'
+  return value || '普通'
 }
 
 async function refreshMemoryStatus() {
@@ -1392,10 +1512,42 @@ async function refreshMemoryStatus() {
   }
 }
 
+async function searchMemory() {
+  const query = memoryQueryText.value
+  if (!query) {
+    memorySearchResults.value = []
+    return
+  }
+  memorySearchLoading.value = true
+  try {
+    const result = (await client.memoryRecall(query, 12)) as { ok?: boolean; memories?: MemoryRecord[]; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    memorySearchResults.value = result.memories || []
+    if (!result.ok) errorText.value = result.error || '记忆检索失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆检索失败'
+  } finally {
+    memorySearchLoading.value = false
+  }
+}
+
+async function browseMemoryVault() {
+  try {
+    const result = (await client.memoryBrowseVault()) as { ok?: boolean; vault?: MemoryVault; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (result.vault) memoryVault.value = result.vault
+    if (!result.ok) errorText.value = result.error || '记忆库读取失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆库读取失败'
+  }
+}
+
 async function saveMemoryCandidate(candidateId: number) {
   try {
     const result = (await client.memorySaveCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
+    if (memoryQueryText.value) void searchMemory()
+    void browseMemoryVault()
     if (!result.ok) errorText.value = result.error || '记忆保存失败'
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '记忆保存失败'
@@ -1427,6 +1579,8 @@ async function deleteMemory(memoryId: number) {
   try {
     const result = (await client.memoryDelete(memoryId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
+    if (memoryQueryText.value) void searchMemory()
+    void browseMemoryVault()
     if (!result.ok) errorText.value = result.error || '记忆删除失败'
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '记忆删除失败'
@@ -1440,6 +1594,8 @@ async function clearMemory() {
   try {
     const result = (await client.memoryClear()) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
+    memorySearchResults.value = []
+    void browseMemoryVault()
     if (!result.ok) errorText.value = result.error || '记忆清空失败'
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '记忆清空失败'
@@ -1617,6 +1773,95 @@ function providerMeta(row: RuntimeProviderStatus) {
   return meta
 }
 
+function nativeSkills(): NativeSkill[] {
+  return skillManifest.value?.skills || ready.value?.skills?.skills || []
+}
+
+function skillManifestVersion() {
+  return skillManifest.value?.version || ready.value?.skills?.version || 'joi.skill_manifest.v1'
+}
+
+function skillCapabilityLabel(value?: string) {
+  const labels: Record<string, string> = {
+    ready: '可用',
+    off: '关闭',
+    unavailable: '不可用',
+    degraded: '降级',
+  }
+  return labels[value || ''] || '未知'
+}
+
+function skillPermissionLabel(value?: string) {
+  const labels: Record<string, string> = {
+    low: '低风险',
+    medium: '需确认',
+    high: '高风险',
+  }
+  return labels[value || ''] || '需确认'
+}
+
+function skillMeta(skill: NativeSkill) {
+  const meta: string[] = []
+  if (skill.category) meta.push(skill.category)
+  if (skill.permission_level) meta.push(skillPermissionLabel(skill.permission_level))
+  if (skill.state_policy) meta.push(skill.state_policy)
+  if (skill.audit) meta.push(skill.audit)
+  if (skill.supports_dry_run) meta.push('dry-run')
+  return meta
+}
+
+function skillTools(skill: NativeSkill) {
+  return [...(skill.tools || []), ...(skill.rpc_methods || [])].slice(0, 10)
+}
+
+function skillEnabled(skill: NativeSkill) {
+  return skill.enabled !== false
+}
+
+function skillToggleDisabled(skill: NativeSkill) {
+  return !connected.value || skillRefreshLoading.value || skill.id === 'joi.runtime_config'
+}
+
+function skillActionLabel(skill: NativeSkill) {
+  if (skill.id === 'joi.runtime_config') return '核心'
+  return skillEnabled(skill) ? '关闭' : '开启'
+}
+
+async function setSkillEnabled(skill: NativeSkill, enabled: boolean) {
+  if (!skill.id) return
+  skillRefreshLoading.value = true
+  try {
+    const result = (await client.applyRuntimeConfig({ skills: { [skill.id]: { enabled } } })) as {
+      ok?: boolean
+      preview?: RuntimeConfigMutationResult
+      ready?: CoreReadyPayload
+    }
+    if (result.preview) runtimePreview.value = result.preview
+    if (result.ok === false) errorText.value = result.preview?.summary || '技能开关没有提交'
+    if (result.ready) {
+      ready.value = result.ready
+      skillManifest.value = result.ready.skills || skillManifest.value
+      syncRuntimeDraft(result.ready)
+    }
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '技能开关提交失败'
+  } finally {
+    skillRefreshLoading.value = false
+  }
+}
+
+async function refreshSkills() {
+  skillRefreshLoading.value = true
+  try {
+    const result = (await client.skillsList()) as { ok?: boolean; skills?: NativeSkillManifest }
+    if (result.skills) skillManifest.value = result.skills
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '技能清单刷新失败'
+  } finally {
+    skillRefreshLoading.value = false
+  }
+}
+
 function defaultRuntimeDraft() {
   return {
     asr_enabled: false,
@@ -1655,9 +1900,9 @@ function syncRuntimeDraft(payload: CoreReadyPayload) {
   const settleMs = computerUse.post_action_settle_ms ?? (parseSettleMs(runtimeProvider(payload, 'computer_use')?.limit) || draft.computer_post_action_settle_ms)
   draft.computer_post_action_settle_ms = Math.max(0, Number(settleMs))
   const llmSettings = settings.llm || {}
-  const text = runtimeProvider(payload, 'text')
+  const fastModel = runtimeProvider(payload, 'fast')
   draft.llm_temperature = Math.max(0, Number(llmSettings.temperature ?? draft.llm_temperature))
-  draft.llm_use_mock = typeof llmSettings.use_mock === 'boolean' ? llmSettings.use_mock : text?.state === 'mock'
+  draft.llm_use_mock = typeof llmSettings.use_mock === 'boolean' ? llmSettings.use_mock : fastModel?.state === 'mock'
   runtimeDraft.value = draft
 }
 
@@ -1797,6 +2042,7 @@ function providerErrorLabel(error: string) {
     tesseract_unavailable: 'Tesseract 不可用',
     ocr_dependency_missing: 'OCR 依赖缺失',
     computer_use_windows_only: '仅 Windows 可执行',
+    computer_use_desktop_only: '仅 Windows/macOS 可执行',
     model_unconfigured: '模型未配置',
     runtime_status_unavailable: '状态不可用',
     empty_update: '没有变更',
@@ -2297,231 +2543,415 @@ onBeforeUnmount(() => {
         </form>
       </section>
 
-      <!-- Memory Cabin (Hermes-enhanced semantic search) -->
-      <section class="memory-section" v-if="activeCabin === 'memory'" style="padding: 0 4px;">
+      <section class="memory-section" v-if="activeCabin === 'memory'">
         <div class="section-title">
-          <h2>🧠 语义记忆</h2>
-          <span>{{ memoryEntries.length }} 条</span>
+          <h2>记忆舱</h2>
+          <span>{{ pendingMemories.length }} 待确认 · {{ recentMemories.length }} 已保存</span>
         </div>
-        <div style="display:flex;gap:8px;margin-bottom:12px;">
-          <input v-model="memoryQuery" type="text" placeholder="搜索记忆... (语义检索)" class="memory-search-input" style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--glass-inner-border);background:var(--glass-panel-bg);font-size:12px;" @keydown.enter="searchMemory" />
-          <button type="button" class="settings-btn-secondary" @click="searchMemory">搜索</button>
-        </div>
-        <div v-if="memoryEntries.length" style="display:flex;flex-direction:column;gap:8px;max-height:400px;overflow-y:auto;">
-          <div v-for="(mem, idx) in memoryEntries" :key="idx" style="padding:10px 12px;border-radius:10px;background:var(--glass-panel-bg);border:1px solid var(--glass-inner-border);">
-            <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-              <span style="font-size:10px;font-weight:600;color:var(--color-primary);background:var(--color-primary-glow);padding:2px 6px;border-radius:4px;">{{ mem.kind }}</span>
-              <span style="font-size:10px;color:#9ca3af;">{{ formatMemoryTime(mem.created_at) }}</span>
-            </div>
-            <p style="font-size:12px;color:#374151;line-height:1.5;margin:0;">{{ mem.text }}</p>
+
+        <div class="memory-command-panel">
+          <div class="memory-command-copy">
+            <strong>{{ memoryEnabled ? '长期记忆开启' : '长期记忆关闭' }}</strong>
+            <span>{{ memoryStatus?.vault_label ? `本地记忆库 · ${memoryStatus.vault_label}` : '等待核心连接后读取本地记忆库' }}</span>
+          </div>
+          <div class="memory-head-actions">
+            <label class="memory-enable-toggle">
+              <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
+              <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
+            </label>
+            <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+            <button type="button" class="memory-link-button" @click="browseMemoryVault">读取库</button>
+            <button type="button" class="memory-link-button danger" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
           </div>
         </div>
-        <div v-else style="text-align:center;padding:40px 20px;color:#9ca3af;font-size:12px;">
-          <p>暂无记忆。对话中的重要信息会被自动保存。</p>
+
+        <form class="memory-search-bar" @submit.prevent="searchMemory">
+          <input v-model="memoryQuery" type="search" placeholder="搜索 Joi 已获授权的长期记忆..." />
+          <button type="submit" :disabled="memorySearchLoading || !memoryQueryText">
+            {{ memorySearchLoading ? '检索中' : '检索' }}
+          </button>
+        </form>
+
+        <div class="memory-grid">
+          <div class="memory-panel memory-profile-panel">
+            <header>
+              <strong>记忆画像</strong>
+              <span>{{ memoryProfileCountText }}</span>
+            </header>
+            <p class="memory-profile-summary">{{ memoryProfile?.summary || '保存并授权几条长期记忆后，Joi 会在这里汇总用户画像。' }}</p>
+            <div class="memory-profile-highlights" v-if="memoryProfileHighlights.length">
+              <span v-for="highlight in memoryProfileHighlights.slice(0, 5)" :key="highlight">{{ highlight }}</span>
+            </div>
+            <div class="memory-profile-sections" v-if="memoryProfileSections.length">
+              <section v-for="section in memoryProfileSections" :key="section.key">
+                <strong>{{ section.label }}</strong>
+                <p v-for="row in section.rows.slice(0, 3)" :key="`${section.key}-${row}`">{{ row }}</p>
+              </section>
+            </div>
+          </div>
+
+          <div class="memory-panel">
+            <header>
+              <strong>待确认</strong>
+              <span>{{ pendingMemories.length }}</span>
+            </header>
+            <div class="memory-list" v-if="pendingMemories.length">
+              <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
+                <div>
+                  <strong>{{ candidate.kind || 'note' }}</strong>
+                  <p>{{ candidate.text }}</p>
+                  <span>{{ candidate.source || 'candidate' }} · {{ memoryPriorityLabel(candidate.priority) }}</span>
+                  <small class="memory-priority-note" v-if="candidate.priority_reason">{{ candidate.priority_reason }}</small>
+                </div>
+                <div class="memory-actions">
+                  <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
+                  <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
+                </div>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>没有待确认记忆</p>
+          </div>
+
+          <div class="memory-panel">
+            <header>
+              <strong>{{ memoryQueryText ? '检索结果' : '最近记忆' }}</strong>
+              <span>{{ displayedMemoryRows.length }}</span>
+            </header>
+            <div class="memory-list" v-if="displayedMemoryRows.length">
+              <article v-for="memory in displayedMemoryRows" :key="memory.id" class="memory-row">
+                <div>
+                  <strong>{{ memory.kind || 'note' }}</strong>
+                  <p>{{ memory.text }}</p>
+                  <span>{{ memory.source || 'manual' }}<template v-if="memory.relevance"> · 相关 {{ Math.round(memory.relevance) }}</template></span>
+                </div>
+                <button type="button" class="memory-delete" @click="deleteMemory(memory.id)">删除</button>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>{{ memorySearchEmptyText }}</p>
+          </div>
+
+          <div class="memory-panel memory-vault-panel">
+            <header>
+              <strong>本地 Vault</strong>
+              <button type="button" class="memory-link-button" @click="browseMemoryVault">刷新</button>
+            </header>
+            <div class="memory-vault-sections" v-if="memoryVaultSections.length">
+              <section v-for="section in memoryVaultSections" :key="section.title">
+                <strong>{{ section.title }}</strong>
+                <p v-for="line in section.lines.slice(0, 6)" :key="`${section.title}-${line}`">{{ line }}</p>
+              </section>
+            </div>
+            <p class="memory-empty" v-else>还没有可展示的本地记忆库内容</p>
+          </div>
         </div>
       </section>
 
-      <!-- Settings Panel (Integrated Design) -->
-      <section class="settings-panel" v-if="activeCabin === 'inspector'">
-        <nav class="settings-nav">
-          <div class="settings-nav-header">设置</div>
-          <button v-for="tab in settingsTabs" :key="tab.id" type="button" class="settings-nav-item" :class="{ active: activeSettingsTab === tab.id }" @click="activeSettingsTab = tab.id">
-            <span class="settings-nav-icon">{{ tab.icon }}</span>
-            <span class="settings-nav-label">{{ tab.label }}</span>
+      <section class="debug-section" v-if="activeCabin === 'inspector'">
+        <nav class="settings-tabbar">
+          <button
+            v-for="tab in settingsTabs"
+            :key="tab.id"
+            type="button"
+            class="settings-tab"
+            :class="{ active: activeSettingsTab === tab.id }"
+            @click="activeSettingsTab = tab.id"
+          >
+            <span>{{ tab.icon }}</span>
+            {{ tab.label }}
           </button>
         </nav>
-        <div class="settings-content">
-          <div class="settings-content-header">
-            <h2>{{ currentSettingsTab?.label }}</h2>
-            <p>{{ currentSettingsTab?.description }}</p>
+
+        <!-- Closet Wardrobe -->
+        <div class="runtime-settings" v-if="activeSettingsTab === 'appearance'">
+          <div class="runtime-settings-head">
+            <strong>个性化装扮 (Cosplay Closet)</strong>
+            <span>点击进行穿戴</span>
           </div>
-
-          <!-- 执行模式 -->
-          <div v-if="activeSettingsTab === 'execution'" class="settings-section">
-            <div class="settings-group">
-              <div class="settings-group-title">当前模型</div>
-              <div class="settings-model-card">
-                <div class="model-card-row" v-for="r in modelRoutes" :key="r.label">
-                  <span class="model-card-label">{{ r.label }}</span>
-                  <span class="model-card-value">{{ r.model || '—' }}</span>
-                </div>
-              </div>
-            </div>
-            <div class="settings-group">
-              <div class="settings-group-title">提供商状态 · 运行设置</div>
-              <div class="settings-provider-list">
-                <div v-for="row in runtimeStatusRows()" :key="row.name" class="settings-provider-item provider-card" :class="row.state">
-                  <div class="provider-dot" :class="row.state"></div>
-                  <div class="provider-info">
-                    <span class="provider-name">{{ row.label || row.name }}</span>
-                    <span class="provider-desc">{{ providerSummary(row) }}</span>
-                  </div>
-                  <span class="provider-state-badge" :class="row.state">{{ providerStateLabel(row.state) }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 语音 -->
-          <div v-if="activeSettingsTab === 'voice'" class="settings-section">
-            <div class="settings-group">
-              <div class="settings-group-title">语音识别 (ASR)</div>
-              <div class="settings-toggle-row"><span>启用 ASR</span><label class="settings-switch"><input v-model="runtimeDraft.asr_enabled" type="checkbox" @change="markRuntimeDraftDirty" /><span class="settings-switch-slider"></span></label></div>
-              <div class="settings-input-row"><span>最大时长 (秒)</span><input v-model.number="runtimeDraft.asr_max_seconds" type="number" min="1" max="600" class="settings-number-input" @input="markRuntimeDraftDirty" /></div>
-              <div class="settings-input-row"><span>超时 (秒)</span><input v-model.number="runtimeDraft.asr_timeout_seconds" type="number" min="1" max="300" class="settings-number-input" @input="markRuntimeDraftDirty" /></div>
-            </div>
-            <div class="settings-group">
-              <div class="settings-group-title">语音合成 (TTS)</div>
-              <div class="settings-toggle-row"><span>启用 TTS</span><label class="settings-switch"><input v-model="runtimeDraft.tts_enabled" type="checkbox" @change="markRuntimeDraftDirty" /><span class="settings-switch-slider"></span></label></div>
-              <div class="settings-input-row"><span>音量</span><input v-model.number="runtimeDraft.tts_volume" type="range" min="0" max="2" step="0.05" class="settings-range" @input="markRuntimeDraftDirty" /><span class="settings-range-value">{{ (runtimeDraft.tts_volume * 100).toFixed(0) }}%</span></div>
-              <div class="settings-input-row"><span>语速</span><input v-model.number="runtimeDraft.tts_speed_factor" type="range" min="0.5" max="2" step="0.05" class="settings-range" @input="markRuntimeDraftDirty" /><span class="settings-range-value">{{ runtimeDraft.tts_speed_factor?.toFixed(1) }}x</span></div>
-              <div class="settings-toggle-row"><span>系统 TTS 回退</span><label class="settings-switch"><input v-model="runtimeDraft.tts_fallback_to_system" type="checkbox" @change="markRuntimeDraftDirty" /><span class="settings-switch-slider"></span></label></div>
-            </div>
-          </div>
-
-          <!-- 记忆 -->
-          <div v-if="activeSettingsTab === 'memory'" class="settings-section">
-            <div class="settings-group">
-              <div class="settings-group-title">记忆舱</div>
-              <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
-                <label class="memory-enable-toggle" style="display:flex;align-items:center;gap:4px;font-size:12px;">
-                  <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
-                  <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
-                </label>
-                <button type="button" class="settings-btn-secondary" @click="refreshMemoryStatus">刷新</button>
-                <button type="button" class="settings-btn-secondary" style="color:var(--color-error);" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
-              </div>
-              <p v-if="!memoryEnabled" style="font-size:11px;color:#9ca3af;margin-bottom:8px;">长期记忆已关闭，新候选不会写入待确认队列。</p>
-              <div v-if="memoryStatus?.vault_path" style="font-size:10px;color:#9ca3af;font-family:monospace;margin-bottom:8px;">{{ memoryStatus.vault_path }}</div>
-
-              <!-- Pending Candidates -->
-              <div v-if="pendingMemories.length" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;">
-                <div v-for="candidate in pendingMemories" :key="candidate.id" class="memory-authorize-bubble" style="padding:8px 10px;border-radius:8px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.2);">
-                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                    <span style="font-size:10px;font-weight:600;color:#d97706;">{{ candidate.kind || 'note' }}</span>
-                    <span style="font-size:10px;color:#9ca3af;">{{ candidate.source || 'candidate' }}</span>
-                  </div>
-                  <p style="font-size:11px;color:#374151;margin:0 0 6px;">{{ candidate.text }}</p>
-                  <div style="display:flex;gap:6px;">
-                    <button type="button" class="settings-btn-primary" style="padding:4px 12px;font-size:10px;" @click="saveMemoryCandidate(candidate.id)">记住</button>
-                    <button type="button" class="settings-btn-secondary" style="padding:4px 12px;font-size:10px;" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Semantic Search -->
-              <div style="display:flex;gap:8px;margin-bottom:12px;">
-                <input v-model="memoryQuery" type="text" placeholder="语义搜索记忆..." style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--glass-inner-border);font-size:12px;" @keydown.enter="searchMemory" />
-                <button type="button" class="settings-btn-secondary" @click="searchMemory">搜索</button>
-              </div>
-
-              <!-- Recent Memories -->
-              <div v-if="recentMemories.length || memoryEntries.length" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto;">
-                <div v-for="(mem, idx) in (memoryEntries.length ? memoryEntries : recentMemories)" :key="idx" style="padding:8px 10px;border-radius:8px;background:rgba(0,0,0,0.02);">
-                  <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
-                    <span style="font-size:10px;font-weight:600;color:var(--color-primary);">{{ mem.kind || 'note' }}</span>
-                    <div style="display:flex;gap:6px;align-items:center;">
-                      <span style="font-size:10px;color:#9ca3af;">{{ formatMemoryTime(mem.created_at) }}</span>
-                      <button v-if="mem.id" type="button" style="font-size:9px;color:var(--color-error);background:none;border:none;cursor:pointer;" @click="deleteMemory(mem.id)">删除</button>
-                    </div>
-                  </div>
-                  <p style="font-size:11px;color:#374151;margin:0;">{{ mem.text }}</p>
-                </div>
-              </div>
-              <p v-else style="font-size:11px;color:#9ca3af;padding:8px 0;">暂无长期记忆。对话中的重要信息会被自动保存。</p>
-
-              <!-- Vault Browser -->
-              <div v-if="vaultContent?.sections?.length" style="margin-top:12px;border-top:1px solid rgba(0,0,0,0.06);padding-top:12px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                  <span style="font-size:11px;font-weight:600;color:#374151;">📖 记忆仓库</span>
-                  <button type="button" class="settings-btn-secondary" style="padding:2px 8px;font-size:9px;" @click="browseVault">{{ vaultContent ? '刷新' : '加载' }}</button>
-                </div>
-                <div v-for="(section, si) in vaultContent.sections" :key="si" style="margin-bottom:8px;">
-                  <div style="font-size:10px;font-weight:600;color:#6b7280;margin-bottom:4px;">{{ section.title }}</div>
-                  <div v-for="(line, li) in section.lines.filter(l => l.trim())" :key="li" style="font-size:10px;color:#374151;padding:2px 0;border-bottom:1px solid rgba(0,0,0,0.02);">{{ line }}</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 插件 & 技能 -->
-          <div v-if="activeSettingsTab === 'plugins'" class="settings-section">
-            <div class="settings-group">
-              <div class="settings-group-title">原生技能 ({{ skillManifest?.available || 0 }}/{{ skillManifest?.total || 0 }})</div>
-              <div v-if="skillManifest?.skills?.length" class="settings-plugin-list">
-                <div v-for="skill in skillManifest.skills" :key="skill.name" class="settings-plugin-item">
-                  <div class="plugin-icon">{{ skillIcon(skill.category) }}</div>
-                  <div class="plugin-info">
-                    <span class="plugin-name">{{ skill.name }} <span style="font-size:9px;color:#9ca3af;">v{{ skill.version }}</span></span>
-                    <span class="plugin-adapter">{{ skill.description }}</span>
-                    <div style="display:flex;gap:4px;margin-top:2px;">
-                      <span style="font-size:9px;padding:1px 4px;border-radius:3px;" :style="{ background: skill.available ? 'var(--color-success-bg)' : 'var(--color-error-bg)', color: skill.available ? 'var(--color-success)' : 'var(--color-error)' }">{{ skill.available ? '就绪' : '不可用' }}</span>
-                      <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(0,0,0,0.04);color:#6b7280;">{{ skill.permission_level }}</span>
-                      <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(0,0,0,0.04);color:#6b7280;">{{ skill.risk_level }}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <p v-else class="settings-empty-hint">技能清单加载中...</p>
-            </div>
-            <div class="settings-group">
-              <div class="settings-group-title">已加载插件 ({{ pluginList.length }})</div>
-              <div v-if="pluginList.length" class="settings-plugin-list">
-                <div v-for="p in pluginList" :key="p.name" class="settings-plugin-item">
-                  <div class="plugin-icon">🧩</div>
-                  <div class="plugin-info"><span class="plugin-name">{{ p.name }}</span><span class="plugin-adapter">{{ p.adapter }}</span></div>
-                </div>
-              </div>
-              <p v-else class="settings-empty-hint">将 ToolPlugin 放入 agent_companion/plugins/ 目录即可自动加载。</p>
-            </div>
-            <div class="settings-group">
-              <div class="settings-group-title">MCP 服务器</div>
-              <p class="settings-empty-hint">暂无外部 MCP 服务器连接。在 config.yaml 中配置 mcpServers 即可。</p>
-            </div>
-          </div>
-
-          <!-- 外观 -->
-          <div v-if="activeSettingsTab === 'appearance'" class="settings-section">
-            <div class="settings-group">
-              <div class="settings-group-title">个性化装扮</div>
-              <div class="settings-accessory-grid">
-                <button type="button" class="settings-accessory-card" :class="{ equipped: equippedAccessories.hat }" @click="toggleAccessory('hat')"><span class="accessory-emoji">🎓</span><span>巫师帽</span></button>
-                <button type="button" class="settings-accessory-card" :class="{ equipped: equippedAccessories.glasses }" @click="toggleAccessory('glasses')"><span class="accessory-emoji">🕶️</span><span>酷墨镜</span></button>
-                <button type="button" class="settings-accessory-card" :class="{ equipped: equippedAccessories.ears }" @click="toggleAccessory('ears')"><span class="accessory-emoji">🐰</span><span>兔耳朵</span></button>
-              </div>
-            </div>
-          </div>
-
-          <!-- 安全 -->
-          <div v-if="activeSettingsTab === 'security'" class="settings-section">
-            <div class="settings-group">
-              <div class="settings-group-title">安全设置</div>
-              <div class="settings-input-row"><span>OCR 超时 (秒)</span><input v-model.number="runtimeDraft.ocr_timeout_seconds" type="number" min="1" max="120" class="settings-number-input" @input="markRuntimeDraftDirty" /></div>
-              <div class="settings-input-row"><span>LLM 温度</span><input v-model.number="runtimeDraft.llm_temperature" type="range" min="0" max="2" step="0.05" class="settings-range" @input="markRuntimeDraftDirty" /><span class="settings-range-value">{{ runtimeDraft.llm_temperature?.toFixed(2) }}</span></div>
-              <div class="settings-toggle-row"><span>Mock 模型</span><label class="settings-switch"><input v-model="runtimeDraft.llm_use_mock" type="checkbox" @change="markRuntimeDraftDirty" /><span class="settings-switch-slider"></span></label></div>
-              <div class="settings-input-row"><span>操作等待 (ms)</span><input v-model.number="runtimeDraft.computer_post_action_settle_ms" type="number" min="0" max="10000" step="25" class="settings-number-input" @input="markRuntimeDraftDirty" /></div>
-            </div>
-          </div>
-
-          <!-- 关于 -->
-          <div v-if="activeSettingsTab === 'about'" class="settings-section">
-            <div class="settings-group">
-              <div class="settings-group-title">关于 Joi</div>
-              <div class="settings-about-card">
-                <div class="about-row"><span>版本</span><span>v0.2.0</span></div>
-                <div class="about-row"><span>分支</span><span>win-desktop-fixes</span></div>
-                <div class="about-row"><span>工作目录</span><span class="about-path">{{ ready?.workspace || '—' }}</span></div>
-                <div class="about-row"><span>连接状态</span><span :class="connected ? 'text-success' : 'text-error'">{{ connectionLabel }}</span></div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Save/Preview Footer -->
-          <div class="settings-footer" v-if="runtimeDraftDirty">
-            <button type="button" class="settings-btn-secondary" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">{{ runtimePreviewLoading ? '预览中' : '预览' }}</button>
-            <button type="button" class="settings-btn-primary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">{{ runtimeApplyLoading ? '提交中' : '提交审批' }}</button>
+          <div class="closet-grid">
+            <button
+              type="button"
+              class="accessory-card"
+              :class="{ equipped: equippedAccessories.hat }"
+              @click="toggleAccessory('hat')"
+            >
+              🎓 巫师帽
+            </button>
+            <button
+              type="button"
+              class="accessory-card"
+              :class="{ equipped: equippedAccessories.glasses }"
+              @click="toggleAccessory('glasses')"
+            >
+              🕶️ 酷墨镜
+            </button>
+            <button
+              type="button"
+              class="accessory-card"
+              :class="{ equipped: equippedAccessories.ears }"
+              @click="toggleAccessory('ears')"
+            >
+              🐰 兔耳朵
+            </button>
           </div>
         </div>
+
+        <div class="runtime-settings memory-settings" v-if="activeSettingsTab === 'memory'">
+          <div class="runtime-settings-head">
+            <strong>记忆舱</strong>
+            <div class="memory-head-actions">
+              <label class="memory-enable-toggle">
+                <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
+                <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
+              </label>
+              <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+              <button type="button" class="memory-link-button danger" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
+            </div>
+          </div>
+          <p class="memory-disabled-note" v-if="!memoryEnabled">长期记忆已关闭，新候选不会写入待确认队列。</p>
+          <div class="memory-vault-path" v-if="memoryStatus?.vault_label">本地记忆库 · {{ memoryStatus.vault_label }}</div>
+          <div class="memory-profile-inline" v-if="memoryProfile">
+            <strong>记忆画像</strong>
+            <p>{{ memoryProfile.summary || '等待更多长期记忆形成画像。' }}</p>
+          </div>
+          <div class="memory-list" v-if="pendingMemories.length">
+            <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
+              <div>
+                <strong>{{ candidate.kind || 'note' }}</strong>
+                <p>{{ candidate.text }}</p>
+                <span>{{ candidate.source || 'candidate' }} · {{ memoryPriorityLabel(candidate.priority) }}</span>
+                <small class="memory-priority-note" v-if="candidate.priority_reason">{{ candidate.priority_reason }}</small>
+              </div>
+              <div class="memory-actions">
+                <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
+                <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
+              </div>
+            </article>
+          </div>
+          <div class="memory-list" v-if="recentMemories.length">
+            <article v-for="memory in recentMemories" :key="memory.id" class="memory-row">
+              <div>
+                <strong>{{ memory.kind || 'note' }}</strong>
+                <p>{{ memory.text }}</p>
+                <span>{{ memory.source || 'manual' }}</span>
+              </div>
+              <button type="button" class="memory-delete" @click="deleteMemory(memory.id)">删除</button>
+            </article>
+          </div>
+          <p class="memory-empty" v-if="!pendingMemories.length && !recentMemories.length">暂无长期记忆</p>
+        </div>
+
+        <div class="runtime-settings skill-manifest-section" v-if="activeSettingsTab === 'skills'">
+          <div class="runtime-settings-head">
+            <strong>原生技能</strong>
+            <div class="memory-head-actions">
+              <span>{{ skillManifestVersion() }}</span>
+              <button type="button" class="memory-link-button" :disabled="skillRefreshLoading" @click="refreshSkills">
+                {{ skillRefreshLoading ? '刷新中' : '刷新' }}
+              </button>
+            </div>
+          </div>
+          <div class="skill-grid" v-if="nativeSkills().length">
+            <article
+              v-for="skill in nativeSkills()"
+              :key="skill.id"
+              class="skill-card"
+              :class="skill.local_capability || 'unavailable'"
+            >
+              <header>
+                <strong>{{ skill.label || skill.id }}</strong>
+                <span>{{ skillCapabilityLabel(skill.local_capability) }}</span>
+              </header>
+              <div class="provider-meta" v-if="skillMeta(skill).length">
+                <span v-for="item in skillMeta(skill)" :key="`${skill.id}-${item}`">{{ item }}</span>
+              </div>
+              <div class="skill-tool-list" v-if="skillTools(skill).length">
+                <code v-for="tool in skillTools(skill)" :key="`${skill.id}-${tool}`">{{ tool }}</code>
+              </div>
+              <div class="skill-actions">
+                <button type="button" :disabled="skillToggleDisabled(skill)" @click="setSkillEnabled(skill, !skillEnabled(skill))">
+                  {{ skillActionLabel(skill) }}
+                </button>
+              </div>
+            </article>
+          </div>
+          <p class="memory-empty" v-else>暂无技能清单</p>
+        </div>
+
+        <template v-if="activeSettingsTab === 'runtime'">
+          <div class="section-title">
+            <h2>运行设置</h2>
+            <span>{{ ready?.runtime?.read_only ? '只读' : '状态' }}</span>
+          </div>
+          <div class="provider-grid">
+            <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
+              <header>
+                <strong>{{ row.label || row.name }}</strong>
+                <span>{{ providerStateLabel(row.state) }}</span>
+              </header>
+              <p>{{ providerSummary(row) }}</p>
+              <div class="provider-meta" v-if="providerMeta(row).length">
+                <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="runtime-settings">
+          <div class="runtime-settings-head">
+            <strong>安全设置</strong>
+            <span>非密钥字段</span>
+          </div>
+          <div class="runtime-controls">
+            <label>
+              <span>ASR</span>
+              <input v-model="runtimeDraft.asr_enabled" type="checkbox" @change="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>ASR 时长</span>
+              <input v-model.number="runtimeDraft.asr_max_seconds" type="number" min="1" max="600" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>ASR 体积</span>
+              <input v-model.number="runtimeDraft.asr_max_bytes" type="number" min="1024" step="1024" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>ASR 超时</span>
+              <input v-model.number="runtimeDraft.asr_timeout_seconds" type="number" min="1" max="300" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>TTS</span>
+              <input v-model="runtimeDraft.tts_enabled" type="checkbox" @change="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>音量</span>
+              <input v-model.number="runtimeDraft.tts_volume" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>语速</span>
+              <input v-model.number="runtimeDraft.tts_speed_factor" type="number" min="0.5" max="2" step="0.05" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>系统回退</span>
+              <input v-model="runtimeDraft.tts_fallback_to_system" type="checkbox" @change="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>OCR 超时</span>
+              <input v-model.number="runtimeDraft.ocr_timeout_seconds" type="number" min="1" max="120" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>温度</span>
+              <input v-model.number="runtimeDraft.llm_temperature" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>Mock 模型</span>
+              <input v-model="runtimeDraft.llm_use_mock" type="checkbox" @change="markRuntimeDraftDirty" />
+            </label>
+            <label>
+              <span>操作等待</span>
+              <input v-model.number="runtimeDraft.computer_post_action_settle_ms" type="number" min="0" max="10000" step="25" @input="markRuntimeDraftDirty" />
+            </label>
+          </div>
+          <div class="runtime-actions">
+            <button type="button" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">
+              {{ runtimePreviewLoading ? '预览中' : '预览' }}
+            </button>
+            <button type="button" class="secondary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">
+              {{ runtimeApplyLoading ? '提交中' : '提交审批' }}
+            </button>
+          </div>
+          <div class="runtime-preview" v-if="runtimePreview">
+            <p>{{ runtimePreview.summary }}</p>
+            <div class="runtime-preview-list" v-if="runtimePreview.changes?.length">
+              <span v-for="change in runtimePreview.changes" :key="change.setting">
+                <strong>{{ change.label }}</strong>{{ runtimeChangeActionLabel(change.action) }} · {{ runtimeValueKindLabel(change.value_kind) }}
+              </span>
+            </div>
+            <div class="runtime-preview-list failed" v-if="runtimePreview.errors?.length">
+              <span v-for="error in runtimePreview.errors" :key="`${error.setting}-${error.code}`">
+                <strong>{{ error.setting }}</strong>{{ providerErrorLabel(error.code) || '无法应用' }}
+              </span>
+            </div>
+          </div>
+          </div>
+        </template>
+
+        <template v-if="activeSettingsTab === 'developer'">
+          <div class="runtime-settings background-context-panel">
+            <div class="runtime-settings-head">
+              <strong>背景上下文</strong>
+              <div class="memory-head-actions">
+                <label class="memory-enable-toggle">
+                  <input type="checkbox" :checked="backgroundEnabled" :disabled="backgroundLoading" @change="toggleBackgroundEnabled" />
+                  <span>{{ backgroundEnabled ? '已开启' : '已关闭' }}</span>
+                </label>
+                <button type="button" class="memory-link-button" :disabled="backgroundLoading" @click="refreshBackgroundStatus">
+                  {{ backgroundLoading ? '同步中' : '刷新' }}
+                </button>
+                <button type="button" class="memory-link-button danger" :disabled="backgroundLoading || !backgroundRecentRows.length" @click="clearBackgroundContext">清空</button>
+              </div>
+            </div>
+            <div class="background-status-grid">
+              <article class="background-status-card" :class="{ active: backgroundActive }">
+                <span>状态</span>
+                <strong>{{ backgroundStateText }}</strong>
+                <small>{{ backgroundSummaryText }}</small>
+              </article>
+              <article class="background-status-card">
+                <span>范围</span>
+                <strong>{{ backgroundStatus?.scope_count ?? backgroundScopes.length }}</strong>
+                <small>已批准</small>
+              </article>
+              <article class="background-status-card">
+                <span>摘要</span>
+                <strong>{{ backgroundStatus?.recent_count ?? backgroundRecentRows.length }}</strong>
+                <small>{{ backgroundRetentionText }}</small>
+              </article>
+              <article class="background-status-card">
+                <span>录制</span>
+                <strong>{{ backgroundStatus?.video_recording ? '开启' : '关闭' }}</strong>
+                <small>{{ backgroundStatus?.safe_for_display === false ? '不可展示' : '安全展示' }}</small>
+              </article>
+            </div>
+            <div class="background-scope-form">
+              <select v-model="backgroundScopeType" :disabled="backgroundLoading">
+                <option value="window">窗口</option>
+                <option value="project">项目</option>
+                <option value="game">游戏</option>
+              </select>
+              <input v-model="backgroundScopeLabel" :disabled="backgroundLoading" type="text" placeholder="批准范围名称" />
+              <button type="button" :disabled="!connected || backgroundLoading" @click="configureBackgroundScope">批准</button>
+            </div>
+            <div class="background-list" v-if="backgroundScopes.length">
+              <article v-for="scope in backgroundScopes" :key="scope.id || `${scope.type}-${scope.label}`" class="background-row">
+                <header>
+                  <strong>{{ scope.label || '已批准范围' }}</strong>
+                  <span>{{ backgroundScopeMeta(scope) }}</span>
+                </header>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>暂无批准范围</p>
+            <div class="background-list recent" v-if="backgroundRecentRows.length">
+              <article v-for="row in backgroundRecentRows" :key="`${row.created_at}-${row.scope_id}`" class="background-row">
+                <header>
+                  <strong>{{ backgroundEntryTime(row) }}</strong>
+                  <span>{{ backgroundEntryMeta(row) }}</span>
+                </header>
+                <p>{{ trimText(row.summary || '', 140) }}</p>
+              </article>
+            </div>
+            <p class="memory-empty" v-else>暂无背景摘要</p>
+          </div>
+          <div class="section-title debug-title">
+            <h2>开发者事件</h2>
+            <span>{{ events.length }} 条</span>
+          </div>
+          <div class="debug-list">
+            <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">
+              <span>{{ eventTime(event) }}</span>
+              <strong>{{ event.type }}</strong>
+              <code>{{ skillName(event) || toolName(event) || intentName(event) || event.display_card.status }}</code>
+              <p>{{ event.display_card.summary }}</p>
+            </div>
+          </div>
+        </template>
       </section>
     </section>
 
@@ -2546,7 +2976,7 @@ onBeforeUnmount(() => {
       
       <!-- Mascot Container circles -->
       <div
-        :class="['character', `emotion-${activeExpressionEmotion}`, `mood-${mascotMood}`, { 'subconscious-glow': subconsciousActive }]"
+        :class="['character', `emotion-${activeExpressionEmotion}`]"
         :title="isCompactMode ? '拖拽移动，单击输入，双击恢复主界面' : 'Joi Companion'"
         @mousedown="startMascotDrag"
         @dragstart.capture.prevent
@@ -2598,18 +3028,6 @@ onBeforeUnmount(() => {
       <div class="speech">
         <strong>{{ characterName }}</strong>
         <span>{{ latestSpeech }}</span>
-      </div>
-
-      <!-- Mood Indicator Badge -->
-      <div class="mood-badge" :class="`mood-${mascotMood}`">
-        <span class="mood-icon">{{ moodIcon }}</span>
-        <span class="mood-label">{{ moodLabel }}</span>
-      </div>
-
-      <!-- Subconscious Thinking Bubble -->
-      <div class="subconscious-bubble" :class="{ active: subconsciousActive }">
-        <div class="subconscious-dots"><span></span><span></span><span></span></div>
-        <span>正在整理记忆...</span>
       </div>
 
       <!-- Voice Status Text -->
@@ -2680,15 +3098,15 @@ onBeforeUnmount(() => {
           </button>
           <button type="button" class="dock-btn" :class="{ active: activeCabin === 'memory' }" @click="activeCabin = 'memory'">
             <svg viewBox="0 0 24 24">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+              <path d="M12 3c-2.76 0-5 1.9-5 4.25 0 .55.13 1.08.36 1.56C5.91 9.43 5 10.72 5 12.25c0 1.76 1.22 3.24 2.88 3.67C8.42 17.71 10.05 19 12 19s3.58-1.29 4.12-3.08C17.78 15.49 19 14.01 19 12.25c0-1.53-.91-2.82-2.36-3.44.23-.48.36-1.01.36-1.56C17 4.9 14.76 3 12 3zm-2.5 7.75a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5zm5 0a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5zM12 16.5c-1.4 0-2.55-.83-2.9-2h5.8c-.35 1.17-1.5 2-2.9 2z"/>
             </svg>
-            <span>记忆</span>
+            <span>记忆舱</span>
           </button>
           <button type="button" class="dock-btn" :class="{ active: activeCabin === 'inspector' }" @click="activeCabin = 'inspector'">
             <svg viewBox="0 0 24 24">
               <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
             </svg>
-            <span>设置</span>
+            <span>配置舱</span>
           </button>
         </nav>
       </div>

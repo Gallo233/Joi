@@ -1,6 +1,6 @@
 # Joi
 
-Joi is a Windows-first multimodal agent companion: a character-fronted assistant for coding, watching screen content, and launching auditable local skills.
+Joi is a Windows-first, macOS-capable multimodal agent companion: a character-fronted assistant for coding, watching screen content, and launching auditable local skills.
 
 The current repository is intentionally focused on the Joi main line.
 
@@ -21,6 +21,7 @@ The current repository is intentionally focused on the Joi main line.
 - [Feedback Log](docs/FEEDBACK_LOG.md)
 - [OpenHuman-Inspired Plan](docs/OPENHUMAN_INSIGHTS.md)
 - [Hermes Handoff](docs/HERMES_TASKS.md)
+- [Windows First-Run Checklist](docs/WINDOWS_FIRST_RUN.md)
 - [Private Semantic Calibration](docs/SEMANTIC_CALIBRATION.md)
 - [Architecture](agent_companion/docs/architecture.md)
 - [Windows Toolchain and Bridge](agent_companion/docs/windows_toolchain_and_bridge.md)
@@ -29,10 +30,26 @@ The current repository is intentionally focused on the Joi main line.
 
 ```powershell
 cd path\to\Joi
+.\start_joi.bat -Setup
+.\start_joi.bat -Doctor
 .\start_joi.bat
 ```
 
 The launcher starts the Python Core on `ws://127.0.0.1:8765` and opens the Joi desktop shell. Core logs are written to `logs/joi_core.out.log` and `logs/joi_core.err.log`.
+`-Setup` creates a local `config.yaml` from `config.example.yaml` when missing and never writes secrets.
+
+On macOS, use the same core and shell with the local venv and npm toolchain:
+
+```bash
+cd /path/to/Joi
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m agent_companion.core.main --serve --workspace .
+cd agent_companion/shell
+npm run tauri dev
+```
+
+macOS Computer Use uses the Mac backend for screenshot observation, Accessibility snapshots, CoreGraphics actions, AppleScript hotkeys, and Spotlight/open-a app launch. Grant Screen Recording and Accessibility permission in System Settings when prompted.
 
 ## Development
 
@@ -90,6 +107,28 @@ Run core tests:
 
 ```powershell
 .\.venv\Scripts\python.exe run_agent_companion_tests.py
+.\.venv\Scripts\python.exe tools\packaging_smoke.py
+.\.venv\Scripts\python.exe tools\windows_setup_wizard.py
+.\.venv\Scripts\python.exe tools\mvp_demo_check.py
+.\.venv\Scripts\python.exe tools\provider_preflight.py
+.\.venv\Scripts\python.exe tools\windows_release_check.py --allow-missing-exe
+.\.venv\Scripts\python.exe tools\windows_handoff_report.py --allow-missing-exe
+```
+
+`tools\packaging_smoke.py` also validates the Windows release privacy policy for local config, secrets, runtime data, logs, dependency folders, and build caches.
+`tools\windows_setup_wizard.py` previews first-run setup and can create `config.yaml` from `config.example.yaml` with `--apply`; it never writes secrets.
+`tools\mvp_demo_check.py` prints safe watch/coding/game demo prompts and dependency readiness without starting external actions.
+`tools\provider_preflight.py` runs an offline, sanitized provider readiness check for text, vision, expression, ASR, TTS, OCR, Computer Use, and audit/verification.
+`tools\windows_release_check.py` aggregates doctor, MVP demo check, provider preflight, packaging smoke, release privacy, and portable package dry-run status into one release readiness report.
+`tools\windows_handoff_report.py` converts release readiness into a safe Windows RC handoff summary for cross-machine review without local paths or secrets.
+
+Build a Windows portable release zip after the Tauri release shell exists:
+
+```powershell
+cd agent_companion\shell
+npm run tauri -- build
+cd ..\..
+.\.venv\Scripts\python.exe tools\package_windows_release.py
 ```
 
 Run a single core request:

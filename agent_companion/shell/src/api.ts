@@ -104,8 +104,36 @@ export class CoreClient {
     return this.send('watch.loop.status', {})
   }
 
+  backgroundStatus() {
+    return this.send('background.status', {})
+  }
+
+  backgroundConfigure(params: Record<string, unknown> = {}) {
+    return this.send('background.configure', params)
+  }
+
+  backgroundClear() {
+    return this.send('background.clear', {})
+  }
+
+  skillsList() {
+    return this.send('skills.list', {})
+  }
+
+  auditRecent(limit = 50) {
+    return this.send('audit.recent', { limit })
+  }
+
   memoryStatus() {
     return this.send('memory.status', {})
+  }
+
+  memoryRecall(query: string, limit = 8) {
+    return this.send('memory.recall', { query, limit })
+  }
+
+  memoryBrowseVault() {
+    return this.send('memory.browse_vault', {})
   }
 
   memorySaveCandidate(candidateId: number) {

@@ -10,7 +10,7 @@ import shutil
 import sys
 from typing import Any
 
-from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
+from agent_companion.core.config import MODEL_ROUTE_LABELS, AppConfig, ModelRouter, load_app_config
 from agent_companion.core.speech_input import AsrRuntimeState
 
 
@@ -40,9 +40,7 @@ def build_runtime_status(workspace: Path, asr_state: AsrRuntimeState, tts_status
         _asr_status(asr_state),
         _tts_status(tts_status),
         _ocr_status(config),
-        _model_status(config, "text"),
-        _model_status(config, "vision"),
-        _model_status(config, "expression"),
+        *[_model_status(config, route) for route in ModelRouter.stable_routes()],
         _computer_use_status(config),
         _audit_verification_status(),
     ]
@@ -165,43 +163,46 @@ def _probe_tesseract_version(tesseract_cmd: str = "") -> bool:
 
 
 def _model_status(config: AppConfig | None, use: str) -> RuntimeProviderStatus:
-    label = {"text": "Text Model", "vision": "Vision Model", "expression": "Expression Model"}.get(use, use.title())
+    route = ModelRouter.normalize_route(use)
+    label = MODEL_ROUTE_LABELS.get(route, route.title())
     if config is None:
-        return RuntimeProviderStatus(use, label, "off", provider="none", summary="未配置")
+        return RuntimeProviderStatus(route, label, "off", provider="none", summary="未配置")
     llm = config.llm
     router = ModelRouter(llm)
-    endpoint = router.resolve(use)
-    if use == "vision":
-        enabled = llm.vision_enabled
-        configured = llm.is_vision_configured
-    elif use == "expression":
-        enabled = llm.expression_enabled
-        configured = llm.is_expression_configured
+    endpoint = router.resolve(route)
+    override = llm.routes.get(route)
+    if override is not None:
+        enabled = bool(override.enabled)
+    elif route == "vision":
+        enabled = bool(llm.vision_enabled)
+    elif route == "voice_style":
+        enabled = bool(llm.expression_enabled)
     else:
         enabled = True
-        configured = bool(llm.use_mock or llm.is_configured)
-    if use == "text" and llm.use_mock:
+    configured = bool(endpoint.configured)
+    if not enabled:
+        state = "off"
+        summary = "未启用"
+    elif llm.use_mock:
         state = "mock"
         summary = "mock"
     elif configured:
         state = "ready"
-        summary = "已配置"
-    elif not enabled:
-        state = "off"
-        summary = "未启用"
+        summary = "已配置" if not endpoint.fallback_reason else "使用回退"
     else:
         state = "error"
         summary = "未配置"
     return RuntimeProviderStatus(
-        use,
+        route,
         label,
         state,
         enabled=enabled,
         configured=configured,
-        provider=_safe_identifier(llm.provider),
+        provider=_safe_identifier(endpoint.provider),
         model=_safe_model(endpoint.model if configured or state == "mock" else ""),
         summary=summary,
         last_error="" if configured or state == "mock" or not enabled else "model_unconfigured",
+        notes=[f"fallback {endpoint.fallback_reason}"] if endpoint.fallback_reason and state != "error" else [],
     )
 
 
@@ -219,7 +220,7 @@ def _computer_use_status(config: AppConfig | None) -> RuntimeProviderStatus:
         provider=_safe_identifier(provider_name),
         summary=summary_msg,
         limit=f"settle {max(0, int(settle_ms or 0))}ms",
-        last_error="" if supported else "computer_use_windows_only",
+        last_error="" if supported else "computer_use_desktop_only",
         notes=["approval gated", "semi-automatic"],
     )
 

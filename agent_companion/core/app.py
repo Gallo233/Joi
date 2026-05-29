@@ -16,16 +16,26 @@ from agent_companion.core.computer_use import (
     computer_approval_audit_event,
     target_grounding_audit_events,
 )
+from agent_companion.core.audit_store import AuditStore
+from agent_companion.core.background_context import BackgroundContextStore
 from agent_companion.core.character import CharacterHarness, load_character
 from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
 from agent_companion.core.codex_events import codex_cancel_run_state
+from agent_companion.core.desktop_context import (
+    DesktopContext,
+    active_desktop_context,
+    record_desktop_context,
+    rewrite_plan_for_desktop_context,
+)
 from agent_companion.core.event_bus import EventBus
 from agent_companion.core.expression import ExpressionEngine
 from agent_companion.core.llm_planner import LlmPlanParser
 from agent_companion.core.memory import MemoryStore
+from agent_companion.core.memory_candidates import tool_result_memory_candidate
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
+from agent_companion.core.skill_manifest import annotate_agent_state_with_skill, skill_boundaries_for_plan, skill_boundary_for_tool
 from agent_companion.core.speech_input import build_asr_provider
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
@@ -40,6 +50,7 @@ from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import PendingSemanticTargetSelection, SemanticTargetSelectionStore, SemanticTargetSelectionTool, SemanticTargetTool
 from agent_companion.core.tools.watch import WatchRecallTool
+from agent_companion.core.tool_compression import build_event_agent_state
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
@@ -58,14 +69,6 @@ class PendingStep:
     created_at: float = 0.0
 
 
-@dataclass
-class DesktopContext:
-    browser: str = ""
-    site: str = ""
-    url: str = ""
-    updated_at: float = 0.0
-
-
 class AgentCompanionApp:
     DESKTOP_CONTEXT_TTL_SECONDS = 600.0
 
@@ -75,8 +78,12 @@ class AgentCompanionApp:
         self.character: CharacterHarness = load_character(self.root / "config" / "default_character.yaml")
         self.expression = ExpressionEngine(self.workspace, self.character)
         self.bus = EventBus(self.workspace / "data" / "agent_companion" / "events.jsonl")
+        self.audit_store = AuditStore(self.workspace / "data" / "agent_companion" / "audit.jsonl")
+        self.bus.subscribe(self.audit_store.record_event)
+        self.background_context = BackgroundContextStore(self.workspace / "data" / "agent_companion" / "background_context.json")
         self.memory = MemoryStore(self.workspace / "data" / "agent_companion" / "memory.sqlite3")
-        self.policy = PolicyGate()
+        self._runtime_config = self._load_runtime_config()
+        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config))
         self.tools = ToolRegistry()
         self.watch_session = WatchSession()
         self.semantic_selection = SemanticTargetSelectionStore()
@@ -86,16 +93,6 @@ class AgentCompanionApp:
         self.approval_history: dict[str, PendingStep] = {}
         self.resolved_approval_ids: set[str] = set()
         self.approval_ttl_seconds = 120.0
-        # Subconscious background loop (P9)
-        from agent_companion.core.subconscious import SubconsciousLoop
-        self.subconscious = SubconsciousLoop(
-            memory=self.memory,
-            interval_seconds=120.0,
-            on_proactive=self._on_subconscious_proactive,
-        )
-        # Skill manifest (P8)
-        from agent_companion.core.skill_manifest import build_default_skill_registry
-        self.skills = build_default_skill_registry()
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
@@ -146,7 +143,7 @@ class AgentCompanionApp:
                     plan.task_id,
                     DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
                     safe_voice_line("我整理了一下步骤。", sprite="3"),
-                    {"steps": [step.name for step in plan.steps]},
+                    self._plan_agent_state(plan),
                 ),
                 plan.user_text,
             )
@@ -184,7 +181,7 @@ class AgentCompanionApp:
                 plan.task_id,
                 DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
                 safe_voice_line("我整理了一下步骤。", sprite="3"),
-                {"steps": [step.name for step in plan.steps]},
+                self._plan_agent_state(plan),
             ),
             plan.user_text,
         )
@@ -220,7 +217,7 @@ class AgentCompanionApp:
                 plan.task_id,
                 DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
                 safe_voice_line("我整理了一下步骤。", sprite="3"),
-                {"steps": [step.name for step in plan.steps]},
+                self._plan_agent_state(plan),
             ),
             plan.user_text,
         )
@@ -265,6 +262,16 @@ class AgentCompanionApp:
         self._record_watch_context(plan, step, result)
         return result
 
+    def reload_runtime_policy(self) -> None:
+        self._runtime_config = self._load_runtime_config()
+        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config))
+
+    def skill_settings_payload(self) -> dict[str, bool]:
+        config = self._runtime_config or self._load_runtime_config()
+        if config is None:
+            return {}
+        return {skill_id: bool(setting.enabled) for skill_id, setting in config.skills.items()}
+
     def resolve_approval(self, approval_id: str, approved: bool) -> list[AgentEvent]:
         if not approval_id:
             return self.bus.drain()
@@ -278,6 +285,7 @@ class AgentCompanionApp:
         self.resolved_approval_ids.add(approval_id)
         if self._pending_step_expired(pending):
             state = {"intent": pending.plan.intent, "approval_expired": True, "approval_id": approval_id}
+            state = annotate_agent_state_with_skill(state, pending.tool)
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval expired before execution.")] if self._is_computer_pending(pending) else [])
             if self._is_codex_permission_pending(pending):
                 state["codex_run"] = codex_cancel_run_state("expired")
@@ -298,6 +306,7 @@ class AgentCompanionApp:
             return self.bus.drain()
         if not approved:
             state = {"intent": pending.plan.intent, "cancelled": True, "approval_id": approval_id}
+            state = annotate_agent_state_with_skill(state, pending.tool)
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "denied", "Approval was denied; no action ran.")] if self._is_computer_pending(pending) else [])
             if self._is_codex_permission_pending(pending):
                 state["codex_run"] = codex_cancel_run_state("denied")
@@ -318,6 +327,7 @@ class AgentCompanionApp:
             return self.bus.drain()
         if not self._pending_step_matches(pending):
             state = {"intent": pending.plan.intent, "approval_id": approval_id, "approval_mismatch": True}
+            state = annotate_agent_state_with_skill(state, pending.tool)
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval no longer matched the pending action.")] if self._is_computer_pending(pending) else [])
             if self._is_codex_permission_pending(pending):
                 state["codex_run"] = codex_cancel_run_state("mismatch")
@@ -344,6 +354,28 @@ class AgentCompanionApp:
             step = self._step_with_memory_context(step)
             is_approved_step = self._is_approved_step(plan, index, step, approved_step)
             decision = self.policy.classify(step, approved=is_approved_step)
+            if not decision.allowed and not decision.requires_approval:
+                self._emit(
+                    AgentEvent(
+                        EventType.TOOL_FAILED,
+                        plan.task_id,
+                        DisplayCard("能力已关闭", f"{self._tool_label(step.name)} 当前不可用。", status="failed"),
+                        safe_voice_line("这个能力现在是关闭的。", sprite="4"),
+                        annotate_agent_state_with_skill(
+                            {
+                                "tool": step.name,
+                                "policy": self.policy.public_payload(step),
+                                "risk": decision.risk.value,
+                                "blocked": True,
+                                "block_reason": decision.reason,
+                            },
+                            step.name,
+                        ),
+                    ),
+                    plan.user_text,
+                )
+                final_ok = False
+                break
             if decision.requires_approval:
                 pending = self._make_pending_step(plan, index, step)
                 self._store_pending_step(pending)
@@ -358,6 +390,7 @@ class AgentCompanionApp:
                         "arguments_hash": pending.arguments_hash,
                     },
                 }
+                agent_state = annotate_agent_state_with_skill(agent_state, step.name)
                 self._attach_audit_state(
                     agent_state,
                     [
@@ -393,7 +426,7 @@ class AgentCompanionApp:
                         plan.task_id,
                         DisplayCard("执行中", f"正在执行：{self._tool_label(step.name)}"),
                         safe_voice_line("我开始执行这一步。", sprite="3"),
-                        {"tool": step.name},
+                        annotate_agent_state_with_skill({"tool": step.name}, step.name),
                     ),
                     plan.user_text,
                 )
@@ -427,6 +460,10 @@ class AgentCompanionApp:
                         "target_candidate": result.agent_state.get("target_candidate"),
                         "target_candidates": result.agent_state.get("target_candidates"),
                     }
+                    agent_state = annotate_agent_state_with_skill(agent_state, pending_request.name)
+                    source_tool = str(result.agent_state.get("tool") or "")
+                    if source_tool:
+                        agent_state["source_skill"] = skill_boundary_for_tool(source_tool)
                     if "codex_run" in result.agent_state:
                         agent_state["codex_run"] = result.agent_state["codex_run"]
                     audit_entries = target_grounding_audit_events(plan.task_id, result, result.risk)
@@ -473,7 +510,7 @@ class AgentCompanionApp:
                         plan.task_id,
                         DisplayCard("任务完成", "这轮任务已经处理完。", status="success"),
                         safe_voice_line(self.character.voice.get("done", "做完了。"), sprite="5"),
-                        {"intent": plan.intent},
+                        self._plan_agent_state(plan, include_steps=False),
                     ),
                     plan.user_text,
                 )
@@ -484,47 +521,48 @@ class AgentCompanionApp:
                     plan.task_id,
                     DisplayCard("任务未完成", "这轮任务没有跑通，细节在任务卡里。", status="failed"),
                     safe_voice_line(self.character.voice.get("failed", "没有跑通。"), sprite="4"),
-                    {"intent": plan.intent},
+                    self._plan_agent_state(plan, include_steps=False),
                 ),
                 plan.user_text,
             )
 
     def _emit_result(self, task_id: str, result: ToolResult, user_text: str = "") -> None:
         event_type = EventType.TOOL_COMPLETED if result.ok else EventType.TOOL_FAILED
-
-        # P6: Compress tool result before emitting
-        from agent_companion.core.tool_compression import compress_tool_result
-        compressed = compress_tool_result(result)
-
-        # Use compressed agent_state for the event (lighter for LLM context)
-        # but keep full display_card and voice_line for UI/TTS
+        agent_state = build_event_agent_state(result)
+        tool_name = str(agent_state.get("tool") or "")
+        if tool_name:
+            agent_state = annotate_agent_state_with_skill(agent_state, tool_name)
         self._emit(
             AgentEvent(
                 event_type,
                 task_id,
                 result.display_card,
                 result.voice_line,
-                {
-                    **compressed.agent_state,
-                    "_compression_ratio": round(compressed.compression_ratio, 2),
-                    "_original_size": compressed.original_tokens_estimate,
-                },
+                agent_state,
             ),
             user_text,
         )
 
-        # Record memory candidate if present
-        if compressed.memory_candidate:
-            self._record_memory_candidate(
-                task_id,
-                str(compressed.memory_candidate.get("kind", "note")),
-                str(compressed.memory_candidate.get("text", "")),
-                str(compressed.memory_candidate.get("source", "tool")),
-                user_text,
-            )
-
     def _emit(self, event: AgentEvent, user_text: str = "") -> None:
         self.bus.emit(self.expression.express(event, user_text))
+
+    @staticmethod
+    def _plan_agent_state(plan: AgentPlan, *, include_steps: bool = True) -> dict[str, object]:
+        steps = [step.name for step in plan.steps]
+        state: dict[str, object] = {
+            "intent": plan.intent,
+            "skills": skill_boundaries_for_plan(steps),
+        }
+        if include_steps:
+            state["steps"] = steps
+            state["skill_steps"] = [
+                {
+                    "tool": step.name,
+                    **skill_boundary_for_tool(step.name),
+                }
+                for step in plan.steps
+            ]
+        return state
 
     @staticmethod
     def _tool_label(name: str) -> str:
@@ -590,6 +628,14 @@ class AgentCompanionApp:
 
     def _record_result_memory_candidate(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
         raw = result.agent_state.get("memory_candidate") if isinstance(result.agent_state, dict) else None
+        if raw is None:
+            raw = tool_result_memory_candidate(
+                intent=plan.intent,
+                tool=step.name,
+                user_text=plan.user_text,
+                agent_state=result.agent_state if isinstance(result.agent_state, dict) else {},
+                ok=result.ok,
+            )
         if raw is None:
             return
         if self._is_ephemeral_result(plan, step, result) or self._is_sensitive_result(plan, step, result):
@@ -667,30 +713,8 @@ class AgentCompanionApp:
             return "操作当前电脑前需要你确认。"
         return f"{self._tool_label(step.name)}需要你确认。"
 
-    def _on_subconscious_proactive(self, message: str, tick_id: str) -> None:
-        """Called by the subconscious loop when it generates a proactive message."""
-        task_id = f"sub-{tick_id}"
-        self._emit(
-            AgentEvent(
-                EventType.TOOL_COMPLETED,
-                task_id,
-                DisplayCard("潜意识", message, status="info"),
-                safe_voice_line(message, sprite="5"),
-                {"subconscious": True, "tick_id": tick_id},
-            ),
-            "",
-        )
-
-    def start_subconscious(self) -> None:
-        """Start the subconscious background loop."""
-        self.subconscious.start()
-
-    def stop_subconscious(self) -> None:
-        """Stop the subconscious background loop."""
-        self.subconscious.stop()
-
     def _register_tools(self) -> None:
-        app_config = self._load_runtime_config()
+        app_config = self._runtime_config
         ocr = self._build_ocr_extractor(app_config)
         post_action_settle_ms = app_config.computer_use.post_action_settle_ms if app_config else 200
         self.tools.register(CompanionChatTool(self.workspace))
@@ -716,12 +740,9 @@ class AgentCompanionApp:
         self.tools.register(SemanticTargetSelectionTool(self.semantic_selection))
         for name, action_type in (
             ("computer.click", "click"),
-            ("computer.double_click", "double_click"),
-            ("computer.drag", "drag"),
             ("computer.type_text", "type_text"),
             ("computer.scroll", "scroll"),
             ("computer.hotkey", "hotkey"),
-            ("computer.open_app", "open_app"),
         ):
             self.tools.register(
                 ComputerActionTool(
@@ -737,14 +758,6 @@ class AgentCompanionApp:
         self.tools.register(McpListTool(self.workspace))
         self.tools.register(FileReadTool(self.workspace))
         self.tools.register(RuntimeConfigUpdateTool(self.workspace))
-        # Load plugins from plugins/ directory
-        try:
-            plugin_count = self.tools.load_plugins(self.workspace)
-            if plugin_count > 0:
-                import logging
-                logging.getLogger(__name__).info("Loaded %d plugin tools", plugin_count)
-        except Exception:
-            pass  # Plugin loading is non-fatal
 
     def _load_runtime_config(self) -> AppConfig | None:
         config_path = self.workspace / "config.yaml"
@@ -829,7 +842,7 @@ class AgentCompanionApp:
     def _step_with_memory_context(self, step: ToolRequest) -> ToolRequest:
         if step.name != "companion.chat":
             return step
-        context = self.memory.context(8)
+        context = self.memory.context(8, query=str(step.arguments.get("text") or ""))
         if not context:
             return step
         arguments = dict(step.arguments)
@@ -859,68 +872,20 @@ class AgentCompanionApp:
 
     def _rewrite_plan_for_desktop_context(self, plan: AgentPlan) -> AgentPlan:
         context = self._active_desktop_context()
-        if context is None or not _looks_like_search_command(plan.user_text):
+        if context is None:
             return plan
-        if not plan.steps:
-            return plan
-        step = plan.steps[0]
-        if step.name not in {"browser.search", "observe.screen"}:
-            return plan
-        if _requests_global_browser_search(plan.user_text):
-            return plan
-        query = _desktop_context_search_query(plan.user_text, step)
-        if not query:
-            return plan
-        return AgentPlan(
-            task_id=plan.task_id,
-            user_text=plan.user_text,
-            intent="desktop_workflow",
-            steps=[
-                ToolRequest(
-                    "computer.workflow",
-                    {
-                        "workflow": "open_web_search",
-                        "browser": context.browser or "edge",
-                        "site": context.site,
-                        "query": query,
-                    },
-                    "继续在当前桌面浏览器站点中搜索，需要确认。",
-                )
-            ],
-        )
+        return rewrite_plan_for_desktop_context(plan, context)
 
     def _active_desktop_context(self) -> DesktopContext | None:
-        if not self.desktop_context.site:
-            return None
-        if time.time() - self.desktop_context.updated_at > self.DESKTOP_CONTEXT_TTL_SECONDS:
+        context = active_desktop_context(self.desktop_context, ttl_seconds=self.DESKTOP_CONTEXT_TTL_SECONDS)
+        if context is None and self.desktop_context.site:
             self.desktop_context = DesktopContext()
-            return None
-        return self.desktop_context
+        return context
 
     def _record_desktop_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
-        if step.name != "computer.workflow":
-            return
-        if not result.ok:
-            return
-        workflow = str(step.arguments.get("workflow") or "").strip()
-        if workflow in {"open_web_search", "open_url"}:
-            raw_site = str(step.arguments.get("site") or "").strip()
-            url = str(step.arguments.get("url") or "").strip()
-            site = raw_site
-            if "://" in raw_site:
-                url = raw_site
-                site = _site_from_url(raw_site)
-            if not site and url:
-                site = _site_from_url(url)
-            self.desktop_context = DesktopContext(
-                browser=str(step.arguments.get("browser") or "edge").strip() or "edge",
-                site=site,
-                url=url,
-                updated_at=time.time(),
-            )
-            return
-        if workflow == "open_app":
-            self.desktop_context = DesktopContext()
+        updated = record_desktop_context(step, result)
+        if updated is not None:
+            self.desktop_context = updated
 
     def _record_watch_context(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
         if not result.ok:
@@ -1100,6 +1065,12 @@ def _arguments_hash(arguments: dict) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
 
+def _disabled_skill_ids(config: AppConfig | None) -> set[str]:
+    if config is None:
+        return set()
+    return {skill_id for skill_id, setting in config.skills.items() if not setting.enabled}
+
+
 def _ocr_text_from_state(ocr: dict) -> list[str]:
     blocks = ocr.get("text_blocks") if isinstance(ocr, dict) else []
     if not isinstance(blocks, list):
@@ -1126,31 +1097,6 @@ def _transcript_text_from_state(transcript: dict) -> list[str]:
         if text and text not in rows:
             rows.append(text[:160])
     return rows
-
-
-def _looks_like_search_command(text: str) -> bool:
-    return re.search(r"(?:搜索|搜一下|查找|搜(?!集))\s*\S+", text) is not None
-
-
-def _requests_global_browser_search(text: str) -> bool:
-    lowered = text.casefold()
-    return any(token in lowered for token in ("baidu", "google", "chrome")) or any(token in text for token in ("百度", "谷歌", "全网搜索"))
-
-
-def _desktop_context_search_query(user_text: str, step: ToolRequest) -> str:
-    query = str(step.arguments.get("query") or "").strip() if isinstance(step.arguments, dict) else ""
-    if not query:
-        query = " ".join((user_text or "").strip().split())
-    query = re.sub(r"^(?:帮我|请|麻烦)?(?:继续)?(?:在当前页面|在这个页面|在当前网站|在这里)?(?:搜索|搜一下|查找|搜(?!集))\s*", "", query).strip()
-    query = re.sub(r"[。！？!?]+$", "", query).strip(" ：:，,")
-    return query[:160]
-
-
-def _site_from_url(url: str) -> str:
-    lowered = url.casefold()
-    if "bilibili.com" in lowered:
-        return "bilibili"
-    return ""
 
 
 def _parse_candidate_selection(text: str) -> int | None:
@@ -1211,7 +1157,7 @@ def _memory_status_body(status: dict[str, object]) -> str:
     enabled = "开启" if status.get("enabled") else "关闭"
     pending = status.get("pending") if isinstance(status.get("pending"), list) else []
     recent = status.get("recent") if isinstance(status.get("recent"), list) else []
-    lines = [f"状态：{enabled}", f"Vault：{status.get('vault_path') or ''}"]
+    lines = [f"状态：{enabled}", f"Vault：{status.get('vault_label') or '本地记忆库'}"]
     if pending:
         lines.append("待确认：")
         for item in pending[:5]:

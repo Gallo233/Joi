@@ -2,6 +2,7 @@ from agent_companion.core.vision.accessibility import (
     AccessibilityObserver,
     AccessibilitySnapshot,
     AccessibleElement,
+    MacAccessibilityObserver,
     UnavailableAccessibilityObserver,
     WindowsAccessibilityObserver,
 )
@@ -13,7 +14,14 @@ from agent_companion.core.vision.summarizer import MockSummarizer, OpenAIVisionS
 from agent_companion.core.vision.targeting import TargetCandidate, resolve_target_candidates
 from agent_companion.core.vision.visual_detector import HeuristicVisualDetector, UnavailableVisualDetector, VisualCandidate, VisualDetectionResult, VisualDetector
 from agent_companion.core.vision.windows import WindowsScreenObserver
-from agent_companion.core.vision.mac import MacScreenObserver
+
+
+def __getattr__(name: str):
+    if name == "MacScreenObserver":
+        from agent_companion.core.vision.mac import MacScreenObserver
+
+        return MacScreenObserver
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "MockSummarizer",
@@ -30,6 +38,7 @@ __all__ = [
     "TargetCandidate",
     "UnavailableOcrExtractor",
     "UnavailableAccessibilityObserver",
+    "MacAccessibilityObserver",
     "VisionObservation",
     "VisionObserver",
     "VisionSummarizer",

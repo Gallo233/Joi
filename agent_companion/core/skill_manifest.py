@@ -1,311 +1,640 @@
-"""P8 Skill Manifest — Formalize Joi's native tools as skills.
-
-Each core capability (Codex, Browser, Computer Use, Memory, Watch, etc.)
-is described as a Skill with:
-  - name, version, description
-  - input_schema / output_schema (JSON Schema-like dicts)
-  - permission_level (auto / confirm / step_confirm)
-  - dry_run support
-  - capability check (is this skill available on this platform?)
-  - state_policy (ephemeral / durable / mixed)
-
-This enables the planner to reason about skills, the UI to show
-skill status, and the policy gate to enforce permissions.
-"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+import os
+import shutil
+import sys
+from typing import Any
+
+from agent_companion.core.speech_input import AsrRuntimeState
+
+
+SKILL_MANIFEST_VERSION = "joi.skill_manifest.v1"
+KNOWN_SKILL_IDS: tuple[str, ...] = (
+    "joi.companion.chat",
+    "joi.codex",
+    "joi.browser",
+    "joi.computer_use",
+    "joi.watch",
+    "joi.memory",
+    "joi.voice_input",
+    "joi.voice_output",
+    "joi.ok_ww",
+    "joi.runtime_config",
+    "joi.local_files",
+    "joi.mcp",
+)
 
 
 @dataclass(frozen=True)
-class SkillInputSchema:
-    """Describes a skill's input parameters."""
-    required: list[str] = field(default_factory=list)
-    optional: list[str] = field(default_factory=list)
-    properties: dict[str, dict[str, Any]] = field(default_factory=dict)
+class NativeSkillManifest:
+    id: str
+    label: str
+    category: str
+    description: str
+    tools: tuple[str, ...] = ()
+    rpc_methods: tuple[str, ...] = ()
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    result_schema: dict[str, Any] = field(default_factory=dict)
+    permission_level: str = "low"
+    supports_dry_run: bool = False
+    local_capability: str = "ready"
+    enabled: bool = True
+    configured: bool = True
+    state_policy: str = "ephemeral"
+    audit: str = "event_log"
+    notes: tuple[str, ...] = ()
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_agent_state(self) -> dict[str, Any]:
         return {
-            "required": self.required,
-            "optional": self.optional,
-            "properties": self.properties,
+            "id": _safe_token(self.id),
+            "label": self.label[:64],
+            "category": _safe_token(self.category),
+            "description": self.description[:180],
+            "tools": [_safe_tool_name(tool) for tool in self.tools],
+            "rpc_methods": [_safe_tool_name(method) for method in self.rpc_methods],
+            "input_schema": _safe_schema(self.input_schema),
+            "result_schema": _safe_schema(self.result_schema),
+            "permission_level": _safe_permission(self.permission_level),
+            "supports_dry_run": bool(self.supports_dry_run),
+            "local_capability": _safe_capability(self.local_capability),
+            "enabled": bool(self.enabled),
+            "configured": bool(self.configured),
+            "state_policy": _safe_token(self.state_policy),
+            "audit": _safe_token(self.audit),
+            "notes": [_safe_note(note) for note in self.notes if _safe_note(note)],
         }
 
 
-@dataclass(frozen=True)
-class SkillManifest:
-    """Complete description of a native Joi skill."""
-    name: str
-    version: str = "1.0.0"
-    description: str = ""
-    tool_name: str = ""  # Maps to ToolAdapter.name
-    category: str = ""   # coding, vision, computer_use, memory, voice, game
-    permission_level: str = "auto"  # auto, confirm, step_confirm
-    dry_run: bool = False  # Supports dry-run mode
-    requires_approval: bool = False
-    risk_level: str = "low"  # low, medium, high
-    input_schema: SkillInputSchema = field(default_factory=SkillInputSchema)
-    output_keys: list[str] = field(default_factory=list)  # Keys in agent_state
-    state_policy: str = "ephemeral"  # ephemeral, durable, mixed
-    platform: str = "all"  # all, windows, macos, linux
-    dependencies: list[str] = field(default_factory=list)  # Other skill names
-    capability_check: Callable[[], bool] | None = None
-
-    def is_available(self) -> bool:
-        """Check if this skill's dependencies are met on this platform."""
-        if self.capability_check:
-            try:
-                return self.capability_check()
-            except Exception:
-                return False
-        return True
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "version": self.version,
-            "description": self.description,
-            "tool_name": self.tool_name,
-            "category": self.category,
-            "permission_level": self.permission_level,
-            "dry_run": self.dry_run,
-            "requires_approval": self.requires_approval,
-            "risk_level": self.risk_level,
-            "input_schema": self.input_schema.to_dict(),
-            "output_keys": self.output_keys,
-            "state_policy": self.state_policy,
-            "platform": self.platform,
-            "dependencies": self.dependencies,
-            "available": self.is_available(),
-        }
+def build_native_skill_manifest(
+    workspace: Path,
+    *,
+    asr_state: AsrRuntimeState | None = None,
+    tts_status: dict[str, Any] | None = None,
+    memory_status: dict[str, Any] | None = None,
+    skill_settings: dict[str, bool] | None = None,
+) -> dict[str, Any]:
+    tts_status = tts_status or {}
+    memory_status = memory_status or {}
+    normalized_skill_settings: dict[str, bool] = {}
+    for key, value in (skill_settings or {}).items():
+        skill_id = normalize_skill_id(key)
+        if skill_id:
+            normalized_skill_settings[skill_id] = bool(value)
+    skills = [
+        _companion_chat_skill(),
+        _codex_skill(),
+        _browser_skill(),
+        _computer_use_skill(),
+        _watch_skill(),
+        _memory_skill(memory_status),
+        _voice_input_skill(asr_state),
+        _voice_output_skill(tts_status),
+        _ok_ww_skill(),
+        _runtime_config_skill(),
+        _local_files_skill(),
+        _mcp_skill(),
+    ]
+    return {
+        "version": SKILL_MANIFEST_VERSION,
+        "safe_for_display": True,
+        "workspace_bound": True,
+        "skills": [_apply_skill_setting(skill, normalized_skill_settings).to_agent_state() for skill in skills],
+    }
 
 
-class SkillRegistry:
-    """Registry of all native Joi skills."""
-
-    def __init__(self) -> None:
-        self._skills: dict[str, SkillManifest] = {}
-
-    def register(self, skill: SkillManifest) -> None:
-        self._skills[skill.name] = skill
-
-    def get(self, name: str) -> SkillManifest | None:
-        return self._skills.get(name)
-
-    def all(self) -> list[SkillManifest]:
-        return list(self._skills.values())
-
-    def available(self) -> list[SkillManifest]:
-        return [s for s in self._skills.values() if s.is_available()]
-
-    def by_category(self, category: str) -> list[SkillManifest]:
-        return [s for s in self._skills.values() if s.category == category]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "total": len(self._skills),
-            "available": len(self.available()),
-            "skills": [s.to_dict() for s in self._skills.values()],
-        }
+def _companion_chat_skill() -> NativeSkillManifest:
+    return NativeSkillManifest(
+        id="joi.companion.chat",
+        label="Companion Chat",
+        category="companion",
+        description="Character-safe conversation with emotion and memory context.",
+        tools=("companion.chat",),
+        input_schema=_object_schema("text", "memory_context"),
+        result_schema=_tool_result_schema("reply", "expression_sync", "model_usage"),
+        permission_level="low",
+        state_policy="session",
+    )
 
 
-def build_default_skill_registry() -> SkillRegistry:
-    """Build the registry with all native Joi skills."""
-    import sys
-
-    registry = SkillRegistry()
-
-    # --- Coding ---
-    registry.register(SkillManifest(
-        name="codex",
-        description="通过 Codex CLI 执行工程任务：修复 bug、写代码、跑测试",
-        tool_name="codex.run",
+def _codex_skill() -> NativeSkillManifest:
+    available = _codex_available()
+    return NativeSkillManifest(
+        id="joi.codex",
+        label="Codex Coding",
         category="coding",
-        permission_level="confirm",
-        requires_approval=True,
-        risk_level="medium",
-        input_schema=SkillInputSchema(
-            required=["goal"],
-            optional=["context"],
-            properties={"goal": {"type": "string", "description": "任务目标"}},
-        ),
-        output_keys=["codex_run", "memory_candidate"],
-        state_policy="durable",
-        platform="all",
-    ))
+        description="Local coding-task execution through Codex with sanitized audit output.",
+        tools=("codex.run",),
+        input_schema=_object_schema("goal"),
+        result_schema=_tool_result_schema("codex_run"),
+        permission_level="medium",
+        supports_dry_run=False,
+        local_capability="ready" if available else "unavailable",
+        configured=available,
+        state_policy="workspace_audit",
+        audit="codex_run_audit",
+        notes=("approval_gated", "workspace_bound"),
+    )
 
-    # --- Vision ---
-    registry.register(SkillManifest(
-        name="observe_screen",
-        description="截取当前窗口或全屏画面，生成视觉摘要",
-        tool_name="observe.screen",
-        category="vision",
-        permission_level="auto",
-        input_schema=SkillInputSchema(
-            optional=["target", "query"],
-            properties={
-                "target": {"type": "string", "enum": ["active_window", "fullscreen"]},
-                "query": {"type": "string"},
-            },
-        ),
-        output_keys=["observation", "vision_summary", "ocr", "ocr_regions"],
-        state_policy="ephemeral",
-        platform="all",
-    ))
 
-    registry.register(SkillManifest(
-        name="resolve_target",
-        description="从当前画面中定位语义目标（按钮、链接等）",
-        tool_name="vision.resolve_target",
-        category="vision",
-        permission_level="auto",
-        input_schema=SkillInputSchema(
-            required=["query"],
-            optional=["action"],
-            properties={"query": {"type": "string", "description": "目标描述"}},
-        ),
-        output_keys=["target_candidate", "target_candidates", "needs_clarification"],
-        state_policy="ephemeral",
-        platform="all",
-    ))
-
-    # --- Computer Use ---
-    for action, desc, risk in [
-        ("click", "点击屏幕指定位置", "medium"),
-        ("double_click", "双击屏幕指定位置", "medium"),
-        ("drag", "拖拽操作", "medium"),
-        ("type_text", "向当前前台应用输入文字", "medium"),
-        ("scroll", "滚动当前画面", "low"),
-        ("hotkey", "按下系统快捷键", "medium"),
-        ("open_app", "打开应用程序", "low"),
-    ]:
-        registry.register(SkillManifest(
-            name=f"computer_{action}",
-            description=desc,
-            tool_name=f"computer.{action}",
-            category="computer_use",
-            permission_level="confirm" if risk == "medium" else "auto",
-            requires_approval=(risk == "medium"),
-            risk_level=risk,
-            input_schema=SkillInputSchema(
-                required=["x", "y"] if action in ("click", "double_click") else
-                          ["text"] if action in ("type_text",) else
-                          ["keys"] if action == "hotkey" else
-                          ["app_name"] if action == "open_app" else [],
-                optional=["button"] if action in ("click", "double_click", "drag") else [],
-            ),
-            output_keys=["computer_use", "post_action_verification"],
-            state_policy="ephemeral",
-            platform="all",
-        ))
-
-    # --- Memory ---
-    registry.register(SkillManifest(
-        name="memory",
-        description="语义记忆存储、检索、候选审批",
-        tool_name="memory.*",
-        category="memory",
-        permission_level="auto",
-        input_schema=SkillInputSchema(
-            optional=["query", "kind", "limit"],
-        ),
-        output_keys=["memory_candidate"],
-        state_policy="durable",
-        platform="all",
-    ))
-
-    # --- Watch Together ---
-    registry.register(SkillManifest(
-        name="watch_together",
-        description="陪看模式：观察画面、转写字幕、主动评论",
-        tool_name="watch.recall",
-        category="watch",
-        permission_level="auto",
-        input_schema=SkillInputSchema(
-            required=["query"],
-        ),
-        output_keys=["watch_context", "vision_summary"],
-        state_policy="ephemeral",
-        platform="all",
-    ))
-
-    # --- Browser ---
-    registry.register(SkillManifest(
-        name="browser_search",
-        description="浏览器搜索并观察结果",
-        tool_name="browser.search",
-        category="browser",
-        permission_level="auto",
-        input_schema=SkillInputSchema(required=["query"]),
-        output_keys=["observation"],
-        state_policy="ephemeral",
-        platform="all",
-    ))
-
-    # --- Game ---
-    registry.register(SkillManifest(
-        name="ok_ww",
-        description="鸣潮 (Wuthering Waves) 游戏日常自动化",
-        tool_name="game.ok_ww.run",
-        category="game",
-        permission_level="confirm",
-        requires_approval=True,
-        risk_level="medium",
-        input_schema=SkillInputSchema(required=["intent"]),
-        state_policy="ephemeral",
-        platform="windows",
-    ))
-
-    # --- Desktop Workflow ---
-    registry.register(SkillManifest(
-        name="desktop_workflow",
-        description="桌面自动操作工作流：多步 Computer Use 组合",
-        tool_name="desktop_workflow.run",
+def _browser_skill() -> NativeSkillManifest:
+    return NativeSkillManifest(
+        id="joi.browser",
+        label="Browser",
         category="computer_use",
-        permission_level="step_confirm",
-        requires_approval=True,
-        risk_level="high",
-        input_schema=SkillInputSchema(required=["steps"]),
-        output_keys=["computer_use", "post_action_verification"],
-        state_policy="ephemeral",
-        platform="all",
-    ))
+        description="Queued browser search and observe requests for page-level assistance.",
+        tools=("browser.search", "browser.observe"),
+        input_schema=_object_schema("query", "url"),
+        result_schema=_tool_result_schema("queued"),
+        permission_level="low",
+        state_policy="session",
+        notes=("bridge_required",),
+    )
 
-    # --- Chat ---
-    registry.register(SkillManifest(
-        name="companion_chat",
-        description="普通对话，角色表达回复",
-        tool_name="companion.chat",
-        category="chat",
-        permission_level="auto",
-        input_schema=SkillInputSchema(required=["text"]),
-        output_keys=["expression"],
-        state_policy="ephemeral",
-        platform="all",
-    ))
 
-    # --- Voice ---
-    registry.register(SkillManifest(
-        name="voice_transcribe",
-        description="语音识别 (ASR)",
-        tool_name="voice.transcribe",
+def _computer_use_skill() -> NativeSkillManifest:
+    desktop_supported = sys.platform in {"win32", "darwin"}
+    platform_note = "windows" if sys.platform == "win32" else "macos" if sys.platform == "darwin" else "unsupported_platform"
+    return NativeSkillManifest(
+        id="joi.computer_use",
+        label="Computer Use",
+        category="computer_use",
+        description="Approval-gated screen observation, target grounding, and desktop actions on Windows and macOS.",
+        tools=(
+            "observe.screen",
+            "vision.resolve_target",
+            "vision.select_target",
+            "computer.click",
+            "computer.double_click",
+            "computer.drag",
+            "computer.type_text",
+            "computer.scroll",
+            "computer.hotkey",
+            "computer.open_app",
+            "computer.workflow",
+        ),
+        input_schema=_computer_use_action_schema(),
+        result_schema=_tool_result_schema("computer_use_audit", "artifacts"),
+        permission_level="medium",
+        local_capability="ready" if desktop_supported else "unavailable",
+        configured=desktop_supported,
+        state_policy="audited_session",
+        audit="computer_use_audit",
+        notes=("llm_driven_action_schema", "approval_gated", "post_action_verification", platform_note),
+    )
+
+
+def _watch_skill() -> NativeSkillManifest:
+    return NativeSkillManifest(
+        id="joi.watch",
+        label="Watch Together",
+        category="watch",
+        description="Session-scoped visual and transcript context for current media or page.",
+        tools=("observe.screen", "watch.recall"),
+        rpc_methods=(
+            "watch.loop.start",
+            "watch.loop.stop",
+            "watch.loop.configure",
+            "watch.loop.refresh",
+            "watch.loop.status",
+            "background.status",
+            "background.configure",
+            "background.clear",
+        ),
+        input_schema=_object_schema("query", "transcript_source", "sample_count"),
+        result_schema=_tool_result_schema("watch_context", "transcript", "model_usage", "background"),
+        permission_level="low",
+        state_policy="session_window",
+        notes=("user_started_loop", "approved_background_scopes", "no_video_recording_by_default"),
+    )
+
+
+def _memory_skill(memory_status: dict[str, Any]) -> NativeSkillManifest:
+    enabled = bool(memory_status.get("enabled", True))
+    return NativeSkillManifest(
+        id="joi.memory",
+        label="Memory",
+        category="memory",
+        description="Explicitly approved local memory candidates and semantic recall.",
+        rpc_methods=(
+            "memory.status",
+            "memory.recall",
+            "memory.browse_vault",
+            "memory.save_candidate",
+            "memory.reject_candidate",
+            "memory.set_enabled",
+            "memory.delete",
+            "memory.clear",
+        ),
+        input_schema=_object_schema("query", "candidate_id", "memory_id"),
+        result_schema=_tool_result_schema("memory", "memories", "vault"),
+        permission_level="low",
+        local_capability="ready" if enabled else "off",
+        enabled=enabled,
+        configured=True,
+        state_policy="explicit_local_vault",
+        audit="memory_candidate_log",
+        notes=("explicit_approval_required", "sensitive_rejected_by_default"),
+    )
+
+
+def _voice_input_skill(asr_state: AsrRuntimeState | None) -> NativeSkillManifest:
+    enabled = bool(asr_state.enabled) if asr_state else False
+    configured = bool(asr_state.configured) if asr_state else False
+    error = str(asr_state.error or "") if asr_state else "asr_unconfigured"
+    return NativeSkillManifest(
+        id="joi.voice_input",
+        label="Voice Input",
         category="voice",
-        permission_level="auto",
-        input_schema=SkillInputSchema(required=["audio"]),
-        state_policy="ephemeral",
-        platform="all",
-    ))
+        description="Click-to-record ASR routed into normal user-message handling.",
+        rpc_methods=("voice.transcribe", "audio.transcribe"),
+        input_schema=_object_schema("audio_base64", "mime_type"),
+        result_schema=_tool_result_schema("transcript", "events"),
+        permission_level="low",
+        local_capability="ready" if configured else ("off" if not enabled else "unavailable"),
+        enabled=enabled,
+        configured=configured,
+        state_policy="ephemeral_audio",
+        audit="voice_event",
+        notes=tuple(note for note in ("size_limited", _safe_note(error)) if note),
+    )
 
-    registry.register(SkillManifest(
-        name="voice_speak",
-        description="语音合成 (TTS)",
-        tool_name="voice.speak",
+
+def _voice_output_skill(tts_status: dict[str, Any]) -> NativeSkillManifest:
+    enabled = bool(tts_status.get("enabled", False))
+    configured = bool(tts_status.get("configured", False))
+    error = _safe_note(str(tts_status.get("last_error") or ""))
+    return NativeSkillManifest(
+        id="joi.voice_output",
+        label="Voice Output",
         category="voice",
-        permission_level="auto",
-        input_schema=SkillInputSchema(required=["text"]),
-        state_policy="ephemeral",
-        platform="all",
-    ))
+        description="TTS synthesis for safe Joi voice lines and expression sync.",
+        input_schema=_object_schema("voice_text", "sprite", "emotion"),
+        result_schema=_tool_result_schema("voice_audio_data_url", "voice_audio_error"),
+        permission_level="low",
+        local_capability="ready" if configured else ("off" if not enabled else "unavailable"),
+        enabled=enabled,
+        configured=configured,
+        state_policy="ephemeral_audio",
+        audit="voice_audio_event",
+        notes=tuple(note for note in ("safe_voice_only", error) if note),
+    )
 
-    return registry
+
+def _ok_ww_skill() -> NativeSkillManifest:
+    available = _ok_ww_available()
+    return NativeSkillManifest(
+        id="joi.ok_ww",
+        label="OK-WW",
+        category="game",
+        description="Approval-gated Wuthering Waves automation handoff through the local runner.",
+        tools=("game.ok_ww.run",),
+        input_schema=_object_schema("intent", "dry_run"),
+        result_schema=_tool_result_schema("dry_run", "returncode"),
+        permission_level="medium",
+        supports_dry_run=True,
+        local_capability="ready" if available else "unavailable",
+        configured=available,
+        state_policy="external_game_runner",
+        audit="game_run_log",
+        notes=("dry_run_first", "approval_gated"),
+    )
+
+
+def _runtime_config_skill() -> NativeSkillManifest:
+    return NativeSkillManifest(
+        id="joi.runtime_config",
+        label="Runtime Settings",
+        category="settings",
+        description="Safe non-sensitive runtime configuration preview and approval-gated apply.",
+        tools=("runtime.update_config",),
+        rpc_methods=("runtime.config.preview", "runtime.config.apply"),
+        input_schema=_object_schema("updates", "dry_run"),
+        result_schema=_tool_result_schema("runtime_config_update"),
+        permission_level="medium",
+        supports_dry_run=True,
+        state_policy="local_config",
+        audit="runtime_config_audit",
+        notes=("allowlisted_fields_only", "approval_gated"),
+    )
+
+
+def _local_files_skill() -> NativeSkillManifest:
+    return NativeSkillManifest(
+        id="joi.local_files",
+        label="Local Files",
+        category="workspace",
+        description="Read-only workspace file access for local context.",
+        tools=("files.read",),
+        rpc_methods=("artifact.read",),
+        input_schema=_object_schema("path", "artifact"),
+        result_schema=_tool_result_schema("content", "data_url"),
+        permission_level="low",
+        state_policy="workspace_readonly",
+        audit="event_log",
+        notes=("workspace_bound",),
+    )
+
+
+def _mcp_skill() -> NativeSkillManifest:
+    return NativeSkillManifest(
+        id="joi.mcp",
+        label="MCP Tools",
+        category="integration",
+        description="Read-only local MCP tool discovery for available integrations.",
+        tools=("mcp.list_tools",),
+        input_schema=_object_schema("query"),
+        result_schema=_tool_result_schema("tools"),
+        permission_level="low",
+        state_policy="ephemeral",
+        audit="event_log",
+        notes=("discovery_only",),
+    )
+
+
+def skill_id_for_tool(tool_name: str) -> str:
+    return _skill_binding(tool_name).get("skill_id", "joi.unknown")
+
+
+def normalize_skill_id(value: str) -> str:
+    text = _safe_token(value)
+    return text if text in KNOWN_SKILL_IDS else ""
+
+
+def skill_boundary_for_tool(tool_name: str) -> dict[str, Any]:
+    binding = _skill_binding(tool_name)
+    return {
+        "skill_id": binding.get("skill_id", "joi.unknown"),
+        "skill_category": binding.get("category", "unknown"),
+        "skill_permission_level": binding.get("permission_level", "medium"),
+        "skill_state_policy": binding.get("state_policy", "ephemeral"),
+        "skill_audit": binding.get("audit", "event_log"),
+    }
+
+
+def skill_boundaries_for_plan(tool_names: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool_name in tool_names:
+        boundary = skill_boundary_for_tool(str(tool_name or ""))
+        key = boundary["skill_id"]
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(boundary)
+    return rows
+
+
+def annotate_agent_state_with_skill(agent_state: dict[str, Any], tool_name: str) -> dict[str, Any]:
+    payload = dict(agent_state)
+    boundary = skill_boundary_for_tool(tool_name)
+    payload.update(boundary)
+    payload["skill"] = boundary
+    return payload
+
+
+def _apply_skill_setting(skill: NativeSkillManifest, skill_settings: dict[str, bool]) -> NativeSkillManifest:
+    enabled_override = skill_settings.get(skill.id)
+    if enabled_override is not False:
+        return skill
+    return replace(skill, enabled=False, local_capability="off")
+
+
+def _codex_available() -> bool:
+    override = os.environ.get("AGENT_COMPANION_CODEX_BIN", "").strip()
+    if override:
+        return Path(override).is_file()
+    return bool(shutil.which("codex"))
+
+
+def _ok_ww_available() -> bool:
+    script = os.environ.get("OK_WW_RUNNER", r"C:\Users\liujialuo\.codex\skills\github_issue_solver\scripts\run_ok_ww.ps1")
+    return Path(script).is_file()
+
+
+def _skill_binding(tool_name: str) -> dict[str, str]:
+    tool = _safe_tool_name(tool_name)
+    return _TOOL_SKILL_BINDINGS.get(tool, _UNKNOWN_SKILL_BINDING)
+
+
+_UNKNOWN_SKILL_BINDING = {
+    "skill_id": "joi.unknown",
+    "category": "unknown",
+    "permission_level": "medium",
+    "state_policy": "ephemeral",
+    "audit": "event_log",
+}
+
+
+_TOOL_SKILL_BINDINGS: dict[str, dict[str, str]] = {
+    "companion.chat": {
+        "skill_id": "joi.companion.chat",
+        "category": "companion",
+        "permission_level": "low",
+        "state_policy": "session",
+        "audit": "event_log",
+    },
+    "codex.run": {
+        "skill_id": "joi.codex",
+        "category": "coding",
+        "permission_level": "medium",
+        "state_policy": "workspace_audit",
+        "audit": "codex_run_audit",
+    },
+    "browser.search": {
+        "skill_id": "joi.browser",
+        "category": "computer_use",
+        "permission_level": "low",
+        "state_policy": "session",
+        "audit": "event_log",
+    },
+    "browser.observe": {
+        "skill_id": "joi.browser",
+        "category": "computer_use",
+        "permission_level": "low",
+        "state_policy": "session",
+        "audit": "event_log",
+    },
+    "observe.screen": {
+        "skill_id": "joi.watch",
+        "category": "watch",
+        "permission_level": "low",
+        "state_policy": "session_window",
+        "audit": "event_log",
+    },
+    "watch.recall": {
+        "skill_id": "joi.watch",
+        "category": "watch",
+        "permission_level": "low",
+        "state_policy": "session_window",
+        "audit": "event_log",
+    },
+    "vision.resolve_target": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "vision.select_target": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.click": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.double_click": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.drag": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.type_text": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.scroll": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.hotkey": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.open_app": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.workflow": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "game.ok_ww.run": {
+        "skill_id": "joi.ok_ww",
+        "category": "game",
+        "permission_level": "medium",
+        "state_policy": "external_game_runner",
+        "audit": "game_run_log",
+    },
+    "runtime.update_config": {
+        "skill_id": "joi.runtime_config",
+        "category": "settings",
+        "permission_level": "medium",
+        "state_policy": "local_config",
+        "audit": "runtime_config_audit",
+    },
+    "files.read": {
+        "skill_id": "joi.local_files",
+        "category": "workspace",
+        "permission_level": "low",
+        "state_policy": "workspace_readonly",
+        "audit": "event_log",
+    },
+    "mcp.list_tools": {
+        "skill_id": "joi.mcp",
+        "category": "integration",
+        "permission_level": "low",
+        "state_policy": "ephemeral",
+        "audit": "event_log",
+    },
+}
+
+
+def _object_schema(*properties: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {name: {"type": "value"} for name in properties if name},
+    }
+
+
+def _computer_use_action_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "description": "LLM chooses constrained desktop actions; app/site routes are data, not new code paths.",
+        "properties": {
+            "intent": {"type": "string", "enum": ["observe", "target", "click", "double_click", "drag", "type_text", "scroll", "hotkey", "open_app", "workflow"]},
+            "target": {"type": "string"},
+            "text": {"type": "string"},
+            "app_name": {"type": "string"},
+            "workflow": {"type": "string", "enum": ["open_app", "open_web_search", "open_url"]},
+            "site": {"type": "string"},
+            "browser": {"type": "string"},
+            "query": {"type": "string"},
+        },
+        "requires_approval_for": ["click", "double_click", "drag", "type_text", "scroll", "hotkey", "open_app", "workflow"],
+    }
+
+
+def _tool_result_schema(*state_keys: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "required": ["ok", "display_card", "voice_line", "agent_state"],
+        "agent_state_keys": [key for key in state_keys if key],
+    }
+
+
+def _safe_schema(value: dict[str, Any]) -> dict[str, Any]:
+    encoded = str(value)
+    if any(fragment in encoded for fragment in ("sk-", "api_key", "base_url", "C:\\", "/Users/", "http://", "https://")):
+        return {"type": "object"}
+    return value
+
+
+def _safe_tool_name(value: str) -> str:
+    text = str(value or "").strip()
+    return text if text and all(char.isalnum() or char in "._-" for char in text) else "redacted"
+
+
+def _safe_permission(value: str) -> str:
+    text = _safe_token(value)
+    return text if text in {"low", "medium", "high"} else "medium"
+
+
+def _safe_capability(value: str) -> str:
+    text = _safe_token(value)
+    return text if text in {"ready", "off", "unavailable", "degraded"} else "unavailable"
+
+
+def _safe_token(value: str) -> str:
+    text = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    if any(fragment in text for fragment in ("sk_", "token", "secret", "api_key", "key=", ":\\")):
+        return "redacted"
+    return "".join(char for char in text if char.isalnum() or char in "._")[:80] or "unknown"
+
+
+def _safe_note(value: str) -> str:
+    text = _safe_token(value)
+    if text in {"unknown", "none"}:
+        return ""
+    return text

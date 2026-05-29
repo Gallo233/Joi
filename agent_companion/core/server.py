@@ -16,6 +16,7 @@ from agent_companion.core.runtime_config_writer import preview_runtime_config_up
 from agent_companion.core.schemas import AgentEvent, DisplayCard
 from agent_companion.core.schemas import EventType
 from agent_companion.core.runtime_status import build_runtime_status
+from agent_companion.core.skill_manifest import build_native_skill_manifest
 from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
 from agent_companion.core.voice import safe_voice_line
@@ -70,14 +71,12 @@ class JsonRpcBridge:
         self.loop = asyncio.get_running_loop()
         self.queue = asyncio.Queue()
         self.app.bus.subscribe(self._on_event)
-        self.app.start_subconscious()
         async with websockets.serve(self._client_handler, self.host, self.port):
             print(f"Joi Core listening on ws://{self.host}:{self.port}")
             pump = asyncio.create_task(self._event_pump())
             try:
                 await asyncio.Future()
             finally:
-                self.app.stop_subconscious()
                 self.watch_loop.stop(emit=False)
                 pump.cancel()
                 self.tts.shutdown()
@@ -130,8 +129,34 @@ class JsonRpcBridge:
             if method == "watch.loop.status":
                 await websocket.send(self._result(request_id, self.watch_loop_status_command()))
                 return
+            if method == "background.status":
+                await websocket.send(self._result(request_id, self.background_status_command()))
+                return
+            if method == "background.configure":
+                result = await asyncio.to_thread(self.background_configure_command, params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "background.clear":
+                result = await asyncio.to_thread(self.background_clear_command)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "skills.list":
+                await websocket.send(self._result(request_id, self.skill_manifest_command()))
+                return
+            if method == "audit.recent":
+                limit = _safe_int(params.get("limit")) or 50
+                await websocket.send(self._result(request_id, self.audit_recent_command(limit)))
+                return
             if method == "memory.status":
                 await websocket.send(self._result(request_id, self.memory_status_command()))
+                return
+            if method == "memory.recall":
+                result = self.memory_recall_command(params)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "memory.browse_vault":
+                result = self.memory_browse_vault_command()
+                await websocket.send(self._result(request_id, result))
                 return
             if method == "memory.save_candidate":
                 result = self.memory_save_candidate_command(params)
@@ -152,55 +177,6 @@ class JsonRpcBridge:
             if method == "memory.clear":
                 result = self.memory_clear_command()
                 await websocket.send(self._result(request_id, result))
-                return
-
-            if method == "memory.recall":
-                query = str((params or {}).get("query") or "").strip()
-                limit = _safe_int((params or {}).get("limit")) or 5
-                entries = self.app.memory.recall(query, limit=limit)
-                await websocket.send(self._result(request_id, {"ok": True, "entries": entries}))
-                return
-
-            if method == "memory.browse_vault":
-                vault = self.app.memory.browse_vault()
-                await websocket.send(self._result(request_id, {"ok": True, "vault": vault}))
-                return
-
-            if method == "memory.search_by_kind":
-                kind_prefix = str((params or {}).get("kind") or "").strip()
-                limit = _safe_int((params or {}).get("limit")) or 10
-                entries = self.app.memory.search_by_kind(kind_prefix, limit=limit)
-                await websocket.send(self._result(request_id, {"ok": True, "entries": entries}))
-                return
-
-            if method == "memory.context":
-                limit = _safe_int((params or {}).get("limit")) or 8
-                query = str((params or {}).get("query") or "").strip()
-                entries = self.app.memory.context(limit=limit, query=query)
-                await websocket.send(self._result(request_id, {"ok": True, "entries": entries}))
-                return
-
-            if method == "subconscious.start":
-                self.app.start_subconscious()
-                await websocket.send(self._result(request_id, {"ok": True, "state": self.app.subconscious.snapshot().to_dict()}))
-                return
-
-            if method == "subconscious.stop":
-                self.app.stop_subconscious()
-                await websocket.send(self._result(request_id, {"ok": True, "state": self.app.subconscious.snapshot().to_dict()}))
-                return
-
-            if method == "subconscious.status":
-                await websocket.send(self._result(request_id, {"ok": True, "state": self.app.subconscious.snapshot().to_dict()}))
-                return
-
-            if method == "skills.list":
-                await websocket.send(self._result(request_id, {"ok": True, "skills": self.app.skills.to_dict()}))
-                return
-
-            if method == "skills.available":
-                available = [s.to_dict() for s in self.app.skills.available()]
-                await websocket.send(self._result(request_id, {"ok": True, "skills": available}))
                 return
             if method == "approval.resolve":
                 approval_id = str(params.get("approval_id") or "")
@@ -367,8 +343,57 @@ class JsonRpcBridge:
     def watch_loop_status_command(self) -> dict[str, Any]:
         return {"ok": True, "watch_loop": self.watch_loop.snapshot().to_agent_state()}
 
+    def background_status_command(self) -> dict[str, Any]:
+        return {"ok": True, "background": self.app.background_context.status()}
+
+    def background_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        enabled = params.get("enabled") if isinstance(params.get("enabled"), bool) else None
+        result = self.app.background_context.configure(
+            enabled=enabled,
+            scope_type=str(params.get("scope_type") or ""),
+            label=str(params.get("label") or ""),
+            active_scope_id=str(params.get("active_scope_id") or ""),
+        )
+        self._emit_background_audit(
+            "背景上下文设置已更新。" if result.get("ok") else "背景上下文设置没有更新。",
+            result.get("background", {}),
+            status="success" if result.get("ok") else "failed",
+        )
+        return result
+
+    def background_clear_command(self) -> dict[str, Any]:
+        result = self.app.background_context.clear_context()
+        self._emit_background_audit("背景上下文摘要已清空。", result.get("background", {}), status="info")
+        return result
+
     def memory_status_command(self) -> dict[str, Any]:
         return {"ok": True, "memory": self.app.memory.status()}
+
+    def skill_manifest_command(self) -> dict[str, Any]:
+        tts_status = self.tts.status_payload()
+        return {
+            "ok": True,
+            "skills": build_native_skill_manifest(
+                self.workspace,
+                asr_state=self.asr_state,
+                tts_status=tts_status,
+                memory_status=self.app.memory.status(),
+                skill_settings=self.app.skill_settings_payload(),
+            ),
+        }
+
+    def audit_recent_command(self, limit: int = 50) -> dict[str, Any]:
+        return {"ok": True, "audit": self.app.audit_store.recent(limit)}
+
+    def memory_recall_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        query = str(params.get("query") or "") if isinstance(params, dict) else ""
+        limit = _safe_int(params.get("limit")) if isinstance(params, dict) else None
+        safe_limit = min(20, max(1, int(limit or 8)))
+        return {"ok": True, "memories": self.app.memory.recall(query, safe_limit), "memory": self.app.memory.status()}
+
+    def memory_browse_vault_command(self) -> dict[str, Any]:
+        return {"ok": True, "vault": self.app.memory.browse_vault(), "memory": self.app.memory.status()}
 
     def memory_save_candidate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         candidate_id = _safe_int(params.get("candidate_id")) if isinstance(params, dict) else None
@@ -481,8 +506,21 @@ class JsonRpcBridge:
         visual_summary = str(state.get("sequence_summary") or state.get("vision_summary") or "")
         visual_status = str(state.get("model_status") or "")
         rolling = self.app.watch_session.transcript_state()
+        source_health = rolling.get("source_health") if isinstance(rolling.get("source_health"), dict) else {}
+        diagnostics = transcript.get("diagnostics") if isinstance(transcript.get("diagnostics"), dict) else {}
+        if diagnostics:
+            diagnostic_source = "system_audio" if diagnostics.get("capture") or diagnostics.get("audio_bytes") is not None else str(transcript.get("source") or options.transcript_source)
+            source_health = dict(source_health)
+            existing = source_health.get(diagnostic_source) if isinstance(source_health.get(diagnostic_source), dict) else {}
+            source_health[diagnostic_source] = {
+                **existing,
+                "status": diagnostics.get("status") or transcript.get("status") or "unknown",
+                "error": error,
+                "capture": diagnostics.get("capture") or "",
+                "audio_bytes": diagnostics.get("audio_bytes") or 0,
+            }
         comment = self.watch_commentary.maybe_comment(rolling, min_interval_seconds=options.commentary_interval_seconds) if options.proactive_enabled else None
-        return WatchLoopTick(
+        tick = WatchLoopTick(
             ok=result.ok,
             summary=result.display_card.summary,
             transcript_text=transcript_text,
@@ -491,7 +529,7 @@ class JsonRpcBridge:
             rolling_summary=str(rolling.get("summary") or ""),
             rolling_transcript=[str(text) for text in rolling.get("recent_text", []) if str(text).strip()],
             transcript_window_seconds=_safe_int(rolling.get("window_seconds")) or 0,
-            source_health=rolling.get("source_health") if isinstance(rolling.get("source_health"), dict) else {},
+            source_health=source_health,
             proactive_reply=comment.reply if comment else "",
             proactive_voice_text=comment.voice_text if comment else "",
             proactive_emotion=comment.emotion if comment else "neutral",
@@ -501,6 +539,13 @@ class JsonRpcBridge:
             visual_status=visual_status,
             error=error,
         )
+        self.app.background_context.record_summary(
+            tick.rolling_summary or tick.visual_summary or tick.summary,
+            source="watch_loop",
+            visual_status=tick.visual_status,
+            transcript_source=tick.transcript_source,
+        )
+        return tick
 
     def _resolve_artifact_path(self, artifact: str) -> Path | None:
         value = (artifact or "").strip()
@@ -515,6 +560,24 @@ class JsonRpcBridge:
         except Exception:
             return None
         return resolved
+
+    def _emit_background_audit(self, summary: str, background: dict[str, Any], *, status: str = "info") -> None:
+        self.app.bus.emit(
+            AgentEvent(
+                EventType.AUDIT_EVENT,
+                f"background-{uuid.uuid4().hex[:8]}",
+                DisplayCard("背景伴随", summary, status=status),
+                safe_voice_line("", fallback=""),
+                {
+                    "tool": "background.context",
+                    "skill_id": "joi.watch",
+                    "skill_category": "watch",
+                    "skill_permission_level": "low",
+                    "skill_audit": "background_context_audit",
+                    "background_context": background,
+                },
+            )
+        )
 
     @staticmethod
     def _voice_audio_data_url(path_text: str) -> str:
@@ -587,8 +650,10 @@ class JsonRpcBridge:
 
     def _ready_payload(self) -> dict[str, Any]:
         tts_status = self.tts.status_payload()
+        memory_status = self.app.memory.status()
         payload: dict[str, Any] = {
-            "workspace": str(self.workspace),
+            "workspace_label": self.workspace.name,
+            "workspace_bound": True,
             "asr": {
                 "enabled": self.asr_state.enabled,
                 "configured": self.asr_state.configured,
@@ -601,9 +666,16 @@ class JsonRpcBridge:
             "tts": tts_status,
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
-            "memory": self.app.memory.status(),
-            "skills": self.app.skills.to_dict(),
-            "subconscious": self.app.subconscious.snapshot().to_dict(),
+            "memory": memory_status,
+            "audit": self.app.audit_store.status(),
+            "background": self.app.background_context.status(),
+            "skills": build_native_skill_manifest(
+                self.workspace,
+                asr_state=self.asr_state,
+                tts_status=tts_status,
+                memory_status=memory_status,
+                skill_settings=self.app.skill_settings_payload(),
+            ),
             "character": {
                 "name": self.app.character.name,
                 "sprites": [],
@@ -630,7 +702,6 @@ class JsonRpcBridge:
                     {
                         "id": sprite.id,
                         "label": sprite.label,
-                        "image_path": str(resolved),
                         "image_data_url": self._image_data_url(resolved),
                     }
                 )
@@ -643,6 +714,7 @@ class JsonRpcBridge:
         self.asr, self.asr_state = build_asr_provider(self.workspace)
         self.tts.reload()
         self.watch_commentary.reload()
+        self.app.reload_runtime_policy()
 
     @staticmethod
     def _image_data_url(path: Path) -> str:
@@ -816,6 +888,10 @@ def _safe_runtime_settings(config: Any) -> dict[str, Any]:
         },
         "computer_use": {
             "post_action_settle_ms": max(0, int(config.computer_use.post_action_settle_ms or 0)),
+        },
+        "skills": {
+            skill_id: {"enabled": bool(setting.enabled)}
+            for skill_id, setting in sorted(config.skills.items())
         },
     }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,26 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
         else:
             merged[key] = value
     return merged
+
+
+MODEL_ROUTES: tuple[str, ...] = ("fast", "reasoning", "vision", "code", "summarize", "voice_style")
+MODEL_ROUTE_LABELS: dict[str, str] = {
+    "fast": "Fast Model",
+    "reasoning": "Reasoning Model",
+    "vision": "Vision Model",
+    "code": "Code Model",
+    "summarize": "Summarize Model",
+    "voice_style": "Voice Style Model",
+}
+MODEL_ROUTE_ALIASES: dict[str, str] = {
+    "": "fast",
+    "text": "fast",
+    "chat": "fast",
+    "companion_chat": "fast",
+    "planner": "reasoning",
+    "plan": "reasoning",
+    "expression": "voice_style",
+}
 
 
 @dataclass(frozen=True)
@@ -115,6 +136,15 @@ class CharacterConfig:
 
 
 @dataclass(frozen=True)
+class ModelRouteConfig:
+    provider: str = ""
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class LlmConfig:
     provider: str
     use_mock: bool
@@ -131,6 +161,7 @@ class LlmConfig:
     expression_base_url: str = ""
     expression_model: str = ""
     expression_api_key: str = ""
+    routes: dict[str, ModelRouteConfig] = field(default_factory=dict)
 
     @property
     def is_configured(self) -> bool:
@@ -159,29 +190,97 @@ class ModelEndpoint:
     base_url: str
     model: str
     api_key: str
+    provider: str = "openai_compatible"
+    route: str = "fast"
+    configured: bool = False
+    fallback_reason: str = ""
+    use_mock: bool = False
+
+    def to_agent_state(self, *, latency_ms: float | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "route": normalize_model_route(self.route),
+            "provider": _safe_public_identifier(self.provider),
+            "model": _safe_public_model(self.model),
+            "configured": bool(self.configured),
+            "fallback_reason": _safe_public_identifier(self.fallback_reason),
+            "mock": bool(self.use_mock),
+        }
+        if latency_ms is not None:
+            payload["latency_ms"] = max(0, int(round(latency_ms)))
+        return payload
 
 
 class ModelRouter:
     def __init__(self, llm: LlmConfig) -> None:
         self._llm = llm
 
+    @staticmethod
+    def stable_routes() -> tuple[str, ...]:
+        return MODEL_ROUTES
+
+    @staticmethod
+    def normalize_route(use: str = "fast") -> str:
+        return normalize_model_route(use)
+
     def resolve(self, use: str = "text") -> ModelEndpoint:
-        if use == "vision" and self._llm.is_vision_configured:
-            return ModelEndpoint(
+        route = normalize_model_route(use)
+        override = self._llm.routes.get(route)
+        fallback_reason = ""
+        if override is not None:
+            if override.enabled:
+                endpoint = self._endpoint(
+                    route,
+                    provider=override.provider or self._llm.provider,
+                    base_url=override.base_url or self._llm.base_url,
+                    model=override.model or self._llm.model,
+                    api_key=override.api_key or self._llm.api_key,
+                    fallback_reason="",
+                )
+                if endpoint.configured or self._llm.use_mock:
+                    return endpoint
+                fallback_reason = f"{route}_route_unconfigured"
+            else:
+                fallback_reason = f"{route}_route_disabled"
+        if route == "vision" and self._llm.is_vision_configured:
+            return self._endpoint(
+                route,
+                provider=self._llm.provider,
                 base_url=self._llm.vision_base_url or self._llm.base_url,
                 model=self._llm.vision_model or self._llm.model,
                 api_key=self._llm.vision_api_key or self._llm.api_key,
+                fallback_reason=fallback_reason,
             )
-        if use in {"expression", "voice_style"} and self._llm.is_expression_configured:
-            return ModelEndpoint(
+        if route == "voice_style" and self._llm.is_expression_configured:
+            return self._endpoint(
+                route,
+                provider=self._llm.provider,
                 base_url=self._llm.expression_base_url or self._llm.base_url,
                 model=self._llm.expression_model or self._llm.model,
                 api_key=self._llm.expression_api_key or self._llm.api_key,
+                fallback_reason=fallback_reason,
             )
-        return ModelEndpoint(
+        if not fallback_reason and route != "fast":
+            fallback_reason = f"{route}_fallback_base"
+        return self._endpoint(
+            route,
+            provider=self._llm.provider,
             base_url=self._llm.base_url,
             model=self._llm.model,
             api_key=self._llm.api_key,
+            fallback_reason=fallback_reason,
+        )
+
+    def _endpoint(self, route: str, *, provider: str, base_url: str, model: str, api_key: str, fallback_reason: str) -> ModelEndpoint:
+        configured = bool(self._llm.use_mock or (model or "").strip() and _configured_secret(api_key))
+        return ModelEndpoint(
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            provider=provider,
+            route=route,
+            configured=configured,
+            fallback_reason="mock" if self._llm.use_mock and not _configured_secret(api_key) else fallback_reason,
+            use_mock=bool(self._llm.use_mock),
         )
 
 
@@ -235,6 +334,11 @@ class ComputerUseConfig:
 
 
 @dataclass(frozen=True)
+class SkillSettingConfig:
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     base_dir: Path
     llm: LlmConfig
@@ -242,6 +346,7 @@ class AppConfig:
     asr: AsrConfig
     ocr: OcrConfig
     computer_use: ComputerUseConfig
+    skills: dict[str, SkillSettingConfig]
     characters: list[CharacterConfig]
 
     @property
@@ -253,6 +358,10 @@ class AppConfig:
     def resolve_path(self, path: str) -> Path:
         candidate = Path(path)
         return candidate if candidate.is_absolute() else self.base_dir / candidate
+
+    def skill_enabled(self, skill_id: str) -> bool:
+        setting = self.skills.get(normalize_skill_setting_id(skill_id))
+        return bool(setting.enabled) if setting is not None else True
 
 
 def load_app_config(path: Path) -> AppConfig:
@@ -269,6 +378,7 @@ def load_app_config(path: Path) -> AppConfig:
     asr_raw = raw.get("asr") or {}
     ocr_raw = raw.get("ocr") or {}
     computer_use_raw = raw.get("computer_use") or {}
+    skills_raw = raw.get("skills") or {}
     character_rows = raw.get("characters") or []
     characters = [_parse_character(row) for row in character_rows if isinstance(row, dict)]
 
@@ -290,6 +400,7 @@ def load_app_config(path: Path) -> AppConfig:
             expression_base_url=str(llm_raw.get("expression_base_url", "") or ""),
             expression_model=str(llm_raw.get("expression_model", "") or ""),
             expression_api_key=str(llm_raw.get("expression_api_key", "") or ""),
+            routes=_parse_model_routes(llm_raw),
         ),
         tts=TtsConfig(
             enabled=bool(tts_raw.get("enabled", False)),
@@ -322,8 +433,64 @@ def load_app_config(path: Path) -> AppConfig:
         computer_use=ComputerUseConfig(
             post_action_settle_ms=max(0, int(computer_use_raw.get("post_action_settle_ms", 200) or 0)),
         ),
+        skills=_parse_skill_settings(skills_raw),
         characters=characters,
     )
+
+
+def normalize_skill_setting_id(value: str) -> str:
+    text = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    return re.sub(r"[^a-z0-9_.]+", "", text)[:80]
+
+
+def _parse_skill_settings(raw: Any) -> dict[str, SkillSettingConfig]:
+    if not isinstance(raw, dict):
+        return {}
+    rows: dict[str, SkillSettingConfig] = {}
+    for raw_id, raw_value in raw.items():
+        skill_id = normalize_skill_setting_id(str(raw_id))
+        if not skill_id.startswith("joi.") or not isinstance(raw_value, dict):
+            continue
+        rows[skill_id] = SkillSettingConfig(enabled=bool(raw_value.get("enabled", True)))
+    return rows
+
+
+def normalize_model_route(value: str = "fast") -> str:
+    normalized = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    return MODEL_ROUTE_ALIASES.get(normalized, normalized if normalized in MODEL_ROUTES else "fast")
+
+
+def _parse_model_routes(llm_raw: dict[str, Any]) -> dict[str, ModelRouteConfig]:
+    routes: dict[str, ModelRouteConfig] = {}
+    raw_routes = llm_raw.get("routes") or llm_raw.get("model_routes") or {}
+    if isinstance(raw_routes, dict):
+        for raw_name, raw_config in raw_routes.items():
+            route = normalize_model_route(str(raw_name))
+            if route not in MODEL_ROUTES or not isinstance(raw_config, dict):
+                continue
+            routes[route] = ModelRouteConfig(
+                provider=str(raw_config.get("provider", "") or ""),
+                base_url=str(raw_config.get("base_url", "") or ""),
+                model=str(raw_config.get("model", "") or ""),
+                api_key=str(raw_config.get("api_key", "") or ""),
+                enabled=bool(raw_config.get("enabled", True)),
+            )
+    for route in MODEL_ROUTES:
+        model = str(llm_raw.get(f"{route}_model", "") or "")
+        base_url = str(llm_raw.get(f"{route}_base_url", "") or "")
+        api_key = str(llm_raw.get(f"{route}_api_key", "") or "")
+        provider = str(llm_raw.get(f"{route}_provider", "") or "")
+        enabled_key = f"{route}_enabled"
+        has_flat_route = any((model, base_url, api_key, provider)) or enabled_key in llm_raw
+        if has_flat_route:
+            routes[route] = ModelRouteConfig(
+                provider=provider,
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                enabled=bool(llm_raw.get(enabled_key, True)),
+            )
+    return routes
 
 
 def _parse_character(row: dict[str, Any]) -> CharacterConfig:
@@ -370,3 +537,31 @@ def _parse_character(row: dict[str, Any]) -> CharacterConfig:
         voice_profiles=voice_profiles,
         sprites=sprites,
     )
+
+
+def _configured_secret(value: str) -> bool:
+    key = (value or "").strip()
+    return bool(key and not key.startswith("${") and not key.startswith("%"))
+
+
+def _safe_public_identifier(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return ""
+    if any(token in text for token in ("sk-", "token", "secret", "api_key", "key=")):
+        return "redacted"
+    if any(char in text for char in ("/", "\\", ":", "{", "}", "$", "%")):
+        return "redacted"
+    return re.sub(r"[^a-z0-9_.-]+", "_", text)[:64]
+
+
+def _safe_public_model(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.casefold()
+    if lowered.startswith(("sk-", "${", "%")) or any(token in lowered for token in ("token", "secret", "api_key")):
+        return "redacted"
+    if any(char in text for char in ("/", "\\", "{", "}")):
+        return "redacted"
+    return text[:96]

@@ -1,17 +1,3 @@
-"""P6 JoiJuice — Tool Result Compression.
-
-Splits tool results into separate channels and compresses large
-outputs before they reach the LLM context window.
-
-Channels:
-  - agent_state: compact data for LLM reasoning (compressed)
-  - display_card: rich data for UI rendering (full)
-  - voice_line: clean spoken text (no JSON/ids/paths)
-  - memory_candidate: data worth remembering (filtered)
-  - audit_log: full trace for developer inspection (full)
-
-Inspired by AIRI's token compression approach.
-"""
 from __future__ import annotations
 
 import json
@@ -20,252 +6,330 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# Maximum characters for agent_state before compression
 AGENT_STATE_BUDGET = 2000
 
-# Patterns to strip from voice lines
-VOICE_STRIP_PATTERNS = [
-    re.compile(r'["\']'),
-    re.compile(r'\b\w{20,}\b'),  # long tokens/hashes
-    re.compile(r'/(?:Users|home|tmp|var|etc)/\S+'),  # file paths
-    re.compile(r'[A-Z]:\\\\\S+'),  # Windows paths
-    re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}\b'),  # IP addresses
-    re.compile(r'sk-[A-Za-z0-9_-]{4,}'),  # API keys
-    re.compile(r'\{[^}]{50,}\}'),  # long JSON blocks
-    re.compile(r'\[[^\]]{100,}\]'),  # long arrays
-]
+_STRIP_KEYS = {
+    "screenshot_path",
+    "screenshot_rel",
+    "artifact",
+    "artifacts",
+    "raw_log",
+    "stderr",
+    "stdout",
+    "jsonl_path",
+    "log_path",
+    "audio_path",
+    "voice_audio_path",
+    "image_data",
+    "image_data_url",
+    "audio_base64",
+    "base64",
+    "raw_html",
+    "raw_response",
+    "arguments_hash",
+    "approval_id",
+    "selection_id",
+}
 
-# Patterns to strip from agent_state
-STATE_STRIP_KEYS = frozenset({
-    "screenshot_path", "screenshot_rel", "raw_log", "stderr",
-    "stdout", "jsonl_path", "log_path", "audio_path",
-    "image_data", "base64", "raw_html", "raw_response",
-})
+_COORDINATE_KEYS = {
+    "x",
+    "y",
+    "end_x",
+    "end_y",
+    "bbox",
+    "bounds",
+    "screen_bbox",
+    "capture_rect",
+    "rect",
+    "preview",
+    "width",
+    "height",
+}
+
+_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:\\|/(?:Users|home|private|tmp|var|Volumes)/|\\\\|data/agent_companion/|"
+    r"\.(?:png|jpg|jpeg|webp|gif|bmp|ppm|json|jsonl|log|txt|ya?ml|sqlite3?|db)\b)",
+    re.IGNORECASE,
+)
+_LOCAL_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/(?:Users|home|private|tmp|var|Volumes)/|\\\\)", re.IGNORECASE)
+_SECRET_RE = re.compile(r"(?:\bsk-[A-Za-z0-9_-]{6,}\b|\b(?:api[_-]?key|token|secret|password|bearer)\b)", re.IGNORECASE)
+_INTERNAL_ID_RE = re.compile(r"\b(?:task|approval|selection|codex|run|resume)[-_]?[0-9a-f]{6,}\b", re.IGNORECASE)
+_JSON_BLOCK_RE = re.compile(r"[\[{][\s\S]{80,}[\]}]")
+_COORD_RE = re.compile(r"\b\d{1,5}\s*,\s*\d{1,5}\b")
+
+_UI_STRIP_KEYS = {
+    "screenshot_path",
+    "raw_log",
+    "stderr",
+    "stdout",
+    "jsonl_path",
+    "log_path",
+    "audio_path",
+    "voice_audio_path",
+    "image_data",
+    "image_data_url",
+    "audio_base64",
+    "base64",
+    "raw_html",
+    "raw_response",
+}
 
 
 @dataclass(frozen=True)
-class CompressedResult:
-    """A tool result split into separate channels."""
-    agent_state: dict[str, Any]       # Compact for LLM
-    display_card: dict[str, Any]      # Full for UI
-    voice_line: str                   # Clean for TTS
-    memory_candidate: dict[str, Any] | None  # Worth remembering
-    audit_log: dict[str, Any]         # Full for dev inspection
-    original_tokens_estimate: int     # Estimated original size
-    compressed_tokens_estimate: int   # Estimated compressed size
+class CompressedToolResult:
+    agent_state: dict[str, Any]
+    display_card: dict[str, Any]
+    voice_line: str
+    memory_candidate: dict[str, str] | None
+    audit_log: dict[str, Any]
+    original_size: int
+    compressed_size: int
 
     @property
     def compression_ratio(self) -> float:
-        if self.original_tokens_estimate <= 0:
+        if self.original_size <= 0:
             return 1.0
-        return self.compressed_tokens_estimate / self.original_tokens_estimate
+        return self.compressed_size / self.original_size
 
-
-def compress_tool_result(result: Any) -> CompressedResult:
-    """Compress a ToolResult into separate channels.
-
-    Args:
-        result: A ToolResult with agent_state, display_card, voice_line
-
-    Returns:
-        CompressedResult with split and compressed channels
-    """
-    agent_state = getattr(result, "agent_state", {}) or {}
-    display_card = getattr(result, "display_card", None)
-    voice_line_obj = getattr(result, "voice_line", None)
-    risk = getattr(result, "risk", None)
-
-    # Estimate original size
-    original_size = _estimate_size(agent_state)
-
-    # 1. Compress agent_state for LLM
-    compressed_state = _compress_agent_state(agent_state)
-
-    # 2. Extract display_card data (keep full)
-    card_data = {}
-    if display_card:
-        card_data = {
-            "title": getattr(display_card, "title", ""),
-            "summary": getattr(display_card, "summary", ""),
-            "body": _truncate(getattr(display_card, "body", ""), 1000),
-            "status": getattr(display_card, "status", "info"),
-            "artifacts": getattr(display_card, "artifacts", []),
+    def to_agent_state(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "planner_state": self.agent_state,
+            "display_card": self.display_card,
+            "voice_line": self.voice_line,
+            "audit_log": self.audit_log,
+            "original_size": self.original_size,
+            "compressed_size": self.compressed_size,
+            "compression_ratio": round(self.compression_ratio, 3),
         }
+        if self.memory_candidate:
+            payload["memory_candidate"] = self.memory_candidate
+        return payload
 
-    # 3. Clean voice line
-    voice_text = ""
-    if voice_line_obj:
-        voice_text = _clean_voice_line(getattr(voice_line_obj, "text", ""))
 
-    # 4. Extract memory candidate
-    memory_candidate = _extract_memory_candidate(agent_state)
-
-    # 5. Build audit log (full data)
-    audit = {
-        "tool": agent_state.get("tool", ""),
-        "ok": agent_state.get("ok", True),
-        "risk": str(getattr(risk, "value", risk)) if risk else "low",
-    }
-    # Include audit-specific data
-    if "computer_use" in agent_state:
-        audit["computer_use"] = agent_state["computer_use"]
-    if "post_action_verification" in agent_state:
-        audit["verification"] = agent_state["post_action_verification"]
-    if "codex_run" in agent_state:
-        audit["codex_run"] = agent_state["codex_run"]
-
-    compressed_size = _estimate_size(compressed_state)
-
-    return CompressedResult(
-        agent_state=compressed_state,
-        display_card=card_data,
-        voice_line=voice_text,
-        memory_candidate=memory_candidate,
-        audit_log=audit,
-        original_tokens_estimate=original_size,
-        compressed_tokens_estimate=compressed_size,
+def compress_tool_result(result: Any) -> CompressedToolResult:
+    state = getattr(result, "agent_state", {}) or {}
+    if not isinstance(state, dict):
+        state = {}
+    card = getattr(result, "display_card", None)
+    voice = getattr(result, "voice_line", None)
+    original_size = _estimate_size(state)
+    planner_state = _compress_state(state)
+    if _estimate_size(planner_state) > AGENT_STATE_BUDGET:
+        planner_state = _compress_state_aggressively(planner_state)
+    compressed_size = _estimate_size(planner_state)
+    return CompressedToolResult(
+        agent_state=planner_state,
+        display_card=_display_card_channel(card),
+        voice_line=_clean_voice_text(str(getattr(voice, "text", "") or "")),
+        memory_candidate=_explicit_memory_candidate(state),
+        audit_log=_audit_channel(result, state),
+        original_size=original_size,
+        compressed_size=compressed_size,
     )
 
 
-def _compress_agent_state(state: dict[str, Any]) -> dict[str, Any]:
-    """Compress agent_state for LLM consumption.
+def build_event_agent_state(result: Any) -> dict[str, Any]:
+    """Build the UI-safe event channel and attach compressed planner channels."""
+    state = getattr(result, "agent_state", {}) or {}
+    if not isinstance(state, dict):
+        state = {}
+    event_state = _sanitize_ui_state(state)
+    compressed = compress_tool_result(result)
+    event_state["joi_juice"] = compressed.to_agent_state()
+    event_state["result_channels"] = {
+        "ui": "agent_state",
+        "planner": "joi_juice.planner_state",
+        "memory": "joi_juice.memory_candidate",
+        "audit": "joi_juice.audit_log",
+    }
+    return event_state
 
-    - Remove large binary/path fields
-    - Truncate long strings
-    - Summarize lists
-    - Remove redundant nested data
-    - PRESERVE structured UI data (target candidates, evidence, approvals)
-    """
-    if not state:
-        return {}
 
-    # Keys that must survive compression intact (frontend/UI needs them)
-    PRESERVE_KEYS = frozenset({
-        "tool", "ok", "error", "needs_clarification", "coordinate_untrusted",
-        "candidate_selection_required", "selection_id", "selected_rank",
-        "target_candidate", "target_candidates", "approval_request",
-        "observation", "ocr", "ocr_regions", "visual_detection",
-        "computer_use", "verification", "post_action_verification",
-        "codex_run", "memory_candidate", "subconscious", "tick_id",
-        "_compression_ratio", "_original_size",
-    })
-
+def _compress_state(state: dict[str, Any]) -> dict[str, Any]:
     compressed: dict[str, Any] = {}
     for key, value in state.items():
-        # Skip heavy fields
-        if key in STATE_STRIP_KEYS:
+        if key in _STRIP_KEYS or key in _COORDINATE_KEYS or key.startswith("audit_"):
             continue
-        if key == "audit" or key.startswith("audit_"):
+        if key in {"target_candidate"} and isinstance(value, dict):
+            compressed[key] = _candidate_summary(value)
             continue
-
-        # Preserve important UI fields as-is
-        if key in PRESERVE_KEYS:
-            compressed[key] = value
+        if key in {"target_candidates"} and isinstance(value, list):
+            compressed[key] = [_candidate_summary(item) for item in value[:5] if isinstance(item, dict)]
+            if len(value) > 5:
+                compressed["target_candidates_more"] = len(value) - 5
             continue
-
-        # Compress nested dicts
-        if isinstance(value, dict):
-            nested = _compress_dict(value)
-            if nested:
-                compressed[key] = nested
-        # Truncate long strings
-        elif isinstance(value, str):
-            if len(value) > 500:
-                compressed[key] = value[:500] + f"...({len(value)} chars)"
-            else:
-                compressed[key] = value
-        # Summarize long lists
-        elif isinstance(value, list):
-            if len(value) > 10:
-                compressed[key] = value[:5] + [f"...{len(value) - 5} more items"]
-            else:
-                compressed[key] = value
-        else:
-            compressed[key] = value
-
+        if key in {"observation", "computer_observation", "first_computer_observation"} and isinstance(value, dict):
+            compressed[key] = _observation_summary(value)
+            continue
+        if key in {"ocr", "transcript"} and isinstance(value, dict):
+            compressed[key] = _status_summary(value)
+            continue
+        cleaned = _compress_value(value)
+        if cleaned not in ({}, [], ""):
+            compressed[key] = cleaned
     return compressed
 
 
-def _compress_dict(d: dict[str, Any]) -> dict[str, Any]:
-    """Recursively compress a nested dict."""
-    result: dict[str, Any] = {}
-    for k, v in d.items():
-        if k in STATE_STRIP_KEYS:
-            continue
-        if isinstance(v, str) and len(v) > 300:
-            result[k] = v[:300] + "..."
-        elif isinstance(v, list) and len(v) > 5:
-            result[k] = v[:3] + [f"...{len(v) - 3} more"]
-        elif isinstance(v, dict):
-            result[k] = _compress_dict(v)
-        else:
-            result[k] = v
-    return result
-
-
-def _aggressive_compress(state: dict[str, Any]) -> dict[str, Any]:
-    """Aggressively compress when still over budget."""
-    result: dict[str, Any] = {}
+def _sanitize_ui_state(state: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
     for key, value in state.items():
-        if isinstance(value, str):
-            result[key] = value[:200]
-        elif isinstance(value, dict):
-            # Keep only top-level keys
-            result[key] = {k: str(v)[:100] for k, v in list(value.items())[:5]}
-        elif isinstance(value, list):
-            result[key] = f"[{len(value)} items]"
-        else:
-            result[key] = value
-    return result
+        key_text = str(key)
+        if key_text in _UI_STRIP_KEYS or key_text.startswith("debug_"):
+            continue
+        cleaned = _sanitize_ui_value(value)
+        if cleaned not in ({}, [], ""):
+            output[key_text] = cleaned
+    return output
 
 
-def _extract_memory_candidate(state: dict[str, Any]) -> dict[str, Any] | None:
-    """Extract memory-worthy data from agent_state."""
-    candidate = state.get("memory_candidate")
-    if isinstance(candidate, dict):
-        return candidate
+def _sanitize_ui_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _UI_STRIP_KEYS or key_text.startswith("debug_"):
+                continue
+            cleaned = _sanitize_ui_value(item)
+            if cleaned not in ({}, [], ""):
+                output[key_text] = cleaned
+        return output
+    if isinstance(value, list):
+        return [_sanitize_ui_value(item) for item in value]
+    if isinstance(value, str):
+        return _clean_ui_text(value)
+    return value
 
-    # Auto-generate from tool results
-    tool = state.get("tool", "")
-    if not tool:
-        return None
 
-    # Only remember certain tool types
-    memorable_tools = {"codex.run", "browser.search", "browser.observe", "observe.screen", "companion.chat"}
-    if tool not in memorable_tools:
-        return None
+def _compress_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _STRIP_KEYS or key_text in _COORDINATE_KEYS:
+                continue
+            cleaned = _compress_value(item)
+            if cleaned not in ({}, [], ""):
+                output[key_text] = cleaned
+        return output
+    if isinstance(value, list):
+        return [_compress_value(item) for item in value[:5]]
+    if isinstance(value, str):
+        return _clean_state_text(value)
+    return value
 
-    summary = state.get("summary") or state.get("vision_summary") or ""
-    if not summary or len(summary) < 10:
-        return None
 
+def _compress_state_aggressively(state: dict[str, Any]) -> dict[str, Any]:
+    keep = {"tool", "ok", "error", "needs_clarification", "candidate_selection_required", "target_candidate", "target_candidates"}
+    return {key: _compress_value(value) for key, value in state.items() if key in keep}
+
+
+def _candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
-        "kind": "tool_result",
-        "text": summary[:400],
-        "source": tool,
+        key: _clean_state_text(str(candidate.get(key) or ""))
+        for key in ("label", "source", "region_name", "ambiguity", "reason", "role")
+        if str(candidate.get(key) or "").strip()
+    } | {
+        "rank": int(candidate.get("rank") or 0),
+        "confidence": round(float(candidate.get("confidence") or 0), 3),
+        "clickable": bool(candidate.get("clickable")) if "clickable" in candidate else False,
+        "enabled": candidate.get("enabled") is not False,
     }
 
 
-def _clean_voice_line(text: str) -> str:
-    """Clean a voice line for TTS — remove technical noise."""
-    if not text:
+def _observation_summary(observation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: _clean_state_text(str(observation.get(key) or ""))
+        for key in ("target", "status", "source", "active_window_title")
+        if str(observation.get(key) or "").strip() and not _unsafe_text(str(observation.get(key) or ""))
+    }
+
+
+def _status_summary(value: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key in ("status", "source", "error", "provider"):
+        text = str(value.get(key) or "").strip()
+        if text and not _unsafe_text(text):
+            summary[key] = _clean_state_text(text)
+    for key in ("segments", "text_blocks", "ocr_regions"):
+        if isinstance(value.get(key), list):
+            summary[f"{key}_count"] = len(value[key])
+    return summary
+
+
+def _display_card_channel(card: Any) -> dict[str, Any]:
+    if card is None:
+        return {}
+    artifacts = getattr(card, "artifacts", []) or []
+    return {
+        "title": _clean_state_text(str(getattr(card, "title", "") or ""))[:120],
+        "summary": _clean_state_text(str(getattr(card, "summary", "") or ""))[:240],
+        "body": _clean_state_text(str(getattr(card, "body", "") or ""))[:600],
+        "status": _clean_state_text(str(getattr(card, "status", "") or ""))[:40],
+        "artifact_count": len(artifacts) if isinstance(artifacts, list) else 0,
+    }
+
+
+def _audit_channel(result: Any, state: dict[str, Any]) -> dict[str, Any]:
+    risk = getattr(result, "risk", "")
+    return {
+        "tool": _clean_state_text(str(state.get("tool") or ""))[:80],
+        "ok": bool(getattr(result, "ok", False)),
+        "risk": str(getattr(risk, "value", risk) or "low")[:40],
+        "original_keys": len(state),
+    }
+
+
+def _explicit_memory_candidate(state: dict[str, Any]) -> dict[str, str] | None:
+    raw = state.get("memory_candidate")
+    if not isinstance(raw, dict):
+        return None
+    text = _clean_state_text(str(raw.get("text") or raw.get("fact") or ""))
+    if not text or _unsafe_text(text):
+        return None
+    return {
+        "kind": _safe_label(str(raw.get("kind") or "note"), "note"),
+        "text": text[:400],
+        "source": _safe_label(str(raw.get("source") or "tool"), "tool"),
+    }
+
+
+def _clean_voice_text(text: str) -> str:
+    value = text or ""
+    for pattern in (_SECRET_RE, _PATH_RE, _INTERNAL_ID_RE, _JSON_BLOCK_RE, _COORD_RE):
+        value = pattern.sub("", value)
+    return " ".join(value.split()).strip()[:200]
+
+
+def _clean_state_text(text: str) -> str:
+    value = " ".join((text or "").split()).strip()
+    if _unsafe_text(value):
         return ""
-    cleaned = text
-    for pattern in VOICE_STRIP_PATTERNS:
-        cleaned = pattern.sub("", cleaned)
-    # Collapse whitespace
-    cleaned = " ".join(cleaned.split())
-    return cleaned[:200]  # Hard cap for TTS
+    if len(value) > 500:
+        return value[:500] + f"...({len(value)} chars)"
+    return value
 
 
-def _truncate(text: str, max_len: int) -> str:
-    if not text or len(text) <= max_len:
-        return text
-    return text[:max_len] + f"...({len(text)} chars)"
+def _clean_ui_text(text: str) -> str:
+    value = str(text or "")
+    if not value:
+        return ""
+    if value.startswith("data:"):
+        return "[redacted-data-url]"
+    value = _SECRET_RE.sub("[redacted]", value)
+    value = _LOCAL_PATH_RE.sub("[local-path]", value)
+    return value[:2000] + (f"...({len(value)} chars)" if len(value) > 2000 else "")
+
+
+def _unsafe_text(text: str) -> bool:
+    return bool(_SECRET_RE.search(text) or _PATH_RE.search(text) or _INTERNAL_ID_RE.search(text))
+
+
+def _safe_label(value: str, fallback: str) -> str:
+    text = (value or "").strip().casefold().replace("-", "_")
+    return text[:40] if text.replace("_", "").isalnum() else fallback
 
 
 def _estimate_size(data: Any) -> int:
-    """Estimate the size of data in characters (rough token proxy)."""
     try:
         return len(json.dumps(data, ensure_ascii=False, default=str))
     except Exception:
