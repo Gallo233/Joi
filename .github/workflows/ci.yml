@@ -37,6 +37,10 @@ jobs:
           cache: npm
           cache-dependency-path: agent_companion/shell/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
       - name: Install frontend dependencies
         working-directory: agent_companion/shell
         run: npm ci
