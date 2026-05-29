@@ -39,6 +39,7 @@ export interface ComputerUseAuditEvent {
   approval_id?: string
   approval_status?: string
   tool_name?: string
+  skill_id?: string
   action_name?: string
   sanitized_arguments?: Record<string, unknown>
   before_artifacts?: ComputerUseAuditArtifact[]

@@ -26,6 +26,7 @@ from agent_companion.core.memory import MemoryStore
 from agent_companion.core.planner import build_plan
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
+from agent_companion.core.skill_manifest import annotate_agent_state_with_skill, skill_boundaries_for_plan, skill_boundary_for_tool
 from agent_companion.core.speech_input import build_asr_provider
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
@@ -137,7 +138,7 @@ class AgentCompanionApp:
                     plan.task_id,
                     DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
                     safe_voice_line("我整理了一下步骤。", sprite="3"),
-                    {"steps": [step.name for step in plan.steps]},
+                    self._plan_agent_state(plan),
                 ),
                 plan.user_text,
             )
@@ -175,7 +176,7 @@ class AgentCompanionApp:
                 plan.task_id,
                 DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
                 safe_voice_line("我整理了一下步骤。", sprite="3"),
-                {"steps": [step.name for step in plan.steps]},
+                self._plan_agent_state(plan),
             ),
             plan.user_text,
         )
@@ -211,7 +212,7 @@ class AgentCompanionApp:
                 plan.task_id,
                 DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
                 safe_voice_line("我整理了一下步骤。", sprite="3"),
-                {"steps": [step.name for step in plan.steps]},
+                self._plan_agent_state(plan),
             ),
             plan.user_text,
         )
@@ -269,6 +270,7 @@ class AgentCompanionApp:
         self.resolved_approval_ids.add(approval_id)
         if self._pending_step_expired(pending):
             state = {"intent": pending.plan.intent, "approval_expired": True, "approval_id": approval_id}
+            state = annotate_agent_state_with_skill(state, pending.tool)
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval expired before execution.")] if self._is_computer_pending(pending) else [])
             if self._is_codex_permission_pending(pending):
                 state["codex_run"] = codex_cancel_run_state("expired")
@@ -289,6 +291,7 @@ class AgentCompanionApp:
             return self.bus.drain()
         if not approved:
             state = {"intent": pending.plan.intent, "cancelled": True, "approval_id": approval_id}
+            state = annotate_agent_state_with_skill(state, pending.tool)
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "denied", "Approval was denied; no action ran.")] if self._is_computer_pending(pending) else [])
             if self._is_codex_permission_pending(pending):
                 state["codex_run"] = codex_cancel_run_state("denied")
@@ -309,6 +312,7 @@ class AgentCompanionApp:
             return self.bus.drain()
         if not self._pending_step_matches(pending):
             state = {"intent": pending.plan.intent, "approval_id": approval_id, "approval_mismatch": True}
+            state = annotate_agent_state_with_skill(state, pending.tool)
             self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval no longer matched the pending action.")] if self._is_computer_pending(pending) else [])
             if self._is_codex_permission_pending(pending):
                 state["codex_run"] = codex_cancel_run_state("mismatch")
@@ -349,6 +353,7 @@ class AgentCompanionApp:
                         "arguments_hash": pending.arguments_hash,
                     },
                 }
+                agent_state = annotate_agent_state_with_skill(agent_state, step.name)
                 self._attach_audit_state(
                     agent_state,
                     [
@@ -384,7 +389,7 @@ class AgentCompanionApp:
                         plan.task_id,
                         DisplayCard("执行中", f"正在执行：{self._tool_label(step.name)}"),
                         safe_voice_line("我开始执行这一步。", sprite="3"),
-                        {"tool": step.name},
+                        annotate_agent_state_with_skill({"tool": step.name}, step.name),
                     ),
                     plan.user_text,
                 )
@@ -418,6 +423,10 @@ class AgentCompanionApp:
                         "target_candidate": result.agent_state.get("target_candidate"),
                         "target_candidates": result.agent_state.get("target_candidates"),
                     }
+                    agent_state = annotate_agent_state_with_skill(agent_state, pending_request.name)
+                    source_tool = str(result.agent_state.get("tool") or "")
+                    if source_tool:
+                        agent_state["source_skill"] = skill_boundary_for_tool(source_tool)
                     if "codex_run" in result.agent_state:
                         agent_state["codex_run"] = result.agent_state["codex_run"]
                     audit_entries = target_grounding_audit_events(plan.task_id, result, result.risk)
@@ -464,7 +473,7 @@ class AgentCompanionApp:
                         plan.task_id,
                         DisplayCard("任务完成", "这轮任务已经处理完。", status="success"),
                         safe_voice_line(self.character.voice.get("done", "做完了。"), sprite="5"),
-                        {"intent": plan.intent},
+                        self._plan_agent_state(plan, include_steps=False),
                     ),
                     plan.user_text,
                 )
@@ -475,7 +484,7 @@ class AgentCompanionApp:
                     plan.task_id,
                     DisplayCard("任务未完成", "这轮任务没有跑通，细节在任务卡里。", status="failed"),
                     safe_voice_line(self.character.voice.get("failed", "没有跑通。"), sprite="4"),
-                    {"intent": plan.intent},
+                    self._plan_agent_state(plan, include_steps=False),
                 ),
                 plan.user_text,
             )
@@ -484,6 +493,9 @@ class AgentCompanionApp:
         event_type = EventType.TOOL_COMPLETED if result.ok else EventType.TOOL_FAILED
         agent_state = dict(result.agent_state)
         agent_state["joi_juice"] = compress_tool_result(result).to_agent_state()
+        tool_name = str(agent_state.get("tool") or "")
+        if tool_name:
+            agent_state = annotate_agent_state_with_skill(agent_state, tool_name)
         self._emit(
             AgentEvent(
                 event_type,
@@ -497,6 +509,24 @@ class AgentCompanionApp:
 
     def _emit(self, event: AgentEvent, user_text: str = "") -> None:
         self.bus.emit(self.expression.express(event, user_text))
+
+    @staticmethod
+    def _plan_agent_state(plan: AgentPlan, *, include_steps: bool = True) -> dict[str, object]:
+        steps = [step.name for step in plan.steps]
+        state: dict[str, object] = {
+            "intent": plan.intent,
+            "skills": skill_boundaries_for_plan(steps),
+        }
+        if include_steps:
+            state["steps"] = steps
+            state["skill_steps"] = [
+                {
+                    "tool": step.name,
+                    **skill_boundary_for_tool(step.name),
+                }
+                for step in plan.steps
+            ]
+        return state
 
     @staticmethod
     def _tool_label(name: str) -> str:

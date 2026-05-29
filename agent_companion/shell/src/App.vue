@@ -586,6 +586,11 @@ function intentName(event: AgentEvent) {
   return typeof intent === 'string' ? intent : ''
 }
 
+function skillName(event: AgentEvent) {
+  const skillId = event.agent_state?.skill_id
+  return typeof skillId === 'string' ? skillId : ''
+}
+
 function isCompanionChat(event: AgentEvent) {
   return toolName(event) === 'companion.chat' || (event.type === 'tool_completed' && event.display_card.title === '对话')
 }
@@ -2646,7 +2651,7 @@ onBeforeUnmount(() => {
             <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">
               <span>{{ eventTime(event) }}</span>
               <strong>{{ event.type }}</strong>
-              <code>{{ toolName(event) || intentName(event) || event.display_card.status }}</code>
+              <code>{{ skillName(event) || toolName(event) || intentName(event) || event.display_card.status }}</code>
               <p>{{ event.display_card.summary }}</p>
             </div>
           </div>

@@ -72,6 +72,9 @@ def build_native_skill_manifest(
         _voice_input_skill(asr_state),
         _voice_output_skill(tts_status),
         _ok_ww_skill(),
+        _runtime_config_skill(),
+        _local_files_skill(),
+        _mcp_skill(),
     ]
     return {
         "version": SKILL_MANIFEST_VERSION,
@@ -266,6 +269,93 @@ def _ok_ww_skill() -> NativeSkillManifest:
     )
 
 
+def _runtime_config_skill() -> NativeSkillManifest:
+    return NativeSkillManifest(
+        id="joi.runtime_config",
+        label="Runtime Settings",
+        category="settings",
+        description="Safe non-sensitive runtime configuration preview and approval-gated apply.",
+        tools=("runtime.update_config",),
+        rpc_methods=("runtime.config.preview", "runtime.config.apply"),
+        input_schema=_object_schema("updates", "dry_run"),
+        result_schema=_tool_result_schema("runtime_config_update"),
+        permission_level="medium",
+        supports_dry_run=True,
+        state_policy="local_config",
+        audit="runtime_config_audit",
+        notes=("allowlisted_fields_only", "approval_gated"),
+    )
+
+
+def _local_files_skill() -> NativeSkillManifest:
+    return NativeSkillManifest(
+        id="joi.local_files",
+        label="Local Files",
+        category="workspace",
+        description="Read-only workspace file access for local context.",
+        tools=("files.read",),
+        rpc_methods=("artifact.read",),
+        input_schema=_object_schema("path", "artifact"),
+        result_schema=_tool_result_schema("content", "data_url"),
+        permission_level="low",
+        state_policy="workspace_readonly",
+        audit="event_log",
+        notes=("workspace_bound",),
+    )
+
+
+def _mcp_skill() -> NativeSkillManifest:
+    return NativeSkillManifest(
+        id="joi.mcp",
+        label="MCP Tools",
+        category="integration",
+        description="Read-only local MCP tool discovery for available integrations.",
+        tools=("mcp.list_tools",),
+        input_schema=_object_schema("query"),
+        result_schema=_tool_result_schema("tools"),
+        permission_level="low",
+        state_policy="ephemeral",
+        audit="event_log",
+        notes=("discovery_only",),
+    )
+
+
+def skill_id_for_tool(tool_name: str) -> str:
+    return _skill_binding(tool_name).get("skill_id", "joi.unknown")
+
+
+def skill_boundary_for_tool(tool_name: str) -> dict[str, Any]:
+    binding = _skill_binding(tool_name)
+    return {
+        "skill_id": binding.get("skill_id", "joi.unknown"),
+        "skill_category": binding.get("category", "unknown"),
+        "skill_permission_level": binding.get("permission_level", "medium"),
+        "skill_state_policy": binding.get("state_policy", "ephemeral"),
+        "skill_audit": binding.get("audit", "event_log"),
+    }
+
+
+def skill_boundaries_for_plan(tool_names: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool_name in tool_names:
+        boundary = skill_boundary_for_tool(str(tool_name or ""))
+        key = boundary["skill_id"]
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(boundary)
+    return rows
+
+
+def annotate_agent_state_with_skill(agent_state: dict[str, Any], tool_name: str) -> dict[str, Any]:
+    payload = dict(agent_state)
+    boundary = skill_boundary_for_tool(tool_name)
+    payload.update(boundary)
+    payload["skill"] = boundary
+    return payload
+
+
 def _codex_available() -> bool:
     override = os.environ.get("AGENT_COMPANION_CODEX_BIN", "").strip()
     if override:
@@ -276,6 +366,143 @@ def _codex_available() -> bool:
 def _ok_ww_available() -> bool:
     script = os.environ.get("OK_WW_RUNNER", r"C:\Users\liujialuo\.codex\skills\github_issue_solver\scripts\run_ok_ww.ps1")
     return Path(script).is_file()
+
+
+def _skill_binding(tool_name: str) -> dict[str, str]:
+    tool = _safe_tool_name(tool_name)
+    return _TOOL_SKILL_BINDINGS.get(tool, _UNKNOWN_SKILL_BINDING)
+
+
+_UNKNOWN_SKILL_BINDING = {
+    "skill_id": "joi.unknown",
+    "category": "unknown",
+    "permission_level": "medium",
+    "state_policy": "ephemeral",
+    "audit": "event_log",
+}
+
+
+_TOOL_SKILL_BINDINGS: dict[str, dict[str, str]] = {
+    "companion.chat": {
+        "skill_id": "joi.companion.chat",
+        "category": "companion",
+        "permission_level": "low",
+        "state_policy": "session",
+        "audit": "event_log",
+    },
+    "codex.run": {
+        "skill_id": "joi.codex",
+        "category": "coding",
+        "permission_level": "medium",
+        "state_policy": "workspace_audit",
+        "audit": "codex_run_audit",
+    },
+    "browser.search": {
+        "skill_id": "joi.browser",
+        "category": "computer_use",
+        "permission_level": "low",
+        "state_policy": "session",
+        "audit": "event_log",
+    },
+    "browser.observe": {
+        "skill_id": "joi.browser",
+        "category": "computer_use",
+        "permission_level": "low",
+        "state_policy": "session",
+        "audit": "event_log",
+    },
+    "observe.screen": {
+        "skill_id": "joi.watch",
+        "category": "watch",
+        "permission_level": "low",
+        "state_policy": "session_window",
+        "audit": "event_log",
+    },
+    "watch.recall": {
+        "skill_id": "joi.watch",
+        "category": "watch",
+        "permission_level": "low",
+        "state_policy": "session_window",
+        "audit": "event_log",
+    },
+    "vision.resolve_target": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "vision.select_target": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.click": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.type_text": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.scroll": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.hotkey": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.workflow": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "game.ok_ww.run": {
+        "skill_id": "joi.ok_ww",
+        "category": "game",
+        "permission_level": "medium",
+        "state_policy": "external_game_runner",
+        "audit": "game_run_log",
+    },
+    "runtime.update_config": {
+        "skill_id": "joi.runtime_config",
+        "category": "settings",
+        "permission_level": "medium",
+        "state_policy": "local_config",
+        "audit": "runtime_config_audit",
+    },
+    "files.read": {
+        "skill_id": "joi.local_files",
+        "category": "workspace",
+        "permission_level": "low",
+        "state_policy": "workspace_readonly",
+        "audit": "event_log",
+    },
+    "mcp.list_tools": {
+        "skill_id": "joi.mcp",
+        "category": "integration",
+        "permission_level": "low",
+        "state_policy": "ephemeral",
+        "audit": "event_log",
+    },
+}
 
 
 def _object_schema(*properties: str) -> dict[str, Any]:

@@ -747,8 +747,12 @@ def main() -> int:
     fake_llm_app = AgentCompanionApp(workspace, llm_planner=FakeLlmPlanner(fake_llm_plan))
     fake_llm_events = fake_llm_app.handle_user_text("帮我在哔哩找猫猫视频")
     assert_true(any(event.type == EventType.PLAN_CREATED and event.agent_state.get("steps") == ["computer.workflow"] for event in fake_llm_events), "Agent app should use LLM planner fallback for ambiguous actionable text")
+    fake_plan_event = [event for event in fake_llm_events if event.type == EventType.PLAN_CREATED][-1]
+    assert_true(fake_plan_event.agent_state.get("skill_steps", [{}])[0].get("skill_id") == "joi.computer_use", "Plan events should bind tool steps to native skill ids")
     fake_llm_approval = _approval_payload(fake_llm_events)
     assert_true(fake_llm_approval.get("tool") == "computer.workflow", "LLM-planned desktop workflow should still require approval")
+    fake_llm_approval_event = [event for event in fake_llm_events if event.type == EventType.APPROVAL_REQUIRED][-1]
+    assert_true(fake_llm_approval_event.agent_state.get("skill_id") == "joi.computer_use" and fake_llm_approval_event.agent_state.get("skill_permission_level") == "medium", "Approval events should carry native skill boundary metadata")
     fake_llm_pending = fake_llm_app.pending_steps[fake_llm_approval["approval_id"]]
     fake_llm_args = fake_llm_pending.plan.steps[fake_llm_pending.index].arguments
     assert_true(fake_llm_args.get("site") == "bilibili" and fake_llm_args.get("query") == "猫猫视频", "LLM-planned approval should keep validated slots")
@@ -2503,6 +2507,8 @@ asr:
     chat_app = AgentCompanionApp(workspace)
     chat_events = chat_app.handle_user_text("你好")
     assert_true(any(event.display_card.title == "对话" for event in chat_events), "chat should produce a dialogue card")
+    chat_tool_event = [event for event in chat_events if event.display_card.title == "对话"][-1]
+    assert_true(chat_tool_event.agent_state.get("skill_id") == "joi.companion.chat", "Tool result events should carry native skill ids")
     assert_true(not any(event.type == EventType.PLAN_CREATED for event in chat_events), "chat should not show plan events")
     assert_true(not any(event.type == EventType.TASK_COMPLETED for event in chat_events), "chat should not show task completion")
 
@@ -2893,6 +2899,7 @@ asr:
     semantic_audit = _audit_rows(semantic_events)
     evidence_audit_rows = [row for row in semantic_audit if row.get("event_type") == "target_candidates"]
     assert_true(evidence_audit_rows and evidence_audit_rows[-1].get("candidate_evidence"), "semantic audit should record sanitized candidate evidence")
+    assert_true(evidence_audit_rows[-1].get("skill_id") == "joi.computer_use", "Semantic grounding audit should carry native skill id")
     audit_evidence_text = str(evidence_audit_rows[-1].get("candidate_evidence"))
     assert_true(not any(fragment in audit_evidence_text for fragment in ["bbox", "screen_center", "data/", ".png", "approval-", "task-", "ButtonControl", "TextControl"]), "semantic audit evidence leaked raw target details")
     assert_true(all("登录" not in event.voice_line.text and "semantic-app.png" not in event.voice_line.text for event in semantic_events), "semantic approval voice should stay immersive")
@@ -2907,9 +2914,10 @@ asr:
     computer_audit = _audit_rows(computer_events)
     assert_true(any(row.get("event_type") == "approval_pending" for row in computer_audit), "computer approval should create an audit event")
     approval_audit = [row for row in computer_audit if row.get("event_type") == "approval_pending"][-1]
-    for field in ("task_id", "event_type", "timestamp", "sanitized_summary", "risk_level", "approval_id", "approval_status", "tool_name", "action_name", "sanitized_arguments", "before_artifacts", "after_artifacts", "verification_result"):
+    for field in ("task_id", "event_type", "timestamp", "sanitized_summary", "risk_level", "approval_id", "approval_status", "tool_name", "skill_id", "action_name", "sanitized_arguments", "before_artifacts", "after_artifacts", "verification_result"):
         assert_true(field in approval_audit, f"audit event missing stable field: {field}")
     assert_true(approval_audit["risk_level"] == "medium", "computer approval audit should preserve risk")
+    assert_true(approval_audit["skill_id"] == "joi.computer_use", "computer approval audit should carry native skill id")
     assert_true(approval_audit["sanitized_arguments"].get("target") == "screen_position", "click audit should sanitize target coordinates")
     assert_true("100" not in str(approval_audit["sanitized_arguments"]) and "200" not in str(approval_audit["sanitized_arguments"]), "click audit leaked raw coordinates")
     assert_true(str(computer_approval.get("approval_id", "")).startswith("approval-"), "computer approval should include approval_id")
@@ -2950,6 +2958,7 @@ asr:
     assert_true(any(row.get("event_type") == "approval_approved" for row in action_rows), "approved action should record approval lifecycle")
     noop_rows = [row for row in action_rows if row.get("event_type") == "verification_noop"]
     assert_true(noop_rows, "likely no-op verification should create an audit entry")
+    assert_true(noop_rows[-1].get("skill_id") == "joi.computer_use", "action verification audit should carry native skill id")
     assert_true(noop_rows[-1].get("verification_result", {}).get("status") == "likely_noop", "no-op audit should preserve verification status")
     assert_true(noop_rows[-1].get("before_artifacts") and noop_rows[-1].get("after_artifacts"), "confirmed action audit should include before/after screenshots")
     assert_true(not any(event.type == EventType.AUDIT_EVENT and event.voice_line.text for event in action_audit_result if "approval-" in event.voice_line.text), "audit events should not speak approval ids")
@@ -3059,6 +3068,7 @@ asr:
     assert_true(skill_rows["joi.computer_use"]["permission_level"] == "medium" and "computer.click" in skill_rows["joi.computer_use"]["tools"], "Computer Use skill should be medium-risk and tool-bound")
     assert_true(skill_rows["joi.voice_input"]["configured"] and skill_rows["joi.voice_input"]["local_capability"] == "ready", "Voice input skill should mirror ASR runtime readiness")
     assert_true(skill_rows["joi.ok_ww"]["supports_dry_run"], "OK-WW skill should advertise dry-run first")
+    assert_true("runtime.update_config" in skill_rows["joi.runtime_config"]["tools"], "Runtime config should be bound to a native skill")
     skill_manifest_payload = ready_bridge.skill_manifest_command()
     assert_true(skill_manifest_payload["ok"] and skill_manifest_payload["skills"]["version"] == SKILL_MANIFEST_VERSION, "skills.list RPC should return the native skill manifest")
     direct_skill_rows = {
@@ -3460,7 +3470,7 @@ llm:
     assert_true("force_visual_summary" in server_source and '"watch.loop.refresh"' in server_source, "Core watch loop should expose forced visual refresh")
     assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
     skill_manifest_source = (workspace / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
-    assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests")
+    assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
     assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source, "Core should expose P8 native skill manifest RPC and ready payload")
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
     watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
@@ -3499,10 +3509,11 @@ llm:
     assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
     assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory candidate controls and stage authorization bubble")
     assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
-    assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source, "Shell should expose P8 native skill manifest status")
+    assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
     assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with recall search and vault preview")
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
     assert_true("_step_with_memory_context" in app_source and "compress_tool_result" in app_source and '"joi_juice"' in app_source, "App should inject approved memory context and attach JoiJuice channels")
+    assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source, "App execution boundary should attach native skill metadata to plan, approval, and result events")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
     assert_true("skill-grid" in shell_style_source and "skill-card" in shell_style_source, "Shell styles should include native skill manifest cards")
