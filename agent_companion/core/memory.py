@@ -72,6 +72,15 @@ class MemoryStore:
             return {"ok": False, "error": "sensitive_memory_candidate", "reason": "ephemeral_or_sensitive"}
         if reason:
             return {"ok": False, "error": "unsafe_memory_candidate", "reason": reason}
+        duplicate = self._candidate_duplicate(cleaned)
+        if duplicate is not None:
+            return {
+                "ok": False,
+                "error": "duplicate_memory_candidate",
+                "reason": str(duplicate.get("reason") or "duplicate"),
+                "candidate": duplicate.get("candidate"),
+                "memory": duplicate.get("memory"),
+            }
         now = time.time()
         with sqlite3.connect(self.path) as db:
             cursor = db.execute(
@@ -403,6 +412,20 @@ class MemoryStore:
                 (status, time.time(), reason[:80], int(candidate_id)),
             )
 
+    def _candidate_duplicate(self, text: str) -> dict[str, Any] | None:
+        fingerprint = _memory_fingerprint(text)
+        if not fingerprint:
+            return None
+        for candidate in self.pending(50):
+            candidate_text = str(candidate.get("text") or "")
+            if _memory_fingerprint(candidate_text) == fingerprint:
+                return {"reason": "pending_duplicate", "candidate": candidate}
+        for memory in self.recent(200):
+            memory_text = str(memory.get("text") or "")
+            if _memory_fingerprint(memory_text) == fingerprint:
+                return {"reason": "already_saved", "memory": memory}
+        return None
+
     def _rewrite_vault(self) -> None:
         manual_notes = self._manual_vault_notes(limit=80)
         memories = self.recent(200)
@@ -679,6 +702,13 @@ def _profile_context_text(profile: dict[str, Any]) -> str:
 
 def _clean_memory_text(text: str) -> str:
     return " ".join((text or "").split()).strip()
+
+
+def _memory_fingerprint(text: str) -> str:
+    cleaned = _clean_memory_text(text).casefold()
+    if not cleaned or _rejection_reason(cleaned):
+        return ""
+    return re.sub(r"[\s，。,.!！?？:：;；\"'“”‘’（）()【】\[\]<>《》]+", "", cleaned)
 
 
 def _rejection_reason(text: str) -> str:

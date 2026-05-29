@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 from typing import Any
 
+from agent_companion.core.memory_candidates import chat_memory_candidate
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.voice import normalize_emotion, safe_voice_line, sprite_for_emotion
@@ -37,6 +38,9 @@ class CompanionChatTool(ToolAdapter):
         memory_profile = _memory_profile(memory_context)
         if memory_profile:
             agent_state["memory_profile"] = memory_profile
+        memory_candidate = chat_memory_candidate(text)
+        if memory_candidate:
+            agent_state["memory_candidate"] = memory_candidate
         if model_usage:
             agent_state["model_usage"] = model_usage
         return ToolResult(

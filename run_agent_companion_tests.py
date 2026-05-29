@@ -889,6 +889,14 @@ def main() -> int:
     assert_true("轻量级原生控件" in chat_memory_result.display_card.summary, "chat should answer from approved memory context")
     assert_true(chat_memory_result.agent_state["memory_context"], "chat should expose the approved memory context it used")
     assert_true("memory_profile" in chat_memory_result.agent_state, "chat should expose approved memory profile context")
+    chat_candidate_result = CompanionChatTool(workspace).run(ToolRequest("companion.chat", {"text": "我更喜欢短一点回答"}))
+    assert_true(
+        chat_candidate_result.agent_state.get("memory_candidate", {}).get("kind") == "preference"
+        and "短一点回答" in chat_candidate_result.agent_state["memory_candidate"]["fact"],
+        "stable chat preferences should emit pending memory candidates",
+    )
+    chat_question_result = CompanionChatTool(workspace).run(ToolRequest("companion.chat", {"text": "你喜欢什么吗？"}))
+    assert_true("memory_candidate" not in chat_question_result.agent_state, "questions should not become memory candidates")
 
     expression_sync_event = AgentCompanionApp(workspace).expression.express(
         AgentEvent(
@@ -924,6 +932,11 @@ def main() -> int:
         assert_true(
             memory_profile["summary"] and any("原生 CSS 变量" in row for row in memory_profile["preferences"]),
             "approved memories should form a user memory profile",
+        )
+        duplicate_candidate = memory.propose("preference", "用户更喜欢原生 CSS 变量", source="chat")
+        assert_true(
+            not duplicate_candidate["ok"] and duplicate_candidate["reason"] == "already_saved",
+            "duplicate memory candidates should not be queued again after save",
         )
         recalled_css = memory.recall("CSS 偏好", 5)
         assert_true(any("原生 CSS 变量" in row["text"] for row in recalled_css), "memory recall should find relevant approved memories")
@@ -995,6 +1008,11 @@ def main() -> int:
         personalized_events = memory_app.handle_user_text("你知道我喜欢什么吗")
         personalized_chat = [event for event in personalized_events if event.agent_state.get("tool") == "companion.chat"]
         assert_true(personalized_chat and "轻量级原生控件" in personalized_chat[-1].display_card.summary, "approved memories should personalize companion chat")
+        implicit_memory_events = memory_app.handle_user_text("我更喜欢短一点回答")
+        implicit_candidates = [event.agent_state.get("memory_candidate") for event in implicit_memory_events if event.agent_state.get("memory_candidate")]
+        assert_true(implicit_candidates and any("短一点回答" in candidate["text"] for candidate in implicit_candidates), "normal chat should create safe pending memory candidates from stable preferences")
+        non_memory_events = memory_app.handle_user_text("你喜欢什么吗？")
+        assert_true(not any(event.agent_state.get("memory_candidate") for event in non_memory_events), "ordinary questions should not create memory candidates")
     finally:
         shutil.rmtree(memory_app_dir, ignore_errors=True)
 
@@ -4136,9 +4154,11 @@ llm:
     tool_compression_source = (workspace / "agent_companion" / "core" / "tool_compression.py").read_text(encoding="utf-8")
     assert_true("compress_tool_result" in tool_compression_source and "build_event_agent_state" in tool_compression_source and "planner_state" in tool_compression_source and "_explicit_memory_candidate" in tool_compression_source, "P6 JoiJuice should expose safe tool-result channels without auto memory")
     memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
-    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "profile" in memory_source and "_candidate_priority" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, profiles, disable switch, semantic recall, local vault browsing/context, and privacy gate")
+    assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "profile" in memory_source and "_candidate_priority" in memory_source and "_candidate_duplicate" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, profiles, dedupe, disable switch, semantic recall, local vault browsing/context, and privacy gate")
+    memory_candidates_source = (workspace / "agent_companion" / "core" / "memory_candidates.py").read_text(encoding="utf-8")
+    assert_true("chat_memory_candidate" in memory_candidates_source and "MEMORY_CANDIDATE_VERSION" in memory_candidates_source and "_looks_transient" in memory_candidates_source, "P5 memory candidate extraction should support safe stable chat preferences")
     chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
-    assert_true("memory_context" in chat_source and "memory_profile" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context and profile")
+    assert_true("memory_context" in chat_source and "memory_profile" in chat_source and "chat_memory_candidate" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context/profile and emit safe memory candidates")
     config_source = (workspace / "agent_companion" / "core" / "config.py").read_text(encoding="utf-8")
     runtime_status_source = (workspace / "agent_companion" / "core" / "runtime_status.py").read_text(encoding="utf-8")
     watch_tool_source = (workspace / "agent_companion" / "core" / "tools" / "watch.py").read_text(encoding="utf-8")
