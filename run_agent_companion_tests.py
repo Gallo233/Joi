@@ -54,6 +54,7 @@ from agent_companion.core.watch_commentary import WatchCommentaryPlanner
 from agent_companion.core.watch_transcript import TranscriptResult, TranscriptSegment
 from tools.eval_visual_detector import SEMANTIC_CALIBRATION_FAILURE_CATEGORIES, run_eval as run_visual_detector_eval, run_local_semantic_calibration
 from tools.joi_doctor import build_doctor_report, doctor_exit_code
+from tools.packaging_smoke import build_packaging_smoke_report, packaging_smoke_exit_code
 
 
 def assert_true(value: bool, message: str) -> None:
@@ -1944,6 +1945,76 @@ characters:
     finally:
         shutil.rmtree(doctor_tmpdir, ignore_errors=True)
 
+    packaging_tmpdir = tempfile.mkdtemp()
+    try:
+        packaging_root = Path(packaging_tmpdir)
+        shell_dir = packaging_root / "agent_companion" / "shell"
+        tauri_dir = shell_dir / "src-tauri"
+        (tauri_dir / "capabilities").mkdir(parents=True, exist_ok=True)
+        (packaging_root / "tools").mkdir(parents=True, exist_ok=True)
+        (shell_dir / "package-lock.json").write_text("{}", encoding="utf-8")
+        (shell_dir / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "joi-shell",
+                    "private": True,
+                    "version": "0.1.0",
+                    "scripts": {"build": "vue-tsc --noEmit && vite build", "tauri": "tauri"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tauri_dir / "Cargo.toml").write_text(
+            """
+[package]
+name = "joi-shell"
+version = "0.1.0"
+edition = "2021"
+""",
+            encoding="utf-8",
+        )
+        (tauri_dir / "tauri.conf.json").write_text(
+            json.dumps(
+                {
+                    "productName": "Joi",
+                    "version": "0.1.0",
+                    "identifier": "local.joi",
+                    "build": {"beforeBuildCommand": "npm run build", "frontendDist": "../dist"},
+                    "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": False}]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tauri_dir / "capabilities" / "default.json").write_text(
+            json.dumps(
+                {
+                    "identifier": "default",
+                    "windows": ["main"],
+                    "permissions": [
+                        "core:window:allow-close",
+                        "core:window:allow-minimize",
+                        "core:window:allow-start-dragging",
+                        "core:window:allow-set-always-on-top",
+                        "core:window:allow-set-skip-taskbar",
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (packaging_root / "start_joi.bat").write_text("powershell -File tools\\start_joi.ps1 %*", encoding="utf-8")
+        (packaging_root / "tools" / "start_joi.ps1").write_text("-Doctor\njoi_doctor.py\njoi_core.err.log\njoi_core.out.log", encoding="utf-8")
+        (packaging_root / "tools" / "joi_doctor.py").write_text("", encoding="utf-8")
+        packaging_report = build_packaging_smoke_report(packaging_root)
+        assert_true(packaging_report["status"] == "ok" and packaging_smoke_exit_code(packaging_report) == 0, "packaging smoke should pass valid release metadata")
+        (tauri_dir / "tauri.conf.json").write_text(
+            json.dumps({"productName": "Joi", "version": "0.2.0", "identifier": "", "build": {}, "app": {"windows": [{"label": "other"}]}}),
+            encoding="utf-8",
+        )
+        broken_packaging_report = build_packaging_smoke_report(packaging_root)
+        assert_true(broken_packaging_report["status"] == "fail" and packaging_smoke_exit_code(broken_packaging_report) == 1 and broken_packaging_report["next_actions"], "packaging smoke should fail closed on release metadata drift")
+    finally:
+        shutil.rmtree(packaging_tmpdir, ignore_errors=True)
+
     changed_verification = verify_post_action(
         _fake_computer_observation(workspace, title="Before", ocr_text=["登录"]),
         _fake_computer_observation(workspace, title="After", ocr_text=["仪表盘"]),
@@ -3761,9 +3832,13 @@ llm:
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
     assert_true("background-status-grid" in shell_style_source and "background-scope-form" in shell_style_source and "background-row" in shell_style_source, "Shell styles should include background context settings and summary rows")
     doctor_source = (workspace / "tools" / "joi_doctor.py").read_text(encoding="utf-8")
+    packaging_smoke_source = (workspace / "tools" / "packaging_smoke.py").read_text(encoding="utf-8")
+    ci_workflow_source = (workspace / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     first_run_doc_source = (workspace / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
     start_joi_source = (workspace / "tools" / "start_joi.ps1").read_text(encoding="utf-8")
     assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
+    assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source, "P10 packaging smoke should validate release metadata and Tauri permissions")
+    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source, "CI should cover Python tests, frontend build, packaging smoke, and Tauri debug smoke build")
     assert_true("-Doctor" in start_joi_source and "joi_doctor.py" in start_joi_source, "Windows launcher should expose a doctor mode")
     assert_true("start_joi.bat -Doctor" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source, "Windows first-run docs should cover doctor, OCR, and audio setup")
 

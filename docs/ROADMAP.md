@@ -155,5 +155,6 @@ Status: in progress
 - Windows-first release build.
 - First-run setup checklist.
 - First-run doctor now checks Python packages, optional OCR/audio packages, frontend toolchain, shell build state, `config.yaml`, Tesseract, and Core port readiness.
+- Packaging smoke now validates version alignment, Tauri shell metadata, window permissions, and launcher wiring.
 - Mac handoff kept current.
-- CI for Python tests, frontend build, and Tauri smoke build.
+- CI workflow now runs Python tests, packaging smoke, frontend build, and Tauri debug no-bundle build on Windows.

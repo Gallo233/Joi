@@ -81,6 +81,7 @@
 - Added constrained background context controls for approved window/project/game scopes, storing summaries only through `background.status`, `background.configure`, and `background.clear`.
 - Exposed background context inspection in the shell developer panel, including enable/disable, scope approval, recent summary review, and summary clearing controls.
 - Added a Windows first-run doctor and setup checklist for Python, frontend tooling, config, OCR, audio transcription, shell build state, and Core port diagnostics.
+- Added a packaging metadata smoke check and Windows GitHub Actions workflow for Python tests, frontend build, and Tauri debug no-bundle build.
 
 ## 2026-05-14
 

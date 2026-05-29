@@ -64,6 +64,12 @@ npm run tauri -- build --debug
 
 If a release shell exists, `start_joi.bat` opens it directly. If no built shell exists but npm/Rust are available, the launcher falls back to Tauri dev mode.
 
+Packaging metadata smoke:
+
+```powershell
+.\.venv\Scripts\python.exe tools\packaging_smoke.py
+```
+
 ## 5. Launch
 
 ```powershell

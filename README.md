@@ -92,6 +92,7 @@ Run core tests:
 
 ```powershell
 .\.venv\Scripts\python.exe run_agent_companion_tests.py
+.\.venv\Scripts\python.exe tools\packaging_smoke.py
 ```
 
 Run a single core request:
