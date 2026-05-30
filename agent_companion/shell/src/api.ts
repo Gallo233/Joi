@@ -120,6 +120,14 @@ export class CoreClient {
     return this.send('skills.list', {})
   }
 
+  agentCliList() {
+    return this.send('agent_cli.list', {})
+  }
+
+  agentCliTest(id: string) {
+    return this.send('agent_cli.test', { id })
+  }
+
   auditRecent(limit = 50) {
     return this.send('audit.recent', { limit })
   }

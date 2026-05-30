@@ -3,7 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { AgentCliListResult, AgentCliProfile, AgentCliTestResult, AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -18,14 +18,26 @@ const previewArtifactEvent = ref<AgentEvent | null>(null)
 const activeCabin = ref<'workspace' | 'chat' | 'memory' | 'inspector'>('workspace')
 const artifactDialog = ref<HTMLDialogElement | null>(null)
 const memoryStatus = ref<MemoryStatus | null>(null)
-type SettingsTabId = 'runtime' | 'skills' | 'memory' | 'appearance' | 'developer'
-const activeSettingsTab = ref<SettingsTabId>('runtime')
+type SettingsTabId = 'execution' | 'runtime' | 'instructions' | 'memory' | 'media' | 'skills' | 'external_mcp' | 'connectors' | 'mcp_servers' | 'language' | 'appearance' | 'design_review' | 'notifications' | 'pets' | 'design_system' | 'privacy' | 'about' | 'developer'
+const activeSettingsTab = ref<SettingsTabId>('execution')
 const settingsTabs: Array<{ id: SettingsTabId; label: string; icon: string }> = [
-  { id: 'runtime', label: '运行', icon: '⚡' },
-  { id: 'skills', label: '技能', icon: '▣' },
-  { id: 'memory', label: '记忆', icon: '🧠' },
-  { id: 'appearance', label: '外观', icon: '🎨' },
-  { id: 'developer', label: '审计', icon: '🧾' },
+  { id: 'execution', label: '执行模式', icon: '☷' },
+  { id: 'instructions', label: 'Instructions / Rules', icon: '✎' },
+  { id: 'memory', label: '记忆', icon: '↶' },
+  { id: 'media', label: '媒体生成提供商', icon: '▧' },
+  { id: 'skills', label: '技能', icon: '▦' },
+  { id: 'external_mcp', label: '外部 MCP', icon: '✣' },
+  { id: 'connectors', label: '连接器', icon: '☷' },
+  { id: 'mcp_servers', label: 'MCP 服务器', icon: '⌁' },
+  { id: 'language', label: '界面语言', icon: '文' },
+  { id: 'appearance', label: '外观', icon: '☼' },
+  { id: 'design_review', label: '设计评审团', icon: '▱' },
+  { id: 'notifications', label: '通知', icon: '◌' },
+  { id: 'pets', label: '宠物', icon: '✣' },
+  { id: 'design_system', label: '设计系统', icon: '◇' },
+  { id: 'privacy', label: '隐私', icon: '◎' },
+  { id: 'about', label: '关于', icon: '⚙' },
+  { id: 'developer', label: '开发者审计', icon: '⌘' },
 ]
 const memoryQuery = ref('')
 const memorySearchResults = ref<MemoryRecord[]>([])
@@ -37,6 +49,13 @@ const backgroundScopeLabel = ref('当前窗口')
 const backgroundLoading = ref(false)
 const skillManifest = ref<NativeSkillManifest | null>(null)
 const skillRefreshLoading = ref(false)
+const executionMode = ref<'local_cli' | 'byok'>('local_cli')
+const selectedAgentCliId = ref('codex')
+const selectedAgentCliModel = ref('默认')
+const selectedAgentCliReasoning = ref('XHigh')
+const agentCliRows = ref<AgentCliProfile[]>([])
+const agentCliLoading = ref(false)
+const agentCliTestStatus = ref<Record<string, string>>({})
 
 const isCompactMode = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
@@ -447,6 +466,7 @@ watch(activeCabin, (cabin) => {
 })
 
 watch(activeSettingsTab, (tab) => {
+  if (tab === 'execution') void refreshAgentClis()
   if (tab === 'memory') {
     void refreshMemoryStatus()
     void browseMemoryVault()
@@ -1773,6 +1793,135 @@ function providerMeta(row: RuntimeProviderStatus) {
   return meta
 }
 
+const displayedAgentClis = computed(() => (agentCliRows.value.length ? agentCliRows.value : fallbackAgentClis()))
+
+const selectedAgentCli = computed(() => {
+  return displayedAgentClis.value.find((row) => row.id === selectedAgentCliId.value) || displayedAgentClis.value[0]
+})
+
+const selectedAgentCliModels = computed(() => {
+  const models = selectedAgentCli.value?.models || []
+  return models.length ? models : ['默认']
+})
+
+const selectedAgentCliReasoningOptions = computed(() => {
+  const rows = selectedAgentCli.value?.reasoning || []
+  return rows.length ? rows : ['默认']
+})
+
+function fallbackAgentClis(): AgentCliProfile[] {
+  return [
+    { id: 'claude', name: 'Claude Code', vendor: 'Anthropic official CLI', installed: false, status: 'missing', models: ['默认'], reasoning: ['默认'] },
+    { id: 'codex', name: 'Codex CLI', vendor: 'OpenAI official CLI', installed: false, status: 'missing', models: ['默认', 'GPT-5.5', 'GPT-5', 'GPT-4.1'], reasoning: ['默认', 'Low', 'Medium', 'High', 'XHigh'], supports_takeover: true },
+    { id: 'hermes', name: 'Hermes', vendor: 'ACP agent CLI', installed: false, status: 'missing', models: ['默认'], reasoning: ['默认'] },
+  ]
+}
+
+function agentCliIcon(row: AgentCliProfile) {
+  const id = row.id || ''
+  if (id === 'codex') return 'C'
+  if (id === 'claude') return 'CC'
+  if (id === 'gemini') return 'G'
+  if (id === 'hermes') return 'H'
+  return 'AI'
+}
+
+function agentCliMeta(row: AgentCliProfile) {
+  const pieces = [row.vendor || 'Agent CLI']
+  if (row.version) pieces.push(row.version)
+  else pieces.push(row.installed ? '已安装' : '未安装')
+  return pieces.join(' · ')
+}
+
+function agentCliStatus(row: AgentCliProfile) {
+  if (agentCliTestStatus.value[row.id]) return agentCliTestStatus.value[row.id]
+  if (row.installed && row.probe_ok) return '测试通过'
+  if (row.installed) return '已安装'
+  return '未安装'
+}
+
+function agentCliTestDisabled(row: AgentCliProfile) {
+  return !connected.value || agentCliLoading.value || !row.installed
+}
+
+function selectAgentCli(row: AgentCliProfile) {
+  selectedAgentCliId.value = row.id
+  const models = row.models || []
+  selectedAgentCliModel.value = models.includes(selectedAgentCliModel.value) ? selectedAgentCliModel.value : models[0] || '默认'
+  const reasoning = row.reasoning || []
+  selectedAgentCliReasoning.value = reasoning.includes(selectedAgentCliReasoning.value) ? selectedAgentCliReasoning.value : reasoning[0] || '默认'
+}
+
+function settingsTitle(tab: SettingsTabId) {
+  const row = settingsTabs.find((item) => item.id === tab)
+  return row?.label || '设置'
+}
+
+function settingsSubtitle(tab: SettingsTabId) {
+  const labels: Record<SettingsTabId, string> = {
+    execution: '在本机 CLI 与 BYOK 之间选择。',
+    runtime: '查看模型和本地运行状态。',
+    instructions: '管理提示词和项目规则。',
+    memory: '管理长期记忆和待确认候选。',
+    media: '配置图像、音频与视觉相关提供商。',
+    skills: '查看并切换 Joi 原生能力。',
+    external_mcp: '管理外部 MCP 能力入口。',
+    connectors: '管理本地与云端连接器。',
+    mcp_servers: '查看 MCP 服务器发现状态。',
+    language: '选择界面显示语言。',
+    appearance: '调整 Joi 外观和微缩模式装扮。',
+    design_review: '管理设计评审相关工作流。',
+    notifications: '设置任务、审批和语音通知。',
+    pets: '管理桌面宠物和互动表现。',
+    design_system: '查看界面设计令牌。',
+    privacy: '查看本地数据和隐私边界。',
+    about: '查看 Joi 版本和运行环境。',
+    developer: '查看审计和背景上下文。',
+  }
+  return labels[tab] || ''
+}
+
+async function refreshAgentClis() {
+  agentCliLoading.value = true
+  try {
+    const result = (await client.agentCliList()) as AgentCliListResult
+    if (Array.isArray(result.clis)) {
+      agentCliRows.value = result.clis
+      const selected = result.selected || selectedAgentCliId.value
+      const row = result.clis.find((item) => item.id === selected) || result.clis.find((item) => item.installed)
+      if (row) selectAgentCli(row)
+    }
+    if (!result.ok) errorText.value = result.error || 'Agent CLI 扫描失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : 'Agent CLI 扫描失败'
+  } finally {
+    agentCliLoading.value = false
+  }
+}
+
+async function testAgentCli(row: AgentCliProfile) {
+  if (!row.id) return
+  agentCliLoading.value = true
+  agentCliTestStatus.value = { ...agentCliTestStatus.value, [row.id]: '测试中' }
+  try {
+    const result = (await client.agentCliTest(row.id)) as AgentCliTestResult
+    if (result.cli) {
+      agentCliRows.value = displayedAgentClis.value.map((item) => (item.id === row.id ? { ...item, ...result.cli } : item))
+      if (selectedAgentCliId.value === row.id) selectAgentCli({ ...row, ...result.cli })
+    }
+    agentCliTestStatus.value = {
+      ...agentCliTestStatus.value,
+      [row.id]: result.summary || (result.ok ? '测试通过' : '测试失败'),
+    }
+    if (!result.ok) errorText.value = result.summary || result.error || 'Agent CLI 测试失败'
+  } catch (error) {
+    agentCliTestStatus.value = { ...agentCliTestStatus.value, [row.id]: '测试失败' }
+    errorText.value = error instanceof Error ? error.message : 'Agent CLI 测试失败'
+  } finally {
+    agentCliLoading.value = false
+  }
+}
+
 function nativeSkills(): NativeSkill[] {
   return skillManifest.value?.skills || ready.value?.skills?.skills || []
 }
@@ -2185,6 +2334,7 @@ function blobToBase64(blob: Blob) {
 
 onMounted(() => {
   client.connect()
+  void refreshAgentClis()
   clockTimer = window.setInterval(() => {
     nowSeconds.value = Date.now() / 1000
   }, 5000)
@@ -2646,7 +2796,265 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="debug-section" v-if="activeCabin === 'inspector'">
+      <section class="debug-section open-settings" v-if="activeCabin === 'inspector'">
+        <div class="settings-shell">
+          <aside class="settings-sidebar" aria-label="设置导航">
+            <div class="settings-sidebar-title">设置</div>
+            <button
+              v-for="tab in settingsTabs"
+              :key="tab.id"
+              type="button"
+              class="settings-nav-row"
+              :class="{ active: activeSettingsTab === tab.id }"
+              @click="activeSettingsTab = tab.id"
+            >
+              <span class="settings-nav-icon">{{ tab.icon }}</span>
+              <span>{{ tab.label }}</span>
+            </button>
+          </aside>
+
+          <section class="settings-main">
+            <header class="settings-open-header">
+              <div>
+                <span>设置</span>
+                <h1>{{ settingsTitle(activeSettingsTab) }}</h1>
+                <p>{{ settingsSubtitle(activeSettingsTab) }}</p>
+              </div>
+              <button type="button" class="settings-close" title="关闭设置" aria-label="关闭设置" @click="activeCabin = 'workspace'">×</button>
+            </header>
+
+            <template v-if="activeSettingsTab === 'execution'">
+              <div class="execution-segment" role="tablist" aria-label="执行模式">
+                <button type="button" :class="{ active: executionMode === 'local_cli' }" @click="executionMode = 'local_cli'">本机 CLI</button>
+                <button type="button" :class="{ active: executionMode === 'byok' }" @click="executionMode = 'byok'">BYOK</button>
+              </div>
+
+              <div v-if="executionMode === 'local_cli'" class="settings-execution-pane">
+                <div class="settings-section-head">
+                  <div>
+                    <strong>你的 CLI（{{ displayedAgentClis.length }}）</strong>
+                    <span>选择用来运行提示词的本机 agent CLI。</span>
+                  </div>
+                  <button type="button" class="settings-outline-button" :disabled="agentCliLoading || !connected" @click="refreshAgentClis">
+                    {{ agentCliLoading ? '扫描中' : '重新扫描' }}
+                  </button>
+                </div>
+
+                <div class="agent-cli-list">
+                  <article
+                    v-for="row in displayedAgentClis"
+                    :key="row.id"
+                    class="agent-cli-card"
+                    :class="{ selected: selectedAgentCliId === row.id, missing: !row.installed }"
+                    @click="selectAgentCli(row)"
+                  >
+                    <div class="agent-cli-icon" :class="row.id">{{ agentCliIcon(row) }}</div>
+                    <div class="agent-cli-copy">
+                      <strong>{{ row.name }}</strong>
+                      <span>{{ agentCliMeta(row) }}</span>
+                    </div>
+                    <button
+                      type="button"
+                      class="agent-cli-test"
+                      :disabled="agentCliTestDisabled(row)"
+                      @click.stop="testAgentCli(row)"
+                    >
+                      测试
+                    </button>
+                  </article>
+                </div>
+
+                <div class="settings-config-card">
+                  <div class="settings-config-title">
+                    <span>模型：</span>
+                    <strong>{{ selectedAgentCli?.name || 'Codex CLI' }}</strong>
+                    <em>来自 CLI 的实时列表</em>
+                  </div>
+                  <label class="settings-select-row">
+                    <span>模型</span>
+                    <select v-model="selectedAgentCliModel">
+                      <option v-for="model in selectedAgentCliModels" :key="model" :value="model">{{ model }}</option>
+                    </select>
+                  </label>
+                  <p>已从已安装的 CLI 刷新模型。“默认”仍使用 CLI 自身配置。</p>
+                  <label class="settings-select-row">
+                    <span>推理强度</span>
+                    <select v-model="selectedAgentCliReasoning">
+                      <option v-for="option in selectedAgentCliReasoningOptions" :key="option" :value="option">{{ option }}</option>
+                    </select>
+                  </label>
+                  <div class="agent-cli-status-line">
+                    <span>{{ selectedAgentCli?.supports_takeover ? '可接管 Joi 写码任务' : '已发现，待接入执行适配器' }}</span>
+                    <strong>{{ selectedAgentCli ? agentCliStatus(selectedAgentCli) : '未选择' }}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div v-else class="settings-execution-pane">
+                <div class="settings-section-head">
+                  <div>
+                    <strong>BYOK</strong>
+                    <span>使用你自己的模型供应商配置。</span>
+                  </div>
+                </div>
+                <div class="provider-grid">
+                  <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
+                    <header>
+                      <strong>{{ row.label || row.name }}</strong>
+                      <span>{{ providerStateLabel(row.state) }}</span>
+                    </header>
+                    <p>{{ providerSummary(row) }}</p>
+                    <div class="provider-meta" v-if="providerMeta(row).length">
+                      <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="runtime-settings">
+                  <div class="runtime-settings-head">
+                    <strong>安全设置</strong>
+                    <span>非密钥字段</span>
+                  </div>
+                  <div class="runtime-controls">
+                    <label><span>ASR</span><input v-model="runtimeDraft.asr_enabled" type="checkbox" @change="markRuntimeDraftDirty" /></label>
+                    <label><span>TTS</span><input v-model="runtimeDraft.tts_enabled" type="checkbox" @change="markRuntimeDraftDirty" /></label>
+                    <label><span>温度</span><input v-model.number="runtimeDraft.llm_temperature" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" /></label>
+                    <label><span>Mock 模型</span><input v-model="runtimeDraft.llm_use_mock" type="checkbox" @change="markRuntimeDraftDirty" /></label>
+                    <label><span>操作等待</span><input v-model.number="runtimeDraft.computer_post_action_settle_ms" type="number" min="0" max="10000" step="25" @input="markRuntimeDraftDirty" /></label>
+                    <label><span>OCR 超时</span><input v-model.number="runtimeDraft.ocr_timeout_seconds" type="number" min="1" max="120" @input="markRuntimeDraftDirty" /></label>
+                  </div>
+                  <div class="runtime-actions">
+                    <button type="button" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">{{ runtimePreviewLoading ? '预览中' : '预览' }}</button>
+                    <button type="button" class="secondary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">{{ runtimeApplyLoading ? '提交中' : '提交审批' }}</button>
+                  </div>
+                  <div class="runtime-preview" v-if="runtimePreview">
+                    <p>{{ runtimePreview.summary }}</p>
+                    <div class="runtime-preview-list" v-if="runtimePreview.changes?.length">
+                      <span v-for="change in runtimePreview.changes" :key="change.setting">
+                        <strong>{{ change.label }}</strong>{{ runtimeChangeActionLabel(change.action) }} · {{ runtimeValueKindLabel(change.value_kind) }}
+                      </span>
+                    </div>
+                    <div class="runtime-preview-list failed" v-if="runtimePreview.errors?.length">
+                      <span v-for="error in runtimePreview.errors" :key="`${error.setting}-${error.code}`">
+                        <strong>{{ error.setting }}</strong>{{ providerErrorLabel(error.code) || '无法应用' }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <div class="runtime-settings skill-manifest-section" v-else-if="activeSettingsTab === 'skills'">
+              <div class="runtime-settings-head">
+                <strong>原生技能</strong>
+                <div class="memory-head-actions">
+                  <span>{{ skillManifestVersion() }}</span>
+                  <button type="button" class="memory-link-button" :disabled="skillRefreshLoading" @click="refreshSkills">
+                    {{ skillRefreshLoading ? '刷新中' : '刷新' }}
+                  </button>
+                </div>
+              </div>
+              <div class="skill-grid" v-if="nativeSkills().length">
+                <article v-for="skill in nativeSkills()" :key="skill.id" class="skill-card" :class="skill.local_capability || 'unavailable'">
+                  <header>
+                    <strong>{{ skill.label || skill.id }}</strong>
+                    <span>{{ skillCapabilityLabel(skill.local_capability) }}</span>
+                  </header>
+                  <div class="provider-meta" v-if="skillMeta(skill).length">
+                    <span v-for="item in skillMeta(skill)" :key="`${skill.id}-${item}`">{{ item }}</span>
+                  </div>
+                  <div class="skill-tool-list" v-if="skillTools(skill).length">
+                    <code v-for="tool in skillTools(skill)" :key="`${skill.id}-${tool}`">{{ tool }}</code>
+                  </div>
+                  <div class="skill-actions">
+                    <button type="button" :disabled="skillToggleDisabled(skill)" @click="setSkillEnabled(skill, !skillEnabled(skill))">
+                      {{ skillActionLabel(skill) }}
+                    </button>
+                  </div>
+                </article>
+              </div>
+              <p class="memory-empty" v-else>暂无技能清单</p>
+            </div>
+
+            <div class="runtime-settings memory-settings" v-else-if="activeSettingsTab === 'memory'">
+              <div class="runtime-settings-head">
+                <strong>记忆舱</strong>
+                <div class="memory-head-actions">
+                  <label class="memory-enable-toggle">
+                    <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
+                    <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
+                  </label>
+                  <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
+                </div>
+              </div>
+              <div class="memory-list" v-if="pendingMemories.length">
+                <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
+                  <div>
+                    <strong>{{ candidate.kind || 'note' }}</strong>
+                    <p>{{ candidate.text }}</p>
+                    <span>{{ candidate.source || 'candidate' }} · {{ memoryPriorityLabel(candidate.priority) }}</span>
+                  </div>
+                  <div class="memory-actions">
+                    <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
+                    <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
+                  </div>
+                </article>
+              </div>
+              <p class="memory-empty" v-else>没有待确认记忆</p>
+            </div>
+
+            <div class="runtime-settings" v-else-if="activeSettingsTab === 'appearance'">
+              <div class="runtime-settings-head">
+                <strong>个性化装扮</strong>
+                <span>点击进行穿戴</span>
+              </div>
+              <div class="closet-grid">
+                <button type="button" class="accessory-card" :class="{ equipped: equippedAccessories.hat }" @click="toggleAccessory('hat')">巫师帽</button>
+                <button type="button" class="accessory-card" :class="{ equipped: equippedAccessories.glasses }" @click="toggleAccessory('glasses')">墨镜</button>
+                <button type="button" class="accessory-card" :class="{ equipped: equippedAccessories.ears }" @click="toggleAccessory('ears')">兔耳</button>
+              </div>
+            </div>
+
+            <template v-else-if="activeSettingsTab === 'developer'">
+              <div class="runtime-settings background-context-panel">
+                <div class="runtime-settings-head">
+                  <strong>背景上下文</strong>
+                  <div class="memory-head-actions">
+                    <label class="memory-enable-toggle">
+                      <input type="checkbox" :checked="backgroundEnabled" :disabled="backgroundLoading" @change="toggleBackgroundEnabled" />
+                      <span>{{ backgroundEnabled ? '已开启' : '已关闭' }}</span>
+                    </label>
+                    <button type="button" class="memory-link-button" :disabled="backgroundLoading" @click="refreshBackgroundStatus">{{ backgroundLoading ? '同步中' : '刷新' }}</button>
+                  </div>
+                </div>
+                <div class="background-status-grid">
+                  <article class="background-status-card" :class="{ active: backgroundActive }">
+                    <span>状态</span>
+                    <strong>{{ backgroundStateText }}</strong>
+                    <small>{{ backgroundSummaryText }}</small>
+                  </article>
+                  <article class="background-status-card">
+                    <span>摘要</span>
+                    <strong>{{ backgroundStatus?.recent_count ?? backgroundRecentRows.length }}</strong>
+                    <small>{{ backgroundRetentionText }}</small>
+                  </article>
+                </div>
+              </div>
+              <div class="debug-list">
+                <div v-for="event in events.slice(-12).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">
+                  <span>{{ eventTime(event) }}</span>
+                  <strong>{{ event.type }}</strong>
+                  <code>{{ skillName(event) || toolName(event) || intentName(event) || event.display_card.status }}</code>
+                  <p>{{ event.display_card.summary }}</p>
+                </div>
+              </div>
+            </template>
+
+            <div class="settings-placeholder" v-else>
+              <strong>{{ settingsTitle(activeSettingsTab) }}</strong>
+              <span>{{ settingsSubtitle(activeSettingsTab) }}</span>
+            </div>
+          </section>
+        </div>
         <nav class="settings-tabbar">
           <button
             v-for="tab in settingsTabs"

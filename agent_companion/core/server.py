@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from agent_companion.core.agent_cli import scan_agent_clis, test_agent_cli
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update
 from agent_companion.core.schemas import AgentEvent, DisplayCard
@@ -142,6 +143,14 @@ class JsonRpcBridge:
                 return
             if method == "skills.list":
                 await websocket.send(self._result(request_id, self.skill_manifest_command()))
+                return
+            if method == "agent_cli.list":
+                result = await asyncio.to_thread(self.agent_cli_list_command)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "agent_cli.test":
+                result = await asyncio.to_thread(self.agent_cli_test_command, params)
+                await websocket.send(self._result(request_id, result))
                 return
             if method == "audit.recent":
                 limit = _safe_int(params.get("limit")) or 50
@@ -382,6 +391,13 @@ class JsonRpcBridge:
                 skill_settings=self.app.skill_settings_payload(),
             ),
         }
+
+    def agent_cli_list_command(self) -> dict[str, Any]:
+        return scan_agent_clis()
+
+    def agent_cli_test_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        cli_id = str(params.get("id") or "") if isinstance(params, dict) else ""
+        return test_agent_cli(cli_id)
 
     def audit_recent_command(self, limit: int = 50) -> dict[str, Any]:
         return {"ok": True, "audit": self.app.audit_store.recent(limit)}

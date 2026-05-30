@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from agent_companion.core.app import AgentCompanionApp
+from agent_companion.core.agent_cli import scan_agent_clis, test_agent_cli
 from agent_companion.core.audit_store import AUDIT_SCHEMA_VERSION, AuditStore
 from agent_companion.core.background_context import BACKGROUND_CONTEXT_VERSION, BackgroundContextStore
 from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, ComputerAction, ComputerObservation, ComputerUseResult, computer_action_audit_event, verify_post_action
@@ -3438,6 +3439,15 @@ asr:
     try:
         os.environ["AGENT_COMPANION_CODEX_BIN"] = str(fake_codex)
 
+        cli_scan = scan_agent_clis()
+        cli_codex = next((row for row in cli_scan.get("clis", []) if row.get("id") == "codex"), {})
+        assert_true(cli_scan["ok"] and cli_codex.get("installed") is True, "agent CLI scan should discover configured Codex")
+        assert_true("fake codex 0.0" in str(cli_codex.get("version") or ""), "agent CLI scan should expose sanitized Codex version")
+        cli_test = test_agent_cli("codex")
+        assert_true(cli_test["ok"] and cli_test.get("cli", {}).get("probe_ok") is True, "agent CLI test should probe configured Codex")
+        _assert_no_codex_safe_text_leaks(cli_scan, "agent CLI scan leaked raw paths or secrets")
+        _assert_no_codex_safe_text_leaks(cli_test, "agent CLI test leaked raw paths or secrets")
+
         os.environ["JOI_FAKE_CODEX_MODE"] = "success"
         codex_success = CodexTool(workspace).run(ToolRequest("codex.run", {"goal": "修复 bug 并跑测试 --secret /Users/me/project"}))
         assert_true(codex_success.ok, "fake Codex success should complete")
@@ -4243,6 +4253,7 @@ llm:
     assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "memoryProfile" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory profile, candidate controls, and stage authorization bubble")
     assert_true("backgroundStatus" in shell_source and "background-context-panel" in shell_source and "configureBackgroundScope" in shell_source and "clearBackgroundContext" in shell_source and "syncBackgroundFromEvent" in shell_source, "Shell developer panel should expose constrained background context inspection and controls")
     assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
+    assert_true("settings-shell" in shell_source and "execution-segment" in shell_source and "agentCliList" in shell_source and "testAgentCli" in shell_source, "Shell settings should expose Open Design execution-mode CLI scanning and testing")
     assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source and "setSkillEnabled" in shell_source and "skillEnabled" in shell_source and "skillToggleDisabled" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
     assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-profile-panel" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with profile, recall search, and vault preview")
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
@@ -4252,6 +4263,7 @@ llm:
     assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source and "reload_runtime_policy" in app_source and "skill_settings_payload" in app_source and "block_reason" in app_source, "App execution boundary should attach native skill metadata and enforce disabled skills")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
     assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-profile-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
+    assert_true("settings-sidebar" in shell_style_source and "agent-cli-card" in shell_style_source and "settings-config-card" in shell_style_source, "Shell styles should include Open Design settings sidebar and CLI cards")
     assert_true("skill-grid" in shell_style_source and "skill-card" in shell_style_source and "skill-actions" in shell_style_source, "Shell styles should include native skill manifest cards")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
     assert_true("background-status-grid" in shell_style_source and "background-scope-form" in shell_style_source and "background-row" in shell_style_source, "Shell styles should include background context settings and summary rows")

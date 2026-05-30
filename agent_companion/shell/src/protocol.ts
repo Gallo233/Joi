@@ -293,6 +293,36 @@ export interface NativeSkillManifest {
   skills?: NativeSkill[]
 }
 
+export interface AgentCliProfile {
+  id: string
+  name: string
+  vendor?: string
+  installed?: boolean
+  version?: string
+  status?: 'ready' | 'missing' | string
+  probe_ok?: boolean
+  error?: string
+  models?: string[]
+  reasoning?: string[]
+  supports_takeover?: boolean
+  notes?: string[]
+}
+
+export interface AgentCliListResult {
+  ok?: boolean
+  mode?: 'local_cli' | 'byok' | string
+  selected?: string
+  clis?: AgentCliProfile[]
+  error?: string
+}
+
+export interface AgentCliTestResult {
+  ok?: boolean
+  summary?: string
+  error?: string
+  cli?: AgentCliProfile
+}
+
 export interface CoreReadyPayload {
   workspace_label?: string
   workspace_bound?: boolean
