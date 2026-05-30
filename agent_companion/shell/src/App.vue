@@ -58,6 +58,7 @@ const agentCliLoading = ref(false)
 const agentCliTestStatus = ref<Record<string, string>>({})
 const agentCliRuntime = ref<AgentCliRuntimeStatus | null>(null)
 const agentCliSyncing = ref(false)
+const agentCliCoreUnsupported = ref(false)
 let agentCliSyncTimer: number | null = null
 
 const isCompactMode = ref(false)
@@ -1849,7 +1850,7 @@ function agentCliStatus(row: AgentCliProfile) {
 }
 
 function agentCliTestDisabled(row: AgentCliProfile) {
-  return !connected.value || agentCliLoading.value || !row.installed
+  return !connected.value || agentCliLoading.value || agentCliCoreUnsupported.value || !row.installed
 }
 
 function selectAgentCli(row: AgentCliProfile) {
@@ -1880,6 +1881,7 @@ function queueAgentCliSync() {
 
 async function syncAgentCliTakeover() {
   if (!connected.value || agentCliSyncing.value) return
+  if (agentCliCoreUnsupported.value) return
   agentCliSyncing.value = true
   try {
     const result = (await client.agentCliConfigure({
@@ -1889,10 +1891,17 @@ async function syncAgentCliTakeover() {
       model: selectedAgentCliModel.value,
       reasoning: selectedAgentCliReasoning.value,
     })) as { ok?: boolean; agent_cli?: AgentCliRuntimeStatus; error?: string }
+    agentCliCoreUnsupported.value = false
     if (result.agent_cli) agentCliRuntime.value = result.agent_cli
     if (result.ok === false) errorText.value = result.error || 'Agent CLI 接管设置没有保存'
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : 'Agent CLI 接管设置失败'
+    if (isAgentCliRpcUnsupported(error)) {
+      agentCliCoreUnsupported.value = true
+      agentCliRuntime.value = { enabled: false, mode: 'byok', selected: selectedAgentCliId.value }
+      errorText.value = '当前 Core 还没有加载 Agent CLI 接管接口，请重启 Joi Core 或桌面应用。'
+    } else {
+      errorText.value = error instanceof Error ? error.message : 'Agent CLI 接管设置失败'
+    }
   } finally {
     agentCliSyncing.value = false
   }
@@ -1900,6 +1909,7 @@ async function syncAgentCliTakeover() {
 
 function agentCliTakeoverText(row?: AgentCliProfile) {
   if (!row) return '未选择接管 CLI'
+  if (agentCliCoreUnsupported.value) return 'Core 需要重启后才能接管'
   if (!row.supports_takeover) return '已发现，待接入执行适配器'
   if (executionMode.value !== 'local_cli') return 'BYOK 模式中'
   return agentCliRuntime.value?.enabled ? '正在接管整个 Joi' : '可接管整个 Joi'
@@ -1938,6 +1948,7 @@ async function refreshAgentClis() {
   agentCliLoading.value = true
   try {
     const result = (await client.agentCliList()) as AgentCliListResult
+    agentCliCoreUnsupported.value = false
     if (Array.isArray(result.clis)) {
       agentCliRows.value = result.clis
       const selected = result.selected || selectedAgentCliId.value
@@ -1946,7 +1957,13 @@ async function refreshAgentClis() {
     }
     if (!result.ok) errorText.value = result.error || 'Agent CLI 扫描失败'
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : 'Agent CLI 扫描失败'
+    if (isAgentCliRpcUnsupported(error)) {
+      agentCliCoreUnsupported.value = true
+      agentCliRows.value = fallbackAgentClis()
+      errorText.value = '当前 Core 还没有加载 Agent CLI 接管接口，请重启 Joi Core 或桌面应用。'
+    } else {
+      errorText.value = error instanceof Error ? error.message : 'Agent CLI 扫描失败'
+    }
   } finally {
     agentCliLoading.value = false
   }
@@ -1958,6 +1975,7 @@ async function testAgentCli(row: AgentCliProfile) {
   agentCliTestStatus.value = { ...agentCliTestStatus.value, [row.id]: '测试中' }
   try {
     const result = (await client.agentCliTest(row.id)) as AgentCliTestResult
+    agentCliCoreUnsupported.value = false
     if (result.cli) {
       agentCliRows.value = displayedAgentClis.value.map((item) => (item.id === row.id ? { ...item, ...result.cli } : item))
       if (selectedAgentCliId.value === row.id) selectAgentCli({ ...row, ...result.cli })
@@ -1969,10 +1987,20 @@ async function testAgentCli(row: AgentCliProfile) {
     if (!result.ok) errorText.value = result.summary || result.error || 'Agent CLI 测试失败'
   } catch (error) {
     agentCliTestStatus.value = { ...agentCliTestStatus.value, [row.id]: '测试失败' }
-    errorText.value = error instanceof Error ? error.message : 'Agent CLI 测试失败'
+    if (isAgentCliRpcUnsupported(error)) {
+      agentCliCoreUnsupported.value = true
+      errorText.value = '当前 Core 还没有加载 Agent CLI 接管接口，请重启 Joi Core 或桌面应用。'
+    } else {
+      errorText.value = error instanceof Error ? error.message : 'Agent CLI 测试失败'
+    }
   } finally {
     agentCliLoading.value = false
   }
+}
+
+function isAgentCliRpcUnsupported(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return message.includes('unknown method: agent_cli.')
 }
 
 function nativeSkills(): NativeSkill[] {
@@ -2898,6 +2926,10 @@ onBeforeUnmount(() => {
                 </div>
 
                 <div class="agent-cli-list">
+                  <div v-if="agentCliCoreUnsupported" class="agent-cli-warning">
+                    <strong>Core 版本未刷新</strong>
+                    <span>请重启 Joi Core 或桌面应用后再扫描 CLI。</span>
+                  </div>
                   <article
                     v-for="row in displayedAgentClis"
                     :key="row.id"
