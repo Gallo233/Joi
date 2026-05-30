@@ -40,6 +40,7 @@ from agent_companion.core.speech_input import build_asr_provider
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.codex import CodexTool
+from agent_companion.core.tools.agent_cli import AgentCliRunTool
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.desktop_workflow import DesktopWorkflowTool
 from agent_companion.core.tools.files import FileReadTool
@@ -149,6 +150,49 @@ class AgentCompanionApp:
             )
         self._run_plan(plan, 0)
         return self.bus.drain()
+
+    def handle_agent_cli_text(self, text: str, *, cli_id: str = "codex", model: str = "默认", reasoning: str = "默认") -> list[AgentEvent]:
+        user_text = " ".join((text or "").strip().split())
+        plan = AgentPlan(
+            task_id=f"task-{uuid.uuid4().hex[:10]}",
+            user_text=user_text,
+            intent="agent_cli_takeover",
+            steps=[
+                ToolRequest(
+                    "agent_cli.run",
+                    self._agent_cli_takeover_arguments(user_text, cli_id=cli_id, model=model, reasoning=reasoning),
+                    "交给本机 Agent CLI 接管这轮 Joi 请求。",
+                )
+            ],
+        )
+        self._emit(
+            AgentEvent(
+                EventType.USER_MESSAGE,
+                plan.task_id,
+                DisplayCard("用户请求", plan.user_text),
+                safe_voice_line("我收到了。", sprite="1"),
+                {"intent": plan.intent, "agent_cli_takeover": True},
+            ),
+            plan.user_text,
+        )
+        self._record_explicit_memory_candidate(plan)
+        self._emit(
+            AgentEvent(
+                EventType.PLAN_CREATED,
+                plan.task_id,
+                DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
+                safe_voice_line("我把这轮请求交给本机 Agent CLI。", sprite="3"),
+                self._plan_agent_state(plan),
+            ),
+            plan.user_text,
+        )
+        self._run_plan(plan, 0)
+        return self.bus.drain()
+
+    def should_handle_locally_before_agent_cli(self, text: str) -> bool:
+        if _parse_memory_command(text):
+            return True
+        return _parse_candidate_selection(text) is not None and self.semantic_selection.has_pending()
 
     def select_semantic_target(self, selection_id: str, rank: int) -> list[AgentEvent]:
         selection_id = (selection_id or "").strip()
@@ -464,8 +508,9 @@ class AgentCompanionApp:
                     source_tool = str(result.agent_state.get("tool") or "")
                     if source_tool:
                         agent_state["source_skill"] = skill_boundary_for_tool(source_tool)
-                    if "codex_run" in result.agent_state:
-                        agent_state["codex_run"] = result.agent_state["codex_run"]
+                    for key in ("codex_run", "agent_cli", "agent_cli_run", "agent_cli_takeover"):
+                        if key in result.agent_state:
+                            agent_state[key] = result.agent_state[key]
                     audit_entries = target_grounding_audit_events(plan.task_id, result, result.risk)
                     if pending_request.name.startswith("computer."):
                         audit_entries.append(
@@ -568,6 +613,7 @@ class AgentCompanionApp:
     def _tool_label(name: str) -> str:
         labels = {
             "companion.chat": "角色对话",
+            "agent_cli.run": "Agent CLI 接管",
             "codex.run": "写码任务",
             "game.ok_ww.run": "游戏自动化",
             "browser.search": "浏览器搜索",
@@ -591,6 +637,7 @@ class AgentCompanionApp:
     def _intent_label(intent: str) -> str:
         labels = {
             "companion_chat": "日常对话",
+            "agent_cli_takeover": "Agent CLI 接管",
             "coding": "写码",
             "game_assist": "游戏",
             "watch_together": "陪看",
@@ -699,12 +746,35 @@ class AgentCompanionApp:
             user_text,
         )
 
+    def _agent_cli_takeover_arguments(self, user_text: str, *, cli_id: str, model: str, reasoning: str) -> dict[str, object]:
+        arguments: dict[str, object] = {
+            "goal": user_text,
+            "cli_id": cli_id or "codex",
+            "model": model or "默认",
+            "reasoning": reasoning or "默认",
+        }
+        memory_context = self.memory.context(8, query=user_text)
+        if memory_context:
+            arguments["memory_context"] = memory_context
+        desktop_context = self._active_desktop_context()
+        if desktop_context is not None:
+            arguments["desktop_context"] = {
+                "browser": desktop_context.browser,
+                "site": desktop_context.site,
+            }
+        background = self.background_context.status()
+        if background.get("active") or background.get("recent_context"):
+            arguments["background_context"] = background
+        return arguments
+
     def _plan_body(self, plan: AgentPlan) -> str:
         return "\n".join(self._tool_label(step.name) for step in plan.steps)
 
     def _approval_summary(self, step: ToolRequest) -> str:
         if step.name == "game.ok_ww.run":
             return "启动游戏自动化前需要你确认。"
+        if step.name == "agent_cli.run":
+            return "交给本机 Agent CLI 接管前需要你确认。"
         if step.name == "codex.run":
             return "交给 Codex 执行前需要你确认。"
         if step.name == "runtime.update_config":
@@ -718,6 +788,7 @@ class AgentCompanionApp:
         ocr = self._build_ocr_extractor(app_config)
         post_action_settle_ms = app_config.computer_use.post_action_settle_ms if app_config else 200
         self.tools.register(CompanionChatTool(self.workspace))
+        self.tools.register(AgentCliRunTool(self.workspace))
         self.tools.register(CodexTool(self.workspace))
         self.tools.register(BrowserTool(self.workspace, "browser.search"))
         self.tools.register(BrowserTool(self.workspace, "browser.observe"))
@@ -1057,7 +1128,7 @@ class AgentCompanionApp:
     @staticmethod
     def _is_codex_permission_pending(pending: PendingStep) -> bool:
         request = pending.request_override or pending.plan.steps[pending.index]
-        return request.name == "codex.run" and "codex_permission_hash" in request.arguments
+        return request.name in {"codex.run", "agent_cli.run"} and "codex_permission_hash" in request.arguments
 
 
 def _arguments_hash(arguments: dict) -> str:

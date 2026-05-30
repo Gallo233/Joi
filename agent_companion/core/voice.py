@@ -45,7 +45,7 @@ BLOCK_PATTERNS = (
     r"\bdata/[^\s]+",
     r"\b[\w.-]+\.(png|jpg|jpeg|webp|bmp|gif|ppm|jsonl|json|log|txt|yaml|yml|py|bat|ps1|gguf|safetensors|ckpt|pth|onnx|bin)\b",
     r"\b(task|approval|selection|codex|browser|tool)[-_]?[0-9a-f]{6,}\b",
-    r"\b(?:codex|game|browser|observe|companion|computer|mcp|files)\.[a-z0-9_.]+\b",
+    r"\b(?:agent_cli|codex|game|browser|observe|companion|computer|mcp|files)\.[a-z0-9_.]+\b",
     r"\b\d{1,5}\s*[,，]\s*\d{1,5}\b",
     r"--[a-zA-Z0-9-]+",
     r"sk-[a-zA-Z0-9]+",

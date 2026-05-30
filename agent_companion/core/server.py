@@ -62,6 +62,13 @@ class JsonRpcBridge:
         self.queue: asyncio.Queue[AgentEvent] | None = None
         self._command_lock = threading.Lock()
         self._command_sequence = 0
+        self.agent_cli_takeover: dict[str, Any] = {
+            "enabled": False,
+            "mode": "byok",
+            "selected": "codex",
+            "model": "默认",
+            "reasoning": "XHigh",
+        }
 
     async def serve(self) -> None:
         try:
@@ -151,6 +158,14 @@ class JsonRpcBridge:
             if method == "agent_cli.test":
                 result = await asyncio.to_thread(self.agent_cli_test_command, params)
                 await websocket.send(self._result(request_id, result))
+                return
+            if method == "agent_cli.configure":
+                result = await asyncio.to_thread(self.agent_cli_configure_command, params)
+                await websocket.send(self._result(request_id, result))
+                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
+                return
+            if method == "agent_cli.status":
+                await websocket.send(self._result(request_id, self.agent_cli_status_command()))
                 return
             if method == "audit.recent":
                 limit = _safe_int(params.get("limit")) or 50
@@ -305,7 +320,19 @@ class JsonRpcBridge:
     def submit_user_text(self, text: str) -> dict[str, Any]:
         if _looks_like_watch_loop_stop(text):
             return self.watch_loop_stop_command()
-        sequence, events = self._run_serial("user.message", lambda: self.app.handle_user_text(text))
+        if self._agent_cli_takeover_enabled(text):
+            status = self.agent_cli_takeover
+            sequence, events = self._run_serial(
+                "user.message.agent_cli",
+                lambda: self.app.handle_agent_cli_text(
+                    text,
+                    cli_id=str(status.get("selected") or "codex"),
+                    model=str(status.get("model") or "默认"),
+                    reasoning=str(status.get("reasoning") or "默认"),
+                ),
+            )
+        else:
+            sequence, events = self._run_serial("user.message", lambda: self.app.handle_user_text(text))
         payload: dict[str, Any] = {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
         if _looks_like_watch_loop_start(text):
             self.watch_commentary.reset()
@@ -398,6 +425,26 @@ class JsonRpcBridge:
     def agent_cli_test_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         cli_id = str(params.get("id") or "") if isinstance(params, dict) else ""
         return test_agent_cli(cli_id)
+
+    def agent_cli_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        current = dict(self.agent_cli_takeover)
+        mode = _safe_agent_cli_mode(params.get("mode") or current.get("mode"))
+        selected = _safe_agent_cli_token(params.get("selected") or params.get("cli_id") or current.get("selected") or "codex")
+        enabled = _safe_bool(params.get("enabled"), bool(current.get("enabled")))
+        if mode != "local_cli":
+            enabled = False
+        self.agent_cli_takeover = {
+            "enabled": bool(enabled),
+            "mode": mode,
+            "selected": selected or "codex",
+            "model": _safe_agent_cli_label(params.get("model") or current.get("model") or "默认"),
+            "reasoning": _safe_agent_cli_label(params.get("reasoning") or current.get("reasoning") or "默认"),
+        }
+        return {"ok": True, "agent_cli": self._agent_cli_status_payload()}
+
+    def agent_cli_status_command(self) -> dict[str, Any]:
+        return {"ok": True, "agent_cli": self._agent_cli_status_payload()}
 
     def audit_recent_command(self, limit: int = 50) -> dict[str, Any]:
         return {"ok": True, "audit": self.app.audit_store.recent(limit)}
@@ -685,6 +732,7 @@ class JsonRpcBridge:
             "memory": memory_status,
             "audit": self.app.audit_store.status(),
             "background": self.app.background_context.status(),
+            "agent_cli": self._agent_cli_status_payload(),
             "skills": build_native_skill_manifest(
                 self.workspace,
                 asr_state=self.asr_state,
@@ -725,6 +773,23 @@ class JsonRpcBridge:
         except Exception:
             return payload
         return payload
+
+    def _agent_cli_takeover_enabled(self, text: str) -> bool:
+        if not bool(self.agent_cli_takeover.get("enabled")):
+            return False
+        if str(self.agent_cli_takeover.get("mode") or "") != "local_cli":
+            return False
+        return not self.app.should_handle_locally_before_agent_cli(text)
+
+    def _agent_cli_status_payload(self) -> dict[str, Any]:
+        return {
+            "safe_for_display": True,
+            "enabled": bool(self.agent_cli_takeover.get("enabled")),
+            "mode": _safe_agent_cli_mode(self.agent_cli_takeover.get("mode")),
+            "selected": _safe_agent_cli_token(self.agent_cli_takeover.get("selected") or "codex"),
+            "model": _safe_agent_cli_label(self.agent_cli_takeover.get("model") or "默认"),
+            "reasoning": _safe_agent_cli_label(self.agent_cli_takeover.get("reasoning") or "默认"),
+        }
 
     def _reload_runtime_after_config_change(self) -> None:
         self.asr, self.asr_state = build_asr_provider(self.workspace)
@@ -799,6 +864,25 @@ def _safe_asr_error_code(error: str) -> str:
     if "timeout" in raw:
         return "asr_timeout"
     return "asr_failed"
+
+
+def _safe_agent_cli_mode(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    return text if text in {"local_cli", "byok"} else "byok"
+
+
+def _safe_agent_cli_token(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    return "".join(char for char in text if char.isalnum() or char in "_-")[:64] or "codex"
+
+
+def _safe_agent_cli_label(value: object) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return "默认"
+    if any(fragment in text.casefold() for fragment in ("sk-", "token", "secret", "api_key", "key=", "/users/", "c:\\")):
+        return "默认"
+    return text[:80]
 
 
 def _safe_int(value: Any) -> int | None:

@@ -23,6 +23,8 @@ class AgentCliProfile:
     version_args: tuple[str, ...] = ("--version",)
     models: tuple[str, ...] = ("默认",)
     reasoning: tuple[str, ...] = ("默认",)
+    run_strategy: str = "unsupported"
+    prompt_args: tuple[str, ...] = ()
     installed_label: str = "未安装"
     supports_takeover: bool = False
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -36,7 +38,10 @@ _PROFILES: tuple[AgentCliProfile, ...] = (
         command_names=("claude", "claude-code"),
         models=("默认", "Sonnet", "Opus"),
         reasoning=("默认",),
+        run_strategy="prompt_arg",
+        prompt_args=("-p",),
         installed_label="已安装",
+        supports_takeover=True,
         notes=("external_agent_cli",),
     ),
     AgentCliProfile(
@@ -47,9 +52,10 @@ _PROFILES: tuple[AgentCliProfile, ...] = (
         env_var="AGENT_COMPANION_CODEX_BIN",
         models=("默认", "GPT-5.5", "GPT-5", "GPT-4.1"),
         reasoning=("默认", "Low", "Medium", "High", "XHigh"),
+        run_strategy="codex_exec_json",
         installed_label="codex-cli",
         supports_takeover=True,
-        notes=("joi_coding_runner", "approval_gated"),
+        notes=("joi_takeover_runner", "approval_gated"),
     ),
     AgentCliProfile(
         id="gemini",
@@ -58,7 +64,10 @@ _PROFILES: tuple[AgentCliProfile, ...] = (
         command_names=("gemini",),
         models=("默认", "Gemini Pro", "Gemini Flash"),
         reasoning=("默认",),
+        run_strategy="prompt_arg",
+        prompt_args=("-p",),
         installed_label="已安装",
+        supports_takeover=True,
         notes=("external_agent_cli",),
     ),
     AgentCliProfile(
@@ -117,9 +126,21 @@ def _profile_state(profile: AgentCliProfile, *, probe: bool = True) -> dict[str,
         "error": error,
         "models": list(profile.models),
         "reasoning": list(profile.reasoning),
+        "run_strategy": profile.run_strategy,
         "supports_takeover": profile.supports_takeover,
         "notes": list(profile.notes),
     }
+
+
+def agent_cli_profile(cli_id: str) -> AgentCliProfile | None:
+    return _profile_by_id(cli_id)
+
+
+def resolve_agent_cli_executable(cli_id: str) -> str:
+    profile = _profile_by_id(cli_id)
+    if profile is None:
+        return ""
+    return _resolve_executable(profile)
 
 
 def _resolve_executable(profile: AgentCliProfile) -> str:

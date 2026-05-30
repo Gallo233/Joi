@@ -3,7 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentCliListResult, AgentCliProfile, AgentCliTestResult, AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { AgentCliListResult, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -56,6 +56,9 @@ const selectedAgentCliReasoning = ref('XHigh')
 const agentCliRows = ref<AgentCliProfile[]>([])
 const agentCliLoading = ref(false)
 const agentCliTestStatus = ref<Record<string, string>>({})
+const agentCliRuntime = ref<AgentCliRuntimeStatus | null>(null)
+const agentCliSyncing = ref(false)
+let agentCliSyncTimer: number | null = null
 
 const isCompactMode = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
@@ -293,6 +296,7 @@ const client = new CoreClient({
     memoryStatus.value = payload.memory || memoryStatus.value
     backgroundStatus.value = payload.background || backgroundStatus.value
     skillManifest.value = payload.skills || skillManifest.value
+    syncAgentCliFromReady(payload)
     syncRuntimeDraft(payload)
   },
   onVoiceAudio: (payload) => void playVoiceAudio(payload),
@@ -472,6 +476,10 @@ watch(activeSettingsTab, (tab) => {
     void browseMemoryVault()
   }
   if (tab === 'developer') void refreshBackgroundStatus()
+})
+
+watch([executionMode, selectedAgentCliId, selectedAgentCliModel, selectedAgentCliReasoning], () => {
+  queueAgentCliSync()
 })
 
 const latestSpeech = computed(() => {
@@ -1811,8 +1819,8 @@ const selectedAgentCliReasoningOptions = computed(() => {
 
 function fallbackAgentClis(): AgentCliProfile[] {
   return [
-    { id: 'claude', name: 'Claude Code', vendor: 'Anthropic official CLI', installed: false, status: 'missing', models: ['默认'], reasoning: ['默认'] },
-    { id: 'codex', name: 'Codex CLI', vendor: 'OpenAI official CLI', installed: false, status: 'missing', models: ['默认', 'GPT-5.5', 'GPT-5', 'GPT-4.1'], reasoning: ['默认', 'Low', 'Medium', 'High', 'XHigh'], supports_takeover: true },
+    { id: 'claude', name: 'Claude Code', vendor: 'Anthropic official CLI', installed: false, status: 'missing', models: ['默认'], reasoning: ['默认'], run_strategy: 'prompt_arg', supports_takeover: true },
+    { id: 'codex', name: 'Codex CLI', vendor: 'OpenAI official CLI', installed: false, status: 'missing', models: ['默认', 'GPT-5.5', 'GPT-5', 'GPT-4.1'], reasoning: ['默认', 'Low', 'Medium', 'High', 'XHigh'], run_strategy: 'codex_exec_json', supports_takeover: true },
     { id: 'hermes', name: 'Hermes', vendor: 'ACP agent CLI', installed: false, status: 'missing', models: ['默认'], reasoning: ['默认'] },
   ]
 }
@@ -1850,6 +1858,51 @@ function selectAgentCli(row: AgentCliProfile) {
   selectedAgentCliModel.value = models.includes(selectedAgentCliModel.value) ? selectedAgentCliModel.value : models[0] || '默认'
   const reasoning = row.reasoning || []
   selectedAgentCliReasoning.value = reasoning.includes(selectedAgentCliReasoning.value) ? selectedAgentCliReasoning.value : reasoning[0] || '默认'
+}
+
+function syncAgentCliFromReady(payload: CoreReadyPayload) {
+  const state = payload.agent_cli
+  if (!state) return
+  agentCliRuntime.value = state
+  executionMode.value = state.enabled ? 'local_cli' : 'byok'
+  if (state.selected) selectedAgentCliId.value = state.selected
+  if (state.model) selectedAgentCliModel.value = state.model
+  if (state.reasoning) selectedAgentCliReasoning.value = state.reasoning
+}
+
+function queueAgentCliSync() {
+  if (agentCliSyncTimer !== null) window.clearTimeout(agentCliSyncTimer)
+  agentCliSyncTimer = window.setTimeout(() => {
+    agentCliSyncTimer = null
+    void syncAgentCliTakeover()
+  }, 120)
+}
+
+async function syncAgentCliTakeover() {
+  if (!connected.value || agentCliSyncing.value) return
+  agentCliSyncing.value = true
+  try {
+    const result = (await client.agentCliConfigure({
+      enabled: executionMode.value === 'local_cli',
+      mode: executionMode.value,
+      selected: selectedAgentCliId.value,
+      model: selectedAgentCliModel.value,
+      reasoning: selectedAgentCliReasoning.value,
+    })) as { ok?: boolean; agent_cli?: AgentCliRuntimeStatus; error?: string }
+    if (result.agent_cli) agentCliRuntime.value = result.agent_cli
+    if (result.ok === false) errorText.value = result.error || 'Agent CLI 接管设置没有保存'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : 'Agent CLI 接管设置失败'
+  } finally {
+    agentCliSyncing.value = false
+  }
+}
+
+function agentCliTakeoverText(row?: AgentCliProfile) {
+  if (!row) return '未选择接管 CLI'
+  if (!row.supports_takeover) return '已发现，待接入执行适配器'
+  if (executionMode.value !== 'local_cli') return 'BYOK 模式中'
+  return agentCliRuntime.value?.enabled ? '正在接管整个 Joi' : '可接管整个 Joi'
 }
 
 function settingsTitle(tab: SettingsTabId) {
@@ -2352,6 +2405,10 @@ onBeforeUnmount(() => {
     window.clearInterval(clockTimer)
     clockTimer = null
   }
+  if (agentCliSyncTimer !== null) {
+    window.clearTimeout(agentCliSyncTimer)
+    agentCliSyncTimer = null
+  }
   cleanupVoiceStream()
   stopSpokenAudio()
   client.close()
@@ -2833,7 +2890,7 @@ onBeforeUnmount(() => {
                 <div class="settings-section-head">
                   <div>
                     <strong>你的 CLI（{{ displayedAgentClis.length }}）</strong>
-                    <span>选择用来运行提示词的本机 agent CLI。</span>
+                    <span>选择用来接管 Joi 请求的本机 agent CLI。</span>
                   </div>
                   <button type="button" class="settings-outline-button" :disabled="agentCliLoading || !connected" @click="refreshAgentClis">
                     {{ agentCliLoading ? '扫描中' : '重新扫描' }}
@@ -2884,8 +2941,8 @@ onBeforeUnmount(() => {
                     </select>
                   </label>
                   <div class="agent-cli-status-line">
-                    <span>{{ selectedAgentCli?.supports_takeover ? '可接管 Joi 写码任务' : '已发现，待接入执行适配器' }}</span>
-                    <strong>{{ selectedAgentCli ? agentCliStatus(selectedAgentCli) : '未选择' }}</strong>
+                    <span>{{ agentCliTakeoverText(selectedAgentCli) }}</span>
+                    <strong>{{ agentCliSyncing ? '同步中' : selectedAgentCli ? agentCliStatus(selectedAgentCli) : '未选择' }}</strong>
                   </div>
                 </div>
               </div>

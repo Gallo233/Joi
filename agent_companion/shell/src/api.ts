@@ -128,6 +128,14 @@ export class CoreClient {
     return this.send('agent_cli.test', { id })
   }
 
+  agentCliConfigure(params: Record<string, unknown>) {
+    return this.send('agent_cli.configure', params)
+  }
+
+  agentCliStatus() {
+    return this.send('agent_cli.status', {})
+  }
+
   auditRecent(limit = 50) {
     return this.send('audit.recent', { limit })
   }

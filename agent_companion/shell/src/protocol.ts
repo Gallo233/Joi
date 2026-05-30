@@ -304,6 +304,7 @@ export interface AgentCliProfile {
   error?: string
   models?: string[]
   reasoning?: string[]
+  run_strategy?: string
   supports_takeover?: boolean
   notes?: string[]
 }
@@ -321,6 +322,15 @@ export interface AgentCliTestResult {
   summary?: string
   error?: string
   cli?: AgentCliProfile
+}
+
+export interface AgentCliRuntimeStatus {
+  safe_for_display?: boolean
+  enabled?: boolean
+  mode?: 'local_cli' | 'byok' | string
+  selected?: string
+  model?: string
+  reasoning?: string
 }
 
 export interface CoreReadyPayload {
@@ -358,6 +368,7 @@ export interface CoreReadyPayload {
     storage?: string
   }
   background?: BackgroundContextStatus
+  agent_cli?: AgentCliRuntimeStatus
   skills?: NativeSkillManifest
   runtime_settings?: {
     asr?: {

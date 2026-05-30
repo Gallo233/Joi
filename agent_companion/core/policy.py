@@ -19,6 +19,7 @@ LOW_RISK = {
     "vision.select_target",
 }
 MEDIUM_RISK = {
+    "agent_cli.run",
     "codex.run",
     "browser.click",
     "browser.type",
@@ -75,6 +76,8 @@ class PolicyGate:
         preview = {key: str(value)[:160] for key, value in request.arguments.items()}
         if request.name.startswith("computer."):
             preview = _computer_preview(request.arguments)
+        elif request.name == "agent_cli.run":
+            preview = _agent_cli_preview(request.arguments)
         elif request.name == "codex.run":
             preview = _codex_preview(request.arguments)
         elif request.name == "runtime.update_config":
@@ -112,6 +115,20 @@ def _codex_preview(arguments: dict[str, Any]) -> dict[str, str]:
     if arguments.get("codex_permission_decision"):
         preview["decision"] = "approval_required_to_continue"
     return preview or {"request": "coding_task"}
+
+
+def _agent_cli_preview(arguments: dict[str, Any]) -> dict[str, str]:
+    preview: dict[str, str] = {"mode": "agent_cli_takeover"}
+    cli_id = str(arguments.get("cli_id") or "").strip()
+    if cli_id:
+        preview["cli"] = cli_id[:40]
+    if arguments.get("goal"):
+        preview["goal"] = "takeover_request"
+    if arguments.get("codex_permission_hash"):
+        preview["permission"] = "one_time_agent_cli_permission"
+    if arguments.get("codex_permission_decision"):
+        preview["decision"] = "approval_required_to_continue"
+    return preview
 
 
 def _runtime_config_preview(arguments: dict[str, Any]) -> dict[str, str]:

@@ -35,6 +35,7 @@ from agent_companion.core.server import JsonRpcBridge
 from agent_companion.core.skill_manifest import SKILL_MANIFEST_VERSION, build_native_skill_manifest
 from agent_companion.core.speech_input import AsrResult, AsrRuntimeState, MockAsrProvider, OpenAICompatibleAsrProvider, build_asr_provider
 from agent_companion.core.tool_compression import compress_tool_result
+from agent_companion.core.tools.agent_cli import AgentCliRunTool
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.computer import ComputerActionTool
@@ -1900,6 +1901,9 @@ def main() -> int:
     assert_true(policy.classify(ToolRequest("computer.click", {"x": 100, "y": 200}), approved=True).allowed, "approved computer.click should be allowed")
     workflow_decision = policy.classify(ToolRequest("computer.workflow", {"workflow": "open_app", "app": "Codex"}))
     assert_true(workflow_decision.requires_approval, "computer.workflow should require approval")
+    agent_cli_decision = policy.classify(ToolRequest("agent_cli.run", {"cli_id": "codex", "goal": "打开网页"}))
+    assert_true(agent_cli_decision.requires_approval, "agent_cli.run should require approval before takeover")
+    assert_true("打开网页" not in str(policy.public_payload(ToolRequest("agent_cli.run", {"cli_id": "codex", "goal": "打开网页"}))), "agent_cli.run policy preview should hide raw user goal")
     public_payload = policy.public_payload(ToolRequest("computer.click", {"x": 100, "y": 200}))
     assert_true("100" not in str(public_payload), "policy preview should not expose raw click coordinates")
 
@@ -3458,6 +3462,15 @@ asr:
         _assert_no_codex_safe_text_leaks(codex_success.display_card.body, "Codex success card leaked raw paths or commands")
         _assert_no_codex_voice_leaks([codex_success], "Codex success voice leaked raw machine detail")
 
+        agent_cli_success = AgentCliRunTool(workspace).run(
+            ToolRequest("agent_cli.run", {"goal": "打开 B 站并搜索猫猫视频", "cli_id": "codex", "model": "默认", "reasoning": "XHigh"})
+        )
+        assert_true(agent_cli_success.ok, "Codex-backed Agent CLI takeover should complete")
+        assert_true(agent_cli_success.agent_state.get("tool") == "agent_cli.run", "Agent CLI takeover result should stay under agent_cli.run")
+        assert_true(agent_cli_success.agent_state.get("agent_cli_takeover") is True, "Agent CLI takeover state should be explicit")
+        assert_true(agent_cli_success.agent_state.get("codex_run", {}).get("status") == "completed", "Agent CLI takeover should preserve Codex run state")
+        _assert_no_codex_voice_leaks([agent_cli_success], "Agent CLI takeover voice leaked raw machine detail")
+
         os.environ["JOI_FAKE_CODEX_MODE"] = "fail"
         codex_failure = CodexTool(workspace).run(ToolRequest("codex.run", {"goal": "修复 bug"}))
         assert_true(not codex_failure.ok, "fake Codex nonzero exit should fail")
@@ -3503,6 +3516,27 @@ asr:
         bridge_completed = codex_app.resolve_approval(str(bridge_approval["approval_id"]), approved=True)
         assert_true(any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("codex_run", {}).get("status") == "completed" for event in bridge_completed), "approved Codex permission should resume fake runner")
         _assert_no_codex_voice_leaks(initial_codex_events + permission_events + bridge_completed, "Codex approval/resume voice leaked raw machine detail")
+
+        agent_cli_app = AgentCompanionApp(workspace)
+        initial_agent_cli_events = agent_cli_app.handle_agent_cli_text("帮我打开 B 站并搜索猫猫视频", cli_id="codex", model="默认", reasoning="XHigh")
+        initial_agent_cli_approval = _approval_payload(initial_agent_cli_events)
+        assert_true(initial_agent_cli_approval.get("tool") == "agent_cli.run", "Agent CLI takeover should require initial agent_cli.run approval")
+        agent_cli_permission_events = agent_cli_app.resolve_approval(str(initial_agent_cli_approval["approval_id"]), approved=True)
+        agent_cli_bridge_approval = _approval_payload(agent_cli_permission_events)
+        assert_true(agent_cli_bridge_approval.get("tool") == "agent_cli.run", "Codex permission inside Agent CLI takeover should resume through agent_cli.run")
+        assert_true(any(event.type == EventType.APPROVAL_REQUIRED and event.agent_state.get("agent_cli_takeover") for event in agent_cli_permission_events), "Agent CLI permission card should carry takeover state")
+        agent_cli_bridge_completed = agent_cli_app.resolve_approval(str(agent_cli_bridge_approval["approval_id"]), approved=True)
+        assert_true(any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("agent_cli_run", {}).get("status") == "completed" for event in agent_cli_bridge_completed), "approved Agent CLI permission should resume fake runner")
+        _assert_no_codex_voice_leaks(initial_agent_cli_events + agent_cli_permission_events + agent_cli_bridge_completed, "Agent CLI approval/resume voice leaked raw machine detail")
+
+        takeover_bridge = JsonRpcBridge(workspace)
+        takeover_config = takeover_bridge.agent_cli_configure_command({"enabled": True, "mode": "local_cli", "selected": "codex", "model": "默认", "reasoning": "XHigh"})
+        assert_true(takeover_config["agent_cli"]["enabled"] is True, "agent_cli.configure should enable takeover mode")
+        takeover_submit = takeover_bridge.submit_user_text("你好，接管这轮 Joi")
+        takeover_approval = _approval_payload_from_dicts(takeover_submit.get("events", []))
+        assert_true(takeover_approval.get("tool") == "agent_cli.run", "enabled takeover mode should route user messages to agent_cli.run")
+        memory_control_submit = takeover_bridge.submit_user_text("你记得什么")
+        assert_true(any(event.get("agent_state", {}).get("intent") == "memory_control" for event in memory_control_submit.get("events", [])), "memory controls should stay local even when Agent CLI takeover is enabled")
 
         denied_app = AgentCompanionApp(workspace)
         denied_initial = denied_app.handle_user_text("修复这个项目 bug 并跑测试")
@@ -3729,10 +3763,11 @@ asr:
     assert_true(ready_payload["runtime"]["read_only"] and ready_payload["runtime"]["safe_for_display"], "Core ready payload should expose safe read-only runtime status")
     assert_true(ready_payload["audit"]["version"] == AUDIT_SCHEMA_VERSION and ready_payload["audit"]["safe_for_display"], "Core ready payload should expose safe audit status")
     assert_true(ready_payload["background"]["version"] == BACKGROUND_CONTEXT_VERSION and ready_payload["background"]["safe_for_display"] and ready_payload["background"]["video_recording"] is False, "Core ready payload should expose safe background context status")
+    assert_true(ready_payload["agent_cli"]["safe_for_display"] and ready_payload["agent_cli"]["selected"] == "codex", "Core ready payload should expose safe Agent CLI takeover status")
     assert_true(ready_payload["skills"]["version"] == SKILL_MANIFEST_VERSION and ready_payload["skills"]["safe_for_display"], "Core ready payload should expose safe native skill manifest")
     skill_ids = {row["id"] for row in ready_payload["skills"]["skills"]}
     assert_true(
-        {"joi.codex", "joi.browser", "joi.computer_use", "joi.memory", "joi.voice_input", "joi.voice_output", "joi.ok_ww"}.issubset(skill_ids),
+        {"joi.agent_cli", "joi.codex", "joi.browser", "joi.computer_use", "joi.memory", "joi.voice_input", "joi.voice_output", "joi.ok_ww"}.issubset(skill_ids),
         "P8 skill manifest should include native Codex, Browser/Computer Use, Memory, ASR/TTS, and OK-WW skills",
     )
     skill_rows = {row["id"]: row for row in ready_payload["skills"]["skills"]}
@@ -3740,6 +3775,7 @@ asr:
     assert_true("background.configure" in skill_rows["joi.watch"]["rpc_methods"] and "background.clear" in skill_rows["joi.watch"]["rpc_methods"], "Watch skill should include constrained background context controls")
     assert_true(skill_rows["joi.voice_input"]["configured"] and skill_rows["joi.voice_input"]["local_capability"] == "ready", "Voice input skill should mirror ASR runtime readiness")
     assert_true(skill_rows["joi.ok_ww"]["supports_dry_run"], "OK-WW skill should advertise dry-run first")
+    assert_true("agent_cli.run" in skill_rows["joi.agent_cli"]["tools"] and "agent_cli.configure" in skill_rows["joi.agent_cli"]["rpc_methods"], "Agent CLI skill should advertise takeover tool and config RPC")
     assert_true("runtime.update_config" in skill_rows["joi.runtime_config"]["tools"], "Runtime config should be bound to a native skill")
     skill_manifest_payload = ready_bridge.skill_manifest_command()
     assert_true(skill_manifest_payload["ok"] and skill_manifest_payload["skills"]["version"] == SKILL_MANIFEST_VERSION, "skills.list RPC should return the native skill manifest")
@@ -4196,9 +4232,10 @@ llm:
     assert_true("background_status_command" in server_source and "background_configure_command" in server_source and "background_clear_command" in server_source and '"background.configure"' in server_source, "Core should expose constrained background context controls")
     assert_true("_watch_loop_should_summarize" in server_source and "skip_summary=not run_vision_summary" in server_source, "Core watch loop should run low-frequency visual summaries")
     assert_true("force_visual_summary" in server_source and '"watch.loop.refresh"' in server_source, "Core watch loop should expose forced visual refresh")
+    assert_true("agent_cli_configure_command" in server_source and '"agent_cli.configure"' in server_source and '"agent_cli.status"' in server_source and "_agent_cli_takeover_enabled" in server_source, "Core should expose Agent CLI takeover configuration and route enabled user messages")
     assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
     skill_manifest_source = (workspace / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
-    assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "KNOWN_SKILL_IDS" in skill_manifest_source and "_apply_skill_setting" in skill_manifest_source and "normalize_skill_id" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
+    assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "KNOWN_SKILL_IDS" in skill_manifest_source and "_apply_skill_setting" in skill_manifest_source and "normalize_skill_id" in skill_manifest_source and "joi.agent_cli" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
     assert_true("_computer_use_action_schema" in skill_manifest_source and "llm_driven_action_schema" in skill_manifest_source and "requires_approval_for" in skill_manifest_source, "Computer Use skill should expose a declarative LLM action schema instead of app-specific routes only")
     assert_true('"background.configure"' in skill_manifest_source and '"background.clear"' in skill_manifest_source, "Watch native skill should advertise background context controls")
     assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source and "skill_settings_payload" in server_source and "audit_recent_command" in server_source and '"audit.recent"' in server_source, "Core should expose P8 native skill manifest and P9 audit RPCs")
@@ -4253,11 +4290,12 @@ llm:
     assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "memoryProfile" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory profile, candidate controls, and stage authorization bubble")
     assert_true("backgroundStatus" in shell_source and "background-context-panel" in shell_source and "configureBackgroundScope" in shell_source and "clearBackgroundContext" in shell_source and "syncBackgroundFromEvent" in shell_source, "Shell developer panel should expose constrained background context inspection and controls")
     assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
-    assert_true("settings-shell" in shell_source and "execution-segment" in shell_source and "agentCliList" in shell_source and "testAgentCli" in shell_source, "Shell settings should expose Open Design execution-mode CLI scanning and testing")
+    assert_true("settings-shell" in shell_source and "execution-segment" in shell_source and "agentCliList" in shell_source and "testAgentCli" in shell_source and "syncAgentCliTakeover" in shell_source and "agentCliRuntime" in shell_source, "Shell settings should expose Open Design execution-mode CLI scanning, testing, and takeover sync")
     assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source and "setSkillEnabled" in shell_source and "skillEnabled" in shell_source and "skillToggleDisabled" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
     assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-profile-panel" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with profile, recall search, and vault preview")
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
     assert_true("_step_with_memory_context" in app_source and "build_event_agent_state" in app_source and "tool_result_memory_candidate" in app_source, "App should inject approved memory context, emit safe JoiJuice event channels, and queue safe tool-result memory candidates")
+    assert_true("handle_agent_cli_text" in app_source and "_agent_cli_takeover_arguments" in app_source and "should_handle_locally_before_agent_cli" in app_source, "App should expose Agent CLI takeover while keeping local control commands local")
     desktop_context_source = (workspace / "agent_companion" / "core" / "desktop_context.py").read_text(encoding="utf-8")
     assert_true("rewrite_plan_for_desktop_context" in desktop_context_source and "record_desktop_context" in desktop_context_source and "DesktopContext" in desktop_context_source, "Desktop context planning should live outside the app orchestrator")
     assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source and "reload_runtime_policy" in app_source and "skill_settings_payload" in app_source and "block_reason" in app_source, "App execution boundary should attach native skill metadata and enforce disabled skills")

@@ -12,6 +12,7 @@ rules:
     - files.read
     - mcp.list_tools
   medium:
+    - agent_cli.run
     - codex.run
     - browser.click
     - browser.type
@@ -23,4 +24,3 @@ rules:
     - package.install
     - git.push
     - external.launch_admin
-
