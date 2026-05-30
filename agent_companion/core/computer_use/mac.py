@@ -6,6 +6,7 @@ and pbcopy/pbpaste for clipboard.  Thread-safe: no PySide6/Qt dependencies.
 from __future__ import annotations
 
 import ctypes
+from collections.abc import Sequence
 import subprocess
 import sys
 import time
@@ -78,25 +79,50 @@ class MacComputerUseBackend:
         # Hide the Joi shell temporarily to ensure mouse click maps to the real window
         hidden_hwnd = hide_foreground_companion_window()
         try:
-            if action.action_type == "click":
-                return self._click(action)
-            if action.action_type == "double_click":
-                return self._double_click(action)
-            if action.action_type == "drag":
-                return self._drag(action)
-            if action.action_type == "type_text":
-                return self._type_text(action)
-            if action.action_type == "scroll":
-                return self._scroll(action)
-            if action.action_type == "hotkey":
-                return self._hotkey(action)
-            if action.action_type == "open_app":
-                return self._open_app(action)
-            return ComputerUseResult(False, action=action, error=f"unsupported action: {action.action_type}")
+            return self._perform_unwrapped(action)
         except Exception as exc:
             return ComputerUseResult(False, action=action, error=f"{type(exc).__name__}: {exc}")
         finally:
             restore_window(hidden_hwnd)
+
+    def perform_sequence(self, actions: Sequence[ComputerAction], settle_ms: int = 220) -> ComputerUseResult:
+        if sys.platform != "darwin":
+            return ComputerUseResult(False, action=ComputerAction("workflow"), error="computer use actions are currently implemented for macOS only")
+        hidden_hwnd = hide_foreground_companion_window()
+        try:
+            for action in actions:
+                if action.action_type == "wait":
+                    time.sleep(max(0, int(action.delta or settle_ms)) / 1000.0)
+                    continue
+                result = self._perform_unwrapped(action)
+                if not result.ok:
+                    return ComputerUseResult(False, action=ComputerAction("workflow"), error=result.error or "workflow step failed")
+                time.sleep(max(0, int(settle_ms or 0)) / 1000.0)
+            return ComputerUseResult(True, action=ComputerAction("workflow"), summary="完成了多步电脑操作。")
+        except Exception as exc:
+            return ComputerUseResult(False, action=ComputerAction("workflow"), error=f"{type(exc).__name__}: {exc}")
+        finally:
+            restore_window(hidden_hwnd)
+
+    def _perform_unwrapped(self, action: ComputerAction) -> ComputerUseResult:
+        if action.action_type == "click":
+            return self._click(action)
+        if action.action_type == "double_click":
+            return self._double_click(action)
+        if action.action_type == "drag":
+            return self._drag(action)
+        if action.action_type == "type_text":
+            return self._type_text(action)
+        if action.action_type == "scroll":
+            return self._scroll(action)
+        if action.action_type == "hotkey":
+            return self._hotkey(action)
+        if action.action_type == "open_app":
+            return self._open_app(action)
+        if action.action_type == "wait":
+            time.sleep(max(0, int(action.delta or 0)) / 1000.0)
+            return ComputerUseResult(True, action=action, summary="等待界面响应。")
+        return ComputerUseResult(False, action=action, error=f"unsupported action: {action.action_type}")
 
     # -------------------------------------------------------------------
     # Mouse actions

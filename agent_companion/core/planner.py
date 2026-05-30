@@ -57,6 +57,13 @@ def build_plan(user_text: str) -> AgentPlan:
             intent="watch_followup",
             steps=[ToolRequest("watch.recall", {"query": text}, "优先使用最近的陪看视觉上下文回答，不重复截图。")],
         )
+    if _is_execution_status_question(text):
+        return AgentPlan(
+            task_id=task_id,
+            user_text=text,
+            intent="companion_chat",
+            steps=[ToolRequest("companion.chat", {"text": text}, "状态追问只走对话，不启动新的桌面操作。")],
+        )
     desktop_workflow = _build_desktop_workflow(text, lowered)
     if desktop_workflow is not None:
         return AgentPlan(
@@ -158,6 +165,15 @@ def _is_watch_followup(text: str) -> bool:
     return any(token in text for token in ("刚刚发生了什么", "你看到了什么", "你刚才看到了什么", "这个页面讲什么", "刚才的画面", "刚才看到的"))
 
 
+def _is_execution_status_question(text: str) -> bool:
+    value = re.sub(r"\s+", "", text or "").strip("。！？!?，,")
+    if not value:
+        return False
+    if value in {"打开了吗", "打开了没", "开了吗", "开了没", "启动了吗", "启动了没", "运行了吗", "运行了没", "执行了吗", "执行了没", "好了没", "好了吗", "成功了吗", "成功了没"}:
+        return True
+    return bool(re.search(r"(?:打开|启动|运行|执行|搜索|搜).{0,8}(?:了吗|了没|成功了吗|成功了没)$", value))
+
+
 def _is_current_video_question(text: str) -> bool:
     video_tokens = ("视频", "播放", "弹幕", "字幕", "B站", "b站", "哔哩", "这一段", "这段")
     content_tokens = ("讲什么", "讲了什么", "在讲", "关于什么", "内容", "发生了什么", "讲到哪", "说了什么", "看懂", "总结", "解释")
@@ -246,7 +262,7 @@ def _requested_app(text: str, lowered: str) -> str:
     if not match:
         return ""
     candidate = match.group(1).strip()
-    if candidate in {"网页", "浏览器", "网站", "页面"}:
+    if candidate in {"网页", "浏览器", "网站", "页面", "了吗", "了没", "吗", "没"}:
         return ""
     return candidate[:80]
 
@@ -365,6 +381,8 @@ def _parse_hotkey(text: str) -> list[str]:
 
 
 def _looks_like_open_app(text: str, lowered: str) -> bool:
+    if _is_execution_status_question(text):
+        return False
     return any(token in text for token in ("打开", "启动", "运行")) or lowered.startswith("open ")
 
 

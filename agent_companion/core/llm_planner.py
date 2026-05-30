@@ -36,6 +36,8 @@ class LlmPlanParser:
     def should_try(self, user_text: str, rule_plan: AgentPlan) -> bool:
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
             return False
+        if _looks_like_execution_status_question(user_text):
+            return False
         if self._config is None or self._config.llm.use_mock or not self._config.llm.is_configured:
             return False
         text = user_text or ""
@@ -129,6 +131,8 @@ def plan_from_llm_payload(user_text: str, payload: dict[str, Any], task_id: str 
     text = " ".join((user_text or "").strip().split())
     if not text:
         return None
+    if _looks_like_execution_status_question(text):
+        return AgentPlan(task_id or f"task-{uuid.uuid4().hex[:10]}", text, "companion_chat", [ToolRequest("companion.chat", {"text": text}, "状态追问只走对话，不启动新的桌面操作。")])
     intent = _safe_identifier(payload.get("intent")).casefold()
     if intent not in SUPPORTED_INTENTS:
         return None
@@ -325,6 +329,8 @@ def _unsafe_text(value: str) -> bool:
 
 
 def _looks_actionable(text: str) -> bool:
+    if _looks_like_execution_status_question(text):
+        return False
     lowered = (text or "").casefold()
     return (
         any(token in text for token in ("打开", "启动", "运行", "开启", "搜索", "搜", "查找", "点击", "点一下", "输入", "滚动", "当前页面", "当前窗口", "视频", "播放", "帮我用", "在B站", "在b站"))
@@ -334,6 +340,15 @@ def _looks_actionable(text: str) -> bool:
 
 def _has_search_word(text: str) -> bool:
     return any(token in text for token in ("搜索", "搜一下", "查找", "搜"))
+
+
+def _looks_like_execution_status_question(text: str) -> bool:
+    value = re.sub(r"\s+", "", text or "").strip("。！？!?，,")
+    if not value:
+        return False
+    if value in {"打开了吗", "打开了没", "开了吗", "开了没", "启动了吗", "启动了没", "运行了吗", "运行了没", "执行了吗", "执行了没", "好了没", "好了吗", "成功了吗", "成功了没"}:
+        return True
+    return bool(re.search(r"(?:打开|启动|运行|执行|搜索|搜).{0,8}(?:了吗|了没|成功了吗|成功了没)$", value))
 
 
 def _looks_like_video_content_question(text: str) -> bool:

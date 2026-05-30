@@ -716,6 +716,8 @@ def main() -> int:
     assert_true(plain_search_plan.intent == "browser" and plain_search_plan.steps[0].name == "browser.search", "generic search should still use browser route without desktop context")
     plain_short_search_plan = build_plan("搜猫猫视频")
     assert_true(plain_short_search_plan.intent == "browser" and plain_short_search_plan.steps[0].arguments.get("query") == "猫猫视频", "short generic search should still use browser route")
+    open_status_plan = build_plan("打开了吗")
+    assert_true(open_status_plan.intent == "companion_chat" and open_status_plan.steps[0].name == "companion.chat", "open status follow-up must not become a new desktop action")
     llm_bili_plan = plan_from_llm_payload(
         "帮我在哔哩找猫猫视频",
         {
@@ -751,6 +753,8 @@ def main() -> int:
     assert_true(llm_click_plan.steps[0].name == "vision.resolve_target" and "x" not in llm_click_plan.steps[0].arguments, "LLM planner must not create raw coordinate clicks")
     assert_true(plan_from_llm_payload("危险动作", {"intent": "shell.run", "confidence": 0.99, "slots": {"command": "rm -rf ."}}) is None, "LLM planner should reject unsupported tools")
     assert_true(plan_from_llm_payload("低置信度", {"intent": "desktop_workflow", "confidence": 0.2, "action": "open_app", "slots": {"app": "Codex"}}) is None, "LLM planner should reject low confidence")
+    llm_status_plan = plan_from_llm_payload("打开了吗", {"intent": "desktop_workflow", "confidence": 0.99, "action": "open_app", "slots": {"app": "了吗"}})
+    assert_true(llm_status_plan is not None and llm_status_plan.intent == "companion_chat", "LLM planner must keep open-status follow-ups in chat")
     fake_llm_plan = plan_from_llm_payload(
         "帮我在哔哩找猫猫视频",
         {"intent": "desktop_workflow", "confidence": 0.9, "action": "open_web_search", "slots": {"site": "bilibili", "query": "猫猫视频"}},
@@ -4172,6 +4176,8 @@ llm:
     assert_true("joi desktop" in windows_focus_source, "Windows focus helper should recognize the Tauri Joi Desktop title")
     windows_observer_source = (workspace / "agent_companion" / "core" / "vision" / "windows.py").read_text(encoding="utf-8")
     assert_true("window_from_point" in windows_observer_source and "hide_foreground_companion_window" in windows_observer_source, "Screen observe should hide Joi and capture the underlying content window")
+    mac_backend_source = (workspace / "agent_companion" / "core" / "computer_use" / "mac.py").read_text(encoding="utf-8")
+    assert_true("def perform_sequence" in mac_backend_source and "_perform_unwrapped" in mac_backend_source, "Mac Computer Use should keep workflow focus across multi-step desktop actions")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
