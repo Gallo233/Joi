@@ -48,8 +48,6 @@ class CodexTool(ToolAdapter):
             str(self.workspace),
             "--sandbox",
             "workspace-write",
-            "--ask-for-approval",
-            "never",
             "--output-last-message",
             str(final_path),
             goal,

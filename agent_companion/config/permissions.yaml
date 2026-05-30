@@ -6,13 +6,13 @@ defaults:
     - high
 rules:
   low:
+    - agent_cli.run
     - observe.screen
     - browser.search
     - browser.observe
     - files.read
     - mcp.list_tools
   medium:
-    - agent_cli.run
     - codex.run
     - browser.click
     - browser.type

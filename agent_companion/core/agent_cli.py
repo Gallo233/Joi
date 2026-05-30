@@ -55,7 +55,7 @@ _PROFILES: tuple[AgentCliProfile, ...] = (
         run_strategy="codex_exec_json",
         installed_label="codex-cli",
         supports_takeover=True,
-        notes=("joi_takeover_runner", "approval_gated"),
+        notes=("joi_takeover_runner", "permission_bridge"),
     ),
     AgentCliProfile(
         id="gemini",

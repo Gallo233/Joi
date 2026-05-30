@@ -126,18 +126,18 @@ def _agent_cli_skill() -> NativeSkillManifest:
         id="joi.agent_cli",
         label="Agent CLI Takeover",
         category="agent",
-        description="Approval-gated local Agent CLI handoff for general Joi requests, not only coding tasks.",
+        description="Local Agent CLI handoff for general Joi requests, not only coding tasks.",
         tools=("agent_cli.run",),
         rpc_methods=("agent_cli.list", "agent_cli.test", "agent_cli.configure", "agent_cli.status"),
         input_schema=_object_schema("goal", "cli_id", "model", "reasoning", "memory_context", "desktop_context", "background_context"),
         result_schema=_tool_result_schema("agent_cli_run", "codex_run"),
-        permission_level="medium",
+        permission_level="low",
         supports_dry_run=False,
         local_capability="ready" if available else "unavailable",
         configured=available,
         state_policy="workspace_audit",
         audit="agent_cli_run_audit",
-        notes=("approval_gated", "workspace_bound", "joi_shell_retains_memory_and_permissions"),
+        notes=("permission_bridge", "workspace_bound", "joi_shell_retains_memory_and_permissions"),
     )
 
 
@@ -467,7 +467,7 @@ _TOOL_SKILL_BINDINGS: dict[str, dict[str, str]] = {
     "agent_cli.run": {
         "skill_id": "joi.agent_cli",
         "category": "agent",
-        "permission_level": "medium",
+        "permission_level": "low",
         "state_policy": "workspace_audit",
         "audit": "agent_cli_run_audit",
     },

@@ -8,6 +8,7 @@ from agent_companion.core.skill_manifest import skill_id_for_tool
 
 
 LOW_RISK = {
+    "agent_cli.run",
     "companion.chat",
     "observe.screen",
     "watch.recall",
@@ -19,7 +20,6 @@ LOW_RISK = {
     "vision.select_target",
 }
 MEDIUM_RISK = {
-    "agent_cli.run",
     "codex.run",
     "browser.click",
     "browser.type",
