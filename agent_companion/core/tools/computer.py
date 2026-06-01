@@ -17,6 +17,7 @@ from agent_companion.core.computer_use import (
 from agent_companion.core.platform_factory import get_computer_backend
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
+from agent_companion.core.tools.foreground_guard import companion_hidden_for_target_observation
 from agent_companion.core.vision import OcrExtractor
 from agent_companion.core.vision.ocr import run_ocr_safely
 from agent_companion.core.voice import safe_voice_line
@@ -52,13 +53,14 @@ class ComputerActionTool(ToolAdapter):
                 risk=RiskLevel.MEDIUM,
             )
 
-        before_observation = self._observe_for_verification("before computer action")
-        result = self.backend.perform(action)
-        verification = None
-        if result.ok:
-            self._settle_after_action()
-            result, verification = self._attach_after_observation(result, before_observation)
-        return self._to_tool_result(result, verification, before_observation)
+        with companion_hidden_for_target_observation():
+            before_observation = self._observe_for_verification("before computer action")
+            result = self.backend.perform(action)
+            verification = None
+            if result.ok:
+                self._settle_after_action()
+                result, verification = self._attach_after_observation(result, before_observation)
+            return self._to_tool_result(result, verification, before_observation)
 
     def _action_from_request(self, request: ToolRequest) -> ComputerAction | None:
         args = request.arguments
@@ -114,7 +116,10 @@ class ComputerActionTool(ToolAdapter):
     ) -> ToolResult:
         action_label = _action_label(result.action.action_type if result.action else self.action_type)
         status = _card_status(result.ok, verification)
-        summary = verification.summary if verification else result.summary if result.ok and result.summary else f"{action_label}没有完成。"
+        if self.action_type == "open_app" and result.ok and result.summary:
+            summary = result.summary
+        else:
+            summary = verification.summary if verification else result.summary if result.ok and result.summary else f"{action_label}没有完成。"
         body = self._friendly_detail(result.error if result.error else "")
         artifacts = verification.artifacts if verification else [result.observation.screenshot_rel] if result.observation else []
         if verification:
@@ -133,7 +138,7 @@ class ComputerActionTool(ToolAdapter):
             ok=result.ok,
             agent_state=agent_state,
             display_card=DisplayCard("电脑操作", summary, body, status=status, artifacts=artifacts),
-            voice_line=safe_voice_line(_voice_for_verification(result.ok, verification), sprite="5" if result.ok else "4"),
+            voice_line=safe_voice_line(_voice_for_verification(result.ok, verification, result.summary if self.action_type == "open_app" else ""), sprite="5" if result.ok else "4"),
             risk=RiskLevel.MEDIUM,
         )
 
@@ -227,9 +232,11 @@ def _friendly_error(error: str) -> str:
     return "动作执行失败。"
 
 
-def _voice_for_verification(ok: bool, verification: PostActionVerification | None) -> str:
+def _voice_for_verification(ok: bool, verification: PostActionVerification | None, success_summary: str = "") -> str:
     if not ok:
         return "电脑操作没有完成，细节在卡片里。"
+    if success_summary:
+        return success_summary
     if verification is None:
         return "电脑操作已经执行。"
     if verification.status == "changed":

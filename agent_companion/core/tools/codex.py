@@ -6,6 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from agent_companion.core.agent_cli import resolve_agent_cli_executable
 from agent_companion.core.codex_events import (
     PERMISSION_FAIL_CLOSED_MESSAGE,
     build_codex_run_state,
@@ -152,17 +153,7 @@ class CodexTool(ToolAdapter):
 
     @staticmethod
     def _codex_executable() -> str:
-        override = os.environ.get("AGENT_COMPANION_CODEX_BIN", "").strip()
-        if override:
-            return override if Path(override).is_file() else ""
-        try:
-            probe = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=5)
-            if probe.returncode == 0:
-                return "codex"
-        except Exception:
-            pass
-        candidate = shutil.which("codex") or ""
-        return candidate
+        return resolve_agent_cli_executable("codex") or shutil.which("codex") or ""
 
     def _rel(self, path: Path) -> str:
         try:

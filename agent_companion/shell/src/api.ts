@@ -32,7 +32,7 @@ export class CoreClient {
         this.scheduleReconnect()
       }
     }
-    socket.onerror = () => this.options.onError?.('Core bridge connection failed')
+    socket.onerror = () => this.options.onError?.('Joi runtime connection failed')
     socket.onmessage = (message) => this.handleMessage(message.data)
   }
 
@@ -136,6 +136,34 @@ export class CoreClient {
     return this.send('agent_cli.status', {})
   }
 
+  runtimeStatus() {
+    return this.send('runtime.status', {})
+  }
+
+  runtimeConfigure(params: Record<string, unknown>) {
+    return this.send('runtime.configure', params)
+  }
+
+  runtimeStart() {
+    return this.send('runtime.start', {})
+  }
+
+  runtimeStop() {
+    return this.send('runtime.stop', {})
+  }
+
+  runtimeApprovalResolve(approvalId: string, approved: boolean) {
+    return this.send('runtime.approval.resolve', { approval_id: approvalId, approved })
+  }
+
+  joiMcpStatus() {
+    return this.send('joi_mcp.status', {})
+  }
+
+  joiMcpInstallCodex() {
+    return this.send('joi_mcp.install_codex', {}, { timeoutMs: 30000, timeoutMessage: 'Joi 能力连接等待超时' })
+  }
+
   auditRecent(limit = 50) {
     return this.send('audit.recent', { limit })
   }
@@ -181,14 +209,14 @@ export class CoreClient {
           const pending = this.pending.get(payload.id)
           if (!pending) return
           this.pending.delete(payload.id)
-          pending.reject(new Error(options?.timeoutMessage || 'Core request timed out'))
+          pending.reject(new Error(options?.timeoutMessage || 'Joi runtime request timed out'))
         }, timeoutMs)
         this.pending.set(payload.id, { resolve, reject, timeoutId })
         this.socket?.send(JSON.stringify(payload))
       })
     }
-    this.options.onError?.('Core bridge is offline')
-    return Promise.reject(new Error('Core bridge is offline'))
+    this.options.onError?.('Joi runtime is starting')
+    return Promise.reject(new Error('Joi runtime is starting'))
   }
 
   private handleMessage(raw: string) {
@@ -199,7 +227,7 @@ export class CoreClient {
         if (pending) {
           this.pending.delete(payload.id)
           window.clearTimeout(pending.timeoutId)
-          if (payload.error) pending.reject(new Error(payload.error.message || 'Core request failed'))
+          if (payload.error) pending.reject(new Error(payload.error.message || 'Joi runtime request failed'))
           else pending.resolve(payload.result)
         }
         return
@@ -216,7 +244,7 @@ export class CoreClient {
         this.options.onVoiceAudio?.(payload.params)
       }
     } catch {
-      this.options.onError?.('Invalid core message')
+      this.options.onError?.('Invalid Joi runtime message')
     }
   }
 

@@ -3,8 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-import tomllib
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
 
 try:
     from tools.package_windows_release import build_release_privacy_report
@@ -189,12 +193,45 @@ def _read_toml(path: Path, add: Any, name: str) -> dict[str, Any]:
         add("fail", name, "Missing.", "Restore the file before packaging.")
         return {}
     try:
-        value = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError:
+        value = _loads_toml(path.read_text(encoding="utf-8"))
+    except ValueError:
         add("fail", name, "Invalid TOML.", "Fix the TOML before packaging.")
         return {}
     add("ok", name, "Parsed.")
     return value
+
+
+def _loads_toml(text: str) -> dict[str, Any]:
+    if tomllib is not None:
+        return tomllib.loads(text)
+    result: dict[str, Any] = {}
+    section: dict[str, Any] = result
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = result
+            for part in line.strip("[]").split("."):
+                section = section.setdefault(part.strip(), {})
+            continue
+        if "=" not in line:
+            continue
+        key, raw_value = (part.strip() for part in line.split("=", 1))
+        section[key] = _loads_toml_scalar(raw_value)
+    return result
+
+
+def _loads_toml_scalar(value: str) -> Any:
+    if value.startswith('"') and value.endswith('"'):
+        return value[1:-1]
+    lowered = value.casefold()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        return int(value)
+    except ValueError:
+        return value
 
 
 def _expect(condition: bool, add: Any, name: str, ok_summary: str, fail_action: str) -> None:

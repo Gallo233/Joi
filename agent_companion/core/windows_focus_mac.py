@@ -120,16 +120,17 @@ def hide_foreground_companion_window(settle_seconds: float = 0.18) -> int | None
     return hwnd
 
 
-def restore_window(hwnd: int | None, settle_seconds: float = 0.08) -> None:
+def restore_window(hwnd: int | None, settle_seconds: float = 0.08, *, activate: bool = True) -> None:
     """Restore Joi's companion shell back to foreground after screen grabs."""
     if not hwnd:
         return
+    frontmost_line = "set frontmost of targetProcess to true" if activate else ""
     script = f"""
     tell application "System Events"
         try
             set targetProcess to first process whose unix id is {hwnd}
             set visible of targetProcess to true
-            set frontmost of targetProcess to true
+            {frontmost_line}
         end try
     end tell
     """

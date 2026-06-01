@@ -155,6 +155,10 @@ textarea {
   overflow: visible;
 }
 
+.shell.settings-active {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .workspace {
   min-height: 0;
   overflow-y: auto;
@@ -169,6 +173,12 @@ textarea {
 
 .workspace.cabin-chat {
   overflow: hidden;
+}
+
+.shell.settings-active .workspace {
+  border-right: 0;
+  padding: 24px;
+  gap: 0;
 }
 
 .shell.compact-active .workspace {
@@ -594,6 +604,110 @@ textarea {
 .hero-panel p {
   color: #4b5563;
   line-height: 1.6;
+}
+
+.runtime-console {
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 14px 40px rgba(15, 23, 42, 0.04);
+}
+
+.console-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.console-line {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.console-line > span {
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 800;
+  padding-top: 9px;
+  text-align: right;
+}
+
+.console-line > div {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.console-line.human > div {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+
+.console-line.approval > div {
+  border-color: rgba(245, 158, 11, 0.34);
+  background: rgba(255, 251, 235, 0.92);
+}
+
+.console-line.error > div {
+  border-color: rgba(239, 68, 68, 0.24);
+  background: rgba(254, 242, 242, 0.9);
+}
+
+.console-line.skill > div {
+  background: rgba(240, 253, 250, 0.94);
+  border-color: rgba(20, 184, 166, 0.24);
+}
+
+.console-line p {
+  margin: 0;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.console-line pre {
+  margin: 8px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #4b5563;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.console-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 300px;
+  color: #6b7280;
+  text-align: center;
+}
+
+.console-empty strong {
+  color: #111827;
+  font-size: 18px;
+}
+
+.console-approval {
+  margin-top: auto;
 }
 
 .eyebrow {
@@ -1835,6 +1949,16 @@ details pre {
 
 .agent-cli-status-line strong {
   color: #111111;
+}
+
+.mcp-connect-line {
+  align-items: center;
+}
+
+.mcp-connect-line .settings-outline-button {
+  min-height: 36px;
+  padding: 0 14px;
+  white-space: nowrap;
 }
 
 .settings-placeholder {

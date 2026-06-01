@@ -16,12 +16,16 @@ from pathlib import Path
 
 import yaml
 
+from agent_companion.core.tools.foreground_guard import _restore_hidden_window
+import agent_companion.core.tools.targeting as targeting_tool_module
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.agent_cli import scan_agent_clis, test_agent_cli
 from agent_companion.core.audit_store import AUDIT_SCHEMA_VERSION, AuditStore
 from agent_companion.core.background_context import BACKGROUND_CONTEXT_VERSION, BackgroundContextStore
 from agent_companion.core.computer_use import COMPUTER_AUDIT_STATE_KEY, ComputerAction, ComputerObservation, ComputerUseResult, computer_action_audit_event, verify_post_action
+from agent_companion.core.computer_use.mac import MacComputerUseBackend
 from agent_companion.core.config import LlmConfig, ModelEndpoint, ModelRouteConfig, ModelRouter, load_app_config
+from agent_companion.core.joi_mcp_server import TOOL_SCHEMAS, _computer_call_summary, _goal_verification, _preferred_browser_from_state, _semantic_click_summary
 from agent_companion.core.llm_planner import plan_from_llm_payload
 from agent_companion.core.memory import MemoryStore
 from agent_companion.core.memory_candidates import tool_result_memory_candidate
@@ -40,7 +44,7 @@ from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.codex import CodexTool
-from agent_companion.core.tools.desktop_workflow import DesktopWorkflowTool
+from agent_companion.core.tools.desktop_workflow import DesktopWorkflowTool, _open_url_in_browser_actions
 from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
 from agent_companion.core.tools.screen_observe import ScreenObserveTool
 from agent_companion.core.tools.targeting import SemanticTargetTool, click_arguments_from_state
@@ -1226,6 +1230,48 @@ def main() -> int:
     assert_true("登录" in target_result.display_card.summary, "semantic target card should name the friendly target")
     forbidden_target_voice = ["登录", "860", "30", "data/", ".png", "{", "vision.resolve_target", "computer.click", "source", "bbox", "task-", "approval-", ".log"]
     assert_true(not any(fragment in target_result.voice_line.text for fragment in forbidden_target_voice), "semantic target voice leaked technical details")
+
+    guard_calls: list[str] = []
+    original_target_guard = targeting_tool_module.companion_hidden_for_target_observation
+
+    class FakeTargetGuard:
+        def __enter__(self) -> None:
+            guard_calls.append("enter")
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            guard_calls.append("exit")
+
+    def fake_target_guard() -> FakeTargetGuard:
+        return FakeTargetGuard()
+
+    class GuardCheckingComputerBackend(FakeComputerBackend):
+        def observe(self, target: str = "active_window", query: str = "") -> ComputerObservation:
+            guard_calls.append("observe")
+            assert_true(guard_calls == ["enter", "observe"], "semantic target observe should run while Joi is hidden from the target window")
+            return super().observe(target=target, query=query)
+
+    targeting_tool_module.companion_hidden_for_target_observation = fake_target_guard
+    try:
+        guarded_target_result = SemanticTargetTool(
+            workspace,
+            computer_backend=GuardCheckingComputerBackend(
+                workspace,
+                observations=[
+                    _fake_computer_observation(
+                        workspace,
+                        rel="data/agent_companion/vision/target-guarded.png",
+                        width=1000,
+                        height=1000,
+                        capture_rect=CaptureRect(100, 200, 1000, 1000),
+                    )
+                ],
+            ),
+            ocr=FakeOcrExtractor(region_ocr),
+            accessibility=_no_accessibility(),
+        ).run(ToolRequest("vision.resolve_target", {"query": "点登录按钮"}))
+    finally:
+        targeting_tool_module.companion_hidden_for_target_observation = original_target_guard
+    assert_true(guarded_target_result.requires_approval and guard_calls == ["enter", "observe", "exit"], "semantic target should hide Joi before observation and restore it after targeting")
 
     ambiguous_target = SemanticTargetTool(
         workspace,
@@ -2522,6 +2568,18 @@ characters:
     finally:
         shutil.rmtree(image_test_dir, ignore_errors=True)
 
+    restore_calls: list[tuple[str, int, bool | None]] = []
+
+    def mac_style_restore(hwnd: int, settle_seconds: float = 0.08, *, activate: bool = True) -> None:
+        restore_calls.append(("mac", hwnd, activate))
+
+    def windows_style_restore(hwnd: int, settle_seconds: float = 0.08) -> None:
+        restore_calls.append(("windows", hwnd, None))
+
+    _restore_hidden_window(mac_style_restore, 101, activate=False)
+    _restore_hidden_window(windows_style_restore, 202, activate=False)
+    assert_true(restore_calls == [("mac", 101, False), ("windows", 202, None)], "foreground guard should restore macOS and Windows windows with compatible signatures")
+
     fake_backend = FakeComputerBackend(workspace)
     click_tool = ComputerActionTool(workspace, "computer.click", "click", fake_backend, post_action_settle_ms=0)
     click_result = click_tool.run(ToolRequest("computer.click", {"x": 100, "y": 200}))
@@ -2630,6 +2688,61 @@ characters:
     assert_true(type_result.ok, "computer.type_text tool should succeed with fake backend")
     assert_true("hello" not in type_result.display_card.summary, "type summary should not echo raw text")
 
+    class FakeMacTextBackend(MacComputerUseBackend):
+        def __init__(self, initial_clipboard: str | None = "old") -> None:
+            self.clipboard = initial_clipboard
+            self.set_values: list[str] = []
+            self.hotkeys: list[tuple[str, tuple[str, ...]]] = []
+            self.fail_set = False
+            self.force_verify_mismatch = False
+            self.fail_hotkey = False
+
+        def _clipboard_text(self) -> str | None:
+            if self.force_verify_mismatch and self.set_values:
+                return "different"
+            return self.clipboard
+
+        def _set_clipboard_text(self, text: str) -> bool:
+            self.set_values.append(text)
+            if self.fail_set:
+                return False
+            self.clipboard = text
+            return True
+
+        def _cg_hotkey(self, key_char: str, modifiers: list[str]) -> bool:
+            self.hotkeys.append((key_char, tuple(modifiers)))
+            return not self.fail_hotkey
+
+    fake_mac_text = FakeMacTextBackend("previous")
+    fake_mac_result = fake_mac_text._type_text(ComputerAction("type_text", text="敏感输入"))
+    assert_true(fake_mac_result.ok and fake_mac_text.hotkeys == [("v", ("cmd",))], "Mac type_text should paste via Cmd+V after clipboard verification")
+    assert_true(fake_mac_text.set_values == ["敏感输入", "previous"] and fake_mac_text.clipboard == "previous", "Mac type_text should restore previous clipboard text")
+    fake_mac_no_previous = FakeMacTextBackend(None)
+    fake_mac_no_previous_result = fake_mac_no_previous._type_text(ComputerAction("type_text", text="temporary secret"))
+    assert_true(fake_mac_no_previous_result.ok and fake_mac_no_previous.set_values[-1] == "", "Mac type_text should clear clipboard when previous text cannot be read")
+    fake_mac_failed_set = FakeMacTextBackend("previous")
+    fake_mac_failed_set.fail_set = True
+    failed_set_result = fake_mac_failed_set._type_text(ComputerAction("type_text", text="hello"))
+    assert_true(not failed_set_result.ok and not fake_mac_failed_set.hotkeys and fake_mac_failed_set.set_values[-1] == "previous", "Mac type_text should fail visibly and restore clipboard when pbcopy fails")
+    fake_mac_failed_verify = FakeMacTextBackend("previous")
+    fake_mac_failed_verify.force_verify_mismatch = True
+    failed_verify_result = fake_mac_failed_verify._type_text(ComputerAction("type_text", text="hello"))
+    assert_true(not failed_verify_result.ok and not fake_mac_failed_verify.hotkeys and fake_mac_failed_verify.set_values[-1] == "previous", "Mac type_text should fail visibly and restore clipboard when clipboard verification fails")
+    fake_mac_failed_paste = FakeMacTextBackend("previous")
+    fake_mac_failed_paste.fail_hotkey = True
+    failed_paste_result = fake_mac_failed_paste._type_text(ComputerAction("type_text", text="hello"))
+    assert_true(not failed_paste_result.ok and fake_mac_failed_paste.hotkeys == [("v", ("cmd",))] and fake_mac_failed_paste.set_values[-1] == "previous", "Mac type_text should fail visibly and restore clipboard when paste hotkey fails")
+    fake_mac_hotkey = FakeMacTextBackend("previous")
+    hotkey_backend_result = fake_mac_hotkey._hotkey(ComputerAction("hotkey", keys=("cmd", "l")))
+    assert_true(hotkey_backend_result.ok and fake_mac_hotkey.hotkeys == [("l", ("command",))], "Mac hotkey should report success only after dispatch succeeds")
+    fake_mac_hotkey_fail = FakeMacTextBackend("previous")
+    fake_mac_hotkey_fail.fail_hotkey = True
+    hotkey_backend_failed = fake_mac_hotkey_fail._hotkey(ComputerAction("hotkey", keys=("cmd", "l")))
+    assert_true(not hotkey_backend_failed.ok and "hotkey dispatch failed" in hotkey_backend_failed.error, "Mac hotkey should fail visibly when AppleScript dispatch fails")
+    fake_mac_spotlight_fail = FakeMacTextBackend("previous")
+    fake_mac_spotlight_fail.fail_hotkey = True
+    assert_true(not fake_mac_spotlight_fail._try_spotlight_launch("Safari") and fake_mac_spotlight_fail.clipboard == "previous", "Mac Spotlight fallback should restore clipboard when hotkey dispatch fails")
+
     hotkey_tool = ComputerActionTool(workspace, "computer.hotkey", "hotkey", fake_backend, post_action_settle_ms=0)
     hotkey_result = hotkey_tool.run(ToolRequest("computer.hotkey", {"keys": ["Ctrl", "L"]}))
     assert_true(hotkey_result.ok, "computer.hotkey tool should succeed with fake backend")
@@ -2665,6 +2778,101 @@ characters:
     assert_true(any(value == "Microsoft Edge" for value in typed_values), "Bilibili workflow should launch Edge")
     assert_true(any(value.startswith("https://search.bilibili.com/all?keyword=") for value in typed_values), "Bilibili workflow should navigate to site search URL")
     assert_true(not any(value == "https://www.bilibili.com" for value in typed_values), "Bilibili search workflow should not stop on homepage when a query exists")
+    mac_url_actions = _open_url_in_browser_actions("Safari", "https://www.bilibili.com/v/popular/all", mac_backend=True)
+    assert_true([action.action_type for action in mac_url_actions] == ["open_url", "wait"], "macOS URL workflow should use native open_url instead of keyboard URL entry")
+    assert_true(mac_url_actions[0].app_name == "Safari" and mac_url_actions[0].text.endswith("/v/popular/all"), "macOS native URL action should carry browser and target URL")
+    preferred_browser = _preferred_browser_from_state(
+        {
+            "frontmost_app": "Joi",
+            "browser_tabs": [
+                {"browser": "Safari", "title": "起始页", "url": "", "frontmost": False},
+                {"browser": "Microsoft Edge", "title": "Bilibili", "url": "https://www.bilibili.com", "frontmost": False},
+            ],
+        }
+    )
+    assert_true(preferred_browser == "Microsoft Edge", "Joi MCP should reuse an existing browser with real page context before opening Safari")
+    joi_mcp_tool_names = {str(row.get("name") or "") for row in TOOL_SCHEMAS}
+    assert_true("joi_computer_click_target" in joi_mcp_tool_names, "Joi MCP should expose a semantic click tool for current-screen targets")
+    safari_goal = _goal_verification(
+        "帮我打开 Safari",
+        {
+            "browser_state": {
+                "frontmost_app": "Safari",
+                "browser_tabs": [{"browser": "Safari", "title": "起始页", "url": "", "frontmost": True}],
+            }
+        },
+        required_terms=[],
+        any_terms=[],
+    )
+    assert_true(safari_goal["status"] == "met" and "safari" in safari_goal["required_hits"], "goal verification should use frontmost browser/app evidence for Safari")
+    bili_hot_goal = _goal_verification(
+        "帮我打开 b站热门视频",
+        {
+            "browser_state": {
+                "frontmost_app": "Microsoft Edge",
+                "browser_tabs": [
+                    {
+                        "browser": "Microsoft Edge",
+                        "title": "综合热门 - 哔哩哔哩",
+                        "url": "https://www.bilibili.com/v/popular/all",
+                        "frontmost": True,
+                    }
+                ],
+            }
+        },
+        required_terms=[],
+        any_terms=[],
+    )
+    assert_true(bili_hot_goal["status"] == "met" and "bilibili" in bili_hot_goal["required_hits"], "goal verification should use browser URL/title evidence for Bilibili popular pages")
+    vague_goal = _goal_verification("打开了吗", {"browser_state": {"frontmost_app": "Finder"}}, required_terms=[], any_terms=[])
+    assert_true(vague_goal["status"] == "uncertain", "vague follow-up verification should not be marked complete without stable context terms")
+    mcp_after_observation = {
+        "target": "active_window",
+        "screenshot_rel": "data/agent_companion/vision/mcp-after.png",
+        "width": 1280,
+        "height": 720,
+        "title": "Bilibili 热门",
+        "capture_rect": {"screen_x": 10, "screen_y": 20, "width": 640, "height": 360, "scale_x": 2, "scale_y": 2},
+    }
+    mcp_action_result = {
+        "ok": True,
+        "events": [
+            {
+                "type": "task_completed",
+                "display_card": {"status": "success", "summary": "操作后画面有变化。"},
+                "agent_state": {
+                    "post_action_verification": {"status": "changed", "summary": "操作后画面有变化。"},
+                    "computer_use": {"observation": mcp_after_observation},
+                },
+            }
+        ],
+    }
+    mcp_browser_state = {
+        "frontmost_app": "Microsoft Edge",
+        "browser_tabs": [{"browser": "Microsoft Edge", "title": "综合热门 - 哔哩哔哩", "url": "https://www.bilibili.com/v/popular/all", "frontmost": True}],
+        "browser_count": 1,
+    }
+    mcp_call = _computer_call_summary(
+        "computer.click",
+        {"x": 120, "y": 140, "goal": "帮我打开 b站热门视频"},
+        {"x": 120, "y": 140},
+        mcp_action_result,
+        None,
+        mcp_after_observation,
+        mcp_browser_state,
+    )
+    continuation = mcp_call["continuation_context"]
+    assert_true(continuation["next_tool"] == "joi_goal_verify" and continuation["suggested_arguments"]["goal"] == "帮我打开 b站热门视频", "MCP computer call should return structured goal verification continuation")
+    assert_true(continuation["browser_focus"]["frontmost_browser"] == "Microsoft Edge" and continuation["has_after_observation"], "MCP continuation context should expose browser focus and after observation")
+    semantic_mcp_call = _semantic_click_summary(
+        query="热门",
+        target="热门",
+        goal="帮我打开 b站热门视频",
+        result=mcp_action_result,
+        latest_observation=mcp_after_observation,
+        browser_state=mcp_browser_state,
+    )
+    assert_true(semantic_mcp_call["continuation_context"]["requires_goal_verification"], "Semantic click MCP result should require goal verification before completion")
 
     # VisionSummarizer: MockSummarizer
     mock_summarizer = MockSummarizer()
@@ -3527,15 +3735,21 @@ asr:
         assert_true(any(event.type == EventType.TOOL_COMPLETED and event.agent_state.get("agent_cli_run", {}).get("status") == "completed" for event in agent_cli_bridge_completed), "approved Agent CLI permission should resume fake runner")
         _assert_no_codex_voice_leaks(initial_agent_cli_events + agent_cli_bridge_completed, "Agent CLI approval/resume voice leaked raw machine detail")
 
+        os.environ["JOI_FAKE_CODEX_MODE"] = "success"
         takeover_bridge = JsonRpcBridge(workspace)
         takeover_config = takeover_bridge.agent_cli_configure_command({"enabled": True, "mode": "local_cli", "selected": "codex", "model": "默认", "reasoning": "XHigh"})
-        assert_true(takeover_config["agent_cli"]["enabled"] is True, "agent_cli.configure should enable takeover mode")
+        assert_true(takeover_config["agent_cli"]["enabled"] is True and takeover_config["codex_runtime"]["enabled"] is True, "agent_cli.configure should enable Codex runtime mode")
+        takeover_bridge.app.bus.drain()
         takeover_submit = takeover_bridge.submit_user_text("你好，接管这轮 Joi")
-        takeover_approval = _approval_payload_from_dicts(takeover_submit.get("events", []))
-        assert_true(takeover_approval.get("tool") == "agent_cli.run", "enabled takeover mode should route user messages to agent_cli.run")
+        takeover_events = takeover_bridge.app.bus.drain()
+        assert_true(takeover_submit.get("ok") is True, "enabled takeover mode should submit through Codex runtime")
+        assert_true(any(event.type == EventType.RUNTIME_STARTED and event.agent_state.get("runtime_event") == "runtime_started" for event in takeover_events), "enabled takeover mode should route user messages to Codex runtime")
+        assert_true(any(event.type == EventType.RUNTIME_FINAL and event.agent_state.get("runtime_event") == "runtime_final" for event in takeover_events), "Codex runtime takeover should complete fake runner")
+        assert_true(not any(event.agent_state.get("tool") == "agent_cli.run" for event in takeover_events), "Codex runtime takeover should not fall back to agent_cli.run for codex")
         memory_control_submit = takeover_bridge.submit_user_text("你记得什么")
         assert_true(any(event.get("agent_state", {}).get("intent") == "memory_control" for event in memory_control_submit.get("events", [])), "memory controls should stay local even when Agent CLI takeover is enabled")
 
+        os.environ["JOI_FAKE_CODEX_MODE"] = "permission"
         denied_app = AgentCompanionApp(workspace)
         denied_initial = denied_app.handle_user_text("修复这个项目 bug 并跑测试")
         denied_permission = denied_app.resolve_approval(str(_approval_payload(denied_initial)["approval_id"]), approved=True)
@@ -3607,6 +3821,63 @@ asr:
     semantic_refused = app.resolve_approval(str(semantic_approval["approval_id"]), approved=False)
     assert_true(any(event.type == EventType.TASK_FAILED for event in semantic_refused), "semantic target refusal should cancel action")
     assert_true(not semantic_backend.actions, "semantic target refusal must not execute click")
+
+    app = AgentCompanionApp(workspace)
+    semantic_approved_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(
+                workspace,
+                rel="data/agent_companion/vision/semantic-approved-target.ppm",
+                width=1000,
+                height=1000,
+                capture_rect=CaptureRect(100, 200, 1000, 1000),
+            )
+        ],
+    )
+    click_before_rel = "data/agent_companion/vision/semantic-click-before.ppm"
+    click_after_rel = "data/agent_companion/vision/semantic-click-after.ppm"
+    _write_ppm(workspace / click_before_rel, 32, 32, (20, 20, 20))
+    _write_ppm(workspace / click_after_rel, 32, 32, (220, 220, 220))
+    semantic_click_backend = FakeComputerBackend(
+        workspace,
+        observations=[
+            _fake_computer_observation(workspace, rel=click_before_rel, title="Bilibili"),
+            _fake_computer_observation(workspace, rel=click_after_rel, title="Bilibili 热门"),
+        ],
+    )
+    app.tools.register(
+        SemanticTargetTool(
+            workspace,
+            computer_backend=semantic_approved_backend,
+            ocr=FakeOcrExtractor(region_ocr),
+            accessibility=_no_accessibility(),
+        )
+    )
+    app.tools.register(
+        ComputerActionTool(
+            workspace,
+            "computer.click",
+            "click",
+            backend=semantic_click_backend,
+            post_action_settle_ms=0,
+            sleep_fn=lambda seconds: None,
+        )
+    )
+    semantic_approved_events = app.handle_user_text("点登录按钮")
+    semantic_approved_payload = _approval_payload(semantic_approved_events)
+    semantic_completed_events = app.resolve_approval(str(semantic_approved_payload["approval_id"]), approved=True)
+    assert_true(
+        len(semantic_click_backend.actions) == 1 and semantic_click_backend.actions[0].x == 990 and semantic_click_backend.actions[0].y == 242,
+        "approved semantic target should execute the synthesized click coordinates",
+    )
+    semantic_tool_completed = [event for event in semantic_completed_events if event.type == EventType.TOOL_COMPLETED and event.agent_state.get("tool") == "computer.click"]
+    assert_true(semantic_tool_completed, "approved semantic target should emit a completed computer.click event")
+    semantic_computer_state = semantic_tool_completed[-1].agent_state.get("computer_use", {})
+    assert_true(semantic_computer_state.get("before_artifact") == click_before_rel and semantic_computer_state.get("after_artifact") == click_after_rel, "approved semantic click should carry before/after observation artifacts")
+    semantic_verification = semantic_tool_completed[-1].agent_state.get("post_action_verification", {})
+    assert_true(semantic_verification.get("status") == "changed", "approved semantic click should verify the post-action screen changed")
+    assert_true(any(event.type == EventType.TASK_COMPLETED for event in semantic_completed_events), "approved semantic target click should complete the local task flow")
 
     app = AgentCompanionApp(workspace)
     computer_events = app.handle_user_text("点击 100,200")
@@ -4220,8 +4491,16 @@ llm:
     assert_true("joi desktop" in windows_focus_source, "Windows focus helper should recognize the Tauri Joi Desktop title")
     windows_observer_source = (workspace / "agent_companion" / "core" / "vision" / "windows.py").read_text(encoding="utf-8")
     assert_true("window_from_point" in windows_observer_source and "hide_foreground_companion_window" in windows_observer_source, "Screen observe should hide Joi and capture the underlying content window")
+    foreground_guard_source = (workspace / "agent_companion" / "core" / "tools" / "foreground_guard.py").read_text(encoding="utf-8")
+    assert_true("_restore_hidden_window" in foreground_guard_source and "inspect.signature" in foreground_guard_source, "Foreground guard should restore platform windows without assuming macOS-only parameters")
     mac_backend_source = (workspace / "agent_companion" / "core" / "computer_use" / "mac.py").read_text(encoding="utf-8")
-    assert_true("def perform_sequence" in mac_backend_source and "_perform_unwrapped" in mac_backend_source, "Mac Computer Use should keep workflow focus across multi-step desktop actions")
+    assert_true("def perform_sequence" in mac_backend_source and "_perform_unwrapped" in mac_backend_source and "def _open_url" in mac_backend_source and "clipboard verification failed" in mac_backend_source and "hotkey dispatch failed" in mac_backend_source, "Mac Computer Use should keep workflow focus, verify clipboard text entry/hotkey dispatch, and support native URL opening")
+    targeting_source = (workspace / "agent_companion" / "core" / "tools" / "targeting.py").read_text(encoding="utf-8")
+    assert_true("companion_hidden_for_target_observation" in targeting_source and "_run_with_visible_target" in targeting_source, "Semantic target resolution should keep Joi hidden while reading the target window")
+    joi_mcp_source = (workspace / "agent_companion" / "core" / "joi_mcp_server.py").read_text(encoding="utf-8")
+    assert_true("joi_computer_click_target" in joi_mcp_source and "semantic_click_call" in joi_mcp_source and "continuation_context" in joi_mcp_source, "Joi MCP should provide a first-class semantic click bridge and structured continuation context for current-screen actions")
+    codex_runtime_source = (workspace / "agent_companion" / "core" / "codex_runtime.py").read_text(encoding="utf-8")
+    assert_true("joi_computer_click_target" in codex_runtime_source and "不要新开浏览器" in codex_runtime_source and "continuation_context" in codex_runtime_source, "Codex runtime harness should prefer current context semantic clicks and structured continuations before opening a new browser")
     server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
@@ -4328,18 +4607,44 @@ llm:
     assert_true("-Doctor" in start_joi_source and "joi_doctor.py" in start_joi_source and "-Setup" in start_joi_source and "windows_setup_wizard.py" in start_joi_source, "Windows launcher should expose doctor and setup modes")
     assert_true("start_joi.bat -Doctor" in first_run_doc_source and "start_joi.bat -Setup" in first_run_doc_source and "windows_setup_wizard.py" in first_run_doc_source and "windows_handoff_report.py" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source and "package_windows_release.py" in first_run_doc_source, "Windows first-run docs should cover setup wizard, doctor, OCR, audio, handoff, and release packaging setup")
 
+    voice_fake_codex_dir = Path(tempfile.mkdtemp())
+    voice_previous_bin = os.environ.get("AGENT_COMPANION_CODEX_BIN")
+    voice_previous_mode = os.environ.get("JOI_FAKE_CODEX_MODE")
+    try:
+        os.environ["AGENT_COMPANION_CODEX_BIN"] = str(_write_fake_codex_executable(voice_fake_codex_dir))
+        os.environ["JOI_FAKE_CODEX_MODE"] = "success"
+        voice_runtime_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
+        voice_runtime_payload = voice_runtime_bridge.transcribe_and_submit("", "audio/webm")
+        voice_runtime_events = voice_runtime_bridge.app.bus.drain()
+        assert_true(voice_runtime_payload["ok"] and voice_runtime_payload["transcript"] == "你好" and voice_runtime_payload["submitted"], "mock ASR should submit transcript")
+        assert_true(any(event.type == EventType.USER_MESSAGE and event.agent_state.get("runtime_event") == "user_message" for event in voice_runtime_events), "ASR transcript should enter Codex runtime by default")
+        assert_true(any(event.type == EventType.RUNTIME_FINAL for event in voice_runtime_events), "ASR Codex runtime route should complete fake runner")
+    finally:
+        if voice_previous_bin is None:
+            os.environ.pop("AGENT_COMPANION_CODEX_BIN", None)
+        else:
+            os.environ["AGENT_COMPANION_CODEX_BIN"] = voice_previous_bin
+        if voice_previous_mode is None:
+            os.environ.pop("JOI_FAKE_CODEX_MODE", None)
+        else:
+            os.environ["JOI_FAKE_CODEX_MODE"] = voice_previous_mode
+        shutil.rmtree(voice_fake_codex_dir, ignore_errors=True)
+
     voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
+    voice_bridge.runtime_stop_command()
     voice_payload = voice_bridge.transcribe_and_submit("", "audio/webm")
     assert_true(voice_payload["ok"] and voice_payload["transcript"] == "你好", "mock ASR should return transcript")
-    assert_true(any(event["type"] == "user_message" for event in voice_payload["events"]), "ASR transcript should enter user.message route")
+    assert_true(any(event["type"] == "user_message" for event in voice_payload["events"]), "ASR transcript should enter local user.message route when runtime is disabled")
 
     approval_voice_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("点击 100,200"))
+    approval_voice_bridge.runtime_stop_command()
     approval_voice_payload = approval_voice_bridge.transcribe_and_submit("", "audio/webm")
     voice_events = approval_voice_payload["events"]
-    assert_true(any(event["type"] == "approval_required" for event in voice_events), "voice computer command should still require approval")
+    assert_true(any(event["type"] == "approval_required" for event in voice_events), "voice computer command should still require approval when runtime is disabled")
     assert_true(not any(event["type"] == "tool_completed" and event.get("agent_state", {}).get("tool") == "computer.click" for event in voice_events), "voice command should not bypass approval")
 
     serial_bridge = JsonRpcBridge(workspace, asr_provider=MockAsrProvider("你好"))
+    serial_bridge.runtime_stop_command()
     import concurrent.futures
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:

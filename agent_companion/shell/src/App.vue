@@ -3,7 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentCliListResult, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { AgentCliListResult, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, CodexRuntimeStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, JoiMcpStatus, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
@@ -57,6 +57,9 @@ const agentCliRows = ref<AgentCliProfile[]>([])
 const agentCliLoading = ref(false)
 const agentCliTestStatus = ref<Record<string, string>>({})
 const agentCliRuntime = ref<AgentCliRuntimeStatus | null>(null)
+const codexRuntime = ref<CodexRuntimeStatus | null>(null)
+const joiMcpStatus = ref<JoiMcpStatus | null>(null)
+const joiMcpInstalling = ref(false)
 const agentCliSyncing = ref(false)
 const agentCliCoreUnsupported = ref(false)
 let agentCliSyncTimer: number | null = null
@@ -294,21 +297,27 @@ const client = new CoreClient({
   },
   onReady: (payload) => {
     ready.value = payload
+    if (isTransientRuntimeNotice(errorText.value)) errorText.value = ''
     memoryStatus.value = payload.memory || memoryStatus.value
     backgroundStatus.value = payload.background || backgroundStatus.value
     skillManifest.value = payload.skills || skillManifest.value
+    codexRuntime.value = payload.codex_runtime || codexRuntime.value
+    joiMcpStatus.value = payload.joi_mcp || joiMcpStatus.value
     syncAgentCliFromReady(payload)
     syncRuntimeDraft(payload)
   },
   onVoiceAudio: (payload) => void playVoiceAudio(payload),
-  onError: (message) => (errorText.value = message),
+  onError: (message) => {
+    if (isTransientRuntimeNotice(message)) return
+    errorText.value = message
+  },
 })
 
 const connected = computed(() => status.value === 'online')
 const connectionLabel = computed(() => {
-  if (status.value === 'online') return 'Core online'
-  if (status.value === 'connecting') return '连接中'
-  return 'Core offline'
+  if (status.value === 'online') return 'Joi 就绪'
+  if (status.value === 'connecting') return 'Joi 启动中'
+  return 'Joi 离线'
 })
 
 const userTextByTask = computed(() => {
@@ -330,7 +339,7 @@ const pendingApproval = computed(() => {
 })
 
 const chatRows = computed(() =>
-  events.value.filter((event) => event.type === 'user_message' || isCompanionChat(event)),
+  events.value.filter((event) => event.type === 'user_message' || event.type === 'runtime_final' || isCompanionChat(event)),
 )
 
 const taskRows = computed(() => {
@@ -354,6 +363,28 @@ const taskRows = computed(() => {
 })
 
 const activeTask = computed(() => taskRows.value[0])
+
+const terminalRows = computed(() => {
+  const finalTextByTask = new Map<string, string>()
+  for (const event of events.value) {
+    if (event.type === 'runtime_final') finalTextByTask.set(event.task_id, terminalText(event))
+  }
+  return events.value
+    .filter((event) => {
+      if (event.type === 'plan_created' || event.type === 'audit_event') return developerMode.value
+      if (event.type === 'tool_started' && toolName(event) === 'codex.run') return false
+      if (event.type === 'runtime_delta' && finalTextByTask.get(event.task_id) === terminalText(event)) return false
+      return Boolean(terminalText(event))
+    })
+    .slice(-80)
+    .map((event) => ({
+      event,
+      role: terminalRole(event),
+      label: terminalLabel(event),
+      text: terminalText(event),
+      detail: terminalDetail(event),
+    }))
+})
 
 const latestWatchLoopStatus = computed<WatchLoopStatus | undefined>(() => {
   for (let index = events.value.length - 1; index >= 0; index -= 1) {
@@ -471,7 +502,10 @@ watch(activeCabin, (cabin) => {
 })
 
 watch(activeSettingsTab, (tab) => {
-  if (tab === 'execution') void refreshAgentClis()
+  if (tab === 'execution') {
+    void refreshAgentClis()
+    void refreshJoiMcpStatus()
+  }
   if (tab === 'memory') {
     void refreshMemoryStatus()
     void browseMemoryVault()
@@ -487,7 +521,7 @@ const latestSpeech = computed(() => {
   const latest = [...events.value]
     .reverse()
     .find((event) => event.voice_line?.text && isSpeakableEvent(event))
-  return latest?.voice_line.text || '我在。要看、要玩、要写代码，都可以直接告诉我。'
+  return latest?.voice_line.text || '我在。要看、要玩、要做点什么，都可以直接告诉我。'
 })
 
 const miniBubbleHasActions = computed(() => Boolean(isCompactMode.value && pendingApproval.value && approvalIdFor(pendingApproval.value)))
@@ -608,15 +642,15 @@ const characterImageSrc = computed(() => {
 const currentMode = computed(() => {
   if (pendingApproval.value) return '等待确认'
   if (watchLoopActive.value) return '陪看'
+  if (codexRuntime.value?.status === 'running') return '运行中'
   const latest = [...events.value].reverse().find((event) => intentName(event) || toolName(event))
   const intent = latest ? intentName(latest) : ''
   const tool = latest ? toolName(latest) : ''
   if (intent === 'game_assist' || tool === 'game.ok_ww.run') return '游戏'
-  if (intent === 'coding' || tool === 'codex.run') return '写码'
   if (intent === 'computer_use' || tool.startsWith('computer.')) return '电脑操作'
   if (intent === 'semantic_target' || tool === 'vision.resolve_target') return '目标定位'
   if (intent === 'watch_together' || intent === 'watch_followup' || intent === 'browser' || tool === 'watch.recall' || tool.startsWith('browser.')) return '陪看'
-  return '闲聊'
+  return '平静'
 })
 const currentSemanticSelectionId = computed(() => {
   const inactiveIds = new Set<string>()
@@ -668,6 +702,37 @@ function intentName(event: AgentEvent) {
 function skillName(event: AgentEvent) {
   const skillId = event.agent_state?.skill_id
   return typeof skillId === 'string' ? skillId : ''
+}
+
+function terminalRole(event: AgentEvent) {
+  if (event.type === 'user_message') return 'human'
+  if (event.type === 'approval_required') return 'approval'
+  if (event.type === 'runtime_error' || event.type === 'tool_failed' || event.type === 'task_failed') return 'error'
+  if (event.type === 'skill_completed' || event.type === 'tool_completed') return 'skill'
+  return 'joi'
+}
+
+function terminalLabel(event: AgentEvent) {
+  if (event.type === 'user_message') return '你'
+  if (event.type === 'approval_required') return '需要确认'
+  if (terminalRole(event) === 'skill') return 'Joi'
+  return 'Joi'
+}
+
+function terminalText(event: AgentEvent) {
+  const summary = hideRuntimeBrand(event.display_card?.summary || '')
+  if (event.type === 'runtime_delta' && summary === 'Joi 状态已更新。') return ''
+  return summary || hideRuntimeBrand(event.voice_line?.text || '')
+}
+
+function terminalDetail(event: AgentEvent) {
+  const body = hideRuntimeBrand(event.display_card?.body || '')
+  if (!body || body === terminalText(event)) return ''
+  return body
+}
+
+function hideRuntimeBrand(value: string) {
+  return String(value || '').replace(/\bCodex\b/gi, 'Joi')
 }
 
 function isCompanionChat(event: AgentEvent) {
@@ -1335,6 +1400,11 @@ function errorLabel(value: string) {
   return labels[value] || value
 }
 
+function isTransientRuntimeNotice(value: string) {
+  const text = String(value || '').trim().toLowerCase()
+  return text === 'joi runtime is starting' || text === 'core bridge is offline' || text === 'core bridge connection failed'
+}
+
 function expressionEmotionClass(value: string) {
   const normalized = value.trim().toLowerCase().replace(/\s+/g, '_')
   return ['happy', 'thinking', 'alert', 'worried', 'serious', 'neutral'].includes(normalized) ? normalized : 'neutral'
@@ -1890,17 +1960,18 @@ async function syncAgentCliTakeover() {
       selected: selectedAgentCliId.value,
       model: selectedAgentCliModel.value,
       reasoning: selectedAgentCliReasoning.value,
-    })) as { ok?: boolean; agent_cli?: AgentCliRuntimeStatus; error?: string }
+    })) as { ok?: boolean; agent_cli?: AgentCliRuntimeStatus; codex_runtime?: CodexRuntimeStatus; error?: string }
     agentCliCoreUnsupported.value = false
     if (result.agent_cli) agentCliRuntime.value = result.agent_cli
-    if (result.ok === false) errorText.value = result.error || 'Agent CLI 接管设置没有保存'
+    if (result.codex_runtime) codexRuntime.value = result.codex_runtime
+    if (result.ok === false) errorText.value = result.error || '运行模式设置没有保存'
   } catch (error) {
     if (isAgentCliRpcUnsupported(error)) {
       agentCliCoreUnsupported.value = true
       agentCliRuntime.value = { enabled: false, mode: 'byok', selected: selectedAgentCliId.value }
-      errorText.value = '当前 Core 还没有加载 Agent CLI 接管接口，请重启 Joi Core 或桌面应用。'
+      errorText.value = '当前 Joi 运行时接口还没有加载，请重启桌面应用。'
     } else {
-      errorText.value = error instanceof Error ? error.message : 'Agent CLI 接管设置失败'
+      errorText.value = error instanceof Error ? error.message : '运行模式设置失败'
     }
   } finally {
     agentCliSyncing.value = false
@@ -1908,11 +1979,13 @@ async function syncAgentCliTakeover() {
 }
 
 function agentCliTakeoverText(row?: AgentCliProfile) {
-  if (!row) return '未选择接管 CLI'
-  if (agentCliCoreUnsupported.value) return 'Core 需要重启后才能接管'
-  if (!row.supports_takeover) return '已发现，待接入执行适配器'
+  if (!row) return '未选择运行时'
+  if (agentCliCoreUnsupported.value) return 'Joi 需要重启后才能接管'
+  if (!row.supports_takeover) return '实验运行时，能力受限'
   if (executionMode.value !== 'local_cli') return 'BYOK 模式中'
-  return agentCliRuntime.value?.enabled ? '正在接管整个 Joi' : '可接管整个 Joi'
+  if (row.id !== 'codex') return '实验运行时'
+  if (joiMcpStatus.value?.connected) return 'Joi 能力已连接'
+  return codexRuntime.value?.enabled ? 'Joi 运行时已就绪' : '可作为 Joi 运行时'
 }
 
 function settingsTitle(tab: SettingsTabId) {
@@ -1960,9 +2033,9 @@ async function refreshAgentClis() {
     if (isAgentCliRpcUnsupported(error)) {
       agentCliCoreUnsupported.value = true
       agentCliRows.value = fallbackAgentClis()
-      errorText.value = '当前 Core 还没有加载 Agent CLI 接管接口，请重启 Joi Core 或桌面应用。'
+      errorText.value = '当前 Joi 运行时接口还没有加载，请重启桌面应用。'
     } else {
-      errorText.value = error instanceof Error ? error.message : 'Agent CLI 扫描失败'
+      errorText.value = error instanceof Error ? error.message : '运行时扫描失败'
     }
   } finally {
     agentCliLoading.value = false
@@ -1989,7 +2062,7 @@ async function testAgentCli(row: AgentCliProfile) {
     agentCliTestStatus.value = { ...agentCliTestStatus.value, [row.id]: '测试失败' }
     if (isAgentCliRpcUnsupported(error)) {
       agentCliCoreUnsupported.value = true
-      errorText.value = '当前 Core 还没有加载 Agent CLI 接管接口，请重启 Joi Core 或桌面应用。'
+      errorText.value = '当前 Joi 运行时接口还没有加载，请重启桌面应用。'
     } else {
       errorText.value = error instanceof Error ? error.message : 'Agent CLI 测试失败'
     }
@@ -2001,6 +2074,31 @@ async function testAgentCli(row: AgentCliProfile) {
 function isAgentCliRpcUnsupported(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || '')
   return message.includes('unknown method: agent_cli.')
+}
+
+async function refreshJoiMcpStatus() {
+  if (!connected.value) return
+  try {
+    const result = (await client.joiMcpStatus()) as { ok?: boolean; joi_mcp?: JoiMcpStatus; error?: string }
+    if (result.joi_mcp) joiMcpStatus.value = result.joi_mcp
+    if (!result.ok) errorText.value = result.error || 'Joi 能力连接状态读取失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : 'Joi 能力连接状态读取失败'
+  }
+}
+
+async function installJoiMcp() {
+  if (!connected.value || joiMcpInstalling.value) return
+  joiMcpInstalling.value = true
+  try {
+    const result = (await client.joiMcpInstallCodex()) as { ok?: boolean; joi_mcp?: JoiMcpStatus; error?: string }
+    if (result.joi_mcp) joiMcpStatus.value = result.joi_mcp
+    if (!result.ok) errorText.value = result.error || 'Joi 能力连接失败'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : 'Joi 能力连接失败'
+  } finally {
+    joiMcpInstalling.value = false
+  }
 }
 
 function nativeSkills(): NativeSkill[] {
@@ -2450,6 +2548,7 @@ onBeforeUnmount(() => {
       'compact-active': isCompactMode,
       'mini-dashboard-active': isCompactMode && miniDashboardActive,
       'mini-speech-active': isCompactMode && miniSpeechActive,
+      'settings-active': activeCabin === 'inspector',
     }"
     @dragstart.capture="preventNativeAssetDrag"
     @drop.capture.prevent
@@ -2478,7 +2577,7 @@ onBeforeUnmount(() => {
     </header>
 
     <section class="workspace" :class="`cabin-${activeCabin}`">
-      <div class="topbar">
+      <div class="topbar" v-if="activeCabin !== 'inspector'">
         <div>
           <span class="brand">Joi</span>
           <span class="mode">{{ currentMode }}</span>
@@ -2494,7 +2593,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <p class="error" v-if="errorText">{{ errorText }}</p>
+      <p class="error" v-if="errorText && activeCabin !== 'inspector'">{{ errorText }}</p>
 
       <section class="watch-session-strip" :class="{ active: watchLoopActive }" v-if="activeCabin === 'workspace' && (watchLoopActive || watchLoopStatus.iterations)">
         <div class="watch-session-main">
@@ -2547,15 +2646,38 @@ onBeforeUnmount(() => {
         </button>
       </section>
 
-      <section class="hero-panel" v-if="activeCabin === 'workspace' && !taskRows.length">
-        <p class="eyebrow">Joi Agent</p>
-        <h1>把任务直接交给角色。</h1>
-        <p>当前优先打通写码、陪看和游戏三条闭环。你说目标，Joi 会用任务卡展示执行结果，语音只播报自然短句。</p>
+      <section class="runtime-console" v-if="activeCabin === 'workspace'">
+        <div class="section-title">
+          <h2>Joi</h2>
+          <span>{{ terminalRows.length ? `${terminalRows.length} 条` : '待命' }}</span>
+        </div>
+        <div class="console-scroll" v-if="terminalRows.length">
+          <div
+            v-for="row in terminalRows"
+            :key="`${row.event.task_id}-${row.event.created_at}-${row.event.type}`"
+            class="console-line"
+            :class="row.role"
+          >
+            <span>{{ row.label }}</span>
+            <div>
+              <p>{{ row.text }}</p>
+              <pre v-if="row.detail">{{ row.detail }}</pre>
+            </div>
+          </div>
+        </div>
+        <div class="console-empty" v-else>
+          <strong>Joi 已经准备好。</strong>
+          <span>直接说你想做什么，也可以打开实时陪看。</span>
+        </div>
+        <div class="approval-actions console-approval" v-if="pendingApproval && approvalIdFor(pendingApproval)">
+          <button type="button" @click="resolveApproval(true)">允许执行</button>
+          <button type="button" class="secondary" @click="resolveApproval(false)">停在这里</button>
+        </div>
       </section>
 
-      <section class="task-section" v-if="activeCabin === 'workspace' && taskRows.length">
+      <section class="task-section" v-if="activeCabin === 'workspace' && developerMode && taskRows.length">
         <div class="section-title">
-          <h2>任务</h2>
+          <h2>开发审计</h2>
           <span>{{ taskRows.length }} 个</span>
         </div>
         <article
@@ -2918,7 +3040,7 @@ onBeforeUnmount(() => {
                 <div class="settings-section-head">
                   <div>
                     <strong>你的 CLI（{{ displayedAgentClis.length }}）</strong>
-                    <span>选择用来接管 Joi 请求的本机 agent CLI。</span>
+                  <span>选择接管 Joi 请求的本机运行时。</span>
                   </div>
                   <button type="button" class="settings-outline-button" :disabled="agentCliLoading || !connected" @click="refreshAgentClis">
                     {{ agentCliLoading ? '扫描中' : '重新扫描' }}
@@ -2927,8 +3049,8 @@ onBeforeUnmount(() => {
 
                 <div class="agent-cli-list">
                   <div v-if="agentCliCoreUnsupported" class="agent-cli-warning">
-                    <strong>Core 版本未刷新</strong>
-                    <span>请重启 Joi Core 或桌面应用后再扫描 CLI。</span>
+                    <strong>Joi 运行时未刷新</strong>
+                    <span>请重启桌面应用后再扫描 CLI。</span>
                   </div>
                   <article
                     v-for="row in displayedAgentClis"
@@ -2975,6 +3097,12 @@ onBeforeUnmount(() => {
                   <div class="agent-cli-status-line">
                     <span>{{ agentCliTakeoverText(selectedAgentCli) }}</span>
                     <strong>{{ agentCliSyncing ? '同步中' : selectedAgentCli ? agentCliStatus(selectedAgentCli) : '未选择' }}</strong>
+                  </div>
+                  <div class="agent-cli-status-line mcp-connect-line" v-if="selectedAgentCliId === 'codex'">
+                    <span>{{ joiMcpStatus?.connected ? 'Joi 能力已连接到当前运行时' : '连接 Joi 的陪看、记忆和技能能力' }}</span>
+                    <button type="button" class="settings-outline-button" :disabled="!connected || joiMcpInstalling" @click="installJoiMcp">
+                      {{ joiMcpInstalling ? '连接中' : joiMcpStatus?.connected ? '重新连接' : '一键连接' }}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -3452,7 +3580,7 @@ onBeforeUnmount(() => {
       </section>
     </section>
 
-    <aside class="stage">
+    <aside class="stage" v-if="activeCabin !== 'inspector'">
       <div class="stage-top">
         <span>Joi Companion</span>
         <span class="stage-emotion-pill">情绪 {{ activeEmotionStatus.label }} · 立绘 {{ activeEmotionStatus.sprite }}</span>
@@ -3550,7 +3678,7 @@ onBeforeUnmount(() => {
         <div class="mini-status-row">
           <div class="mini-task-pulse">
             <div class="mini-pulse-dot" :style="{ backgroundColor: connected ? 'var(--color-primary)' : 'var(--color-error)' }"></div>
-            <span>{{ connected ? 'Joi online' : 'Core offline' }}</span>
+            <span>{{ connected ? 'Joi online' : 'Joi offline' }}</span>
           </div>
           <button type="button" class="mini-restore-btn" title="恢复主界面" @click="toggleCompactMode">还原</button>
         </div>
@@ -3599,7 +3727,7 @@ onBeforeUnmount(() => {
             </svg>
             <span>记忆舱</span>
           </button>
-          <button type="button" class="dock-btn" :class="{ active: activeCabin === 'inspector' }" @click="activeCabin = 'inspector'">
+          <button type="button" class="dock-btn" @click="activeCabin = 'inspector'">
             <svg viewBox="0 0 24 24">
               <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
             </svg>

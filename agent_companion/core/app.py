@@ -189,10 +189,36 @@ class AgentCompanionApp:
         self._run_plan(plan, 0)
         return self.bus.drain()
 
+    def handle_skill_run(self, tool: str, arguments: dict[str, Any] | None = None, *, user_text: str = "Joi skill") -> list[AgentEvent]:
+        tool_name = str(tool or "").strip()
+        if not _is_mcp_exposed_joi_skill(tool_name):
+            task_id = f"skill-{uuid.uuid4().hex[:10]}"
+            self._emit(
+                AgentEvent(
+                    EventType.TOOL_FAILED,
+                    task_id,
+                    DisplayCard("Joi 技能", "这个能力没有开放给当前运行时。", status="failed"),
+                    safe_voice_line("这个能力没有开放给当前运行时。", sprite="4"),
+                    {"tool": tool_name or "unknown", "blocked": True, "block_reason": "not_exposed_to_codex_runtime"},
+                ),
+                user_text,
+            )
+            return self.bus.drain()
+        plan = AgentPlan(
+            task_id=f"skill-{uuid.uuid4().hex[:10]}",
+            user_text=user_text,
+            intent="joi_skill",
+            steps=[ToolRequest(tool_name, arguments if isinstance(arguments, dict) else {}, "由 Joi runtime 调用原生技能。")],
+        )
+        self._run_plan(plan, 0)
+        return self.bus.drain()
+
     def should_handle_locally_before_agent_cli(self, text: str) -> bool:
         if _parse_memory_command(text):
             return True
-        return _parse_candidate_selection(text) is not None and self.semantic_selection.has_pending()
+        if _parse_candidate_selection(text) is not None and self.semantic_selection.has_pending():
+            return True
+        return False
 
     def select_semantic_target(self, selection_id: str, rank: int) -> list[AgentEvent]:
         selection_id = (selection_id or "").strip()
@@ -548,7 +574,7 @@ class AgentCompanionApp:
             if not result.ok:
                 break
         if final_ok:
-            if self._should_emit_task_completion(plan.intent):
+            if self._should_emit_task_completion(plan.intent) or self._approved_computer_step_completed(approved_step):
                 self._emit(
                     AgentEvent(
                         EventType.TASK_COMPLETED,
@@ -623,6 +649,9 @@ class AgentCompanionApp:
             "vision.select_target": "候选选择",
             "watch.recall": "陪看追问",
             "computer.click": "电脑点击",
+            "computer.double_click": "电脑双击",
+            "computer.drag": "电脑拖拽",
+            "computer.open_app": "打开应用",
             "computer.type_text": "电脑输入",
             "computer.scroll": "电脑滚动",
             "computer.hotkey": "快捷键",
@@ -654,6 +683,11 @@ class AgentCompanionApp:
     @staticmethod
     def _should_emit_task_completion(intent: str) -> bool:
         return intent not in {"companion_chat", "watch_together", "watch_followup", "semantic_target", "semantic_target_selection"}
+
+    @staticmethod
+    def _approved_computer_step_completed(pending: PendingStep | None) -> bool:
+        request = pending.request_override if pending is not None else None
+        return request is not None and request.name.startswith("computer.")
 
     @staticmethod
     def _is_ephemeral_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
@@ -811,6 +845,9 @@ class AgentCompanionApp:
         self.tools.register(SemanticTargetSelectionTool(self.semantic_selection))
         for name, action_type in (
             ("computer.click", "click"),
+            ("computer.double_click", "double_click"),
+            ("computer.drag", "drag"),
+            ("computer.open_app", "open_app"),
             ("computer.type_text", "type_text"),
             ("computer.scroll", "scroll"),
             ("computer.hotkey", "hotkey"),
@@ -1250,3 +1287,30 @@ def _safe_rank(value: object) -> int:
     except (TypeError, ValueError):
         return 0
     return rank if rank > 0 else 0
+
+
+def _is_mcp_exposed_joi_skill(tool_name: str) -> bool:
+    if not tool_name:
+        return False
+    if tool_name in {"codex.run", "agent_cli.run", "companion.chat"}:
+        return False
+    return tool_name in {
+        "observe.screen",
+        "watch.recall",
+        "browser.search",
+        "browser.observe",
+        "vision.resolve_target",
+        "vision.select_target",
+        "computer.click",
+        "computer.double_click",
+        "computer.drag",
+        "computer.open_app",
+        "computer.type_text",
+        "computer.scroll",
+        "computer.hotkey",
+        "computer.workflow",
+        "game.ok_ww.run",
+        "runtime.update_config",
+        "files.read",
+        "mcp.list_tools",
+    }

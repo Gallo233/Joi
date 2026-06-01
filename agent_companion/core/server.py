@@ -5,14 +5,17 @@ import asyncio
 import base64
 import json
 import mimetypes
+import shutil
+import subprocess
 import sys
 import threading
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from agent_companion.core.agent_cli import scan_agent_clis, test_agent_cli
+from agent_companion.core.agent_cli import resolve_agent_cli_executable, scan_agent_clis, test_agent_cli
 from agent_companion.core.app import AgentCompanionApp
+from agent_companion.core.codex_runtime import CodexRuntimeSession
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update
 from agent_companion.core.schemas import AgentEvent, DisplayCard
 from agent_companion.core.schemas import EventType
@@ -27,6 +30,9 @@ from agent_companion.core.watch_loop import WatchLoopController, WatchLoopOption
 
 SPEAKABLE_EVENTS = {
     EventType.APPROVAL_REQUIRED,
+    EventType.RUNTIME_STARTED,
+    EventType.RUNTIME_FINAL,
+    EventType.RUNTIME_ERROR,
     EventType.TOOL_STARTED,
     EventType.TOOL_COMPLETED,
     EventType.TOOL_FAILED,
@@ -49,6 +55,7 @@ class JsonRpcBridge:
         self.host = host
         self.port = port
         self.app = AgentCompanionApp(self.workspace)
+        self.codex_runtime = CodexRuntimeSession(self.workspace, self.app, self.app.bus.emit)
         self.tts = TtsBridge(self.workspace)
         self.watch_commentary = WatchCommentaryPlanner(self.workspace, self.app.character)
         self.watch_loop = WatchLoopController(self._watch_loop_tick, self.app.bus.emit)
@@ -117,6 +124,43 @@ class JsonRpcBridge:
                     return
                 asyncio.create_task(asyncio.to_thread(self.submit_user_text, text))
                 await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
+                return
+            if method == "runtime.status":
+                await websocket.send(self._result(request_id, self.runtime_status_command()))
+                return
+            if method == "runtime.configure":
+                result = await asyncio.to_thread(self.runtime_configure_command, params)
+                await websocket.send(self._result(request_id, result))
+                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
+                return
+            if method == "runtime.start":
+                result = await asyncio.to_thread(self.runtime_start_command)
+                await websocket.send(self._result(request_id, result))
+                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
+                return
+            if method == "runtime.stop":
+                result = await asyncio.to_thread(self.runtime_stop_command)
+                await websocket.send(self._result(request_id, result))
+                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
+                return
+            if method == "runtime.approval.resolve":
+                approval_id = str(params.get("approval_id") or "")
+                approved = bool(params.get("approved", False))
+                result = await asyncio.to_thread(self.runtime_approval_resolve_command, approval_id, approved)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "joi_mcp.status":
+                result = await asyncio.to_thread(self.joi_mcp_status_command)
+                await websocket.send(self._result(request_id, result))
+                return
+            if method == "joi_mcp.install_codex":
+                result = await asyncio.to_thread(self.joi_mcp_install_codex_command)
+                await websocket.send(self._result(request_id, result))
+                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
+                return
+            if method == "skill.run":
+                result = await asyncio.to_thread(self.skill_run_command, params)
+                await websocket.send(self._result(request_id, result))
                 return
             if method == "watch.loop.start":
                 result = await asyncio.to_thread(self.watch_loop_start_command, params)
@@ -320,6 +364,8 @@ class JsonRpcBridge:
     def submit_user_text(self, text: str) -> dict[str, Any]:
         if _looks_like_watch_loop_stop(text):
             return self.watch_loop_stop_command()
+        if self.codex_runtime.should_handle(text) and not self.app.should_handle_locally_before_agent_cli(text):
+            return self.codex_runtime.run_user_text(text)
         if self._agent_cli_takeover_enabled(text):
             status = self.agent_cli_takeover
             sequence, events = self._run_serial(
@@ -339,13 +385,105 @@ class JsonRpcBridge:
             payload["watch_loop"] = self.watch_loop.start(self._watch_loop_options_from_params({"query": text})).to_agent_state()
         return payload
 
+    def runtime_status_command(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "runtime": self.codex_runtime.status_payload(),
+            "asr": self._asr_payload(),
+            "tts": self.tts.status_payload(),
+            "joi_mcp": self.joi_mcp_status_command().get("joi_mcp", {}),
+        }
+
+    def runtime_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        runtime = self.codex_runtime.configure(params if isinstance(params, dict) else {})
+        return {"ok": True, "runtime": runtime}
+
+    def runtime_start_command(self) -> dict[str, Any]:
+        return {"ok": True, "runtime": self.codex_runtime.start()}
+
+    def runtime_stop_command(self) -> dict[str, Any]:
+        return {"ok": True, "runtime": self.codex_runtime.stop()}
+
+    def runtime_approval_resolve_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
+        if not approval_id:
+            return {"ok": False, "error": "missing_approval_id"}
+        result = self.codex_runtime.resolve_approval(approval_id, approved)
+        if result is None:
+            return {"ok": False, "error": "unknown_runtime_approval"}
+        return {"ok": True, "submitted": True, **result}
+
+    def joi_mcp_status_command(self) -> dict[str, Any]:
+        codex = _codex_executable()
+        if not codex:
+            self.codex_runtime.mark_mcp_connected(False)
+            return {"ok": True, "joi_mcp": {"connected": False, "available": False, "status": "codex_not_found"}}
+        try:
+            probe = subprocess.run([codex, "mcp", "list"], cwd=str(self.workspace), capture_output=True, text=True, timeout=8)
+        except Exception:
+            self.codex_runtime.mark_mcp_connected(False)
+            return {"ok": True, "joi_mcp": {"connected": False, "available": True, "status": "probe_failed"}}
+        output = f"{probe.stdout}\n{probe.stderr}"
+        connected = probe.returncode == 0 and any(line.strip().startswith("joi") or line.strip().split(" ", 1)[0] == "joi" for line in output.splitlines())
+        self.codex_runtime.mark_mcp_connected(connected)
+        return {
+            "ok": True,
+            "joi_mcp": {
+                "connected": connected,
+                "available": True,
+                "status": "connected" if connected else "not_connected",
+            },
+        }
+
+    def joi_mcp_install_codex_command(self) -> dict[str, Any]:
+        codex = _codex_executable()
+        if not codex:
+            return {"ok": False, "error": "codex_not_found", "joi_mcp": {"connected": False, "available": False}}
+        subprocess.run([codex, "mcp", "remove", "joi"], cwd=str(self.workspace), capture_output=True, text=True, timeout=8)
+        command = [
+            codex,
+            "mcp",
+            "add",
+            "--env",
+            f"PYTHONPATH={self.workspace}",
+            "joi",
+            "--",
+            sys.executable,
+            "-m",
+            "agent_companion.core.joi_mcp_server",
+            "--workspace",
+            str(self.workspace),
+        ]
+        try:
+            result = subprocess.run(command, cwd=str(self.workspace), capture_output=True, text=True, timeout=20)
+        except Exception:
+            return {"ok": False, "error": "install_failed", "joi_mcp": {"connected": False, "available": True}}
+        ok = result.returncode == 0
+        self.codex_runtime.mark_mcp_connected(ok)
+        return {
+            "ok": ok,
+            "error": "" if ok else "codex_mcp_add_failed",
+            "joi_mcp": {"connected": ok, "available": True, "status": "connected" if ok else "install_failed"},
+        }
+
+    def skill_run_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        tool = str(params.get("tool") or "")
+        arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        sequence, events = self._run_serial(
+            "skill.run",
+            lambda: self.app.handle_skill_run(tool, arguments, user_text=f"Joi skill: {tool}"),
+        )
+        return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+
     def watch_loop_start_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self.watch_commentary.reset()
         snapshot = self.watch_loop.start(self._watch_loop_options_from_params(params if isinstance(params, dict) else {}))
+        self._emit_watch_loop_state("实时陪看已启动。", snapshot.to_agent_state(), "success")
         return {"ok": True, "watch_loop": snapshot.to_agent_state()}
 
     def watch_loop_stop_command(self) -> dict[str, Any]:
         snapshot = self.watch_loop.stop()
+        self._emit_watch_loop_state("实时陪看已停止。", snapshot.to_agent_state(), "info")
         return {"ok": True, "watch_loop": snapshot.to_agent_state()}
 
     def watch_loop_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -366,6 +504,7 @@ class JsonRpcBridge:
         snapshot = self.watch_loop.configure(self._watch_loop_options_from_params(merged))
         if not snapshot.proactive_enabled:
             self.watch_commentary.reset()
+        self._emit_watch_loop_state("实时陪看设置已更新。", snapshot.to_agent_state(), "info")
         return {"ok": True, "watch_loop": snapshot.to_agent_state()}
 
     def watch_loop_refresh_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -374,6 +513,7 @@ class JsonRpcBridge:
             return {"ok": False, "error": "watch_loop_inactive", "watch_loop": current.to_agent_state()}
         force_visual = _safe_bool(params.get("force_visual_summary"), False) if isinstance(params, dict) else False
         snapshot = self.watch_loop.refresh(force_visual_summary=force_visual)
+        self._emit_watch_loop_state("画面理解已更新。", snapshot.to_agent_state(), "success")
         return {"ok": True, "watch_loop": snapshot.to_agent_state()}
 
     def watch_loop_status_command(self) -> dict[str, Any]:
@@ -441,7 +581,8 @@ class JsonRpcBridge:
             "model": _safe_agent_cli_label(params.get("model") or current.get("model") or "默认"),
             "reasoning": _safe_agent_cli_label(params.get("reasoning") or current.get("reasoning") or "默认"),
         }
-        return {"ok": True, "agent_cli": self._agent_cli_status_payload()}
+        runtime = self.codex_runtime.configure(self.agent_cli_takeover)
+        return {"ok": True, "agent_cli": self._agent_cli_status_payload(), "codex_runtime": runtime}
 
     def agent_cli_status_command(self) -> dict[str, Any]:
         return {"ok": True, "agent_cli": self._agent_cli_status_payload()}
@@ -489,6 +630,8 @@ class JsonRpcBridge:
         return {**result, "memory": self.app.memory.status()}
 
     def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
+        if self.codex_runtime.has_pending_approval(approval_id):
+            return self.runtime_approval_resolve_command(approval_id, approved)
         sequence, events = self._run_serial("approval.resolve", lambda: self.app.resolve_approval(approval_id, approved))
         payload: dict[str, Any] = {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
         if any(_event_applied_runtime_config(event) for event in events):
@@ -642,6 +785,33 @@ class JsonRpcBridge:
             )
         )
 
+    def _emit_watch_loop_state(self, summary: str, watch_loop: dict[str, Any], status: str = "info") -> None:
+        self.app.bus.emit(
+            AgentEvent(
+                EventType.SKILL_COMPLETED,
+                f"watch-{uuid.uuid4().hex[:8]}",
+                DisplayCard("Joi", summary, status=status),
+                safe_voice_line("", fallback=""),
+                {
+                    "tool": "joi.watch",
+                    "runtime_event": "skill_completed",
+                    "skill_id": "joi.watch",
+                    "watch_loop": watch_loop,
+                },
+            )
+        )
+
+    def _asr_payload(self) -> dict[str, Any]:
+        return {
+            "enabled": self.asr_state.enabled,
+            "configured": self.asr_state.configured,
+            "provider": self.asr_state.provider,
+            "max_seconds": self.asr_state.max_seconds,
+            "max_bytes": self.asr_state.max_bytes,
+            "timeout_seconds": self.asr_state.timeout_seconds,
+            "error": self.asr_state.error,
+        }
+
     @staticmethod
     def _voice_audio_data_url(path_text: str) -> str:
         if not path_text:
@@ -717,17 +887,11 @@ class JsonRpcBridge:
         payload: dict[str, Any] = {
             "workspace_label": self.workspace.name,
             "workspace_bound": True,
-            "asr": {
-                "enabled": self.asr_state.enabled,
-                "configured": self.asr_state.configured,
-                "provider": self.asr_state.provider,
-                "max_seconds": self.asr_state.max_seconds,
-                "max_bytes": self.asr_state.max_bytes,
-                "timeout_seconds": self.asr_state.timeout_seconds,
-                "error": self.asr_state.error,
-            },
+            "asr": self._asr_payload(),
             "tts": tts_status,
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
+            "codex_runtime": self.codex_runtime.status_payload(),
+            "joi_mcp": self.joi_mcp_status_command().get("joi_mcp", {}),
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
             "memory": memory_status,
             "audit": self.app.audit_store.status(),
@@ -782,13 +946,15 @@ class JsonRpcBridge:
         return not self.app.should_handle_locally_before_agent_cli(text)
 
     def _agent_cli_status_payload(self) -> dict[str, Any]:
+        runtime = self.codex_runtime.status_payload()
         return {
             "safe_for_display": True,
-            "enabled": bool(self.agent_cli_takeover.get("enabled")),
-            "mode": _safe_agent_cli_mode(self.agent_cli_takeover.get("mode")),
-            "selected": _safe_agent_cli_token(self.agent_cli_takeover.get("selected") or "codex"),
-            "model": _safe_agent_cli_label(self.agent_cli_takeover.get("model") or "默认"),
-            "reasoning": _safe_agent_cli_label(self.agent_cli_takeover.get("reasoning") or "默认"),
+            "enabled": bool(runtime.get("enabled")),
+            "mode": _safe_agent_cli_mode(runtime.get("mode")),
+            "selected": _safe_agent_cli_token(runtime.get("selected") or "codex"),
+            "model": _safe_agent_cli_label(runtime.get("model") or "默认"),
+            "reasoning": _safe_agent_cli_label(runtime.get("reasoning") or "默认"),
+            "status": str(runtime.get("status") or "ready"),
         }
 
     def _reload_runtime_after_config_change(self) -> None:
@@ -883,6 +1049,10 @@ def _safe_agent_cli_label(value: object) -> str:
     if any(fragment in text.casefold() for fragment in ("sk-", "token", "secret", "api_key", "key=", "/users/", "c:\\")):
         return "默认"
     return text[:80]
+
+
+def _codex_executable() -> str:
+    return resolve_agent_cli_executable("codex") or shutil.which("codex") or ""
 
 
 def _safe_int(value: Any) -> int | None:

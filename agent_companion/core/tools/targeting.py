@@ -28,6 +28,7 @@ from agent_companion.core.vision import (
 from agent_companion.core.vision.ocr import run_ocr_safely
 from agent_companion.core.vision.regions import group_ocr_regions, regions_to_agent_state, summarize_ocr_regions
 from agent_companion.core.vision.targeting import TargetCandidate, resolve_target_candidates
+from agent_companion.core.tools.foreground_guard import companion_hidden_for_target_observation
 from agent_companion.core.voice import safe_voice_line
 
 
@@ -125,6 +126,10 @@ class SemanticTargetTool(ToolAdapter):
 
     def run(self, request: ToolRequest) -> ToolResult:
         query = str(request.arguments.get("query") or request.arguments.get("target") or "").strip()
+        with companion_hidden_for_target_observation():
+            return self._run_with_visible_target(query)
+
+    def _run_with_visible_target(self, query: str) -> ToolResult:
         try:
             observation = self.computer_backend.observe(target="active_window", query=query)
         except Exception:

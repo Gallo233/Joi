@@ -15,6 +15,12 @@ class RiskLevel(str, Enum):
 class EventType(str, Enum):
     USER_MESSAGE = "user_message"
     PLAN_CREATED = "plan_created"
+    RUNTIME_STARTED = "runtime_started"
+    RUNTIME_DELTA = "runtime_delta"
+    RUNTIME_FINAL = "runtime_final"
+    RUNTIME_ERROR = "runtime_error"
+    SKILL_STARTED = "skill_started"
+    SKILL_COMPLETED = "skill_completed"
     APPROVAL_REQUIRED = "approval_required"
     AUDIT_EVENT = "audit_event"
     TOOL_STARTED = "tool_started"

@@ -144,15 +144,34 @@ def resolve_agent_cli_executable(cli_id: str) -> str:
 
 
 def _resolve_executable(profile: AgentCliProfile) -> str:
-    if profile.env_var:
-        override = os.environ.get(profile.env_var, "").strip()
+    env_names = [profile.env_var] if profile.env_var else []
+    if profile.id == "codex":
+        env_names.append("CODEX_CLI_PATH")
+    for env_name in env_names:
+        override = os.environ.get(env_name, "").strip()
         if override and Path(override).is_file():
             return override
     for command in profile.command_names:
         found = shutil.which(command)
         if found:
             return found
+    for candidate in _candidate_executables(profile):
+        if candidate.is_file():
+            return str(candidate)
     return ""
+
+
+def _candidate_executables(profile: AgentCliProfile) -> tuple[Path, ...]:
+    if profile.id != "codex":
+        return ()
+    home = Path.home()
+    return (
+        Path("/opt/homebrew/bin/codex"),
+        Path("/usr/local/bin/codex"),
+        home / ".codex" / "bin" / "codex",
+        home / ".local" / "bin" / "codex",
+        Path("/Applications/Codex.app/Contents/Resources/codex"),
+    )
 
 
 def _probe_version(executable: str, version_args: tuple[str, ...]) -> tuple[str, str]:
@@ -167,7 +186,7 @@ def _probe_version(executable: str, version_args: tuple[str, ...]) -> tuple[str,
         return "", "timeout"
     except OSError:
         return "", "launch_failed"
-    output = " ".join(f"{result.stdout or ''} {result.stderr or ''}".split())
+    output = " ".join((result.stdout or result.stderr or "").split())
     safe_output = _safe_display_text(output)
     if result.returncode != 0 and not safe_output:
         return "", "nonzero_exit"

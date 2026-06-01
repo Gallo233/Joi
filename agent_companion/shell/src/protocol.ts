@@ -1,6 +1,12 @@
 export type EventType =
   | 'user_message'
   | 'plan_created'
+  | 'runtime_started'
+  | 'runtime_delta'
+  | 'runtime_final'
+  | 'runtime_error'
+  | 'skill_started'
+  | 'skill_completed'
   | 'approval_required'
   | 'audit_event'
   | 'tool_started'
@@ -331,6 +337,27 @@ export interface AgentCliRuntimeStatus {
   selected?: string
   model?: string
   reasoning?: string
+  status?: string
+}
+
+export interface CodexRuntimeStatus {
+  safe_for_display?: boolean
+  enabled?: boolean
+  mode?: 'local_cli' | 'byok' | string
+  selected?: string
+  model?: string
+  reasoning?: string
+  available?: boolean
+  status?: string
+  session?: string
+  mcp_connected?: boolean
+  pending_approvals?: number
+}
+
+export interface JoiMcpStatus {
+  connected?: boolean
+  available?: boolean
+  status?: string
 }
 
 export interface CoreReadyPayload {
@@ -369,6 +396,8 @@ export interface CoreReadyPayload {
   }
   background?: BackgroundContextStatus
   agent_cli?: AgentCliRuntimeStatus
+  codex_runtime?: CodexRuntimeStatus
+  joi_mcp?: JoiMcpStatus
   skills?: NativeSkillManifest
   runtime_settings?: {
     asr?: {
