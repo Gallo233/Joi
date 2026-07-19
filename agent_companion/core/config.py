@@ -8,9 +8,21 @@ from typing import Any
 
 import yaml
 
+from agent_companion.core.secret_store import LLM_API_KEY_ENV, managed_secret
+
+
+_ENV_REFERENCE_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$|^%([A-Za-z_][A-Za-z0-9_]*)%$")
+
 
 def _expand_env(value: Any) -> Any:
     if isinstance(value, str):
+        match = _ENV_REFERENCE_RE.fullmatch(value.strip())
+        if match:
+            name = match.group(1) or match.group(2) or ""
+            resolved = os.environ.get(name, "").strip()
+            if not resolved and name == LLM_API_KEY_ENV:
+                resolved = managed_secret(name)
+            return resolved or value
         return os.path.expandvars(value)
     if isinstance(value, list):
         return [_expand_env(item) for item in value]
@@ -166,6 +178,8 @@ class LlmConfig:
     @property
     def is_configured(self) -> bool:
         key = (self.api_key or "").strip()
+        if self.provider.strip().casefold() == "ollama":
+            return bool(self.base_url.strip() and self.model.strip())
         return bool(key and not key.startswith("${") and not key.startswith("%"))
 
     @property
@@ -271,7 +285,7 @@ class ModelRouter:
         )
 
     def _endpoint(self, route: str, *, provider: str, base_url: str, model: str, api_key: str, fallback_reason: str) -> ModelEndpoint:
-        configured = bool(self._llm.use_mock or (model or "").strip() and _configured_secret(api_key))
+        configured = bool(self._llm.use_mock or _model_endpoint_configured(provider, base_url, model, api_key))
         return ModelEndpoint(
             base_url=base_url,
             model=model,
@@ -372,6 +386,11 @@ def load_app_config(path: Path) -> AppConfig:
         if isinstance(secrets, dict):
             raw = _deep_merge(raw, secrets)
     raw = _expand_env(raw)
+    managed_llm_key = managed_secret(LLM_API_KEY_ENV)
+    if managed_llm_key:
+        llm_section = raw.setdefault("llm", {})
+        if isinstance(llm_section, dict):
+            llm_section["api_key"] = managed_llm_key
 
     llm_raw = raw.get("llm") or {}
     tts_raw = raw.get("tts") or {}
@@ -381,6 +400,15 @@ def load_app_config(path: Path) -> AppConfig:
     skills_raw = raw.get("skills") or {}
     character_rows = raw.get("characters") or []
     characters = [_parse_character(row) for row in character_rows if isinstance(row, dict)]
+    # Character packages are the source of truth for the active identity. Keep
+    # legacy config.yaml characters as a fallback for older workspaces.
+    try:
+        from agent_companion.core.character_packages import CharacterPackageManager
+
+        active_character = _parse_character(CharacterPackageManager(path.resolve().parent).active_character_row())
+        characters = [active_character, *[row for row in characters if row.name != active_character.name]]
+    except Exception:
+        pass
 
     return AppConfig(
         base_dir=path.resolve().parent,
@@ -436,6 +464,18 @@ def load_app_config(path: Path) -> AppConfig:
         skills=_parse_skill_settings(skills_raw),
         characters=characters,
     )
+
+
+def load_workspace_config(workspace: Path) -> AppConfig | None:
+    """Best-effort config loading for optional runtime consumers."""
+
+    config_path = workspace.resolve() / "config.yaml"
+    if not config_path.is_file():
+        return None
+    try:
+        return load_app_config(config_path)
+    except Exception:
+        return None
 
 
 def normalize_skill_setting_id(value: str) -> str:
@@ -542,6 +582,14 @@ def _parse_character(row: dict[str, Any]) -> CharacterConfig:
 def _configured_secret(value: str) -> bool:
     key = (value or "").strip()
     return bool(key and not key.startswith("${") and not key.startswith("%"))
+
+
+def _model_endpoint_configured(provider: str, base_url: str, model: str, api_key: str) -> bool:
+    if not (model or "").strip() or not (base_url or "").strip():
+        return False
+    if (provider or "").strip().casefold() == "ollama":
+        return True
+    return _configured_secret(api_key)
 
 
 def _safe_public_identifier(value: Any) -> str:

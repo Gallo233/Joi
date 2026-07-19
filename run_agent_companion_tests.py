@@ -882,9 +882,11 @@ def main() -> int:
     assert_true(sprite_for_emotion("thinking") == "3" and sprite_for_emotion("unknown") == "1", "emotion sprite map should be stable")
 
     chat_emotion_result = CompanionChatTool(workspace).run(ToolRequest("companion.chat", {"text": "你现在开心吗"}))
-    assert_true(chat_emotion_result.voice_line.emotion == "happy", "chat fallback should infer happy emotion from user text")
-    assert_true(chat_emotion_result.voice_line.sprite != "1", "chat emotion should select a non-neutral sprite when available")
-    assert_true(chat_emotion_result.agent_state["expression_sync"]["emotion"] == "happy", "chat should expose expression sync state")
+    assert_true(not chat_emotion_result.ok, "unconfigured chat must not present a static fallback as a successful model reply")
+    assert_true(chat_emotion_result.agent_state.get("model_error") == "model_disabled", "disabled-model test mode should stay explicit")
+    assert_true("关闭" in chat_emotion_result.display_card.summary, "disabled-model test mode should not fabricate a model reply")
+    assert_true(chat_emotion_result.voice_line.emotion == "worried", "disabled chat should use the connection-error expression")
+    assert_true(chat_emotion_result.agent_state["expression_sync"]["emotion"] == "worried", "chat should expose expression sync state")
     chat_memory_result = CompanionChatTool(workspace).run(
         ToolRequest(
             "companion.chat",
@@ -1057,8 +1059,8 @@ def main() -> int:
             safe_tool_result,
         )
         assert_true(
-            any("修复设置面板" in row["text"] for row in memory_app.memory.pending(20)),
-            "app should queue safe tool-result memory candidates for authorization",
+            not any("修复设置面板" in row["text"] for row in memory_app.memory.pending(20)),
+            "operational task receipts should stay out of the long-term user-memory queue",
         )
         screen_tool_result = ToolResult(
             ok=True,
@@ -3037,7 +3039,10 @@ characters:
         assert_true(tmp_config.ocr.timeout_seconds == 4, "OCR timeout should parse")
         assert_true(tmp_config.computer_use.post_action_settle_ms == 0, "computer use settle delay should parse")
         assert_true(ModelRouter(tmp_config.llm).resolve("reasoning").model == "gpt-router-reasoning", "config routes should parse reasoning override")
-        assert_true(ModelRouter(tmp_config.llm).resolve("code").api_key == "sk-test", "route overrides should inherit base credentials when omitted")
+        assert_true(
+            ModelRouter(tmp_config.llm).resolve("code").api_key == tmp_config.llm.api_key,
+            "route overrides should inherit the resolved base credential when omitted",
+        )
         asr_provider, asr_state = build_asr_provider(tmp)
         assert_true(isinstance(asr_provider, OpenAICompatibleAsrProvider), "configured ASR should use OpenAI-compatible provider")
         assert_true(asr_state.configured and asr_state.max_bytes == 4096, "ASR runtime state should expose limits")
@@ -3374,6 +3379,7 @@ asr:
     assert_true(any(event.display_card.title == "对话" for event in chat_events), "chat should produce a dialogue card")
     chat_tool_event = [event for event in chat_events if event.display_card.title == "对话"][-1]
     assert_true(chat_tool_event.agent_state.get("skill_id") == "joi.companion.chat", "Tool result events should carry native skill ids")
+    assert_true(any(event.type == EventType.TOOL_STARTED and event.agent_state.get("ui_phase") == "thinking" for event in chat_events), "chat should emit an immediate public thinking phase")
     assert_true(not any(event.type == EventType.PLAN_CREATED for event in chat_events), "chat should not show plan events")
     assert_true(not any(event.type == EventType.TASK_COMPLETED for event in chat_events), "chat should not show task completion")
 
@@ -4301,7 +4307,9 @@ llm:
     assert_true("tesseract_missing" in app_vue_source and "tesseract_unavailable" in app_vue_source, "Shell runtime status view should label Tesseract runtime probe failures")
     assert_true("runtimeDraft" in app_vue_source and "previewRuntimeSettings" in app_vue_source and "applyRuntimeSettings" in app_vue_source, "Shell developer panel should include runtime settings dry-run/apply controls")
     assert_true("runtime_settings" in app_vue_source and "runtimePreview" in app_vue_source and "提交审批" in app_vue_source, "Shell runtime settings UI should refresh from safe ready payload and require approval apply")
-    assert_true("api_key" not in app_vue_source and "server_url" not in app_vue_source and "base_url" not in app_vue_source and "refer_audio_path" not in app_vue_source and "gpt_sovits_work_path" not in app_vue_source, "Shell runtime settings UI must not expose secret, endpoint, or path fields")
+    assert_true("server_url" not in app_vue_source and "refer_audio_path" not in app_vue_source and "gpt_sovits_work_path" not in app_vue_source, "Shell runtime settings UI must not expose local media paths")
+    assert_true('type="password"' in app_vue_source and 'autocomplete="new-password"' in app_vue_source and "byokApiKey.value = ''" in app_vue_source, "BYOK should accept a masked key and clear it after save")
+    assert_true("密钥不会写入项目文件" in app_vue_source and "系统密钥库" in app_vue_source, "BYOK should explain its secret-storage boundary")
     assert_true("target-overlays" in app_vue_source and "targetPreviewSummary" in app_vue_source, "Shell should render semantic target approval previews")
     assert_true("target-list" in app_vue_source and "targetRank" in app_vue_source, "Shell should show ranked semantic target candidates")
     assert_true("targetSource" in app_vue_source and "UI控件" in app_vue_source and "融合" in app_vue_source and "视觉" in app_vue_source, "Shell should show semantic target candidate source")
@@ -4552,11 +4560,17 @@ llm:
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
     assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
     shell_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
+    character_source = (workspace / "agent_companion" / "shell" / "src" / "components" / "JoiCharacter.vue").read_text(encoding="utf-8")
     shell_style_source = (workspace / "agent_companion" / "shell" / "src" / "styles.css").read_text(encoding="utf-8")
     assert_true("activeExpressionEmotion" in shell_source and "expression_sync" in shell_source and "emotion-${activeExpressionEmotion}" in shell_source, "Shell should bind expression sync to character emotion class")
-    assert_true("emotion-status-card" in shell_source and "当前情绪" in shell_source, "Chat cabin should expose a compact emotion status module")
     assert_true("stage-emotion-pill" in shell_source and "情绪 {{ activeEmotionStatus.label }}" in shell_source, "Stage should surface current emotion outside the chat cabin")
-    assert_true("accessoryFitStyle" in shell_source and "--acc-hat-top" in shell_source and ":style=\"accessoryFitStyle\"" in shell_source, "Accessory overlays should use adaptive anchor variables")
+    assert_true(
+        "accessoryFitStyle" in shell_source
+        and "--acc-hat-top" in shell_source
+        and ':accessory-style="accessoryFitStyle"' in shell_source
+        and ':style="accessoryStyle"' in character_source,
+        "Accessory overlays should use adaptive anchor variables",
+    )
     assert_true("preventNativeAssetDrag" in shell_source and "@dragstart.capture.prevent" in shell_source, "Compact mascot should block native asset dragging")
     assert_true("miniBubbleHasActions" in shell_source and "mini-approval-actions" in shell_source and "requestMiniChange" in shell_source, "Compact speech bubble should expose approval and change actions")
     assert_true("watchLoopStatus" in shell_source and "watch-session-strip" in shell_source and "stopWatchLoop" in shell_source, "Shell should show and control realtime watch loop state")
@@ -4569,7 +4583,14 @@ llm:
     assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
     assert_true("settings-shell" in shell_source and "execution-segment" in shell_source and "agentCliList" in shell_source and "testAgentCli" in shell_source and "syncAgentCliTakeover" in shell_source and "agentCliRuntime" in shell_source, "Shell settings should expose Open Design execution-mode CLI scanning, testing, and takeover sync")
     assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source and "setSkillEnabled" in shell_source and "skillEnabled" in shell_source and "skillToggleDisabled" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
-    assert_true("memory-section" in shell_source and "memorySearchResults" in shell_source and "browseMemoryVault" in shell_source and "memory-profile-panel" in shell_source and "memory-vault-panel" in shell_source, "Shell should expose a dedicated memory cabin with profile, recall search, and vault preview")
+    assert_true(
+        "memory-section" in shell_source
+        and "displayedMemoryRows" in shell_source
+        and "browseMemoryVault" in shell_source
+        and "memory-profile-rail" in shell_source
+        and "memory-library" in shell_source,
+        "Shell should expose a dedicated memory cabin with profile, recall search, and local-vault status",
+    )
     app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
     assert_true("_step_with_memory_context" in app_source and "build_event_agent_state" in app_source and "tool_result_memory_candidate" in app_source, "App should inject approved memory context, emit safe JoiJuice event channels, and queue safe tool-result memory candidates")
     assert_true("handle_agent_cli_text" in app_source and "_agent_cli_takeover_arguments" in app_source and "should_handle_locally_before_agent_cli" in app_source, "App should expose Agent CLI takeover while keeping local control commands local")

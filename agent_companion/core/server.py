@@ -3,23 +3,45 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import functools
+import http.server
 import json
 import mimetypes
-import shutil
 import subprocess
 import sys
 import threading
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from agent_companion.core.agent_cli import resolve_agent_cli_executable, scan_agent_clis, test_agent_cli
+from agent_companion.core.agent_cli import scan_agent_clis, test_agent_cli
+from agent_companion.core.agent_skills import AgentSkillError, AgentSkillService
 from agent_companion.core.app import AgentCompanionApp
+from agent_companion.core.byok import ByokService
+from agent_companion.core.character_packages import CharacterPackageError
+from agent_companion.core.capability_orchestrator import ComputerUseOrchestrator
+from agent_companion.core.collaboration_store import CollaborationStore, DEFAULT_PROJECT_ID, DEFAULT_THREAD_ID
+from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.codex_runtime import CodexRuntimeSession
+from agent_companion.core.coercion import bool_or, float_or, optional_int
+from agent_companion.core.config import load_workspace_config
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update
+from agent_companion.core.rpc import (
+    JsonRpcProtocolError,
+    JsonRpcRouter,
+    RpcMethodNotFound,
+    encode_error,
+    encode_result,
+    parse_request,
+)
 from agent_companion.core.schemas import AgentEvent, DisplayCard
-from agent_companion.core.schemas import EventType
+from agent_companion.core.schemas import EventType, RiskLevel, ToolRequest
+from agent_companion.core.policy import PolicyDecision
 from agent_companion.core.runtime_status import build_runtime_status
+from agent_companion.core.scene_session import SceneSession
+from agent_companion.core.game_adapters import GameAdapterRegistry
+from agent_companion.core.services import ArtifactService, BackgroundContextService, MemoryService
 from agent_companion.core.skill_manifest import build_native_skill_manifest
 from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
@@ -54,10 +76,31 @@ class JsonRpcBridge:
         self.workspace = workspace.resolve()
         self.host = host
         self.port = port
+        self.asset_port = port + 1
+        self._asset_server: http.server.ThreadingHTTPServer | None = None
+        self._asset_thread: threading.Thread | None = None
         self.app = AgentCompanionApp(self.workspace)
+        self.collaboration = CollaborationStore(self.workspace, default_character_id=self.app.character.id)
+        self.capability_orchestrator = ComputerUseOrchestrator(self.workspace, self.collaboration)
+        self.agent_skills = AgentSkillService(self.workspace, self.collaboration)
+        self.game_adapters = GameAdapterRegistry(self.workspace, self.collaboration.data_home)
+        self.app.set_session_authorizer(self._session_policy_decision)
+        self.app.bus.set_context_provider(self.collaboration.context)
+        self.app.bus.subscribe(self._record_collaboration_event)
+        self.artifacts = ArtifactService(self.workspace)
+        self.memory_service = MemoryService(self.app.memory)
+        self.background_service = BackgroundContextService(
+            self.app.background_context,
+            lambda summary, background, status: self._emit_background_audit(
+                summary,
+                background,
+                status=status,
+            ),
+        )
         self.codex_runtime = CodexRuntimeSession(self.workspace, self.app, self.app.bus.emit)
         self.tts = TtsBridge(self.workspace)
         self.watch_commentary = WatchCommentaryPlanner(self.workspace, self.app.character)
+        self.scene_session = SceneSession()
         self.watch_loop = WatchLoopController(self._watch_loop_tick, self.app.bus.emit)
         if asr_provider is None:
             self.asr, self.asr_state = build_asr_provider(self.workspace, allow_mock=allow_mock_asr)
@@ -76,6 +119,14 @@ class JsonRpcBridge:
             "model": "默认",
             "reasoning": "XHigh",
         }
+        codex_available = bool(_codex_executable())
+        self._joi_mcp_status: dict[str, Any] = {
+            "connected": False,
+            "available": codex_available,
+            "status": "not_checked" if codex_available else "codex_not_found",
+        }
+        self.byok = ByokService(self.workspace, self._reload_runtime_after_config_change)
+        self.rpc = self._build_rpc_router()
 
     async def serve(self) -> None:
         try:
@@ -86,20 +137,56 @@ class JsonRpcBridge:
         self.loop = asyncio.get_running_loop()
         self.queue = asyncio.Queue()
         self.app.bus.subscribe(self._on_event)
-        async with websockets.serve(self._client_handler, self.host, self.port):
-            print(f"Joi Core listening on ws://{self.host}:{self.port}")
-            pump = asyncio.create_task(self._event_pump())
-            try:
-                await asyncio.Future()
-            finally:
-                self.watch_loop.stop(emit=False)
-                pump.cancel()
-                self.tts.shutdown()
+        self._start_character_asset_server()
+        try:
+            async with websockets.serve(self._client_handler, self.host, self.port):
+                print(f"Joi Core listening on ws://{self.host}:{self.port}")
+                pump = asyncio.create_task(self._event_pump())
+                try:
+                    await asyncio.Future()
+                finally:
+                    self.watch_loop.stop(emit=False)
+                    pump.cancel()
+                    self.tts.shutdown()
+        finally:
+            self._stop_character_asset_server()
 
     def _on_event(self, event: AgentEvent) -> None:
         if self.loop is None or self.queue is None:
             return
         self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
+
+    def _session_policy_decision(self, request: ToolRequest, risk: RiskLevel) -> PolicyDecision | None:
+        context = self.collaboration.context()
+        session_id = str(context.get("session_id") or "")
+        if not session_id:
+            return None
+        session = self.collaboration.session_payload(session_id, include_receipts=False)
+        if not session:
+            return None
+        if session.get("state") != "running":
+            return PolicyDecision(risk, False, True, "当前能力会话已暂停，请先继续或由你接管。")
+        if _is_always_sensitive_request(request):
+            return PolicyDecision(risk, False, True, "敏感操作始终需要这一次明确确认。")
+        profile = str(session.get("permission_profile") or "observe")
+        if profile == "observe":
+            return PolicyDecision(risk, False, True, "观察模式不能改变外部状态，可切换到协作后继续。")
+        permission = self.collaboration.permission_for_session(session_id)
+        scope = permission.get("scope") if isinstance(permission.get("scope"), dict) else {}
+        if not _request_within_bound_scope(request, scope):
+            return PolicyDecision(risk, False, True, "这一步超出项目绑定范围，需要确认扩权。")
+        return PolicyDecision(risk, True, False, f"{profile} 模式在项目绑定范围内自动执行。")
+
+    def _record_collaboration_event(self, event: AgentEvent) -> None:
+        self.collaboration.record_event(event)
+        state = event.agent_state if isinstance(event.agent_state, dict) else {}
+        session_id = str(event.session_id or state.get("session_id") or self.collaboration.context().get("session_id") or "")
+        tool = str(state.get("tool") or "")
+        if not session_id or event.type not in {EventType.TOOL_COMPLETED, EventType.TOOL_FAILED}:
+            return
+        if not (tool.startswith("computer.") or tool.startswith("browser.") or tool.startswith("game.")):
+            return
+        self.capability_orchestrator.record_tool_event(session_id, event)
 
     async def _client_handler(self, websocket: Any) -> None:
         self.clients.add(websocket)
@@ -107,193 +194,586 @@ class JsonRpcBridge:
             await websocket.send(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
             async for raw in websocket:
                 await self._handle_message(websocket, raw)
+        except Exception:
+            # Webviews can disappear without a WebSocket close frame when the
+            # native window quits. Treat that as a normal client disconnect.
+            return
         finally:
             self.clients.discard(websocket)
 
     async def _handle_message(self, websocket: Any, raw: str) -> None:
         request_id: Any = None
         try:
-            payload = json.loads(raw)
-            request_id = payload.get("id")
-            method = str(payload.get("method") or "")
-            params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-            if method == "user.message":
-                text = str(params.get("text") or "").strip()
-                if not text:
-                    await websocket.send(self._result(request_id, {"ok": False, "error": "empty_text"}))
-                    return
-                asyncio.create_task(asyncio.to_thread(self.submit_user_text, text))
-                await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
-                return
-            if method == "runtime.status":
-                await websocket.send(self._result(request_id, self.runtime_status_command()))
-                return
-            if method == "runtime.configure":
-                result = await asyncio.to_thread(self.runtime_configure_command, params)
-                await websocket.send(self._result(request_id, result))
-                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
-                return
-            if method == "runtime.start":
-                result = await asyncio.to_thread(self.runtime_start_command)
-                await websocket.send(self._result(request_id, result))
-                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
-                return
-            if method == "runtime.stop":
-                result = await asyncio.to_thread(self.runtime_stop_command)
-                await websocket.send(self._result(request_id, result))
-                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
-                return
-            if method == "runtime.approval.resolve":
-                approval_id = str(params.get("approval_id") or "")
-                approved = bool(params.get("approved", False))
-                result = await asyncio.to_thread(self.runtime_approval_resolve_command, approval_id, approved)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "joi_mcp.status":
-                result = await asyncio.to_thread(self.joi_mcp_status_command)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "joi_mcp.install_codex":
-                result = await asyncio.to_thread(self.joi_mcp_install_codex_command)
-                await websocket.send(self._result(request_id, result))
-                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
-                return
-            if method == "skill.run":
-                result = await asyncio.to_thread(self.skill_run_command, params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "watch.loop.start":
-                result = await asyncio.to_thread(self.watch_loop_start_command, params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "watch.loop.stop":
-                result = await asyncio.to_thread(self.watch_loop_stop_command)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "watch.loop.configure":
-                result = await asyncio.to_thread(self.watch_loop_configure_command, params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "watch.loop.refresh":
-                result = await asyncio.to_thread(self.watch_loop_refresh_command, params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "watch.loop.status":
-                await websocket.send(self._result(request_id, self.watch_loop_status_command()))
-                return
-            if method == "background.status":
-                await websocket.send(self._result(request_id, self.background_status_command()))
-                return
-            if method == "background.configure":
-                result = await asyncio.to_thread(self.background_configure_command, params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "background.clear":
-                result = await asyncio.to_thread(self.background_clear_command)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "skills.list":
-                await websocket.send(self._result(request_id, self.skill_manifest_command()))
-                return
-            if method == "agent_cli.list":
-                result = await asyncio.to_thread(self.agent_cli_list_command)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "agent_cli.test":
-                result = await asyncio.to_thread(self.agent_cli_test_command, params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "agent_cli.configure":
-                result = await asyncio.to_thread(self.agent_cli_configure_command, params)
-                await websocket.send(self._result(request_id, result))
-                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
-                return
-            if method == "agent_cli.status":
-                await websocket.send(self._result(request_id, self.agent_cli_status_command()))
-                return
-            if method == "audit.recent":
-                limit = _safe_int(params.get("limit")) or 50
-                await websocket.send(self._result(request_id, self.audit_recent_command(limit)))
-                return
-            if method == "memory.status":
-                await websocket.send(self._result(request_id, self.memory_status_command()))
-                return
-            if method == "memory.recall":
-                result = self.memory_recall_command(params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "memory.browse_vault":
-                result = self.memory_browse_vault_command()
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "memory.save_candidate":
-                result = self.memory_save_candidate_command(params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "memory.reject_candidate":
-                result = self.memory_reject_candidate_command(params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "memory.set_enabled":
-                result = self.memory_set_enabled_command(params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "memory.delete":
-                result = self.memory_delete_command(params)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "memory.clear":
-                result = self.memory_clear_command()
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "approval.resolve":
-                approval_id = str(params.get("approval_id") or "")
-                approved = bool(params.get("approved", False))
-                if not approval_id:
-                    await websocket.send(self._result(request_id, {"ok": False, "error": "missing_approval_id"}))
-                    return
-                asyncio.create_task(asyncio.to_thread(self.resolve_approval_command, approval_id, approved))
-                await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
-                return
-            if method == "runtime.config.preview":
-                updates = params.get("updates")
-                result = self.preview_runtime_config_update_command(updates if isinstance(updates, dict) else {})
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "runtime.config.apply":
-                updates = params.get("updates")
-                result = self.apply_runtime_config_update_command(updates if isinstance(updates, dict) else {})
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "semantic_target.select":
-                selection_id = str(params.get("selection_id") or "").strip()
-                rank = _safe_int(params.get("rank"))
-                if not selection_id:
-                    await websocket.send(self._result(request_id, {"ok": False, "error": "missing_selection_id"}))
-                    return
-                if rank is None or rank < 1:
-                    await websocket.send(self._result(request_id, {"ok": False, "error": "invalid_rank"}))
-                    return
-                asyncio.create_task(asyncio.to_thread(self.select_semantic_target_command, selection_id, rank))
-                await websocket.send(self._result(request_id, {"ok": True, "submitted": True}))
-                return
-            if method in {"voice.transcribe", "audio.transcribe"}:
-                audio_base64 = str(params.get("audio_base64") or "")
-                mime_type = str(params.get("mime_type") or "")
-                result = await asyncio.to_thread(self.transcribe_and_submit, audio_base64, mime_type)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "artifact.read":
-                artifact = str(params.get("artifact") or "")
-                result = await asyncio.to_thread(self.read_artifact_command, artifact)
-                await websocket.send(self._result(request_id, result))
-                return
-            if method == "core.ping":
-                await websocket.send(self._result(request_id, {"ok": True}))
-                return
-            await websocket.send(self._error(request_id, -32601, f"unknown method: {method}"))
+            request = parse_request(raw)
+            request_id = request.request_id
+            dispatched = await self.rpc.dispatch(request.method, request.params)
+            await websocket.send(self._result(request_id, dispatched.result))
+            if dispatched.broadcast_ready:
+                await self._broadcast_ready()
+        except JsonRpcProtocolError as exc:
+            await websocket.send(self._error(exc.request_id, exc.code, exc.message))
+        except RpcMethodNotFound as exc:
+            await websocket.send(self._error(request_id, -32601, f"unknown method: {exc.method}"))
         except Exception as exc:
             await websocket.send(self._error(request_id, -32603, str(exc)[:500]))
+
+    def _build_rpc_router(self) -> JsonRpcRouter:
+        router = JsonRpcRouter()
+        router.register("user.message", self._rpc_user_message)
+        router.register("runtime.status", lambda _: self.runtime_status_command())
+        router.register("runtime.configure", self.runtime_configure_command, run_in_thread=True, broadcast_ready=True)
+        router.register("runtime.start", lambda _: self.runtime_start_command(), run_in_thread=True, broadcast_ready=True)
+        router.register("runtime.stop", lambda _: self.runtime_stop_command(), run_in_thread=True, broadcast_ready=True)
+        router.register(
+            "runtime.approval.resolve",
+            lambda params: self.runtime_approval_resolve_command(
+                str(params.get("approval_id") or ""),
+                bool(params.get("approved", False)),
+            ),
+            run_in_thread=True,
+        )
+        router.register("joi_mcp.status", lambda _: self.joi_mcp_status_command(), run_in_thread=True)
+        router.register("joi_mcp.install_codex", lambda _: self.joi_mcp_install_codex_command(), run_in_thread=True, broadcast_ready=True)
+        router.register("skill.run", self.skill_run_command, run_in_thread=True)
+        router.register("skill.catalog", self.agent_skill_list_command)
+        router.register("skill.inspect", self.agent_skill_inspect_command, run_in_thread=True)
+        router.register("skill.install", self.agent_skill_install_command, run_in_thread=True, broadcast_ready=True)
+        router.register("skill.update", self.agent_skill_update_command, run_in_thread=True, broadcast_ready=True)
+        router.register("skill.uninstall", self.agent_skill_uninstall_command, run_in_thread=True, broadcast_ready=True)
+        router.register("skill.validate", self.agent_skill_validate_command, run_in_thread=True)
+        router.register("skill.enable", self.agent_skill_enable_command, run_in_thread=True, broadcast_ready=True)
+        router.register("skill.draft.list", self.agent_skill_draft_list_command)
+        router.register("skill.draft.create", self.agent_skill_draft_create_command, run_in_thread=True)
+        router.register("skill.draft.approve", self.agent_skill_draft_approve_command, run_in_thread=True, broadcast_ready=True)
+        router.register("skill.draft.reject", self.agent_skill_draft_reject_command, run_in_thread=True)
+        router.register("watch.loop.start", self.watch_loop_start_command, run_in_thread=True)
+        router.register("watch.loop.stop", lambda _: self.watch_loop_stop_command(), run_in_thread=True)
+        router.register("watch.loop.configure", self.watch_loop_configure_command, run_in_thread=True)
+        router.register("watch.loop.refresh", self.watch_loop_refresh_command, run_in_thread=True)
+        router.register("watch.loop.status", lambda _: self.watch_loop_status_command())
+        router.register("background.status", lambda _: self.background_status_command())
+        router.register("background.configure", self.background_configure_command, run_in_thread=True)
+        router.register("background.clear", lambda _: self.background_clear_command(), run_in_thread=True)
+        router.register("skills.list", lambda _: self.skill_manifest_command())
+        router.register("agent_cli.list", lambda _: self.agent_cli_list_command(), run_in_thread=True)
+        router.register("agent_cli.test", self.agent_cli_test_command, run_in_thread=True)
+        router.register("agent_cli.configure", self.agent_cli_configure_command, run_in_thread=True, broadcast_ready=True)
+        router.register("agent_cli.status", lambda _: self.agent_cli_status_command())
+        router.register("byok.status", lambda _: self.byok.status())
+        router.register("byok.connect", self.byok_connect_command, run_in_thread=True, broadcast_ready=True)
+        router.register("byok.test", lambda _: self.byok.test(), run_in_thread=True, broadcast_ready=True)
+        router.register("byok.models", self.byok.discover_models, run_in_thread=True)
+        router.register("byok.disconnect", lambda _: self.byok.disconnect(), run_in_thread=True, broadcast_ready=True)
+        router.register("audit.recent", lambda params: self.audit_recent_command(optional_int(params.get("limit")) or 50))
+        router.register("conversation.history", self.conversation_history_command)
+        router.register("project.list", self.project_list_command)
+        router.register("project.create", self.project_create_command, run_in_thread=True, broadcast_ready=True)
+        router.register("project.update", self.project_update_command, run_in_thread=True, broadcast_ready=True)
+        router.register("project.archive", self.project_archive_command, run_in_thread=True, broadcast_ready=True)
+        router.register("project.delete", self.project_delete_command, run_in_thread=True, broadcast_ready=True)
+        router.register("thread.list", self.thread_list_command)
+        router.register("thread.create", self.thread_create_command, run_in_thread=True, broadcast_ready=True)
+        router.register("thread.update", self.thread_update_command, run_in_thread=True, broadcast_ready=True)
+        router.register("thread.activate", self.thread_activate_command, run_in_thread=True, broadcast_ready=True)
+        router.register("thread.archive", self.thread_archive_command, run_in_thread=True, broadcast_ready=True)
+        router.register("thread.delete", self.thread_delete_command, run_in_thread=True, broadcast_ready=True)
+        router.register("resource_binding.list", self.resource_binding_list_command)
+        router.register("resource_binding.add", self.resource_binding_add_command, run_in_thread=True, broadcast_ready=True)
+        router.register("resource_binding.remove", self.resource_binding_remove_command, run_in_thread=True, broadcast_ready=True)
+        router.register("capability.session.start", self.capability_session_start_command, run_in_thread=True, broadcast_ready=True)
+        router.register("capability.session.status", self.capability_session_status_command)
+        router.register("capability.session.pause", lambda params: self.capability_session_transition_command(params, "paused"), run_in_thread=True, broadcast_ready=True)
+        router.register("capability.session.resume", lambda params: self.capability_session_transition_command(params, "running"), run_in_thread=True, broadcast_ready=True)
+        router.register("capability.session.cancel", lambda params: self.capability_session_transition_command(params, "cancelled"), run_in_thread=True, broadcast_ready=True)
+        router.register("permission.grant", self.permission_grant_command, run_in_thread=True, broadcast_ready=True)
+        router.register("permission.expand", self.permission_grant_command, run_in_thread=True, broadcast_ready=True)
+        router.register("permission.revoke", self.permission_revoke_command, run_in_thread=True, broadcast_ready=True)
+        router.register("action_receipt.list", self.action_receipt_list_command)
+        router.register("game.adapter.list", lambda _: self.game_adapter_list_command())
+        router.register("game.adapter.status", self.game_adapter_status_command)
+        router.register("game.adapter.install", self.game_adapter_install_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.uninstall", self.game_adapter_uninstall_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.enable", self.game_adapter_enable_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.run", self.game_adapter_run_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.pause", self.game_adapter_pause_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.resume", self.game_adapter_resume_command, run_in_thread=True, broadcast_ready=True)
+        router.register("character.list", lambda _: self.character_list_command())
+        router.register("character.detail", self.character_detail_command)
+        router.register("character.create", self.character_create_command, run_in_thread=True, broadcast_ready=True)
+        router.register("character.update", self.character_update_command, run_in_thread=True, broadcast_ready=True)
+        router.register("character.inspect", self.character_inspect_command, run_in_thread=True)
+        router.register("character.import", self.character_import_command, run_in_thread=True, broadcast_ready=True)
+        router.register("character.export", self.character_export_command, run_in_thread=True)
+        router.register("character.activate", self.character_activate_command, run_in_thread=True, broadcast_ready=True)
+        router.register("character.duplicate", self.character_duplicate_command, run_in_thread=True, broadcast_ready=True)
+        router.register("character.uninstall", self.character_uninstall_command, run_in_thread=True, broadcast_ready=True)
+        router.register("character.check_updates", self.character_check_updates_command, run_in_thread=True)
+        router.register("character.install_update", self.character_install_update_command, run_in_thread=True, broadcast_ready=True)
+        router.register("memory.status", lambda _: self.memory_status_command())
+        router.register("memory.list", self.memory_list_command)
+        router.register("memory.pending", self.memory_pending_command)
+        router.register("memory.recall", self.memory_recall_command)
+        router.register("memory.browse_vault", lambda _: self.memory_browse_vault_command())
+        router.register("memory.save_candidate", self.memory_save_candidate_command)
+        router.register("memory.reject_candidate", self.memory_reject_candidate_command)
+        router.register("memory.set_enabled", self.memory_set_enabled_command)
+        router.register("memory.delete", self.memory_delete_command)
+        router.register("memory.update", self.memory_update_command)
+        router.register("memory.clear", lambda _: self.memory_clear_command())
+        router.register("approval.resolve", self._rpc_approval_resolve)
+        router.register("runtime.config.preview", self._rpc_runtime_config_preview)
+        router.register("runtime.config.apply", self._rpc_runtime_config_apply)
+        router.register("semantic_target.select", self._rpc_semantic_target_select)
+        router.register(
+            "voice.transcribe",
+            self._rpc_voice_transcribe,
+            aliases=("audio.transcribe",),
+            run_in_thread=True,
+        )
+        router.register("artifact.read", self._rpc_artifact_read, run_in_thread=True)
+        router.register("core.ping", lambda _: {"ok": True})
+        return router
+
+    async def _rpc_user_message(self, params: dict[str, Any]) -> dict[str, Any]:
+        text = str(params.get("text") or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty_text"}
+        thread_id = str(params.get("thread_id") or "").strip()
+        if thread_id:
+            activation = self._activate_thread_context(thread_id)
+            if not activation.get("ok"):
+                return activation
+        asyncio.create_task(asyncio.to_thread(self.submit_user_text, text))
+        return {"ok": True, "submitted": True}
+
+    async def _rpc_approval_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
+        approval_id = str(params.get("approval_id") or "")
+        if not approval_id:
+            return {"ok": False, "error": "missing_approval_id"}
+        approved = bool(params.get("approved", False))
+        asyncio.create_task(asyncio.to_thread(self.resolve_approval_command, approval_id, approved))
+        return {"ok": True, "submitted": True}
+
+    async def _rpc_semantic_target_select(self, params: dict[str, Any]) -> dict[str, Any]:
+        selection_id = str(params.get("selection_id") or "").strip()
+        rank = optional_int(params.get("rank"))
+        if not selection_id:
+            return {"ok": False, "error": "missing_selection_id"}
+        if rank is None or rank < 1:
+            return {"ok": False, "error": "invalid_rank"}
+        asyncio.create_task(asyncio.to_thread(self.select_semantic_target_command, selection_id, rank))
+        return {"ok": True, "submitted": True}
+
+    def _rpc_runtime_config_preview(self, params: dict[str, Any]) -> dict[str, Any]:
+        updates = params.get("updates")
+        return self.preview_runtime_config_update_command(updates if isinstance(updates, dict) else {})
+
+    def _rpc_runtime_config_apply(self, params: dict[str, Any]) -> dict[str, Any]:
+        updates = params.get("updates")
+        return self.apply_runtime_config_update_command(updates if isinstance(updates, dict) else {})
+
+    def _rpc_voice_transcribe(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.transcribe_and_submit(
+            str(params.get("audio_base64") or ""),
+            str(params.get("mime_type") or ""),
+        )
+
+    def _rpc_artifact_read(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.read_artifact_command(str(params.get("artifact") or ""))
+
+    def conversation_history_command(self, params: dict[str, Any]) -> dict[str, Any]:
+        limit = optional_int(params.get("limit")) or 160
+        after_sequence = optional_int(params.get("after_sequence")) or 0
+        thread_id = str(params.get("thread_id") or self.collaboration.context()["thread_id"])
+        rows = self.collaboration.history(thread_id, limit=limit, after_sequence=after_sequence)
+        return {
+            "ok": True,
+            "events": rows,
+            "latest_sequence": self.app.bus.latest_sequence,
+            "active_approval_ids": self._active_approval_ids(),
+            "thread_id": thread_id,
+        }
+
+    def project_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return {"ok": True, "projects": self.collaboration.list_projects(bool(params.get("include_archived"))), "active": self.collaboration.context()}
+
+    def project_create_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        result = self.collaboration.create_project(str(params.get("name") or ""), str(params.get("default_character_id") or self.app.character.id))
+        return {"ok": True, **result, "collaboration": self.collaboration.snapshot()}
+
+    def project_update_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.collaboration.update_project(
+            str(params.get("project_id") or ""),
+            name=str(params["name"]) if "name" in params else None,
+            default_character_id=str(params["default_character_id"]) if "default_character_id" in params else None,
+            archived=bool(params["archived"]) if "archived" in params else None,
+        )
+
+    def project_archive_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.collaboration.update_project(str(params.get("project_id") or ""), archived=bool(params.get("archived", True)))
+
+    def project_delete_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.collaboration.delete_project(str(params.get("project_id") or ""), bool(params.get("confirmed")))
+
+    def thread_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        project_id = str(params.get("project_id") or self.collaboration.context()["project_id"])
+        return {
+            "ok": True,
+            "threads": self.collaboration.list_threads(project_id, bool(params.get("include_archived")), str(params.get("query") or "")),
+            "active": self.collaboration.context(),
+        }
+
+    def thread_create_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        project_id = str(params.get("project_id") or self.collaboration.context()["project_id"])
+        result = self.collaboration.create_thread(project_id, str(params.get("title") or ""), str(params.get("character_id") or ""))
+        if result.get("ok"):
+            self._activate_thread_character(str((result.get("thread") or {}).get("character_id") or ""))
+        return {**result, "collaboration": self.collaboration.snapshot()}
+
+    def thread_update_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.collaboration.update_thread(
+            str(params.get("thread_id") or ""),
+            title=str(params["title"]) if "title" in params else None,
+            character_id=str(params["character_id"]) if "character_id" in params else None,
+            archived=bool(params["archived"]) if "archived" in params else None,
+        )
+
+    def thread_activate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._activate_thread_context(str((params or {}).get("thread_id") or ""))
+
+    def thread_archive_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.collaboration.update_thread(str(params.get("thread_id") or ""), archived=bool(params.get("archived", True)))
+
+    def thread_delete_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.collaboration.delete_thread(str(params.get("thread_id") or ""), bool(params.get("confirmed")))
+
+    def resource_binding_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        project_id = str((params or {}).get("project_id") or self.collaboration.context()["project_id"])
+        return {"ok": True, "bindings": self.collaboration.list_bindings(project_id)}
+
+    def resource_binding_add_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.collaboration.add_binding(
+            str(params.get("project_id") or self.collaboration.context()["project_id"]),
+            str(params.get("kind") or ""),
+            str(params.get("value") or ""),
+            str(params.get("label") or ""),
+            params.get("metadata") if isinstance(params.get("metadata"), dict) else {},
+        )
+
+    def resource_binding_remove_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.collaboration.remove_binding(str((params or {}).get("binding_id") or ""))
+
+    def capability_session_start_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        drivers = self.capability_orchestrator.driver_inventory(str(params.get("driver") or "auto"))
+        result = self.collaboration.start_session(
+            str(params.get("capability") or "computer_use"),
+            str(params.get("goal") or ""),
+            str(params.get("permission_profile") or "observe"),
+            project_id=str(params.get("project_id") or ""),
+            thread_id=str(params.get("thread_id") or ""),
+            driver=drivers.selected,
+            budget=params.get("budget") if isinstance(params.get("budget"), dict) else {},
+            stop_conditions=params.get("stop_conditions") if isinstance(params.get("stop_conditions"), list) else [],
+        )
+        session = result.get("session") if isinstance(result.get("session"), dict) else {}
+        if result.get("ok") and str(session.get("capability") or "") == "computer_use":
+            self.app.set_computer_driver(drivers.selected, str(session.get("id") or ""))
+        result["drivers"] = drivers.payload()
+        return result
+
+    def capability_session_status_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        session_id = str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or "")
+        session = self.collaboration.session_payload(session_id) if session_id else {}
+        if session:
+            session["orchestrator"] = self.capability_orchestrator.runtime_payload(session_id)
+        return {"ok": bool(session_id), "session": session}
+
+    def capability_session_transition_command(self, params: dict[str, Any] | None, state: str) -> dict[str, Any]:
+        session_id = str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or "")
+        result = self.collaboration.transition_session(session_id, state)
+        if state in {"cancelled", "completed", "failed"}:
+            self.app.set_computer_driver("native")
+        return result
+
+    def permission_grant_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.collaboration.grant_permission(
+            str(params.get("session_id") or self.collaboration.context().get("session_id") or ""),
+            str(params.get("profile") or "observe"),
+            params.get("scope") if isinstance(params.get("scope"), dict) else {},
+        )
+
+    def permission_revoke_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.collaboration.revoke_permission(str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or ""))
+
+    def action_receipt_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        session_id = str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or "")
+        return {"ok": bool(session_id), "receipts": self.collaboration.list_receipts(session_id) if session_id else []}
+
+    def game_adapter_list_command(self) -> dict[str, Any]:
+        return self.game_adapters.list()
+
+    def game_adapter_status_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.game_adapters.status(str((params or {}).get("adapter_id") or ""))
+
+    def game_adapter_install_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.game_adapters.install(str(params.get("adapter_id") or ""), confirmed=bool(params.get("confirmed")))
+
+    def game_adapter_uninstall_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.game_adapters.uninstall(str(params.get("adapter_id") or ""), confirmed=bool(params.get("confirmed")))
+
+    def game_adapter_enable_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.game_adapters.set_enabled(str(params.get("adapter_id") or ""), bool(params.get("enabled", True)))
+
+    def game_adapter_run_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        adapter_id = str(params.get("adapter_id") or "")
+        mode = str(params.get("mode") or "takeover")
+        goal = str(params.get("goal") or "")
+        dry_run = bool(params.get("dry_run", True))
+        if dry_run:
+            return self.game_adapters.prepare(adapter_id, mode, goal, True)
+        session_result = self.collaboration.start_session(
+            "game",
+            goal,
+            "collaborate",
+            driver="structured_bridge" if mode == "companion" else self.capability_orchestrator.driver_inventory("auto").selected,
+            budget=params.get("budget") if isinstance(params.get("budget"), dict) else {},
+            stop_conditions=["user_input", "game_disconnect", "budget_exhausted"],
+        )
+        if not session_result.get("ok"):
+            return session_result
+        session = session_result.get("session") or {}
+        prepared = self.game_adapters.prepare(adapter_id, mode, goal, False)
+        tool = str(prepared.get("tool") or "")
+        if tool:
+            sequence, events = self._run_serial(
+                "game.adapter.run",
+                lambda: self.app.handle_skill_run(tool, prepared.get("arguments") if isinstance(prepared.get("arguments"), dict) else {}, user_text=goal or adapter_id),
+            )
+            ok = not any(event.type == EventType.TASK_FAILED for event in events)
+            self.collaboration.transition_session(str(session.get("id") or ""), "completed" if ok else "failed")
+            return {"ok": ok, "session": self.collaboration.session_payload(str(session.get("id") or "")), "prepared": prepared, "sequence": sequence, "events": [event.to_dict() for event in events]}
+        if not prepared.get("ok"):
+            self.collaboration.transition_session(str(session.get("id") or ""), "failed")
+        elif mode == "companion":
+            self.collaboration.transition_session(str(session.get("id") or ""), "completed")
+        return {**prepared, "session": self.collaboration.session_payload(str(session.get("id") or ""))}
+
+    def game_adapter_pause_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        adapter_id = str((params or {}).get("adapter_id") or "")
+        result = self.game_adapters.pause(adapter_id)
+        session_id = str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or "")
+        if session_id:
+            result["session"] = self.collaboration.transition_session(session_id, "paused").get("session") or {}
+        return result
+
+    def game_adapter_resume_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        adapter_id = str((params or {}).get("adapter_id") or "")
+        result = self.game_adapters.resume(adapter_id)
+        session_id = str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or "")
+        if session_id:
+            result["session"] = self.collaboration.transition_session(session_id, "running").get("session") or {}
+        return result
+
+    def character_list_command(self) -> dict[str, Any]:
+        result = self._character_command(self.app.character_packages.list)
+        for character in result.get("characters") or []:
+            self._attach_character_image(character, "avatar_path", "avatar_url", "avatar_data_url")
+            self._attach_character_image(character, "portrait_path", "portrait_url", "portrait_data_url")
+        return result
+
+    def character_detail_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        character_id = str((params or {}).get("character_id") or "")
+        result = self._character_command(lambda: self.app.character_packages.detail(character_id))
+        character = result.get("character") if isinstance(result.get("character"), dict) else {}
+        self._attach_character_image(character, "avatar_path", "avatar_url", "avatar_data_url")
+        self._attach_character_image(character, "portrait_path", "portrait_url", "portrait_data_url")
+        return result
+
+    def character_create_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = (params or {}).get("character")
+        return self._character_preview_result(
+            self._character_command(lambda: self.app.character_packages.create(payload if isinstance(payload, dict) else {}))
+        )
+
+    def character_update_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        character_id = str(params.get("character_id") or "")
+        payload = params.get("character")
+        return self._character_preview_result(
+            self._character_command(lambda: self.app.character_packages.update(character_id, payload if isinstance(payload, dict) else {}))
+        )
+
+    def character_import_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        source = str((params or {}).get("path") or "")
+        return self._character_command(lambda: self.app.character_packages.import_package(source))
+
+    def character_inspect_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        source = str((params or {}).get("path") or "")
+        return self._character_command(lambda: self.app.character_packages.inspect_package(source))
+
+    def character_export_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        character_id = str(params.get("character_id") or "")
+        destination = str(params.get("destination") or "")
+        return self._character_command(lambda: self.app.character_packages.export_package(character_id, destination))
+
+    def character_activate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        character_id = str((params or {}).get("character_id") or "")
+
+        def activate() -> dict[str, Any]:
+            result = self.app.character_packages.activate(character_id)
+            self._reload_active_character()
+            self.collaboration.update_thread(self.collaboration.context()["thread_id"], character_id=character_id)
+            result["memory"] = self.app.memory.status()
+            result["ready"] = self._ready_payload()
+            return result
+
+        return self._character_preview_result(self._character_command(activate))
+
+    def character_duplicate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        return self._character_preview_result(
+            self._character_command(
+                lambda: self.app.character_packages.duplicate(
+                    str(params.get("character_id") or ""),
+                    str(params.get("name") or ""),
+                )
+            )
+        )
+
+    def character_uninstall_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        character_id = str(params.get("character_id") or "")
+        fallback_id = str(params.get("fallback_id") or "")
+
+        def uninstall() -> dict[str, Any]:
+            detail = self.app.character_packages.detail(character_id).get("character") or {}
+            if bool(detail.get("built_in")):
+                raise CharacterPackageError("builtin_character_required", "内置角色不能卸载。")
+            switched = character_id == self.app.character.id
+            if switched:
+                if not fallback_id or fallback_id == character_id:
+                    raise CharacterPackageError("active_character_required", "卸载当前角色前需要提供备用角色。")
+                self.app.character_packages.activate(fallback_id)
+                self._reload_active_character()
+            result = self.app.character_packages.uninstall(character_id)
+            result["active_id"] = self.app.character.id
+            if switched:
+                result["ready"] = self._ready_payload()
+            return result
+
+        return self._character_command(uninstall)
+
+    def _reload_active_character(self) -> None:
+        self.watch_loop.stop(emit=False)
+        self.app.reload_character_package()
+        self.memory_service = MemoryService(self.app.memory)
+        self.tts.reload()
+        self.watch_commentary.character = self.app.character
+        self.watch_commentary.reload()
+
+    def _activate_thread_context(self, thread_id: str) -> dict[str, Any]:
+        result = self.collaboration.activate_thread(thread_id)
+        if not result.get("ok"):
+            return result
+        thread = result.get("thread") if isinstance(result.get("thread"), dict) else {}
+        active = result.get("active") if isinstance(result.get("active"), dict) else {}
+        self._activate_thread_character(str(thread.get("character_id") or active.get("character_id") or ""))
+        return {**result, "collaboration": self.collaboration.snapshot(), "ready": self._ready_payload()}
+
+    def _activate_thread_character(self, character_id: str) -> None:
+        if not character_id or character_id == self.app.character.id:
+            return
+        try:
+            self.app.character_packages.activate(character_id)
+            self._reload_active_character()
+        except CharacterPackageError:
+            # Historical threads remain usable if their character was removed.
+            self.collaboration.update_thread(self.collaboration.context()["thread_id"], character_id=self.app.character.id)
+
+    def character_check_updates_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        character_id = str((params or {}).get("character_id") or "")
+        return self._character_command(lambda: self.app.character_packages.check_updates(character_id))
+
+    def character_install_update_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        character_id = str(params.get("character_id") or "")
+        package_url = str(params.get("package_url") or "")
+
+        def install() -> dict[str, Any]:
+            result = self.app.character_packages.install_update(character_id, package_url)
+            if character_id == self.app.character.id and result.get("updated"):
+                self.app.reload_character_package()
+                self.memory_service = MemoryService(self.app.memory)
+                self.tts.reload()
+                self.watch_commentary.character = self.app.character
+                self.watch_commentary.reload()
+            return result
+
+        return self._character_command(install)
+
+    @staticmethod
+    def _character_command(callback: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        try:
+            return callback()
+        except CharacterPackageError as exc:
+            return exc.to_payload()
+
+    def _character_preview_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        character = result.get("character") if isinstance(result.get("character"), dict) else None
+        if character is None:
+            return result
+        self._attach_character_image(character, "avatar_path", "avatar_url", "avatar_data_url")
+        self._attach_character_image(character, "portrait_path", "portrait_url", "portrait_data_url")
+        return result
+
+    def _attach_character_image(
+        self,
+        payload: dict[str, Any],
+        path_key: str,
+        url_key: str,
+        data_key: str,
+    ) -> None:
+        """Expose installed images through the local asset server without leaking paths.
+
+        A data URL remains as a fallback only when the read-only asset service is not
+        available. This keeps ordinary list/ready RPC responses small while preserving
+        preview support in tests and constrained runtimes.
+        """
+
+        path = Path(str(payload.get(path_key) or ""))
+        asset_url = self._character_asset_url(path)
+        payload[url_key] = asset_url
+        payload[data_key] = "" if asset_url else self._image_data_url(path) if path.is_file() else ""
+        payload.pop(path_key, None)
+
+    def _active_approval_ids(self) -> list[str]:
+        return sorted({*self.app.pending_steps, *self.codex_runtime.pending_approval_ids()})
+
+    async def _broadcast_ready(self) -> None:
+        await self._broadcast(
+            json.dumps(
+                {"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()},
+                ensure_ascii=False,
+            )
+        )
 
     async def _event_pump(self) -> None:
         assert self.queue is not None
@@ -362,6 +842,15 @@ class JsonRpcBridge:
         return payload
 
     def submit_user_text(self, text: str) -> dict[str, Any]:
+        context = self.collaboration.context()
+        thread = self.collaboration.get_thread(context["thread_id"])
+        if thread and thread.title == "新对话":
+            self.collaboration.update_thread(thread.id, title=text[:36])
+        if _looks_like_computer_goal(text) and not context.get("session_id"):
+            driver = self.capability_orchestrator.driver_inventory("auto").selected
+            started = self.collaboration.start_session("computer_use", text, "collaborate", driver=driver)
+            session = started.get("session") if isinstance(started.get("session"), dict) else {}
+            self.app.set_computer_driver(driver, str(session.get("id") or ""))
         if _looks_like_watch_loop_stop(text):
             return self.watch_loop_stop_command()
         if self.codex_runtime.should_handle(text) and not self.app.should_handle_locally_before_agent_cli(text):
@@ -381,8 +870,9 @@ class JsonRpcBridge:
             sequence, events = self._run_serial("user.message", lambda: self.app.handle_user_text(text))
         payload: dict[str, Any] = {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
         if _looks_like_watch_loop_start(text):
-            self.watch_commentary.reset()
-            payload["watch_loop"] = self.watch_loop.start(self._watch_loop_options_from_params({"query": text})).to_agent_state()
+            watch_result = self.watch_loop_start_command({"query": text})
+            payload["watch_loop"] = watch_result.get("watch_loop") or {}
+            payload["capability_session"] = watch_result.get("capability_session") or {}
         return payload
 
     def runtime_status_command(self) -> dict[str, Any]:
@@ -391,8 +881,12 @@ class JsonRpcBridge:
             "runtime": self.codex_runtime.status_payload(),
             "asr": self._asr_payload(),
             "tts": self.tts.status_payload(),
-            "joi_mcp": self.joi_mcp_status_command().get("joi_mcp", {}),
+            "joi_mcp": dict(self._joi_mcp_status),
+            "byok": self.byok.status(),
         }
+
+    def byok_connect_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.byok.connect(params if isinstance(params, dict) else {})
 
     def runtime_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         runtime = self.codex_runtime.configure(params if isinstance(params, dict) else {})
@@ -416,22 +910,25 @@ class JsonRpcBridge:
         codex = _codex_executable()
         if not codex:
             self.codex_runtime.mark_mcp_connected(False)
-            return {"ok": True, "joi_mcp": {"connected": False, "available": False, "status": "codex_not_found"}}
+            self._joi_mcp_status = {"connected": False, "available": False, "status": "codex_not_found"}
+            return {"ok": True, "joi_mcp": dict(self._joi_mcp_status)}
         try:
             probe = subprocess.run([codex, "mcp", "list"], cwd=str(self.workspace), capture_output=True, text=True, timeout=8)
         except Exception:
             self.codex_runtime.mark_mcp_connected(False)
-            return {"ok": True, "joi_mcp": {"connected": False, "available": True, "status": "probe_failed"}}
+            self._joi_mcp_status = {"connected": False, "available": True, "status": "probe_failed"}
+            return {"ok": True, "joi_mcp": dict(self._joi_mcp_status)}
         output = f"{probe.stdout}\n{probe.stderr}"
         connected = probe.returncode == 0 and any(line.strip().startswith("joi") or line.strip().split(" ", 1)[0] == "joi" for line in output.splitlines())
         self.codex_runtime.mark_mcp_connected(connected)
+        self._joi_mcp_status = {
+            "connected": connected,
+            "available": True,
+            "status": "connected" if connected else "not_connected",
+        }
         return {
             "ok": True,
-            "joi_mcp": {
-                "connected": connected,
-                "available": True,
-                "status": "connected" if connected else "not_connected",
-            },
+            "joi_mcp": dict(self._joi_mcp_status),
         }
 
     def joi_mcp_install_codex_command(self) -> dict[str, Any]:
@@ -459,14 +956,32 @@ class JsonRpcBridge:
             return {"ok": False, "error": "install_failed", "joi_mcp": {"connected": False, "available": True}}
         ok = result.returncode == 0
         self.codex_runtime.mark_mcp_connected(ok)
+        self._joi_mcp_status = {"connected": ok, "available": True, "status": "connected" if ok else "install_failed"}
         return {
             "ok": ok,
             "error": "" if ok else "codex_mcp_add_failed",
-            "joi_mcp": {"connected": ok, "available": True, "status": "connected" if ok else "install_failed"},
+            "joi_mcp": dict(self._joi_mcp_status),
         }
 
     def skill_run_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params if isinstance(params, dict) else {}
+        installation_id = str(params.get("installation_id") or "")
+        if installation_id:
+            session_id = str(params.get("session_id") or self.collaboration.context().get("session_id") or "")
+            session = self.collaboration.session_payload(session_id, include_receipts=False) if session_id else {}
+            profile = str(params.get("permission_profile") or session.get("permission_profile") or "observe")
+            try:
+                return self.agent_skills.run(
+                    installation_id,
+                    script=str(params.get("script") or ""),
+                    arguments=params.get("arguments") if isinstance(params.get("arguments"), list) else [],
+                    permission_profile=profile,
+                    approved=bool(params.get("approved")),
+                    project_root=str(params.get("project_root") or self.workspace),
+                    timeout_seconds=optional_int(params.get("timeout_seconds")) or 120,
+                )
+            except AgentSkillError as exc:
+                return {"ok": False, "error": exc.code, "message": exc.message}
         tool = str(params.get("tool") or "")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         sequence, events = self._run_serial(
@@ -475,14 +990,111 @@ class JsonRpcBridge:
         )
         return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
 
+    def agent_skill_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        context = self.collaboration.context()
+        return self.agent_skills.list(
+            project_id=str(params.get("project_id") or context.get("project_id") or ""),
+            character_id=str(params.get("character_id") or context.get("character_id") or self.app.character.id),
+            include_disabled=bool(params.get("include_disabled", True)),
+        )
+
+    def agent_skill_inspect_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            return self.agent_skills.inspect(str((params or {}).get("source") or ""))
+        except AgentSkillError as exc:
+            return {"ok": False, "error": exc.code, "message": exc.message}
+
+    def agent_skill_install_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        scope = str(params.get("scope") or "global")
+        try:
+            return self.agent_skills.install(
+                str(params.get("source") or ""),
+                scope=scope,
+                scope_id=self._agent_skill_scope_id(scope, str(params.get("scope_id") or "")),
+                expected_digest=str(params.get("expected_digest") or ""),
+            )
+        except AgentSkillError as exc:
+            return {"ok": False, "error": exc.code, "message": exc.message}
+
+    def agent_skill_update_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        try:
+            return self.agent_skills.update(str(params.get("installation_id") or ""), expected_digest=str(params.get("expected_digest") or ""))
+        except AgentSkillError as exc:
+            return {"ok": False, "error": exc.code, "message": exc.message}
+
+    def agent_skill_uninstall_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        try:
+            return self.agent_skills.uninstall(str(params.get("installation_id") or ""), confirmed=bool(params.get("confirmed")))
+        except AgentSkillError as exc:
+            return {"ok": False, "error": exc.code, "message": exc.message}
+
+    def agent_skill_validate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.agent_skills.validate(str((params or {}).get("installation_id") or ""))
+
+    def agent_skill_enable_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        return self.agent_skills.set_enabled(str(params.get("installation_id") or ""), bool(params.get("enabled", True)))
+
+    def agent_skill_draft_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        context = self.collaboration.context()
+        project_id = str(params.get("project_id") or context.get("project_id") or DEFAULT_PROJECT_ID)
+        thread_id = str(params.get("thread_id") or "")
+        return {"ok": True, "drafts": self.collaboration.list_skill_drafts(project_id, thread_id)}
+
+    def agent_skill_draft_create_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        context = self.collaboration.context()
+        draft = self.collaboration.create_skill_draft(
+            str(params.get("project_id") or context.get("project_id") or DEFAULT_PROJECT_ID),
+            str(params.get("thread_id") or context.get("thread_id") or DEFAULT_THREAD_ID),
+            str(params.get("name") or "可复用流程"),
+            params.get("draft") if isinstance(params.get("draft"), dict) else {},
+        )
+        return {"ok": True, "draft": draft}
+
+    def agent_skill_draft_approve_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        scope = str(params.get("scope") or "project")
+        try:
+            return self.agent_skills.install_draft(
+                str(params.get("draft_id") or ""),
+                scope=scope,
+                scope_id=self._agent_skill_scope_id(scope, str(params.get("scope_id") or "")),
+            )
+        except AgentSkillError as exc:
+            return {"ok": False, "error": exc.code, "message": exc.message}
+
+    def agent_skill_draft_reject_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.collaboration.update_skill_draft(str((params or {}).get("draft_id") or ""), "rejected")
+
+    def _agent_skill_scope_id(self, scope: str, requested: str) -> str:
+        if scope == "project":
+            return requested or str(self.collaboration.context().get("project_id") or DEFAULT_PROJECT_ID)
+        if scope == "character":
+            return requested or str(self.collaboration.context().get("character_id") or self.app.character.id)
+        return ""
+
     def watch_loop_start_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
         self.watch_commentary.reset()
-        snapshot = self.watch_loop.start(self._watch_loop_options_from_params(params if isinstance(params, dict) else {}))
+        options = self._watch_loop_options_from_params(params)
+        self.scene_session.reset(mode=options.mode, spoiler_level=options.spoiler_level, min_comment_interval_seconds=options.commentary_interval_seconds)
+        capability = self.collaboration.start_session("scene_watch", options.query, "observe", driver="scene")
+        snapshot = self.watch_loop.start(options)
         self._emit_watch_loop_state("实时陪看已启动。", snapshot.to_agent_state(), "success")
-        return {"ok": True, "watch_loop": snapshot.to_agent_state()}
+        return {"ok": True, "watch_loop": snapshot.to_agent_state(), "capability_session": capability.get("session") or {}}
 
     def watch_loop_stop_command(self) -> dict[str, Any]:
         snapshot = self.watch_loop.stop()
+        context = self.collaboration.context()
+        session = self.collaboration.session_payload(str(context.get("session_id") or ""), include_receipts=False)
+        if session.get("capability") == "scene_watch":
+            self.collaboration.transition_session(str(session.get("id") or ""), "completed")
         self._emit_watch_loop_state("实时陪看已停止。", snapshot.to_agent_state(), "info")
         return {"ok": True, "watch_loop": snapshot.to_agent_state()}
 
@@ -498,10 +1110,17 @@ class JsonRpcBridge:
             "proactive_enabled": current.proactive_enabled,
             "commentary_interval_seconds": current.commentary_interval_seconds or 30.0,
             "vision_interval_ticks": current.vision_interval_ticks,
+            "mode": current.mode or "quiet",
+            "spoiler_level": current.spoiler_level or "none",
         }
         if isinstance(params, dict):
             merged.update(params)
         snapshot = self.watch_loop.configure(self._watch_loop_options_from_params(merged))
+        self.scene_session.configure(
+            mode=snapshot.mode,
+            spoiler_level=snapshot.spoiler_level,
+            min_comment_interval_seconds=snapshot.commentary_interval_seconds,
+        )
         if not snapshot.proactive_enabled:
             self.watch_commentary.reset()
         self._emit_watch_loop_state("实时陪看设置已更新。", snapshot.to_agent_state(), "info")
@@ -511,7 +1130,7 @@ class JsonRpcBridge:
         current = self.watch_loop.snapshot()
         if not current.active:
             return {"ok": False, "error": "watch_loop_inactive", "watch_loop": current.to_agent_state()}
-        force_visual = _safe_bool(params.get("force_visual_summary"), False) if isinstance(params, dict) else False
+        force_visual = bool_or(params.get("force_visual_summary"), False) if isinstance(params, dict) else False
         snapshot = self.watch_loop.refresh(force_visual_summary=force_visual)
         self._emit_watch_loop_state("画面理解已更新。", snapshot.to_agent_state(), "success")
         return {"ok": True, "watch_loop": snapshot.to_agent_state()}
@@ -520,34 +1139,20 @@ class JsonRpcBridge:
         return {"ok": True, "watch_loop": self.watch_loop.snapshot().to_agent_state()}
 
     def background_status_command(self) -> dict[str, Any]:
-        return {"ok": True, "background": self.app.background_context.status()}
+        return self.background_service.status()
 
     def background_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        params = params if isinstance(params, dict) else {}
-        enabled = params.get("enabled") if isinstance(params.get("enabled"), bool) else None
-        result = self.app.background_context.configure(
-            enabled=enabled,
-            scope_type=str(params.get("scope_type") or ""),
-            label=str(params.get("label") or ""),
-            active_scope_id=str(params.get("active_scope_id") or ""),
-        )
-        self._emit_background_audit(
-            "背景上下文设置已更新。" if result.get("ok") else "背景上下文设置没有更新。",
-            result.get("background", {}),
-            status="success" if result.get("ok") else "failed",
-        )
-        return result
+        return self.background_service.configure(params)
 
     def background_clear_command(self) -> dict[str, Any]:
-        result = self.app.background_context.clear_context()
-        self._emit_background_audit("背景上下文摘要已清空。", result.get("background", {}), status="info")
-        return result
+        return self.background_service.clear()
 
     def memory_status_command(self) -> dict[str, Any]:
-        return {"ok": True, "memory": self.app.memory.status()}
+        return self.memory_service.status()
 
     def skill_manifest_command(self) -> dict[str, Any]:
         tts_status = self.tts.status_payload()
+        context = self.collaboration.context()
         return {
             "ok": True,
             "skills": build_native_skill_manifest(
@@ -557,6 +1162,10 @@ class JsonRpcBridge:
                 memory_status=self.app.memory.status(),
                 skill_settings=self.app.skill_settings_payload(),
             ),
+            "installations": self.agent_skills.list(
+                project_id=str(context.get("project_id") or ""),
+                character_id=str(context.get("character_id") or self.app.character.id),
+            )["skills"],
         }
 
     def agent_cli_list_command(self) -> dict[str, Any]:
@@ -571,7 +1180,7 @@ class JsonRpcBridge:
         current = dict(self.agent_cli_takeover)
         mode = _safe_agent_cli_mode(params.get("mode") or current.get("mode"))
         selected = _safe_agent_cli_token(params.get("selected") or params.get("cli_id") or current.get("selected") or "codex")
-        enabled = _safe_bool(params.get("enabled"), bool(current.get("enabled")))
+        enabled = bool_or(params.get("enabled"), bool(current.get("enabled")))
         if mode != "local_cli":
             enabled = False
         self.agent_cli_takeover = {
@@ -591,43 +1200,34 @@ class JsonRpcBridge:
         return {"ok": True, "audit": self.app.audit_store.recent(limit)}
 
     def memory_recall_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        query = str(params.get("query") or "") if isinstance(params, dict) else ""
-        limit = _safe_int(params.get("limit")) if isinstance(params, dict) else None
-        safe_limit = min(20, max(1, int(limit or 8)))
-        return {"ok": True, "memories": self.app.memory.recall(query, safe_limit), "memory": self.app.memory.status()}
+        return self.memory_service.recall(params)
+
+    def memory_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.memory_service.list(params)
+
+    def memory_pending_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.memory_service.pending(params)
 
     def memory_browse_vault_command(self) -> dict[str, Any]:
-        return {"ok": True, "vault": self.app.memory.browse_vault(), "memory": self.app.memory.status()}
+        return self.memory_service.browse_vault()
 
     def memory_save_candidate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        candidate_id = _safe_int(params.get("candidate_id")) if isinstance(params, dict) else None
-        if candidate_id is None:
-            return {"ok": False, "error": "missing_candidate_id", "memory": self.app.memory.status()}
-        result = self.app.memory.save_candidate(candidate_id)
-        return {**result, "memory": self.app.memory.status()}
+        return self.memory_service.save_candidate(params)
 
     def memory_reject_candidate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        candidate_id = _safe_int(params.get("candidate_id")) if isinstance(params, dict) else None
-        if candidate_id is None:
-            return {"ok": False, "error": "missing_candidate_id", "memory": self.app.memory.status()}
-        reason = str(params.get("reason") or "user_rejected") if isinstance(params, dict) else "user_rejected"
-        result = self.app.memory.reject_candidate(candidate_id, reason)
-        return {**result, "memory": self.app.memory.status()}
+        return self.memory_service.reject_candidate(params)
 
     def memory_set_enabled_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        enabled = _safe_bool(params.get("enabled"), True) if isinstance(params, dict) else True
-        return {"ok": True, "memory": self.app.memory.set_enabled(enabled)}
+        return self.memory_service.set_enabled(params)
 
     def memory_delete_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        memory_id = _safe_int(params.get("memory_id")) if isinstance(params, dict) else None
-        if memory_id is None:
-            return {"ok": False, "error": "missing_memory_id", "memory": self.app.memory.status()}
-        result = self.app.memory.delete(memory_id)
-        return {**result, "memory": self.app.memory.status()}
+        return self.memory_service.delete(params)
+
+    def memory_update_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.memory_service.update(params)
 
     def memory_clear_command(self) -> dict[str, Any]:
-        result = self.app.memory.clear()
-        return {**result, "memory": self.app.memory.status()}
+        return self.memory_service.clear()
 
     def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
         if self.codex_runtime.has_pending_approval(approval_id):
@@ -657,31 +1257,24 @@ class JsonRpcBridge:
         return {"ok": True, "submitted": True, "preview": preview.to_agent_state(), "sequence": sequence, "events": [event.to_dict() for event in events]}
 
     def read_artifact_command(self, artifact: str) -> dict[str, Any]:
-        path = self._resolve_artifact_path(artifact)
-        if path is None or not path.is_file():
-            return {"ok": False, "error": "artifact_not_found"}
-        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
-            return {"ok": False, "error": "unsupported_artifact_type"}
-        if path.stat().st_size > 8 * 1024 * 1024:
-            return {"ok": False, "error": "artifact_too_large"}
-        mime = mimetypes.guess_type(path.name)[0] or "image/png"
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        return {"ok": True, "artifact": artifact, "mime": mime, "data_url": f"data:{mime};base64,{encoded}"}
+        return self.artifacts.read_image(artifact)
 
     def _watch_loop_options_from_params(self, params: dict[str, Any]) -> WatchLoopOptions:
         query = str(params.get("query") or "陪我看当前视频").strip()
-        sample_interval_ms = _safe_int(params.get("sample_interval_ms"))
-        vision_interval_ticks = _safe_int(params.get("vision_interval_ticks"))
+        sample_interval_ms = optional_int(params.get("sample_interval_ms"))
+        vision_interval_ticks = optional_int(params.get("vision_interval_ticks"))
         return WatchLoopOptions(
             query=query or "陪我看当前视频",
-            interval_seconds=_safe_float(params.get("interval_seconds"), 6.0),
-            sample_count=_safe_int(params.get("sample_count")) or 3,
+            interval_seconds=float_or(params.get("interval_seconds"), 6.0),
+            sample_count=optional_int(params.get("sample_count")) or 3,
             sample_interval_ms=sample_interval_ms if sample_interval_ms is not None else 700,
             transcript_source=str(params.get("transcript_source") or "system_audio"),
             transcribe=bool(params.get("transcribe", True)),
-            proactive_enabled=_safe_bool(params.get("proactive_enabled"), True),
-            commentary_interval_seconds=_safe_float(params.get("commentary_interval_seconds"), 30.0),
+            proactive_enabled=bool_or(params.get("proactive_enabled"), True),
+            commentary_interval_seconds=float_or(params.get("commentary_interval_seconds"), 30.0),
             vision_interval_ticks=vision_interval_ticks if vision_interval_ticks is not None else 5,
+            mode=str(params.get("mode") or "quiet"),
+            spoiler_level=str(params.get("spoiler_level") or "none"),
         )
 
     def _watch_loop_tick(self, options: WatchLoopOptions) -> WatchLoopTick:
@@ -725,7 +1318,19 @@ class JsonRpcBridge:
                 "capture": diagnostics.get("capture") or "",
                 "audio_bytes": diagnostics.get("audio_bytes") or 0,
             }
-        comment = self.watch_commentary.maybe_comment(rolling, min_interval_seconds=options.commentary_interval_seconds) if options.proactive_enabled else None
+        scene = self.scene_session.observe(
+            visual_summary,
+            [str(text) for text in rolling.get("recent_text", []) if str(text).strip()],
+            transcript_source=str(transcript.get("source") or options.transcript_source),
+            proactive_enabled=options.proactive_enabled,
+        )
+        comment = self.watch_commentary.maybe_comment(
+            rolling,
+            min_interval_seconds=options.commentary_interval_seconds,
+            mode=options.mode,
+            spoiler_level=options.spoiler_level,
+            visual_summary=visual_summary,
+        ) if scene.should_comment else None
         tick = WatchLoopTick(
             ok=result.ok,
             summary=result.display_card.summary,
@@ -734,7 +1339,7 @@ class JsonRpcBridge:
             transcript_status=str(transcript.get("status") or ""),
             rolling_summary=str(rolling.get("summary") or ""),
             rolling_transcript=[str(text) for text in rolling.get("recent_text", []) if str(text).strip()],
-            transcript_window_seconds=_safe_int(rolling.get("window_seconds")) or 0,
+            transcript_window_seconds=optional_int(rolling.get("window_seconds")) or 0,
             source_health=source_health,
             proactive_reply=comment.reply if comment else "",
             proactive_voice_text=comment.voice_text if comment else "",
@@ -744,6 +1349,7 @@ class JsonRpcBridge:
             visual_summary=visual_summary,
             visual_status=visual_status,
             error=error,
+            scene_observation=scene.payload(),
         )
         self.app.background_context.record_summary(
             tick.rolling_summary or tick.visual_summary or tick.summary,
@@ -752,20 +1358,6 @@ class JsonRpcBridge:
             transcript_source=tick.transcript_source,
         )
         return tick
-
-    def _resolve_artifact_path(self, artifact: str) -> Path | None:
-        value = (artifact or "").strip()
-        if not value or "\x00" in value:
-            return None
-        candidate = Path(value)
-        if not candidate.is_absolute():
-            candidate = self.workspace / value
-        try:
-            resolved = candidate.resolve()
-            resolved.relative_to(self.workspace)
-        except Exception:
-            return None
-        return resolved
 
     def _emit_background_audit(self, summary: str, background: dict[str, Any], *, status: str = "info") -> None:
         self.app.bus.emit(
@@ -887,16 +1479,25 @@ class JsonRpcBridge:
         payload: dict[str, Any] = {
             "workspace_label": self.workspace.name,
             "workspace_bound": True,
+            "event_cursor": self.app.bus.latest_sequence,
+            "active_approval_ids": self._active_approval_ids(),
             "asr": self._asr_payload(),
             "tts": tts_status,
             "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
             "codex_runtime": self.codex_runtime.status_payload(),
-            "joi_mcp": self.joi_mcp_status_command().get("joi_mcp", {}),
+            "joi_mcp": dict(self._joi_mcp_status),
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
             "memory": memory_status,
             "audit": self.app.audit_store.status(),
             "background": self.app.background_context.status(),
             "agent_cli": self._agent_cli_status_payload(),
+            "byok": self.byok.status(),
+            "collaboration": self.collaboration.snapshot(),
+            "agent_skills": self.agent_skills.list(
+                project_id=str(self.collaboration.context().get("project_id") or ""),
+                character_id=str(self.collaboration.context().get("character_id") or self.app.character.id),
+            )["skills"],
+            "game_adapters": self.game_adapters.list()["adapters"],
             "skills": build_native_skill_manifest(
                 self.workspace,
                 asr_state=self.asr_state,
@@ -904,36 +1505,38 @@ class JsonRpcBridge:
                 memory_status=memory_status,
                 skill_settings=self.app.skill_settings_payload(),
             ),
-            "character": {
-                "name": self.app.character.name,
-                "sprites": [],
-            },
+            "character": {"id": self.app.character.id, "name": self.app.character.name, "sprites": []},
         }
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
+        try:
+            character_payload = self.app.character_packages.active_runtime_payload()
+            character_payload["model_url"] = self._character_asset_url(Path(str(character_payload.get("model_path") or "")))
+            self._attach_character_image(character_payload, "avatar_path", "avatar_url", "avatar_data_url")
+            self._attach_character_image(character_payload, "portrait_path", "portrait_url", "portrait_data_url")
+            self._attach_character_image(character_payload, "background_path", "background_url", "background_data_url")
+            character_payload["sprites"] = [
+                {
+                    "id": str(sprite.get("id") or "1"),
+                    "label": str(sprite.get("label") or "default"),
+                    "image_data_url": self._image_data_url(Path(str(sprite.get("image_path") or ""))),
+                }
+                for sprite in character_payload.get("sprites") or []
+                if Path(str(sprite.get("image_path") or "")).is_file()
+            ]
+            character_payload.pop("model_path", None)
+            payload["character"] = character_payload
+            public_characters: list[dict[str, Any]] = []
+            for row in self.app.character_packages.list():
+                self._attach_character_image(row, "avatar_path", "avatar_url", "avatar_data_url")
+                self._attach_character_image(row, "portrait_path", "portrait_url", "portrait_data_url")
+                public_characters.append(row)
+            payload["characters"] = public_characters
+        except Exception:
+            pass
+        config = load_workspace_config(self.workspace)
+        if config is None:
             return payload
         try:
-            from agent_companion.core.config import load_app_config
-
-            config = load_app_config(config_path)
             payload["runtime_settings"] = _safe_runtime_settings(config)
-            character = config.primary_character
-            sprites: list[dict[str, str]] = []
-            for sprite in character.sprites:
-                image_path = (sprite.image_path or "").strip()
-                if not image_path:
-                    continue
-                resolved = config.resolve_path(image_path).resolve()
-                if not resolved.is_file():
-                    continue
-                sprites.append(
-                    {
-                        "id": sprite.id,
-                        "label": sprite.label,
-                        "image_data_url": self._image_data_url(resolved),
-                    }
-                )
-            payload["character"] = {"name": character.name, "sprites": sprites}
         except Exception:
             return payload
         return payload
@@ -963,9 +1566,44 @@ class JsonRpcBridge:
         self.watch_commentary.reload()
         self.app.reload_runtime_policy()
 
+    def _start_character_asset_server(self) -> None:
+        if self._asset_server is not None:
+            return
+        handler = functools.partial(
+            _CharacterAssetRequestHandler,
+            directory=str(self.app.character_packages.packages_dir),
+        )
+        try:
+            server = http.server.ThreadingHTTPServer((self.host, self.asset_port), handler)
+        except OSError:
+            server = http.server.ThreadingHTTPServer((self.host, 0), handler)
+        self.asset_port = int(server.server_address[1])
+        self._asset_server = server
+        self._asset_thread = threading.Thread(target=server.serve_forever, name="joi-character-assets", daemon=True)
+        self._asset_thread.start()
+
+    def _stop_character_asset_server(self) -> None:
+        server = self._asset_server
+        self._asset_server = None
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        self._asset_thread = None
+
+    def _character_asset_url(self, path: Path) -> str:
+        if not path.is_file() or not self.asset_port:
+            return ""
+        try:
+            relative = path.resolve().relative_to(self.app.character_packages.packages_dir.resolve()).as_posix()
+        except ValueError:
+            return ""
+        return f"http://{self.host}:{self.asset_port}/characters/{urllib.parse.quote(relative, safe='/')}"
+
     @staticmethod
     def _image_data_url(path: Path) -> str:
         try:
+            if path.stat().st_size > 12 * 1024 * 1024:
+                return ""
             data = path.read_bytes()
         except Exception:
             return ""
@@ -975,11 +1613,52 @@ class JsonRpcBridge:
 
     @staticmethod
     def _result(request_id: Any, result: dict[str, Any]) -> str:
-        return json.dumps({"jsonrpc": "2.0", "id": request_id or f"server-{uuid.uuid4().hex[:8]}", "result": result}, ensure_ascii=False)
+        response_id = request_id if request_id is not None else f"server-{uuid.uuid4().hex[:8]}"
+        return encode_result(response_id, result)
 
     @staticmethod
     def _error(request_id: Any, code: int, message: str) -> str:
-        return json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}, ensure_ascii=False)
+        return encode_error(request_id, code, message)
+
+
+class _CharacterAssetRequestHandler(http.server.SimpleHTTPRequestHandler):
+    """Read-only HTTP surface scoped to installed character assets."""
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
+        if not self._prepare_character_path():
+            self.send_error(404)
+            return
+        super().do_GET()
+
+    def do_HEAD(self) -> None:  # noqa: N802 - stdlib handler contract
+        if not self._prepare_character_path():
+            self.send_error(404)
+            return
+        super().do_HEAD()
+
+    def _prepare_character_path(self) -> bool:
+        parsed = urllib.parse.urlsplit(self.path)
+        if not parsed.path.startswith("/characters/"):
+            return False
+        relative = urllib.parse.unquote(parsed.path[len("/characters/") :])
+        parts = Path(relative).parts
+        if not relative or ".." in parts or any(part.startswith(".") for part in parts):
+            return False
+        self.path = "/" + urllib.parse.quote(relative, safe="/")
+        return True
+
+    def list_directory(self, path: str) -> None:
+        self.send_error(404)
+        return None
+
+    def end_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
+        self.send_header("Cache-Control", "public, max-age=300")
+        super().end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
 
 
 def _decode_audio_base64(audio_base64: str) -> bytes:
@@ -1052,34 +1731,7 @@ def _safe_agent_cli_label(value: object) -> str:
 
 
 def _codex_executable() -> str:
-    return resolve_agent_cli_executable("codex") or shutil.which("codex") or ""
-
-
-def _safe_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _safe_float(value: Any, default: float) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().casefold()
-    if text in {"1", "true", "yes", "on", "enabled", "开启"}:
-        return True
-    if text in {"0", "false", "no", "off", "disabled", "关闭"}:
-        return False
-    return default
+    return codex_executable()
 
 
 def _watch_loop_should_summarize(options: WatchLoopOptions, next_iteration: int) -> bool:
@@ -1126,6 +1778,72 @@ def _looks_like_watch_loop_stop(text: str) -> bool:
             "不用陪看了",
         )
     )
+
+
+def _looks_like_computer_goal(text: str) -> bool:
+    value = " ".join((text or "").strip().split()).casefold()
+    if not value:
+        return False
+    return any(
+        token in value
+        for token in (
+            "打开",
+            "点击",
+            "输入",
+            "帮我搜索",
+            "浏览器",
+            "访达",
+            "finder",
+            "备忘录",
+            "电脑上",
+            "桌面上",
+            "帮我操作",
+        )
+    )
+
+
+def _is_always_sensitive_request(request: ToolRequest) -> bool:
+    name = request.name.casefold()
+    if name in {"files.delete", "package.install", "git.push", "external.launch_admin"}:
+        return True
+    action = str(request.arguments.get("action") or request.arguments.get("intent") or "").casefold()
+    sensitive_tokens = ("payment", "pay", "付款", "购买", "login", "登录", "authorize", "授权", "send_message", "发消息", "delete", "删除", "install", "安装")
+    return any(token in action for token in sensitive_tokens)
+
+
+def _request_within_bound_scope(request: ToolRequest, scope: dict[str, Any]) -> bool:
+    directories = [str(item) for item in scope.get("directory", []) if str(item)]
+    applications = [str(item).casefold() for item in scope.get("application", []) if str(item)]
+    domains = [str(item).casefold().lstrip(".") for item in scope.get("domain", []) if str(item)]
+    games = [str(item).casefold() for item in scope.get("game", []) if str(item)]
+    arguments = request.arguments
+    requested_app = str(arguments.get("app_name") or arguments.get("app") or arguments.get("browser") or "").strip().casefold()
+    if requested_app:
+        return any(requested_app == app or requested_app in app or app in requested_app for app in applications)
+    requested_url = str(arguments.get("url") or "").strip()
+    if requested_url:
+        host = (urllib.parse.urlparse(requested_url if "://" in requested_url else f"https://{requested_url}").hostname or "").casefold()
+        return any(host == domain or host.endswith("." + domain) for domain in domains)
+    requested_game = str(arguments.get("game") or arguments.get("game_id") or "").strip().casefold()
+    if request.name.startswith("game."):
+        return bool(games) and (not requested_game or any(requested_game == game or requested_game in game for game in games))
+    requested_path = str(arguments.get("path") or arguments.get("directory") or arguments.get("workspace") or "").strip()
+    if requested_path:
+        try:
+            target = Path(requested_path).expanduser().resolve()
+        except OSError:
+            return False
+        for directory in directories:
+            try:
+                target.relative_to(Path(directory).expanduser().resolve())
+                return True
+            except (OSError, ValueError):
+                continue
+        return False
+    # Coordinate, keyboard and DOM actions target the currently selected view.
+    # They are auto-authorized only when the project has at least one explicit
+    # binding; changing focus outside it is caught by post-action verification.
+    return bool(directories or applications or domains or games)
 
 
 def _event_applied_runtime_config(event: AgentEvent) -> bool:

@@ -48,7 +48,7 @@ class ScreenObserveTool(ToolAdapter):
                 ok=False,
                 agent_state={"tool": self.name, "target": target, "error": type(exc).__name__, "detail": str(exc)[:500]},
                 display_card=DisplayCard("画面观察", "当前画面没有截取成功。", str(exc)[:1800], status="failed"),
-                voice_line=safe_voice_line("我没能截到当前画面，细节在卡片里。", sprite="4"),
+                voice_line=safe_voice_line("我没能截到当前画面，可以展开执行过程查看细节。", sprite="4"),
             )
 
         first_record = records[0]
@@ -259,7 +259,7 @@ class ScreenObserveTool(ToolAdapter):
     @staticmethod
     def _voice_for(observation: VisionObservation, summary_text: str, summary_error: str = "") -> VoiceLine:
         if summary_text:
-            return safe_voice_line("我看到了主要内容，摘要已经放进卡片里。", sprite="5")
+            return safe_voice_line("我看到了主要内容，摘要已经显示出来。", sprite="5")
         if summary_error:
             return safe_voice_line("我截到画面了，摘要暂时没生成出来。", sprite="4")
         return safe_voice_line("我截到画面了，需要配置视觉模型才能总结内容。", sprite="4")

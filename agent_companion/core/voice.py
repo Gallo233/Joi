@@ -52,7 +52,7 @@ BLOCK_PATTERNS = (
 )
 
 
-def safe_voice_line(text: str, fallback: str = "我整理好了，结果在卡片里。", emotion: str = "neutral", sprite: str = "1") -> VoiceLine:
+def safe_voice_line(text: str, fallback: str = "我整理好了，结果已经显示出来。", emotion: str = "neutral", sprite: str = "1") -> VoiceLine:
     cleaned = " ".join((text or "").split()).strip()
     cleaned, token_emotion = strip_emotion_token(cleaned)
     emotion = normalize_emotion(token_emotion or emotion)

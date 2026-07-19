@@ -103,7 +103,7 @@ class AgentCliRunTool(ToolAdapter):
             agent_state=state,
             display_card=DisplayCard(title, summary, body, status=status, artifacts=result.display_card.artifacts),
             voice_line=safe_voice_line(
-                "Agent CLI 接管完成了。" if result.ok else ("这一步需要你确认后我再继续。" if result.requires_approval else "Agent CLI 没有跑通，细节在卡片里。"),
+                "Agent CLI 接管完成了。" if result.ok else ("这一步需要你确认后我再继续。" if result.requires_approval else "Agent CLI 没有跑通，可以展开执行过程查看细节。"),
                 sprite="5" if result.ok else "4",
             ),
             requires_approval=result.requires_approval,
@@ -178,7 +178,7 @@ class AgentCliRunTool(ToolAdapter):
                 status="success" if ok else "failed",
                 artifacts=artifacts,
             ),
-            voice_line=safe_voice_line("Agent CLI 接管完成了。" if ok else "Agent CLI 没有跑通，细节在卡片里。", sprite="5" if ok else "4"),
+            voice_line=safe_voice_line("Agent CLI 接管完成了。" if ok else "Agent CLI 没有跑通，可以展开执行过程查看细节。", sprite="5" if ok else "4"),
             risk=RiskLevel.MEDIUM,
         )
 

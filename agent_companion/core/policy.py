@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from agent_companion.core.schemas import RiskLevel, ToolRequest
 from agent_companion.core.skill_manifest import skill_id_for_tool
@@ -47,8 +47,13 @@ class PolicyDecision:
 
 
 class PolicyGate:
-    def __init__(self, disabled_skills: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        disabled_skills: set[str] | None = None,
+        session_authorizer: Callable[[ToolRequest, RiskLevel], PolicyDecision | None] | None = None,
+    ) -> None:
         self.disabled_skills = set(disabled_skills or set())
+        self.session_authorizer = session_authorizer
 
     def classify(self, request: ToolRequest, approved: bool = False) -> PolicyDecision:
         name = request.name
@@ -69,6 +74,10 @@ class PolicyGate:
             return PolicyDecision(risk, True, False, "低风险动作可直接执行。")
         if approved:
             return PolicyDecision(risk, True, False, "用户已确认。")
+        if self.session_authorizer is not None:
+            session_decision = self.session_authorizer(request, risk)
+            if session_decision is not None:
+                return session_decision
         return PolicyDecision(risk, False, True, f"{risk.value} 风险动作需要确认。")
 
     @staticmethod

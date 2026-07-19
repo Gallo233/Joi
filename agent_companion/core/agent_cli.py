@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -11,6 +12,8 @@ from typing import Any
 
 _PATH_RE = re.compile(r"(?<!:)\/(?:Users|home|private|tmp|var|Volumes)\/[^\s]+|\b[A-Za-z]:[\\/][^\s]+")
 _SECRET_RE = re.compile(r"sk-[A-Za-z0-9_-]+|\b(?:api[_-]?key|secret|token|bearer)\b", re.IGNORECASE)
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
+_REASONING_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 @dataclass(frozen=True)
@@ -50,7 +53,7 @@ _PROFILES: tuple[AgentCliProfile, ...] = (
         vendor="OpenAI official CLI",
         command_names=("codex",),
         env_var="AGENT_COMPANION_CODEX_BIN",
-        models=("默认", "GPT-5.5", "GPT-5", "GPT-4.1"),
+        models=("默认",),
         reasoning=("默认", "Low", "Medium", "High", "XHigh"),
         run_strategy="codex_exec_json",
         installed_label="codex-cli",
@@ -115,6 +118,7 @@ def _profile_state(profile: AgentCliProfile, *, probe: bool = True) -> dict[str,
     if installed and probe:
         version, error = _probe_version(executable, profile.version_args)
         probe_ok = bool(version and not error)
+    model_state = _model_state(profile, executable)
     return {
         "id": profile.id,
         "name": profile.name,
@@ -124,12 +128,120 @@ def _profile_state(profile: AgentCliProfile, *, probe: bool = True) -> dict[str,
         "status": "ready" if installed else "missing",
         "probe_ok": probe_ok,
         "error": error,
-        "models": list(profile.models),
+        **model_state,
         "reasoning": list(profile.reasoning),
         "run_strategy": profile.run_strategy,
         "supports_takeover": profile.supports_takeover,
         "notes": list(profile.notes),
     }
+
+
+def _model_state(profile: AgentCliProfile, executable: str) -> dict[str, Any]:
+    if profile.id == "codex":
+        if not executable:
+            return _fallback_model_state("cli_not_found")
+        return _discover_codex_models(executable)
+    models = list(profile.models) or ["默认"]
+    return {
+        "models": models,
+        "model_options": [{"id": model, "label": model} for model in models],
+        "models_source": "profile",
+        "models_error": "",
+    }
+
+
+def _discover_codex_models(executable: str) -> dict[str, Any]:
+    """Read Codex's public model catalog and return only display-safe fields."""
+    try:
+        result = subprocess.run(
+            [executable, "debug", "models"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+    except subprocess.TimeoutExpired:
+        return _fallback_model_state("model_catalog_timeout")
+    except OSError:
+        return _fallback_model_state("model_catalog_launch_failed")
+    if result.returncode != 0:
+        return _fallback_model_state("model_catalog_nonzero_exit")
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _fallback_model_state("model_catalog_invalid")
+    raw_models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(raw_models, list):
+        return _fallback_model_state("model_catalog_invalid")
+
+    discovered: list[tuple[int, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for raw in raw_models:
+        if not isinstance(raw, dict) or raw.get("visibility") not in (None, "list"):
+            continue
+        model_id = str(raw.get("slug") or "").strip()
+        if not _MODEL_ID_RE.fullmatch(model_id) or model_id in seen:
+            continue
+        seen.add(model_id)
+        display_name = _safe_model_label(raw.get("display_name")) or model_id
+        reasoning = _safe_reasoning_levels(raw.get("supported_reasoning_levels"))
+        default_reasoning = str(raw.get("default_reasoning_level") or "").strip().casefold()
+        if default_reasoning not in _REASONING_LEVELS:
+            default_reasoning = ""
+        try:
+            priority = int(raw.get("priority", 10_000))
+        except (TypeError, ValueError):
+            priority = 10_000
+        discovered.append(
+            (
+                priority,
+                {
+                    "id": model_id,
+                    "label": display_name,
+                    "reasoning": reasoning,
+                    "default_reasoning": default_reasoning,
+                },
+            )
+        )
+    if not discovered:
+        return _fallback_model_state("model_catalog_empty")
+    discovered.sort(key=lambda item: (item[0], item[1]["label"].casefold()))
+    options = [
+        {"id": "默认", "label": "默认（使用 CLI 配置）", "reasoning": [], "default_reasoning": ""},
+        *(option for _, option in discovered),
+    ]
+    return {
+        "models": [option["id"] for option in options],
+        "model_options": options,
+        "models_source": "cli_live",
+        "models_error": "",
+    }
+
+
+def _fallback_model_state(error: str) -> dict[str, Any]:
+    return {
+        "models": ["默认"],
+        "model_options": [{"id": "默认", "label": "默认（使用 CLI 配置）", "reasoning": [], "default_reasoning": ""}],
+        "models_source": "fallback",
+        "models_error": error,
+    }
+
+
+def _safe_model_label(value: object) -> str:
+    label = " ".join(str(value or "").split()).strip()
+    if not label or _PATH_RE.search(label) or _SECRET_RE.search(label):
+        return ""
+    return label[:80]
+
+
+def _safe_reasoning_levels(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    levels: list[str] = []
+    for row in value:
+        effort = str(row.get("effort") if isinstance(row, dict) else row).strip().casefold()
+        if effort in _REASONING_LEVELS and effort not in levels:
+            levels.append(effort)
+    return levels
 
 
 def agent_cli_profile(cli_id: str) -> AgentCliProfile | None:
@@ -149,8 +261,8 @@ def _resolve_executable(profile: AgentCliProfile) -> str:
         env_names.append("CODEX_CLI_PATH")
     for env_name in env_names:
         override = os.environ.get(env_name, "").strip()
-        if override and Path(override).is_file():
-            return override
+        if override:
+            return override if Path(override).is_file() else ""
     for command in profile.command_names:
         found = shutil.which(command)
         if found:

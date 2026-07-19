@@ -49,7 +49,7 @@ class ComputerActionTool(ToolAdapter):
                 ok=False,
                 agent_state={"tool": self.name, "error": "invalid_arguments"},
                 display_card=DisplayCard("电脑操作", "动作参数不完整。", self._friendly_detail("参数不足"), status="failed"),
-                voice_line=safe_voice_line("这一步缺少必要参数，细节在卡片里。", sprite="4"),
+                voice_line=safe_voice_line("这一步缺少必要参数，可以展开执行过程查看细节。", sprite="4"),
                 risk=RiskLevel.MEDIUM,
             )
 
@@ -129,6 +129,8 @@ class ComputerActionTool(ToolAdapter):
         agent_state = {"tool": self.name, "computer_use": result.to_agent_state()}
         if before_observation and before_observation.screenshot_rel:
             agent_state["computer_use"]["before_artifact"] = before_observation.screenshot_rel
+        if before_observation and before_observation.title:
+            agent_state["computer_use"]["before_title"] = before_observation.title
         if result.observation and result.observation.screenshot_rel:
             agent_state["computer_use"]["after_artifact"] = result.observation.screenshot_rel
         if verification:
@@ -234,7 +236,7 @@ def _friendly_error(error: str) -> str:
 
 def _voice_for_verification(ok: bool, verification: PostActionVerification | None, success_summary: str = "") -> str:
     if not ok:
-        return "电脑操作没有完成，细节在卡片里。"
+        return "电脑操作没有完成，可以展开执行过程查看细节。"
     if success_summary:
         return success_summary
     if verification is None:

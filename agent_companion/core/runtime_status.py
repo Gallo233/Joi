@@ -10,7 +10,7 @@ import shutil
 import sys
 from typing import Any
 
-from agent_companion.core.config import MODEL_ROUTE_LABELS, AppConfig, ModelRouter, load_app_config
+from agent_companion.core.config import MODEL_ROUTE_LABELS, AppConfig, ModelRouter, load_workspace_config
 from agent_companion.core.speech_input import AsrRuntimeState
 
 
@@ -52,13 +52,7 @@ def build_runtime_status(workspace: Path, asr_state: AsrRuntimeState, tts_status
 
 
 def _load_config(workspace: Path) -> AppConfig | None:
-    config_path = workspace / "config.yaml"
-    if not config_path.is_file():
-        return None
-    try:
-        return load_app_config(config_path)
-    except Exception:
-        return None
+    return load_workspace_config(workspace)
 
 
 def _asr_status(state: AsrRuntimeState) -> RuntimeProviderStatus:

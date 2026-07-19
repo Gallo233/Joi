@@ -71,6 +71,12 @@ class AgentEvent:
     voice_line: VoiceLine
     agent_state: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    event_id: str = ""
+    sequence: int = 0
+    project_id: str = ""
+    thread_id: str = ""
+    session_id: str = ""
+    character_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

@@ -11,8 +11,18 @@ if TYPE_CHECKING:
     from agent_companion.core.vision import AccessibilityObserver, VisionObserver
 
 
-def get_computer_backend(workspace: Path, observer: VisionObserver | None = None) -> ComputerUseBackend:
+def get_computer_backend(
+    workspace: Path,
+    observer: VisionObserver | None = None,
+    *,
+    driver: str = "native",
+    session_id: str = "",
+) -> ComputerUseBackend:
     """Instantiate the dynamic computer use automation backend for the current platform."""
+    if driver == "cua":
+        from agent_companion.core.computer_use.cua_driver import CuaDriverBackend
+
+        return CuaDriverBackend(workspace, session_id=session_id)
     if sys.platform == "win32":
         from agent_companion.core.computer_use.windows import WindowsComputerUseBackend
         return WindowsComputerUseBackend(workspace, observer)

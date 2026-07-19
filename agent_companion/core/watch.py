@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Any
 
+from agent_companion.core.config import load_workspace_config
+
 
 @dataclass(frozen=True)
 class WatchFrame:
@@ -291,15 +293,7 @@ class WatchAnswerer:
             return fallback, status
 
     def _load_config(self) -> Any | None:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
-            return None
-        try:
-            from agent_companion.core.config import load_app_config
-
-            return load_app_config(config_path)
-        except Exception:
-            return None
+        return load_workspace_config(self.workspace)
 
 
 def _ocr_line(frame: WatchFrame) -> str:

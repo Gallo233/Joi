@@ -29,7 +29,7 @@ class RuntimeConfigUpdateTool(ToolAdapter):
                 body,
                 status="success" if result.ok else "failed",
             ),
-            voice_line=safe_voice_line("运行设置预览好了。" if dry_run and result.ok else "运行设置已更新。" if result.ok else "运行设置没有更新，细节在卡片里。", sprite="3" if result.ok else "4"),
+            voice_line=safe_voice_line("运行设置预览好了。" if dry_run and result.ok else "运行设置已更新。" if result.ok else "运行设置没有更新，可以展开执行过程查看细节。", sprite="3" if result.ok else "4"),
             risk=RiskLevel.MEDIUM,
         )
 

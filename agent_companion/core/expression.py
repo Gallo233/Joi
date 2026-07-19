@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_companion.core.character import CharacterHarness
+from agent_companion.core.config import load_workspace_config
 from agent_companion.core.schemas import AgentEvent, EventType, VoiceLine
 from agent_companion.core.voice import safe_voice_line
 
@@ -38,6 +39,12 @@ class ExpressionEngine:
         sprite = str(payload.get("sprite") or fallback.sprite or "1")
         voice_line = safe_voice_line(voice_text, emotion=emotion, sprite=sprite)
         return replace(event, voice_line=voice_line, agent_state=_with_expression_sync(event.agent_state, voice_line))
+
+    def reload(self, character: CharacterHarness | None = None) -> None:
+        if character is not None:
+            self.character = character
+        self._config = self._load_config()
+        self._client = None
 
     def _llm_expression(self, event: AgentEvent, user_text: str) -> dict[str, Any] | None:
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
@@ -109,15 +116,7 @@ class ExpressionEngine:
             return None
 
     def _load_config(self) -> Any | None:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
-            return None
-        try:
-            from agent_companion.core.config import load_app_config
-
-            return load_app_config(config_path)
-        except Exception:
-            return None
+        return load_workspace_config(self.workspace)
 
 
 def _with_expression_sync(state: dict[str, Any], voice_line: VoiceLine) -> dict[str, Any]:

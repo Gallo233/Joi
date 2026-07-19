@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import threading
 import time
@@ -12,13 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from agent_companion.core.agent_cli import resolve_agent_cli_executable
 from agent_companion.core.codex_events import sanitized_codex_text
+from agent_companion.core.codex_support import codex_executable, permission_fingerprint
 from agent_companion.core.schemas import AgentEvent, DisplayCard, EventType
 from agent_companion.core.voice import safe_voice_line
 
 
 RuntimeEmitter = Callable[[AgentEvent], None]
+_MODEL_ARG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
+_REASONING_ARGS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 @dataclass
@@ -142,7 +143,12 @@ class CodexRuntimeSession:
         return self._run_prompt(approval.task_id, decision_text, include_harness=False, approval=approval, approved=approved)
 
     def has_pending_approval(self, approval_id: str) -> bool:
-        return approval_id in self._pending
+        with self._lock:
+            return approval_id in self._pending
+
+    def pending_approval_ids(self) -> list[str]:
+        with self._lock:
+            return list(self._pending)
 
     def _run_prompt(
         self,
@@ -333,8 +339,9 @@ class CodexRuntimeSession:
             )
 
     def _command(self, codex: str, prompt: str, final_path: Path, *, resume: bool) -> list[str]:
+        runtime_overrides = _codex_runtime_overrides(self.state.get("model"), self.state.get("reasoning"))
         if resume:
-            command = [codex, "exec", "resume", "--json", "--output-last-message", str(final_path)]
+            command = [codex, "exec", "resume", "--json", "--output-last-message", str(final_path), *runtime_overrides]
             session_id = str(self.state.get("session_id") or "").strip()
             if session_id:
                 command.append(session_id)
@@ -345,6 +352,7 @@ class CodexRuntimeSession:
         return [
             codex,
             "exec",
+            *runtime_overrides,
             "--json",
             "--skip-git-repo-check",
             "--cd",
@@ -363,6 +371,7 @@ class CodexRuntimeSession:
             "你是 Joi 的主执行内核，但用户只应感知到 Joi 这个角色。",
             "不要把自己描述成 Codex，也不要把普通请求说成写代码任务。",
             "Joi 桌面壳负责显示、语音、设置、记忆和陪看状态；你负责理解用户目标并持续推进。",
+            "最终回复先给结果，默认控制在 2 至 5 个短句；只有确实需要时才列出不超过 4 项。不要重复用户请求，也不要逐条复述内部执行日志。",
             "如果需要操作本机界面，优先通过本地 joi MCP 工具完成：先用 joi_screen_observe 看当前画面，再用 joi_computer_* 或 joi_browser_* 执行动作，动作后继续观察验证。",
             "如果用户要点击当前画面里的按钮、链接、标签、菜单或某个自然语言目标，优先调用 joi_computer_click_target(query='目标描述', goal='用户完整目标')，让 Joi 负责观察、定位、审批和点击；只有明确坐标时才直接用 joi_computer_click。",
             "joi_computer_click / double_click / drag 的坐标默认使用最近一次 joi_screen_observe 返回截图里的像素坐标；Joi 会转换成真实屏幕坐标。",
@@ -392,10 +401,9 @@ class CodexRuntimeSession:
         return "\n\n".join(sections)
 
     def _record_memory_candidate(self, task_id: str, user_text: str, final_text: str) -> None:
-        try:
-            self.app.memory.propose("runtime_outcome", f"用户让 Joi 处理：{user_text}\n结果：{final_text[:280]}", source="joi")
-        except Exception:
-            return
+        # Runtime outcomes are execution history, not durable facts about the user.
+        # Persisting every result polluted long-term memory with task receipts.
+        return
 
     def _load_state(self) -> dict[str, Any]:
         default = {
@@ -426,13 +434,24 @@ class CodexRuntimeSession:
 
     @staticmethod
     def _codex_executable() -> str:
-        return resolve_agent_cli_executable("codex") or shutil.which("codex") or ""
+        return codex_executable()
 
     def _rel(self, path: Path) -> str:
         try:
             return path.relative_to(self.workspace).as_posix()
         except ValueError:
             return str(path)
+
+
+def _codex_runtime_overrides(model: object, reasoning: object) -> list[str]:
+    overrides: list[str] = []
+    model_id = str(model or "").strip()
+    if model_id and model_id != "默认" and _MODEL_ARG_RE.fullmatch(model_id):
+        overrides.extend(("--model", model_id))
+    effort = re.sub(r"[\s_-]+", "", str(reasoning or "").strip().casefold())
+    if effort in _REASONING_ARGS:
+        overrides.extend(("--config", f'model_reasoning_effort="{effort}"'))
+    return overrides
 
 
 def _permission_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -443,7 +462,7 @@ def _permission_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         "summary": _event_summary(payload) or "权限请求已准备好。",
         "tool": _find_first_string(payload, ("tool", "tool_name", "action", "command")) or "external_permission",
         "resume_token": _find_first_string(payload, ("resume_token", "continuation_token", "resume_id", "request_id", "id")),
-        "permission_hash": _permission_hash(payload),
+        "permission_hash": permission_fingerprint(payload),
         "resumable": True,
     }
 
@@ -476,11 +495,6 @@ def _find_first_string(value: object, keys: tuple[str, ...]) -> str:
             if found:
                 return found
     return ""
-
-
-def _permission_hash(payload: dict[str, Any]) -> str:
-    text = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
-    return str(abs(hash(text)))[:24]
 
 
 def _safe_joi_text(value: object, fallback: str = "Joi 状态已更新。") -> str:

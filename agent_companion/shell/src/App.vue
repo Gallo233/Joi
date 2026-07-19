@@ -1,54 +1,169 @@
 <script setup lang="ts">
-import { convertFileSrc } from '@tauri-apps/api/core'
-import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow, LogicalSize, type PhysicalPosition, type PhysicalSize } from '@tauri-apps/api/window'
+import {
+  AlertCircle,
+  ArrowLeft,
+  ArrowUp,
+  Archive,
+  AppWindow,
+  Bell,
+  Bot,
+  Brain,
+  Cable,
+  CheckCircle2,
+  ChevronDown,
+  Code2,
+  Cpu,
+  File as FileIcon,
+  FilePlus2,
+  FileText,
+  Folder as FolderIcon,
+  FolderPlus,
+  Globe2,
+  Gamepad2,
+  Hand,
+  Image as ImageIcon,
+  Info,
+  KeyRound,
+  Languages,
+  LoaderCircle,
+  Maximize2,
+  Menu,
+  MessageCircle,
+  Mic,
+  Minimize2,
+  MonitorPlay,
+  Palette,
+  Paperclip,
+  Pause,
+  Play,
+  Pencil,
+  Plus,
+  Plug,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Server,
+  Settings,
+  Settings2,
+  Shield,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  Unplug,
+  UserRound,
+  Volume2,
+  WalletCards,
+  Zap,
+  X,
+} from 'lucide-vue-next'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
-import type { AgentCliListResult, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, CodexRuntimeStatus, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, JoiMcpStatus, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import JoiCharacter from './components/JoiCharacter.vue'
+import CharacterLibrary from './components/CharacterLibrary.vue'
+import type { Live2DEmotion, Live2DRuntimeMapping } from './live2d/runtime'
+import type { ActionReceipt, AgentCliListResult, AgentCliModelOption, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, AgentSkillInspection, AgentSkillInstallation, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ByokConnectResult, ByokPreset, ByokStatus, ByokTestResult, CapabilitySession, CodexRuntimeStatus, CollaborationSnapshot, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, GameAdapterManifest, JoiMcpStatus, JoiProject, JoiThread, MemoryCandidate, MemoryCandidatePage, MemoryPage, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, PermissionProfile, ResourceBinding, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import { settingsSubtitle, settingsTabs, settingsTitle, type SettingsTabId } from './settings'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
 const status = ref<CoreStatus>('offline')
 const errorText = ref('')
+type AttachmentKind = 'file' | 'folder'
+interface ComposerAttachment {
+  kind: AttachmentKind
+  name: string
+  path: string
+}
+const composerAttachments = ref<ComposerAttachment[]>([])
+const attachmentPickerBusy = ref(false)
+const attachmentPickerError = ref('')
+const composerSending = ref(false)
 const events = ref<AgentEvent[]>([])
+const eventCursor = ref(0)
+const activeApprovalIds = ref(new Set<string>())
+const historyLoading = ref(false)
+const expandedTaskIds = ref(new Set<string>())
+const chatScrollArea = ref<HTMLElement | null>(null)
+const workspaceRef = ref<HTMLElement | null>(null)
+let chatPinnedToBottom = true
+let chatHasAutoScrolled = false
 const developerMode = ref(false)
 const ready = ref<CoreReadyPayload | null>(null)
-const failedImageSrc = ref('')
+const contextRailOpen = ref(false)
+const contextRailBusy = ref(false)
+const contextSearch = ref('')
+const newProjectName = ref('')
+const projectRows = ref<JoiProject[]>([])
+const threadRows = ref<JoiThread[]>([])
+const resourceBindings = ref<ResourceBinding[]>([])
+const activeContext = ref<NonNullable<CollaborationSnapshot['active']>>({})
+const activeCapabilitySession = ref<CapabilitySession | null>(null)
+const editingRailItem = ref<{ type: 'project' | 'thread'; id: string } | null>(null)
+const editingRailValue = ref('')
+const showArchivedContext = ref(false)
 const previewArtifact = ref('')
 const previewArtifactEvent = ref<AgentEvent | null>(null)
-const activeCabin = ref<'workspace' | 'chat' | 'memory' | 'inspector'>('workspace')
+type CabinId = 'workspace' | 'chat' | 'memory' | 'characters' | 'inspector'
+type TurnStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed'
+type TurnStepState = 'done' | 'current' | 'waiting' | 'failed'
+interface TurnStep {
+  key: string
+  label: string
+  detail: string
+  state: TurnStepState
+}
+interface ConversationTurn {
+  taskId: string
+  user: AgentEvent
+  assistant?: AgentEvent
+  approval?: AgentEvent
+  rows: AgentEvent[]
+  status: TurnStatus
+  staleApproval: boolean
+  steps: TurnStep[]
+  hasTrace: boolean
+  updatedAt: number
+}
+
+const activeCabin = ref<CabinId>('chat')
+const quickMenuOpen = ref(false)
+const characterMenuOpen = ref(false)
+const stageBackdropEnabled = ref(true)
+const characterFullBody = ref(false)
+const stageZoom = ref(1.1)
 const artifactDialog = ref<HTMLDialogElement | null>(null)
 const memoryStatus = ref<MemoryStatus | null>(null)
-type SettingsTabId = 'execution' | 'runtime' | 'instructions' | 'memory' | 'media' | 'skills' | 'external_mcp' | 'connectors' | 'mcp_servers' | 'language' | 'appearance' | 'design_review' | 'notifications' | 'pets' | 'design_system' | 'privacy' | 'about' | 'developer'
 const activeSettingsTab = ref<SettingsTabId>('execution')
-const settingsTabs: Array<{ id: SettingsTabId; label: string; icon: string }> = [
-  { id: 'execution', label: '执行模式', icon: '☷' },
-  { id: 'instructions', label: 'Instructions / Rules', icon: '✎' },
-  { id: 'memory', label: '记忆', icon: '↶' },
-  { id: 'media', label: '媒体生成提供商', icon: '▧' },
-  { id: 'skills', label: '技能', icon: '▦' },
-  { id: 'external_mcp', label: '外部 MCP', icon: '✣' },
-  { id: 'connectors', label: '连接器', icon: '☷' },
-  { id: 'mcp_servers', label: 'MCP 服务器', icon: '⌁' },
-  { id: 'language', label: '界面语言', icon: '文' },
-  { id: 'appearance', label: '外观', icon: '☼' },
-  { id: 'design_review', label: '设计评审团', icon: '▱' },
-  { id: 'notifications', label: '通知', icon: '◌' },
-  { id: 'pets', label: '宠物', icon: '✣' },
-  { id: 'design_system', label: '设计系统', icon: '◇' },
-  { id: 'privacy', label: '隐私', icon: '◎' },
-  { id: 'about', label: '关于', icon: '⚙' },
-  { id: 'developer', label: '开发者审计', icon: '⌘' },
-]
+const settingsSearch = ref('')
+const fallbackLive2DModelUrl = import.meta.env.VITE_JOI_LIVE2D_MODEL_URL || '/live2d/joi/joi.model3.json'
 const memoryQuery = ref('')
-const memorySearchResults = ref<MemoryRecord[]>([])
+const memoryRows = ref<MemoryRecord[]>([])
+const memoryPendingRows = ref<MemoryCandidate[]>([])
+const memoryView = ref<'saved' | 'pending'>('saved')
+const memoryTotal = ref(0)
+const memoryHasMore = ref(false)
+const memoryOffset = ref(0)
 const memorySearchLoading = ref(false)
 const memoryVault = ref<MemoryVault | null>(null)
+const editingMemoryId = ref<number | null>(null)
+const editingMemoryText = ref('')
+const editingMemoryKind = ref('note')
 const backgroundStatus = ref<BackgroundContextStatus | null>(null)
 const backgroundScopeType = ref<'window' | 'project' | 'game'>('window')
 const backgroundScopeLabel = ref('当前窗口')
 const backgroundLoading = ref(false)
 const skillManifest = ref<NativeSkillManifest | null>(null)
 const skillRefreshLoading = ref(false)
+const installedAgentSkills = ref<AgentSkillInstallation[]>([])
+const agentSkillSource = ref('')
+const agentSkillScope = ref<'global' | 'project' | 'character'>('project')
+const agentSkillInspection = ref<AgentSkillInspection | null>(null)
+const agentSkillBusy = ref(false)
+const agentSkillNotice = ref('')
+const gameAdapterRows = ref<GameAdapterManifest[]>([])
+const gameAdapterNotice = ref('')
 const executionMode = ref<'local_cli' | 'byok'>('local_cli')
 const selectedAgentCliId = ref('codex')
 const selectedAgentCliModel = ref('默认')
@@ -62,32 +177,193 @@ const joiMcpStatus = ref<JoiMcpStatus | null>(null)
 const joiMcpInstalling = ref(false)
 const agentCliSyncing = ref(false)
 const agentCliCoreUnsupported = ref(false)
+const byokStatus = ref<ByokStatus | null>(null)
+const byokDraft = ref(defaultByokDraft())
+const byokApiKey = ref('')
+const byokLoading = ref(false)
+const byokDiscovering = ref(false)
+const byokAdvancedOpen = ref(false)
+const byokResult = ref<ByokTestResult | null>(null)
+const byokNotice = ref('')
+const byokDirty = ref(false)
 let agentCliSyncTimer: number | null = null
 
+const fallbackByokPresets: ByokPreset[] = [
+  { id: 'openai', label: 'OpenAI', description: '官方 API · 默认选择高性价比模型', base_url: 'https://api.openai.com/v1', model: 'gpt-5.6-luna', requires_key: true, cost_hint: '适合日常高频对话' },
+  { id: 'openai_compatible', label: '兼容 API', description: '支持 OpenAI Chat Completions 的供应商', base_url: '', model: '', requires_key: true, cost_hint: '价格由供应商决定' },
+  { id: 'ollama', label: 'Ollama 本地', description: '使用本机模型 · 不消耗云端额度', base_url: 'http://127.0.0.1:11434/v1', model: '', requires_key: false, cost_hint: '无 API 调用费用' },
+]
+
+const byokPresets = computed(() => byokStatus.value?.presets?.length ? byokStatus.value.presets : fallbackByokPresets)
+const selectedByokPreset = computed(() => byokPresets.value.find((preset) => preset.id === byokDraft.value.provider) || byokPresets.value[0])
+const byokRequiresKey = computed(() => selectedByokPreset.value?.requires_key !== false)
+const byokSecretReady = computed(() => !byokRequiresKey.value || Boolean(byokApiKey.value.trim() || byokStatus.value?.secret?.stored))
+const byokCanConnect = computed(() => Boolean(connected.value && !byokLoading.value && !byokDiscovering.value && byokDraft.value.base_url.trim() && byokDraft.value.model.trim() && byokSecretReady.value))
+const byokKnownModels = computed(() => byokResult.value?.models || byokStatus.value?.last_test?.models || [])
+
+const stageZoomLabel = computed(() => `${Math.round(stageZoom.value * 100)}%`)
+const stageCharacterStyle = computed(() => ({ '--stage-character-scale': String(stageZoom.value) }))
+const live2DModelUrl = computed(() => {
+  const character = ready.value?.character
+  if (!character) return ''
+  if (character?.id === 'builtin-hikari' && character?.model_type === 'live2d') return fallbackLive2DModelUrl
+  if (character?.model_url) return character.model_url
+  if ((character?.model_type === 'live2d' || character?.model_type === 'vrm') && character.model_path) return convertFileSrc(character.model_path)
+  return character?.model_type === 'static' || character?.model_type === 'vrm' ? '' : fallbackLive2DModelUrl
+})
+const live2DRuntimeMapping = computed<Live2DRuntimeMapping>(() => ({
+  expressions: ready.value?.character?.expression_mappings || [],
+  lipSync: ready.value?.character?.lip_sync || {},
+}))
+const characterRenderKey = computed(() => [
+  ready.value?.character?.id || 'joi',
+  ready.value?.character?.model_type || 'static',
+  live2DModelUrl.value,
+].join(':'))
+const stageBackdropStyle = computed(() => {
+  const background = ready.value?.character?.background_url || ready.value?.character?.background_data_url
+  if (!stageBackdropEnabled.value || !background) return {}
+  return {
+    backgroundImage: `linear-gradient(rgba(241, 247, 255, .16), rgba(244, 249, 255, .62)), url(${background})`,
+    backgroundSize: 'cover',
+    backgroundPosition: 'center',
+  }
+})
+
+const settingsIconMap: Record<SettingsTabId, Component> = {
+  execution: Settings2,
+  runtime: Cpu,
+  instructions: FileText,
+  memory: Brain,
+  media: Volume2,
+  skills: Sparkles,
+  external_mcp: Cable,
+  connectors: Plug,
+  mcp_servers: Server,
+  language: Languages,
+  appearance: Palette,
+  design_review: MessageCircle,
+  notifications: Bell,
+  pets: Bot,
+  design_system: Code2,
+  privacy: Shield,
+  about: Info,
+  developer: Code2,
+}
+
+const settingsGroupDefinitions: Array<{ label: string; tabs: SettingsTabId[] }> = [
+  { label: 'Joi', tabs: ['execution', 'runtime', 'memory', 'skills'] },
+  { label: '体验', tabs: ['appearance'] },
+  { label: '高级', tabs: ['developer'] },
+]
+
+const filteredSettingsGroups = computed(() => {
+  const query = settingsSearch.value.trim().toLocaleLowerCase()
+  return settingsGroupDefinitions
+    .map((group) => ({
+      ...group,
+      tabs: group.tabs
+        .map((id) => settingsTabs.find((tab) => tab.id === id))
+        .filter((tab): tab is (typeof settingsTabs)[number] => Boolean(tab))
+        .filter((tab) => !query || `${tab.label} ${tab.subtitle}`.toLocaleLowerCase().includes(query)),
+    }))
+    .filter((group) => group.tabs.length)
+})
+
+function settingsIcon(tab: SettingsTabId) {
+  return settingsIconMap[tab]
+}
+
+function openCabin(cabin: CabinId) {
+  activeCabin.value = cabin
+  quickMenuOpen.value = false
+  characterMenuOpen.value = false
+  if (cabin === 'inspector' && activeSettingsTab.value === 'execution') {
+    void refreshAgentClis()
+    void refreshByokStatus()
+  }
+}
+
+async function handleCharacterActivated(_characterId: string, readyPayload?: CoreReadyPayload) {
+  if (readyPayload) ready.value = readyPayload
+  events.value = []
+  eventCursor.value = 0
+  activeApprovalIds.value = new Set()
+  memoryRows.value = []
+  memoryPendingRows.value = []
+  await nextTick()
+  await Promise.all([refreshConversationHistory(), refreshMemoryWorkspace()])
+}
+
+function cycleStageZoom() {
+  const zoomSteps = [1, 1.1, 1.2]
+  const currentIndex = zoomSteps.findIndex((value) => value === stageZoom.value)
+  stageZoom.value = zoomSteps[(currentIndex + 1) % zoomSteps.length]
+}
+
 const isCompactMode = ref(false)
+const compactTransitioning = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
 const miniSpeechActive = ref(false)
 const miniDashboardActive = ref(false)
 const watchTranscriptSource = ref<'system_audio' | 'ocr_subtitle' | 'auto'>('system_audio')
-const watchProactiveEnabled = ref(true)
+const watchProactiveEnabled = ref(false)
 const watchCommentaryInterval = ref(30)
+const watchSceneMode = ref<'quiet' | 'commentary' | 'translate' | 'analysis' | 'accessibility'>('quiet')
+const watchSpoilerLevel = ref<'none' | 'current_scene' | 'full'>('none')
 const watchVisionInterval = ref(5)
 let miniSpeechTimer: number | null = null
 
+interface NormalWindowSnapshot {
+  size: PhysicalSize
+  position: PhysicalPosition
+  maximized: boolean
+}
+
+let normalWindowSnapshot: NormalWindowSnapshot | null = null
+
 async function toggleCompactMode() {
+  if (compactTransitioning.value) return
+  compactTransitioning.value = true
   const nextCompactMode = !isCompactMode.value
-  isCompactMode.value = nextCompactMode
-  clearMiniSpeechTimer()
-  miniSpeechActive.value = false
-  miniDashboardActive.value = false
-  document.body.classList.toggle('transparent-active', nextCompactMode)
-  await applyWindowShellMode(nextCompactMode)
+  try {
+    clearMiniSpeechTimer()
+    miniSpeechActive.value = false
+    miniDashboardActive.value = false
+    if (nextCompactMode) {
+      isCompactMode.value = true
+      document.body.classList.add('transparent-active')
+      await applyWindowShellMode(true)
+      return
+    }
+    await applyWindowShellMode(false)
+    isCompactMode.value = false
+    document.body.classList.remove('transparent-active')
+  } finally {
+    compactTransitioning.value = false
+  }
 }
 
 async function applyWindowShellMode(compact: boolean) {
   try {
     const appWindow = getCurrentWindow()
     if (compact) {
+      if (!normalWindowSnapshot) {
+        try {
+          normalWindowSnapshot = {
+            size: await appWindow.outerSize(),
+            position: await appWindow.outerPosition(),
+            maximized: await appWindow.isMaximized(),
+          }
+        } catch (e) {
+          normalWindowSnapshot = null
+        }
+      }
+      if (normalWindowSnapshot?.maximized) {
+        await safeWindowCall(() => appWindow.unmaximize())
+      }
+      await safeWindowCall(() => appWindow.setTitleBarStyle('overlay'))
+      await setNativeWindowControlsVisible(false)
       await safeWindowCall(() => appWindow.setShadow(false))
       await safeWindowCall(() => appWindow.setAlwaysOnTop(true))
       await safeWindowCall(() => appWindow.setSkipTaskbar(true))
@@ -95,13 +371,32 @@ async function applyWindowShellMode(compact: boolean) {
       await safeWindowCall(() => appWindow.setSize(compactWindowSize()))
       return
     }
-    await safeWindowCall(() => appWindow.setSize(new LogicalSize(1080, 780)))
     await safeWindowCall(() => appWindow.setResizable(true))
     await safeWindowCall(() => appWindow.setSkipTaskbar(false))
     await safeWindowCall(() => appWindow.setAlwaysOnTop(false))
+    if (normalWindowSnapshot?.maximized) {
+      await safeWindowCall(() => appWindow.setPosition(normalWindowSnapshot!.position))
+      await safeWindowCall(() => appWindow.maximize())
+    } else if (normalWindowSnapshot) {
+      await safeWindowCall(() => appWindow.setSize(normalWindowSnapshot!.size))
+      await safeWindowCall(() => appWindow.setPosition(normalWindowSnapshot!.position))
+    } else {
+      await safeWindowCall(() => appWindow.setSize(new LogicalSize(1120, 760)))
+    }
+    await safeWindowCall(() => appWindow.setTitleBarStyle('overlay'))
+    await setNativeWindowControlsVisible(true)
     await safeWindowCall(() => appWindow.setShadow(true))
+    normalWindowSnapshot = null
   } catch (e) {
     // Browser preview fallback.
+  }
+}
+
+async function setNativeWindowControlsVisible(visible: boolean) {
+  try {
+    await invoke('set_macos_window_controls_visible', { visible })
+  } catch (e) {
+    // Browser preview and non-macOS fallback.
   }
 }
 
@@ -126,22 +421,6 @@ async function safeWindowCall(action: () => Promise<void>) {
   }
 }
 
-async function closeWindow() {
-  try {
-    await getCurrentWindow().close()
-  } catch (e) {
-    // Browser preview fallback: the button is decorative when no Tauri shell is present.
-  }
-}
-
-async function minimizeWindow() {
-  try {
-    await getCurrentWindow().minimize()
-  } catch (e) {
-    // Browser preview fallback.
-  }
-}
-
 async function toggleMaximizeWindow() {
   try {
     const appWindow = getCurrentWindow()
@@ -155,10 +434,16 @@ async function toggleMaximizeWindow() {
   }
 }
 
+function handleTitlebarDoubleClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null
+  if (target?.closest('button, input, select, textarea, a, [role="button"], .topbar-actions')) return
+  void toggleMaximizeWindow()
+}
+
 async function startWindowDrag(event: MouseEvent) {
   if (event.button !== 0) return
   const target = event.target as HTMLElement | null
-  if (target?.closest('button, input, select, textarea, a, [role="button"], .topbar-actions, .traffic-lights')) return
+  if (target?.closest('button, input, select, textarea, a, [role="button"], .topbar-actions')) return
   try {
     await getCurrentWindow().startDragging()
   } catch (e) {
@@ -173,7 +458,6 @@ function startMascotDrag(event: MouseEvent) {
   event.stopPropagation()
   if (event.detail >= 2) {
     clearMascotClickTimer()
-    void toggleCompactMode()
     return
   }
   stopMascotDragWatch()
@@ -207,7 +491,6 @@ function handleMascotClick(event: MouseEvent) {
   if (!isCompactMode.value) return
   if (event.detail >= 2) {
     clearMascotClickTimer()
-    void toggleCompactMode()
     return
   }
   if (mascotDragMoved) {
@@ -290,21 +573,31 @@ const client = new CoreClient({
   onStatus: (value) => (status.value = value),
   onEvent: (event) => {
     rememberVoiceEventEpoch(event)
-    events.value.push(event)
+    trackLiveApprovalEvent(event)
+    mergeConversationEvents([event])
     syncMemoryFromEvent(event)
     syncBackgroundFromEvent(event)
     preloadImageArtifacts(event)
+    if (event.session_id && ['tool_completed', 'tool_failed', 'task_completed', 'task_failed'].includes(event.type)) {
+      void refreshCapabilitySession(event.session_id)
+    }
   },
   onReady: (payload) => {
     ready.value = payload
+    syncCollaborationSnapshot(payload.collaboration)
     if (isTransientRuntimeNotice(errorText.value)) errorText.value = ''
     memoryStatus.value = payload.memory || memoryStatus.value
     backgroundStatus.value = payload.background || backgroundStatus.value
     skillManifest.value = payload.skills || skillManifest.value
+    installedAgentSkills.value = payload.agent_skills || installedAgentSkills.value
+    gameAdapterRows.value = payload.game_adapters || gameAdapterRows.value
     codexRuntime.value = payload.codex_runtime || codexRuntime.value
     joiMcpStatus.value = payload.joi_mcp || joiMcpStatus.value
     syncAgentCliFromReady(payload)
     syncRuntimeDraft(payload)
+    syncByokFromReady(payload)
+    activeApprovalIds.value = new Set(payload.active_approval_ids || [])
+    void refreshConversationHistory()
   },
   onVoiceAudio: (payload) => void playVoiceAudio(payload),
   onError: (message) => {
@@ -314,11 +607,277 @@ const client = new CoreClient({
 })
 
 const connected = computed(() => status.value === 'online')
+const composerCanSubmit = computed(() => (
+  connected.value
+  && !composerSending.value
+  && (Boolean(input.value.trim()) || composerAttachments.value.length > 0)
+))
 const connectionLabel = computed(() => {
   if (status.value === 'online') return 'Joi 就绪'
   if (status.value === 'connecting') return 'Joi 启动中'
   return 'Joi 离线'
 })
+
+const activeProject = computed(() => projectRows.value.find((project) => project.id === activeContext.value.project_id))
+const activeThread = computed(() => threadRows.value.find((thread) => thread.id === activeContext.value.thread_id))
+const visibleProjects = computed(() => projectRows.value.filter((project) => showArchivedContext.value || !project.archived))
+const visibleThreads = computed(() => {
+  const query = contextSearch.value.trim().toLocaleLowerCase()
+  return threadRows.value.filter((thread) => {
+    if (!showArchivedContext.value && thread.archived) return false
+    return !query || thread.title.toLocaleLowerCase().includes(query)
+  })
+})
+const capabilityReceipts = computed<ActionReceipt[]>(() => activeCapabilitySession.value?.receipts || [])
+const latestCapabilityReceipt = computed<ActionReceipt | null>(() => capabilityReceipts.value.at(-1) || null)
+const capabilityPermissionLabel = computed(() => permissionProfileLabel(activeCapabilitySession.value?.permission_profile || 'observe'))
+const capabilityStateLabel = computed(() => {
+  const state = activeCapabilitySession.value?.state || ''
+  return ({ running: 'Joi 正在协作', paused: '已暂停，等待交接', waiting_approval: '等待确认', completed: '本次目标已完成', failed: '需要调整后重试', cancelled: '已结束' } as Record<string, string>)[state] || '准备中'
+})
+
+function syncCollaborationSnapshot(snapshot?: CollaborationSnapshot | null) {
+  if (!snapshot) return
+  activeContext.value = { ...(snapshot.active || {}) }
+  projectRows.value = [...(snapshot.projects || projectRows.value)]
+  threadRows.value = [...(snapshot.threads || threadRows.value)]
+  resourceBindings.value = [...(snapshot.bindings || resourceBindings.value)]
+  activeCapabilitySession.value = snapshot.capability_session?.id ? snapshot.capability_session : null
+}
+
+async function refreshCollaboration(projectId = activeContext.value.project_id || '') {
+  if (!connected.value || contextRailBusy.value) return
+  contextRailBusy.value = true
+  try {
+    const projectsResult = await client.projectList(true) as { projects?: JoiProject[]; active?: CollaborationSnapshot['active'] }
+    projectRows.value = projectsResult.projects || projectRows.value
+    activeContext.value = { ...(projectsResult.active || activeContext.value) }
+    const targetProjectId = projectId || activeContext.value.project_id || projectRows.value[0]?.id || ''
+    if (targetProjectId) {
+      const [threadsResult, bindingsResult] = await Promise.all([
+        client.threadList(targetProjectId, '', true) as Promise<{ threads?: JoiThread[]; active?: CollaborationSnapshot['active'] }>,
+        client.resourceBindingList(targetProjectId) as Promise<{ bindings?: ResourceBinding[] }>,
+      ])
+      threadRows.value = threadsResult.threads || []
+      resourceBindings.value = bindingsResult.bindings || []
+      activeContext.value = { ...(threadsResult.active || activeContext.value) }
+    }
+    if (activeContext.value.session_id) await refreshCapabilitySession(activeContext.value.session_id)
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '项目列表没有刷新成功'
+  } finally {
+    contextRailBusy.value = false
+  }
+}
+
+async function createProjectFromRail() {
+  const name = newProjectName.value.trim()
+  if (!name || contextRailBusy.value) return
+  contextRailBusy.value = true
+  try {
+    const result = await client.projectCreate(name, ready.value?.character?.id || '') as { collaboration?: CollaborationSnapshot; ready?: CoreReadyPayload }
+    newProjectName.value = ''
+    if (result.ready) ready.value = result.ready
+    if (result.collaboration) syncCollaborationSnapshot(result.collaboration)
+    await refreshCollaboration(activeContext.value.project_id)
+    await resetThreadHistory()
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '项目没有创建成功'
+  } finally {
+    contextRailBusy.value = false
+  }
+}
+
+async function switchProject(projectId: string) {
+  if (!projectId || contextRailBusy.value) return
+  contextRailBusy.value = true
+  try {
+    const result = await client.threadList(projectId, '', false) as { threads?: JoiThread[] }
+    const rows = result.threads || []
+    if (rows[0]) await activateThread(rows[0].id)
+    else {
+      const created = await client.threadCreate(projectId) as { thread?: JoiThread }
+      if (created.thread) await activateThread(created.thread.id)
+    }
+  } finally {
+    contextRailBusy.value = false
+  }
+}
+
+async function createThreadFromRail() {
+  const projectId = activeContext.value.project_id
+  if (!projectId || contextRailBusy.value) return
+  try {
+    const result = await client.threadCreate(projectId, '', ready.value?.character?.id || '') as { thread?: JoiThread; collaboration?: CollaborationSnapshot }
+    if (result.collaboration) syncCollaborationSnapshot(result.collaboration)
+    if (result.thread) await activateThread(result.thread.id)
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '新对话没有创建成功'
+  }
+}
+
+async function activateThread(threadId: string) {
+  if (!threadId) return
+  try {
+    const result = await client.threadActivate(threadId) as { ready?: CoreReadyPayload; collaboration?: CollaborationSnapshot; active?: CollaborationSnapshot['active'] }
+    if (result.ready) {
+      ready.value = result.ready
+      syncCollaborationSnapshot(result.ready.collaboration)
+    } else if (result.collaboration) syncCollaborationSnapshot(result.collaboration)
+    if (result.active) activeContext.value = { ...result.active }
+    await resetThreadHistory()
+    await refreshCollaboration(activeContext.value.project_id)
+    contextRailOpen.value = false
+    activeCabin.value = 'chat'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '对话没有切换成功'
+  }
+}
+
+async function resetThreadHistory() {
+  events.value = []
+  eventCursor.value = 0
+  historyLoading.value = false
+  activeApprovalIds.value = new Set()
+  await nextTick()
+  await refreshConversationHistory()
+}
+
+function beginRailRename(type: 'project' | 'thread', id: string, value: string) {
+  editingRailItem.value = { type, id }
+  editingRailValue.value = value
+}
+
+async function saveRailRename() {
+  const editing = editingRailItem.value
+  const value = editingRailValue.value.trim()
+  if (!editing || !value) return
+  if (editing.type === 'project') await client.projectUpdate(editing.id, { name: value })
+  else await client.threadUpdate(editing.id, { title: value })
+  editingRailItem.value = null
+  editingRailValue.value = ''
+  await refreshCollaboration(activeContext.value.project_id)
+}
+
+async function archiveThreadFromRail(thread: JoiThread) {
+  await client.threadArchive(thread.id, !thread.archived)
+  if (thread.id === activeContext.value.thread_id && !thread.archived) {
+    const fallback = threadRows.value.find((row) => row.id !== thread.id && !row.archived)
+    if (fallback) await activateThread(fallback.id)
+  }
+  await refreshCollaboration(activeContext.value.project_id)
+}
+
+async function archiveProjectFromRail(project: JoiProject) {
+  await client.projectArchive(project.id, !project.archived)
+  if (project.id === activeContext.value.project_id && !project.archived) {
+    const fallback = projectRows.value.find((row) => row.id !== project.id && !row.archived)
+    if (fallback) await switchProject(fallback.id)
+  }
+  await refreshCollaboration(activeContext.value.project_id)
+}
+
+async function deleteArchivedThread(thread: JoiThread) {
+  if (!thread.archived) return
+  await client.threadDelete(thread.id, true)
+  await refreshCollaboration(activeContext.value.project_id)
+}
+
+async function deleteArchivedProject(project: JoiProject) {
+  if (!project.archived) return
+  await client.projectDelete(project.id, true)
+  await refreshCollaboration()
+}
+
+async function bindProjectDirectory() {
+  const projectId = activeContext.value.project_id
+  if (!projectId || contextRailBusy.value) return
+  contextRailBusy.value = true
+  try {
+    const selectedPaths = await invoke<string[]>('pick_attachments', { kind: 'folder' })
+    for (const path of selectedPaths || []) {
+      const normalized = String(path || '').trim()
+      if (!normalized || resourceBindings.value.some((binding) => binding.kind === 'directory' && binding.value === normalized)) continue
+      const label = normalized.split(/[\\/]/).filter(Boolean).at(-1) || normalized
+      await client.resourceBindingAdd(projectId, 'directory', normalized, label)
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || '')
+    if (message && !/cancel/i.test(message)) errorText.value = message
+  } finally {
+    contextRailBusy.value = false
+    await refreshCollaboration(projectId)
+  }
+}
+
+async function addTextResourceBinding(kind: 'domain' | 'application' | 'game') {
+  const projectId = activeContext.value.project_id
+  if (!projectId) return
+  const prompts = {
+    domain: ['绑定网站域名', '例如 docs.example.com'],
+    application: ['绑定应用', '例如 Safari 或 com.apple.Safari'],
+    game: ['绑定游戏', '例如 Minecraft'],
+  } as const
+  const value = window.prompt(prompts[kind][0], prompts[kind][1])?.trim()
+  if (!value) return
+  const normalized = kind === 'domain' ? value.replace(/^https?:\/\//, '').replace(/\/.*$/, '') : value
+  await client.resourceBindingAdd(projectId, kind, normalized, normalized)
+  await refreshCollaboration(projectId)
+}
+
+async function removeResourceBinding(bindingId: string) {
+  if (!bindingId) return
+  await client.resourceBindingRemove(bindingId)
+  await refreshCollaboration(activeContext.value.project_id)
+}
+
+async function refreshCapabilitySession(sessionId = activeContext.value.session_id || '') {
+  if (!sessionId) {
+    activeCapabilitySession.value = null
+    return
+  }
+  try {
+    const result = await client.capabilitySessionStatus(sessionId) as { session?: CapabilitySession }
+    activeCapabilitySession.value = result.session?.id ? result.session : null
+    if (result.session?.id) activeContext.value = { ...activeContext.value, session_id: result.session.id }
+  } catch {
+    // Capability status is supplemental; chat remains usable if it is unavailable.
+  }
+}
+
+async function changeCapabilityPermission(profile: PermissionProfile) {
+  const session = activeCapabilitySession.value
+  if (!session || session.permission_profile === profile) return
+  const result = await client.permissionGrant(session.id, profile) as { session?: CapabilitySession }
+  if (result.session) activeCapabilitySession.value = result.session
+}
+
+async function toggleCapabilityPause() {
+  const session = activeCapabilitySession.value
+  if (!session) return
+  const result = session.state === 'running'
+    ? await client.capabilitySessionPause(session.id) as { session?: CapabilitySession }
+    : await client.capabilitySessionResume(session.id) as { session?: CapabilitySession }
+  if (result.session) activeCapabilitySession.value = result.session
+}
+
+async function takeOverCapability() {
+  const session = activeCapabilitySession.value
+  if (!session) return
+  const result = await client.capabilitySessionPause(session.id) as { session?: CapabilitySession }
+  if (result.session) activeCapabilitySession.value = result.session
+}
+
+async function cancelCapability() {
+  const session = activeCapabilitySession.value
+  if (!session) return
+  const result = await client.capabilitySessionCancel(session.id) as { session?: CapabilitySession }
+  if (result.session) activeCapabilitySession.value = result.session
+}
+
+function permissionProfileLabel(profile: PermissionProfile | string) {
+  return ({ observe: '观察', collaborate: '协作', delegate: '托管' } as Record<string, string>)[profile] || '观察'
+}
 
 const userTextByTask = computed(() => {
   const rows = new Map<string, string>()
@@ -332,15 +891,26 @@ const pendingApproval = computed(() => {
   for (let index = events.value.length - 1; index >= 0; index -= 1) {
     const event = events.value[index]
     if (event.type !== 'approval_required') continue
-    const hasLaterEvent = events.value.slice(index + 1).some((later) => later.task_id === event.task_id)
-    return hasLaterEvent ? undefined : event
+    if (!activeApprovalIds.value.has(approvalIdFor(event))) continue
+    const resolved = events.value.slice(index + 1).some((later) => approvalResolvedBy(event, later))
+    if (!resolved) return event
   }
   return undefined
 })
 
-const chatRows = computed(() =>
-  events.value.filter((event) => event.type === 'user_message' || event.type === 'runtime_final' || isCompanionChat(event)),
-)
+const conversationTurns = computed<ConversationTurn[]>(() => {
+  const grouped = new Map<string, AgentEvent[]>()
+  for (const event of events.value) {
+    const rows = grouped.get(event.task_id) || []
+    rows.push(event)
+    grouped.set(event.task_id, rows)
+  }
+  return [...grouped.entries()]
+    .map(([taskId, rows]) => buildConversationTurn(taskId, rows))
+    .filter((turn): turn is ConversationTurn => Boolean(turn))
+    .sort((left, right) => left.user.created_at - right.user.created_at)
+    .slice(-8)
+})
 
 const taskRows = computed(() => {
   const byTask = new Map<string, AgentEvent[]>()
@@ -447,27 +1017,25 @@ const pendingMemories = computed(() => (memoryStatus.value?.pending || []).filte
 const recentMemories = computed(() => memoryStatus.value?.recent || [])
 const memoryEnabled = computed(() => memoryStatus.value?.enabled !== false)
 const memoryProfile = computed(() => memoryStatus.value?.profile || null)
-const memoryProfileHighlights = computed(() => memoryProfile.value?.highlights || [])
 const memoryProfileSections = computed(() =>
   [
     { key: 'preferences', label: '偏好', rows: memoryProfile.value?.preferences || [] },
     { key: 'habits', label: '习惯', rows: memoryProfile.value?.habits || [] },
     { key: 'relationship', label: '关系', rows: memoryProfile.value?.relationship || [] },
-    { key: 'recent_focus', label: '关注', rows: memoryProfile.value?.recent_focus || [] },
-  ].filter((section) => section.rows.length),
+    { key: 'recent_focus', label: '最近关注', rows: memoryProfile.value?.recent_focus || [] },
+  ],
 )
+const memorySavedCount = computed(() => Number(memoryStatus.value?.counts?.saved ?? memoryProfile.value?.counts?.saved ?? recentMemories.value.length))
+const memoryPendingCount = computed(() => Number(memoryStatus.value?.counts?.pending ?? memoryProfile.value?.counts?.pending ?? pendingMemories.value.length))
 const memoryProfileCountText = computed(() => {
-  const counts = memoryProfile.value?.counts || {}
-  const saved = Number(counts.saved || recentMemories.value.length || 0)
-  const pending = Number(counts.pending || pendingMemories.value.length || 0)
-  return `${saved} 已保存 · ${pending} 待确认`
+  return `${memorySavedCount.value} 条已保存 · ${memoryPendingCount.value} 条待确认`
 })
 const topPendingMemory = computed(() => pendingMemories.value[0] || null)
 const memoryAuthorizeText = computed(() => topPendingMemory.value?.text || '')
 const memoryQueryText = computed(() => memoryQuery.value.trim())
-const displayedMemoryRows = computed(() => (memoryQueryText.value ? memorySearchResults.value : recentMemories.value))
-const memoryVaultSections = computed(() => memoryVault.value?.sections || [])
-const memorySearchEmptyText = computed(() => (memoryQueryText.value ? '没有找到相关记忆' : '暂无长期记忆'))
+const displayedMemoryRows = computed(() => memoryRows.value)
+const displayedMemoryCandidates = computed(() => memoryPendingRows.value)
+const memorySearchEmptyText = computed(() => (memoryQueryText.value ? '没有找到相关记忆' : 'Joi 还没有保存长期记忆'))
 const backgroundEnabled = computed(() => backgroundStatus.value?.enabled === true)
 const backgroundActive = computed(() => backgroundStatus.value?.active === true)
 const backgroundScopes = computed<BackgroundContextScope[]>(() => backgroundStatus.value?.approved_scopes || [])
@@ -491,24 +1059,43 @@ watch(watchLoopStatus, (status) => {
   if (source === 'system_audio' || source === 'ocr_subtitle' || source === 'auto') watchTranscriptSource.value = source
   if (typeof status.proactive_enabled === 'boolean') watchProactiveEnabled.value = status.proactive_enabled
   if (status.commentary_interval_seconds) watchCommentaryInterval.value = Number(status.commentary_interval_seconds)
+  if (status.mode && ['quiet', 'commentary', 'translate', 'analysis', 'accessibility'].includes(status.mode)) watchSceneMode.value = status.mode as typeof watchSceneMode.value
+  if (status.spoiler_level && ['none', 'current_scene', 'full'].includes(status.spoiler_level)) watchSpoilerLevel.value = status.spoiler_level as typeof watchSpoilerLevel.value
   const visionInterval = Number(status.vision_interval_ticks)
   if (Number.isFinite(visionInterval)) watchVisionInterval.value = Math.max(0, visionInterval)
 })
 
-watch(activeCabin, (cabin) => {
-  if (cabin !== 'memory') return
-  void refreshMemoryStatus()
-  void browseMemoryVault()
+watch(activeCabin, async (cabin) => {
+  await nextTick()
+  if (workspaceRef.value) workspaceRef.value.scrollTop = 0
+  if (cabin === 'memory') void refreshMemoryWorkspace()
+})
+
+watch(() => events.value.length, async () => {
+  const shouldScroll = chatPinnedToBottom || !chatHasAutoScrolled
+  await nextTick()
+  if (!shouldScroll || activeCabin.value !== 'chat' || !chatScrollArea.value) return
+  chatScrollArea.value.scrollTop = chatScrollArea.value.scrollHeight
+  chatHasAutoScrolled = true
+})
+
+watch(activeCabin, async (cabin) => {
+  if (cabin !== 'chat') return
+  await nextTick()
+  if (!chatScrollArea.value) return
+  chatScrollArea.value.scrollTop = chatScrollArea.value.scrollHeight
+  chatPinnedToBottom = true
+  chatHasAutoScrolled = true
 })
 
 watch(activeSettingsTab, (tab) => {
   if (tab === 'execution') {
     void refreshAgentClis()
     void refreshJoiMcpStatus()
+    void refreshByokStatus()
   }
   if (tab === 'memory') {
     void refreshMemoryStatus()
-    void browseMemoryVault()
   }
   if (tab === 'developer') void refreshBackgroundStatus()
 })
@@ -517,11 +1104,15 @@ watch([executionMode, selectedAgentCliId, selectedAgentCliModel, selectedAgentCl
   queueAgentCliSync()
 })
 
+watch(executionMode, (mode) => {
+  if (mode === 'byok') void refreshByokStatus()
+})
+
 const latestSpeech = computed(() => {
   const latest = [...events.value]
     .reverse()
     .find((event) => event.voice_line?.text && isSpeakableEvent(event))
-  return latest?.voice_line.text || '我在。要看、要玩、要做点什么，都可以直接告诉我。'
+  return latest?.voice_line.text || ready.value?.character?.greeting || '我在。要看、要玩、要做点什么，都可以直接告诉我。'
 })
 
 const miniBubbleHasActions = computed(() => Boolean(isCompactMode.value && pendingApproval.value && approvalIdFor(pendingApproval.value)))
@@ -632,14 +1223,21 @@ const accessoryFitStyle = computed(() => {
 })
 
 const characterName = computed(() => ready.value?.character?.name || 'Joi')
+const characterGreeting = computed(() => ready.value?.character?.greeting || '我在。今天想一起做点什么？')
 
 const characterImageSrc = computed(() => {
   const sprites = ready.value?.character?.sprites || []
   const active = sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
-  return active?.image_data_url || ''
+  return active?.image_data_url || ready.value?.character?.portrait_url || ready.value?.character?.portrait_data_url || ''
 })
+const characterAvatarSrc = computed(() => (
+  ready.value?.character?.avatar_url
+  || ready.value?.character?.avatar_data_url
+  || characterImageSrc.value
+))
 
 const currentMode = computed(() => {
+  if (activeCabin.value === 'characters') return '角色库'
   if (pendingApproval.value) return '等待确认'
   if (watchLoopActive.value) return '陪看'
   if (codexRuntime.value?.status === 'running') return '运行中'
@@ -689,6 +1287,231 @@ const voiceStatusText = computed(() => {
   return ''
 })
 
+function eventIdentity(event: AgentEvent) {
+  if (event.event_id) return event.event_id
+  return [event.task_id, event.type, event.created_at, event.display_card?.title, event.display_card?.summary].join(':')
+}
+
+function compareEvents(left: AgentEvent, right: AgentEvent) {
+  const leftSequence = Number(left.sequence || 0)
+  const rightSequence = Number(right.sequence || 0)
+  if (leftSequence > 0 && rightSequence > 0 && leftSequence !== rightSequence) return leftSequence - rightSequence
+  if (left.created_at !== right.created_at) return left.created_at - right.created_at
+  return eventIdentity(left).localeCompare(eventIdentity(right))
+}
+
+function mergeConversationEvents(incoming: AgentEvent[]) {
+  if (!incoming.length) return
+  const byId = new Map(events.value.map((event) => [eventIdentity(event), event]))
+  for (const event of incoming) {
+    if (!event?.task_id || !event?.type) continue
+    byId.set(eventIdentity(event), event)
+    eventCursor.value = Math.max(eventCursor.value, Number(event.sequence || 0))
+  }
+  events.value = [...byId.values()].sort(compareEvents).slice(-400)
+}
+
+async function refreshConversationHistory() {
+  if (historyLoading.value || !connected.value) return
+  historyLoading.value = true
+  try {
+    const result = (await client.conversationHistory(eventCursor.value, eventCursor.value ? 240 : 320, activeContext.value.thread_id || '')) as {
+      ok?: boolean
+      events?: AgentEvent[]
+      latest_sequence?: number
+      active_approval_ids?: string[]
+    }
+    if (Array.isArray(result.events)) mergeConversationEvents(result.events)
+    activeApprovalIds.value = new Set(result.active_approval_ids || [])
+    eventCursor.value = Math.max(eventCursor.value, Number(result.latest_sequence || 0))
+  } catch (error) {
+    if (!isTransientRuntimeNotice(error instanceof Error ? error.message : '')) {
+      errorText.value = error instanceof Error ? error.message : '对话恢复失败'
+    }
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+function approvalResolvedBy(approval: AgentEvent, later: AgentEvent) {
+  if (later.task_id !== approval.task_id || later.created_at < approval.created_at) return false
+  if (later.type === 'approval_required') return eventIdentity(later) !== eventIdentity(approval)
+  if (['tool_started', 'tool_completed', 'tool_failed', 'task_completed', 'task_failed', 'runtime_final', 'runtime_error'].includes(later.type)) return true
+  const state = later.agent_state || {}
+  const approvalState = asRecord(state.approval)
+  const status = stringValue(approvalState.status || state.approval_status).toLocaleLowerCase()
+  return ['approved', 'rejected', 'resolved', 'cancelled', 'expired'].includes(status)
+}
+
+function trackLiveApprovalEvent(event: AgentEvent) {
+  const next = new Set(activeApprovalIds.value)
+  if (event.type === 'approval_required') {
+    const approvalId = approvalIdFor(event)
+    if (approvalId) next.add(approvalId)
+  } else {
+    for (const candidate of events.value) {
+      if (candidate.type !== 'approval_required' || candidate.task_id !== event.task_id) continue
+      if (!approvalResolvedBy(candidate, event)) continue
+      const approvalId = approvalIdFor(candidate)
+      if (approvalId) next.delete(approvalId)
+    }
+  }
+  activeApprovalIds.value = next
+}
+
+function buildConversationTurn(taskId: string, sourceRows: AgentEvent[]): ConversationTurn | undefined {
+  const rows = [...sourceRows].sort(compareEvents)
+  const user = rows.find((event) => event.type === 'user_message')
+  if (!user) return undefined
+  const approval = [...rows]
+    .reverse()
+    .find((event, reverseIndex) => {
+      if (event.type !== 'approval_required') return false
+      if (!activeApprovalIds.value.has(approvalIdFor(event))) return false
+      const index = rows.length - reverseIndex - 1
+      return !rows.slice(index + 1).some((later) => approvalResolvedBy(event, later))
+    })
+  const decisive = [...rows].reverse().find((event) => [
+    'runtime_started',
+    'runtime_delta',
+    'runtime_final',
+    'runtime_error',
+    'approval_required',
+    'tool_started',
+    'tool_completed',
+    'tool_failed',
+    'task_completed',
+    'task_failed',
+  ].includes(event.type))
+  const staleApproval = decisive?.type === 'approval_required' && !approval
+  let status: TurnStatus = 'queued'
+  if (approval) status = 'waiting'
+  else if (staleApproval) status = 'failed'
+  else if (decisive && ['runtime_error', 'tool_failed', 'task_failed'].includes(decisive.type)) status = 'failed'
+  else if (decisive && ['runtime_final', 'tool_completed', 'task_completed'].includes(decisive.type)) status = 'completed'
+  else if (decisive) status = 'running'
+
+  const assistant = [...rows].reverse().find((event) => (
+    event.type === 'runtime_final'
+    || event.type === 'tool_completed'
+    || event.type === 'tool_failed'
+    || isCompanionChat(event)
+  ))
+  const hasExecution = rows.some((event) => [
+    'plan_created', 'runtime_started', 'runtime_delta', 'runtime_error', 'approval_required',
+    'skill_started', 'skill_completed', 'tool_started', 'tool_failed', 'task_completed', 'task_failed',
+  ].includes(event.type) && !isCompanionChat(event))
+  const companionOnly = rows.every(isCompanionOnlyEvent)
+  const simpleCompanionReply = status === 'completed' && Boolean(assistant && isCompanionChat(assistant)) && !hasExecution
+  return {
+    taskId,
+    user,
+    assistant,
+    approval,
+    rows,
+    status,
+    staleApproval,
+    steps: buildTurnSteps(rows, status),
+    hasTrace: !companionOnly && !simpleCompanionReply && (hasExecution || status !== 'completed'),
+    updatedAt: rows[rows.length - 1]?.created_at || user.created_at,
+  }
+}
+
+function buildTurnSteps(rows: AgentEvent[], status: TurnStatus): TurnStep[] {
+  const ordered = new Map<string, TurnStep>()
+  const upsert = (key: string, label: string, detail: string) => {
+    if (ordered.has(key)) ordered.delete(key)
+    ordered.set(key, { key, label, detail, state: 'done' })
+  }
+  upsert('received', '收到请求', 'Joi 已接收这条消息')
+  for (const event of rows) {
+    const detail = hideRuntimeBrand(event.display_card?.summary || '')
+    if (event.type === 'plan_created') upsert('understand', '理解目标', detail || '正在整理任务')
+    else if (event.type === 'runtime_started') upsert('execute', '开始处理', detail || 'Joi 已开始执行')
+    else if (event.type === 'runtime_delta') upsert('progress', '正在推进', detail || '状态持续更新中')
+    else if (event.type === 'skill_started' || event.type === 'tool_started') upsert('execute', '使用能力', detail || '正在执行所需步骤')
+    else if (event.type === 'approval_required') upsert('approval', '等待确认', detail || '需要你的确认才能继续')
+    else if (event.type === 'skill_completed' || event.type === 'tool_completed') upsert('result', '整理结果', detail || '执行步骤已完成')
+    else if (event.type === 'runtime_final' || event.type === 'task_completed') upsert('done', '处理完成', detail || '请求已完成')
+    else if (event.type === 'runtime_error' || event.type === 'tool_failed' || event.type === 'task_failed') upsert('failed', '处理受阻', detail || '这次没有顺利完成')
+  }
+  let steps = [...ordered.values()]
+  if (steps.length > 4) steps = [steps[0], ...steps.slice(-3)]
+  const last = steps[steps.length - 1]
+  if (last) {
+    if (status === 'running' || status === 'queued') last.state = 'current'
+    if (status === 'waiting') last.state = 'waiting'
+    if (status === 'failed') last.state = 'failed'
+  }
+  return steps
+}
+
+function turnStatusLabel(turn: ConversationTurn) {
+  if (turn.staleApproval) return '确认已失效'
+  if (turn.status === 'waiting') return '需要你的确认'
+  if (turn.status === 'failed') return '没有完成'
+  if (turn.status === 'completed') return '已完成'
+  if (turn.status === 'queued') return '已收到'
+  return '正在处理'
+}
+
+function turnProgressLabel(turn: ConversationTurn) {
+  const progress = [...turn.rows].reverse().find((event) => Boolean(event.agent_state?.ui_transient && event.agent_state?.ui_label))
+  const label = String(progress?.agent_state?.ui_label || '').trim()
+  return label || `${characterName.value} 正在想`
+}
+
+function turnStatusText(turn: ConversationTurn) {
+  if (turn.staleApproval) return '应用已重新启动，请重试这条请求以重新确认'
+  if (turn.status === 'completed' && turn.assistant) return '执行过程已收起'
+  const latest = [...turn.rows].reverse().find((event) => {
+    if (event.type === 'user_message' || event.type === 'audit_event') return false
+    const summary = hideRuntimeBrand(event.display_card?.summary || '')
+    return Boolean(summary && summary !== 'Joi 状态已更新。')
+  })
+  return latest ? hideRuntimeBrand(latest.display_card.summary) : '正在准备处理这条请求'
+}
+
+function turnTimeLabel(turn: ConversationTurn) {
+  if (turn.status === 'running' || turn.status === 'waiting' || turn.status === 'queued') {
+    const seconds = Math.max(1, Math.floor(nowSeconds.value - turn.user.created_at))
+    if (seconds < 60) return `${seconds} 秒`
+    return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+  }
+  return new Date(turn.updatedAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function isTurnExpanded(turn: ConversationTurn) {
+  return turn.status === 'waiting' || expandedTaskIds.value.has(turn.taskId)
+}
+
+function toggleTurnTrace(turn: ConversationTurn) {
+  const next = new Set(expandedTaskIds.value)
+  if (next.has(turn.taskId)) next.delete(turn.taskId)
+  else next.add(turn.taskId)
+  expandedTaskIds.value = next
+}
+
+function onChatScroll() {
+  const element = chatScrollArea.value
+  if (!element) return
+  chatPinnedToBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120
+}
+
+async function retryTurn(turn: ConversationTurn) {
+  if (!connected.value || composerSending.value) return
+  composerSending.value = true
+  errorText.value = ''
+  beginNewVoiceIntent()
+  try {
+    await client.sendUserText(turn.user.display_card.summary, activeContext.value.thread_id || '')
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '重试失败'
+  } finally {
+    composerSending.value = false
+  }
+}
+
 function toolName(event: AgentEvent) {
   const tool = event.agent_state?.tool
   return typeof tool === 'string' ? tool : ''
@@ -737,6 +1560,10 @@ function hideRuntimeBrand(value: string) {
 
 function isCompanionChat(event: AgentEvent) {
   return toolName(event) === 'companion.chat' || (event.type === 'tool_completed' && event.display_card.title === '对话')
+}
+
+function isCompanionOnlyEvent(event: AgentEvent) {
+  return event.type === 'user_message' || event.type === 'audit_event' || isCompanionChat(event)
 }
 
 function isTaskCardEvent(event: AgentEvent) {
@@ -1402,12 +2229,17 @@ function errorLabel(value: string) {
 
 function isTransientRuntimeNotice(value: string) {
   const text = String(value || '').trim().toLowerCase()
-  return text === 'joi runtime is starting' || text === 'core bridge is offline' || text === 'core bridge connection failed'
+  return text === 'joi runtime is starting'
+    || text === 'joi runtime connection failed'
+    || text === 'core bridge is offline'
+    || text === 'core bridge connection failed'
 }
 
-function expressionEmotionClass(value: string) {
+function expressionEmotionClass(value: string): Live2DEmotion {
   const normalized = value.trim().toLowerCase().replace(/\s+/g, '_')
-  return ['happy', 'thinking', 'alert', 'worried', 'serious', 'neutral'].includes(normalized) ? normalized : 'neutral'
+  return ['happy', 'thinking', 'alert', 'worried', 'serious', 'neutral'].includes(normalized)
+    ? normalized as Live2DEmotion
+    : 'neutral'
 }
 
 function expressionEmotionLabel(value: string) {
@@ -1429,14 +2261,74 @@ function eventTime(event: AgentEvent) {
   return new Date(event.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-function submit() {
+function attachmentName(path: string) {
+  const normalized = path.replace(/[\\/]+$/, '')
+  return normalized.split(/[\\/]/).pop() || normalized
+}
+
+async function addAttachments(kind: AttachmentKind) {
+  if (attachmentPickerBusy.value) return
+  attachmentPickerBusy.value = true
+  attachmentPickerError.value = ''
+  try {
+    const selectedPaths = await invoke<string[]>('pick_attachments', { kind })
+    if (!selectedPaths.length) return
+
+    const existingPaths = new Set(composerAttachments.value.map((attachment) => attachment.path))
+    const additions = selectedPaths
+      .filter((path) => !existingPaths.has(path))
+      .map((path) => ({ kind, name: attachmentName(path), path }))
+    const availableSlots = Math.max(0, 20 - composerAttachments.value.length)
+    composerAttachments.value.push(...additions.slice(0, availableSlots))
+    if (additions.length > availableSlots) {
+      attachmentPickerError.value = '单条消息最多添加 20 个文件或文件夹。'
+    }
+    quickMenuOpen.value = false
+  } catch (error) {
+    attachmentPickerError.value = error instanceof Error ? error.message : '没有打开系统选择器，请再试一次。'
+  } finally {
+    attachmentPickerBusy.value = false
+  }
+}
+
+function removeAttachment(path: string) {
+  composerAttachments.value = composerAttachments.value.filter((attachment) => attachment.path !== path)
+  attachmentPickerError.value = ''
+}
+
+function attachmentPrompt(attachments: ComposerAttachment[]) {
+  return attachments
+    .map((attachment) => `- ${attachment.kind === 'folder' ? '文件夹' : '文件'}：${attachment.path.replace(/[\r\n]+/g, ' ')}`)
+    .join('\n')
+}
+
+async function submit() {
+  if (!composerCanSubmit.value) return
   const text = input.value.trim()
-  if (!text) return
+  const attachments = [...composerAttachments.value]
+  const requestText = attachments.length
+    ? `${text || '请读取并处理这些本地附件。'}\n\n本地附件（可直接读取）：\n${attachmentPrompt(attachments)}`
+    : text
+  if (!requestText) return
   beginNewVoiceIntent()
-  void client.sendUserText(text).catch((error) => {
+  errorText.value = ''
+  composerSending.value = true
+  try {
+    await client.sendUserText(requestText, activeContext.value.thread_id || '')
+    input.value = ''
+    composerAttachments.value = []
+    attachmentPickerError.value = ''
+  } catch (error) {
     errorText.value = error instanceof Error ? error.message : '发送失败'
-  })
-  input.value = ''
+  } finally {
+    composerSending.value = false
+  }
+}
+
+function sendChatStarter(text: string) {
+  if (!connected.value || composerSending.value) return
+  input.value = text
+  void submit()
 }
 
 function startWatchLoop() {
@@ -1449,6 +2341,8 @@ function startWatchLoop() {
     transcript_source: watchTranscriptSource.value,
     proactive_enabled: watchProactiveEnabled.value,
     commentary_interval_seconds: watchCommentaryInterval.value,
+    mode: watchSceneMode.value,
+    spoiler_level: watchSpoilerLevel.value,
     vision_interval_ticks: watchVisionInterval.value,
   }).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '实时陪看启动失败'
@@ -1461,10 +2355,17 @@ function configureWatchLoop() {
     transcript_source: watchTranscriptSource.value,
     proactive_enabled: watchProactiveEnabled.value,
     commentary_interval_seconds: watchCommentaryInterval.value,
+    mode: watchSceneMode.value,
+    spoiler_level: watchSpoilerLevel.value,
     vision_interval_ticks: watchVisionInterval.value,
   }).catch((error) => {
     errorText.value = error instanceof Error ? error.message : '实时陪看设置失败'
   })
+}
+
+function changeWatchSceneMode() {
+  watchProactiveEnabled.value = watchSceneMode.value !== 'quiet'
+  configureWatchLoop()
 }
 
 function refreshWatchVision() {
@@ -1611,23 +2512,103 @@ async function refreshMemoryStatus() {
   }
 }
 
-async function searchMemory() {
-  const query = memoryQueryText.value
-  if (!query) {
-    memorySearchResults.value = []
-    return
-  }
+async function refreshMemoryWorkspace() {
+  await Promise.all([refreshMemoryStatus(), loadMemoryPage(true), browseMemoryVault()])
+}
+
+async function loadMemoryPage(reset = true) {
+  if (memorySearchLoading.value) return
   memorySearchLoading.value = true
+  const offset = reset ? 0 : memoryOffset.value
   try {
-    const result = (await client.memoryRecall(query, 12)) as { ok?: boolean; memories?: MemoryRecord[]; memory?: MemoryStatus; error?: string }
-    if (result.memory) memoryStatus.value = result.memory
-    memorySearchResults.value = result.memories || []
-    if (!result.ok) errorText.value = result.error || '记忆检索失败'
+    if (memoryView.value === 'pending') {
+      const result = (await client.memoryPending({ offset, limit: 12 })) as { ok?: boolean; page?: MemoryCandidatePage; error?: string }
+      const page = result.page
+      if (!result.ok || !page) {
+        errorText.value = result.error || '待确认记忆读取失败'
+        return
+      }
+      memoryPendingRows.value = reset ? page.items : [...memoryPendingRows.value, ...page.items]
+      memoryRows.value = []
+      memoryTotal.value = page.total
+      memoryOffset.value = page.offset + page.items.length
+      memoryHasMore.value = page.has_more
+      return
+    }
+    const result = (await client.memoryList({ query: memoryQueryText.value, offset, limit: 12, sort: 'recent' })) as { ok?: boolean; page?: MemoryPage; error?: string }
+    const page = result.page
+    if (!result.ok || !page) {
+      errorText.value = result.error || '记忆列表读取失败'
+      return
+    }
+    memoryRows.value = reset ? page.items : [...memoryRows.value, ...page.items]
+    memoryPendingRows.value = []
+    memoryTotal.value = page.total
+    memoryOffset.value = page.offset + page.items.length
+    memoryHasMore.value = page.has_more
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆检索失败'
+    errorText.value = error instanceof Error ? error.message : '记忆列表读取失败'
   } finally {
     memorySearchLoading.value = false
   }
+}
+
+async function searchMemory() {
+  memoryView.value = 'saved'
+  await loadMemoryPage(true)
+}
+
+async function selectMemoryView(view: 'saved' | 'pending') {
+  if (memoryView.value === view && (memoryRows.value.length || memoryPendingRows.value.length)) return
+  memoryView.value = view
+  editingMemoryId.value = null
+  await loadMemoryPage(true)
+}
+
+function beginMemoryEdit(memory: MemoryRecord) {
+  editingMemoryId.value = memory.id
+  editingMemoryText.value = memory.text || ''
+  editingMemoryKind.value = memory.kind || 'note'
+}
+
+function cancelMemoryEdit() {
+  editingMemoryId.value = null
+  editingMemoryText.value = ''
+}
+
+async function saveMemoryEdit(memoryId: number) {
+  const text = editingMemoryText.value.trim()
+  if (!text) return
+  try {
+    const result = (await client.memoryUpdate(memoryId, text, editingMemoryKind.value)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
+    if (result.memory) memoryStatus.value = result.memory
+    if (!result.ok) {
+      errorText.value = result.error === 'duplicate_memory' ? '已经存在相同记忆' : result.error || '记忆更新失败'
+      return
+    }
+    cancelMemoryEdit()
+    await loadMemoryPage(true)
+    void browseMemoryVault()
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : '记忆更新失败'
+  }
+}
+
+function memoryKindLabel(kind?: string) {
+  const value = (kind || 'note').toLocaleLowerCase()
+  if (value.startsWith('preference')) return '偏好'
+  if (value.startsWith('habit') || value.startsWith('routine')) return '习惯'
+  if (value.startsWith('relationship') || value.startsWith('identity') || value.startsWith('persona')) return '关系'
+  if (value.startsWith('project') || value.startsWith('focus') || value.startsWith('task')) return '关注'
+  return '笔记'
+}
+
+function memoryTime(timestamp?: number) {
+  if (!timestamp) return '刚刚'
+  const value = new Date(timestamp * 1000)
+  const today = new Date()
+  if (value.toDateString() === today.toDateString()) return value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return value.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
 async function browseMemoryVault() {
@@ -1645,7 +2626,7 @@ async function saveMemoryCandidate(candidateId: number) {
   try {
     const result = (await client.memorySaveCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
-    if (memoryQueryText.value) void searchMemory()
+    await loadMemoryPage(true)
     void browseMemoryVault()
     if (!result.ok) errorText.value = result.error || '记忆保存失败'
   } catch (error) {
@@ -1657,6 +2638,7 @@ async function rejectMemoryCandidate(candidateId: number) {
   try {
     const result = (await client.memoryRejectCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
+    await loadMemoryPage(true)
     if (!result.ok) errorText.value = result.error || '记忆已忽略'
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '记忆忽略失败'
@@ -1678,7 +2660,7 @@ async function deleteMemory(memoryId: number) {
   try {
     const result = (await client.memoryDelete(memoryId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
-    if (memoryQueryText.value) void searchMemory()
+    await loadMemoryPage(true)
     void browseMemoryVault()
     if (!result.ok) errorText.value = result.error || '记忆删除失败'
   } catch (error) {
@@ -1687,13 +2669,16 @@ async function deleteMemory(memoryId: number) {
 }
 
 async function clearMemory() {
-  const count = pendingMemories.value.length + recentMemories.value.length
+  const count = memorySavedCount.value + memoryPendingCount.value
   if (!count) return
   if (!window.confirm(`清空 ${count} 条记忆和待确认候选？此操作不会删除手动编辑区。`)) return
   try {
     const result = (await client.memoryClear()) as { ok?: boolean; memory?: MemoryStatus; error?: string }
     if (result.memory) memoryStatus.value = result.memory
-    memorySearchResults.value = []
+    memoryRows.value = []
+    memoryPendingRows.value = []
+    memoryTotal.value = 0
+    memoryHasMore.value = false
     void browseMemoryVault()
     if (!result.ok) errorText.value = result.error || '记忆清空失败'
   } catch (error) {
@@ -1703,10 +2688,14 @@ async function clearMemory() {
 
 function resolveApproval(approved: boolean) {
   if (!pendingApproval.value) return
-  const approvalId = approvalIdFor(pendingApproval.value)
+  resolveApprovalFor(pendingApproval.value, approved)
+}
+
+function resolveApprovalFor(approval: AgentEvent, approved: boolean) {
+  const approvalId = approvalIdFor(approval)
   if (!approvalId) return
   const epoch = beginNewVoiceIntent()
-  taskVoiceEpochs.set(pendingApproval.value.task_id, epoch)
+  taskVoiceEpochs.set(approval.task_id, epoch)
   clearMiniSpeechTimer()
   miniSpeechActive.value = false
   void syncCompactWindowSize()
@@ -1878,9 +2867,23 @@ const selectedAgentCli = computed(() => {
   return displayedAgentClis.value.find((row) => row.id === selectedAgentCliId.value) || displayedAgentClis.value[0]
 })
 
-const selectedAgentCliModels = computed(() => {
+const selectedAgentCliModels = computed<AgentCliModelOption[]>(() => {
+  const options = selectedAgentCli.value?.model_options || []
+  if (options.length) return options
   const models = selectedAgentCli.value?.models || []
-  return models.length ? models : ['默认']
+  return (models.length ? models : ['默认']).map((model) => ({ id: model, label: model }))
+})
+
+const selectedAgentCliModelSource = computed(() => {
+  if (selectedAgentCli.value?.models_source === 'cli_live') return '来自 CLI 的实时列表'
+  if (selectedAgentCli.value?.models_source === 'fallback') return 'CLI 列表暂不可用'
+  return '内置候选列表'
+})
+
+const selectedAgentCliModelHint = computed(() => {
+  if (selectedAgentCli.value?.models_source === 'cli_live') return '已从当前安装的 CLI 实时读取模型。“默认”使用 CLI 自身配置。'
+  if (selectedAgentCli.value?.models_source === 'fallback') return '暂时无法读取 CLI 模型目录，当前仅使用 CLI 默认配置。点击“测试”可重新读取。'
+  return '该 CLI 暂未提供模型发现接口，显示内置候选项。'
 })
 
 const selectedAgentCliReasoningOptions = computed(() => {
@@ -1891,7 +2894,7 @@ const selectedAgentCliReasoningOptions = computed(() => {
 function fallbackAgentClis(): AgentCliProfile[] {
   return [
     { id: 'claude', name: 'Claude Code', vendor: 'Anthropic official CLI', installed: false, status: 'missing', models: ['默认'], reasoning: ['默认'], run_strategy: 'prompt_arg', supports_takeover: true },
-    { id: 'codex', name: 'Codex CLI', vendor: 'OpenAI official CLI', installed: false, status: 'missing', models: ['默认', 'GPT-5.5', 'GPT-5', 'GPT-4.1'], reasoning: ['默认', 'Low', 'Medium', 'High', 'XHigh'], run_strategy: 'codex_exec_json', supports_takeover: true },
+    { id: 'codex', name: 'Codex CLI', vendor: 'OpenAI official CLI', installed: false, status: 'missing', models: ['默认'], model_options: [{ id: '默认', label: '默认（使用 CLI 配置）' }], models_source: 'fallback', models_error: 'cli_not_found', reasoning: ['默认', 'Low', 'Medium', 'High', 'XHigh'], run_strategy: 'codex_exec_json', supports_takeover: true },
     { id: 'hermes', name: 'Hermes', vendor: 'ACP agent CLI', installed: false, status: 'missing', models: ['默认'], reasoning: ['默认'] },
   ]
 }
@@ -1925,8 +2928,9 @@ function agentCliTestDisabled(row: AgentCliProfile) {
 
 function selectAgentCli(row: AgentCliProfile) {
   selectedAgentCliId.value = row.id
-  const models = row.models || []
-  selectedAgentCliModel.value = models.includes(selectedAgentCliModel.value) ? selectedAgentCliModel.value : models[0] || '默认'
+  const models = (row.model_options || []).map((option) => option.id)
+  const availableModels = models.length ? models : row.models || []
+  selectedAgentCliModel.value = availableModels.includes(selectedAgentCliModel.value) ? selectedAgentCliModel.value : availableModels[0] || '默认'
   const reasoning = row.reasoning || []
   selectedAgentCliReasoning.value = reasoning.includes(selectedAgentCliReasoning.value) ? selectedAgentCliReasoning.value : reasoning[0] || '默认'
 }
@@ -1986,35 +2990,6 @@ function agentCliTakeoverText(row?: AgentCliProfile) {
   if (row.id !== 'codex') return '实验运行时'
   if (joiMcpStatus.value?.connected) return 'Joi 能力已连接'
   return codexRuntime.value?.enabled ? 'Joi 运行时已就绪' : '可作为 Joi 运行时'
-}
-
-function settingsTitle(tab: SettingsTabId) {
-  const row = settingsTabs.find((item) => item.id === tab)
-  return row?.label || '设置'
-}
-
-function settingsSubtitle(tab: SettingsTabId) {
-  const labels: Record<SettingsTabId, string> = {
-    execution: '在本机 CLI 与 BYOK 之间选择。',
-    runtime: '查看模型和本地运行状态。',
-    instructions: '管理提示词和项目规则。',
-    memory: '管理长期记忆和待确认候选。',
-    media: '配置图像、音频与视觉相关提供商。',
-    skills: '查看并切换 Joi 原生能力。',
-    external_mcp: '管理外部 MCP 能力入口。',
-    connectors: '管理本地与云端连接器。',
-    mcp_servers: '查看 MCP 服务器发现状态。',
-    language: '选择界面显示语言。',
-    appearance: '调整 Joi 外观和微缩模式装扮。',
-    design_review: '管理设计评审相关工作流。',
-    notifications: '设置任务、审批和语音通知。',
-    pets: '管理桌面宠物和互动表现。',
-    design_system: '查看界面设计令牌。',
-    privacy: '查看本地数据和隐私边界。',
-    about: '查看 Joi 版本和运行环境。',
-    developer: '查看审计和背景上下文。',
-  }
-  return labels[tab] || ''
 }
 
 async function refreshAgentClis() {
@@ -2181,12 +3156,328 @@ async function setSkillEnabled(skill: NativeSkill, enabled: boolean) {
 async function refreshSkills() {
   skillRefreshLoading.value = true
   try {
-    const result = (await client.skillsList()) as { ok?: boolean; skills?: NativeSkillManifest }
+    const [result, catalog, adapters] = await Promise.all([
+      client.skillsList() as Promise<{ ok?: boolean; skills?: NativeSkillManifest }>,
+      client.agentSkillCatalog(activeContext.value.project_id || '', ready.value?.character?.id || '', true) as Promise<{ skills?: AgentSkillInstallation[] }>,
+      client.gameAdapterList() as Promise<{ adapters?: GameAdapterManifest[] }>,
+    ])
     if (result.skills) skillManifest.value = result.skills
+    installedAgentSkills.value = catalog.skills || []
+    gameAdapterRows.value = adapters.adapters || []
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '技能清单刷新失败'
   } finally {
     skillRefreshLoading.value = false
+  }
+}
+
+async function chooseAgentSkillSource(kind: AttachmentKind) {
+  try {
+    const selected = await invoke<string[]>('pick_attachments', { kind })
+    const source = selected?.[0]
+    if (!source) return
+    agentSkillSource.value = source
+    agentSkillInspection.value = null
+    agentSkillNotice.value = ''
+    await inspectAgentSkill()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || '')
+    if (message && !/cancel/i.test(message)) agentSkillNotice.value = message
+  }
+}
+
+async function inspectAgentSkill() {
+  const source = agentSkillSource.value.trim()
+  if (!source || agentSkillBusy.value) return
+  agentSkillBusy.value = true
+  agentSkillNotice.value = ''
+  try {
+    const result = await client.agentSkillInspect(source) as { ok?: boolean; inspection?: AgentSkillInspection; error?: string; message?: string }
+    agentSkillInspection.value = result.inspection || null
+    agentSkillNotice.value = result.ok ? '检查完成。安装时会再次校验文件哈希。' : result.message || result.error || 'Skill 检查失败'
+  } catch (error) {
+    agentSkillInspection.value = null
+    agentSkillNotice.value = error instanceof Error ? error.message : 'Skill 检查失败'
+  } finally {
+    agentSkillBusy.value = false
+  }
+}
+
+function agentSkillScopeId() {
+  if (agentSkillScope.value === 'project') return activeContext.value.project_id || ''
+  if (agentSkillScope.value === 'character') return ready.value?.character?.id || ''
+  return ''
+}
+
+async function installInspectedAgentSkill() {
+  const inspection = agentSkillInspection.value
+  if (!inspection || agentSkillBusy.value) return
+  agentSkillBusy.value = true
+  try {
+    const result = await client.agentSkillInstall(
+      agentSkillSource.value.trim(),
+      agentSkillScope.value,
+      agentSkillScopeId(),
+      inspection.digest,
+    ) as { ok?: boolean; error?: string; message?: string }
+    agentSkillNotice.value = result.ok ? `${inspection.name} 已安装，脚本仍保持显式调用。` : result.message || result.error || 'Skill 安装失败'
+    if (result.ok) {
+      agentSkillSource.value = ''
+      agentSkillInspection.value = null
+      await refreshSkills()
+    }
+  } catch (error) {
+    agentSkillNotice.value = error instanceof Error ? error.message : 'Skill 安装失败'
+  } finally {
+    agentSkillBusy.value = false
+  }
+}
+
+async function toggleAgentSkill(skill: AgentSkillInstallation) {
+  await client.agentSkillEnable(skill.id, !skill.enabled)
+  await refreshSkills()
+}
+
+async function updateAgentSkill(skill: AgentSkillInstallation) {
+  agentSkillBusy.value = true
+  try {
+    const result = await client.agentSkillUpdate(skill.id) as { ok?: boolean; error?: string; message?: string }
+    agentSkillNotice.value = result.ok ? `${skill.name} 已更新并完成哈希校验。` : result.message || result.error || '更新失败'
+    await refreshSkills()
+  } finally {
+    agentSkillBusy.value = false
+  }
+}
+
+async function uninstallAgentSkill(skill: AgentSkillInstallation) {
+  if (!window.confirm(`卸载 ${skill.name}？运行记录会保留，安装文件和注册信息会清理。`)) return
+  const result = await client.agentSkillUninstall(skill.id, true) as { ok?: boolean; error?: string }
+  agentSkillNotice.value = result.ok ? `${skill.name} 已卸载，没有遗留安装文件。` : result.error || '卸载失败'
+  await refreshSkills()
+}
+
+function agentSkillScopeLabel(scope: string) {
+  return ({ global: '全局', project: '当前项目', character: '当前角色' } as Record<string, string>)[scope] || scope
+}
+
+async function installGameAdapter(adapter: GameAdapterManifest) {
+  const review = `${adapter.name} ${adapter.version}\n来源：${adapter.source}\n许可：${adapter.license}\n动作：${adapter.action_sets.join('、')}\n\n安装代码适配器？首次实际运行仍会经过能力会话权限。`
+  if (!window.confirm(review)) return
+  const result = await client.gameAdapterInstall(adapter.id, true) as { ok?: boolean; error?: string; adapter?: GameAdapterManifest }
+  gameAdapterNotice.value = result.ok ? `${adapter.name} 适配器已安装。` : result.error || '适配器安装失败'
+  await refreshSkills()
+}
+
+async function uninstallGameAdapter(adapter: GameAdapterManifest) {
+  if (!window.confirm(`卸载 ${adapter.name} 适配器？不会删除游戏存档或聊天记录。`)) return
+  const result = await client.gameAdapterUninstall(adapter.id, true) as { ok?: boolean; error?: string }
+  gameAdapterNotice.value = result.ok ? `${adapter.name} 适配器已卸载。` : result.error || '适配器卸载失败'
+  await refreshSkills()
+}
+
+async function toggleGameAdapter(adapter: GameAdapterManifest) {
+  await client.gameAdapterEnable(adapter.id, !adapter.enabled)
+  await refreshSkills()
+}
+
+async function inspectGameAdapterRun(adapter: GameAdapterManifest) {
+  const mode = adapter.modes.includes('companion') ? 'companion' : adapter.modes[0]
+  const result = await client.gameAdapterRun({ adapter_id: adapter.id, mode, goal: '连接检查', dry_run: true }) as { ready?: boolean; error?: string; detection_status?: { setup_hint?: string } }
+  gameAdapterNotice.value = result.ready ? `${adapter.name} 已准备好。` : result.detection_status?.setup_hint || result.error || `${adapter.name} 还需要配置。`
+}
+
+function defaultByokDraft() {
+  return {
+    provider: 'openai',
+    base_url: 'https://api.openai.com/v1',
+    model: 'gpt-5.6-luna',
+    temperature: 0.7,
+  }
+}
+
+function syncByokStatus(status: ByokStatus | null | undefined, force = false) {
+  if (!status) return
+  byokStatus.value = status
+  byokResult.value = status.last_test || byokResult.value
+  if (byokDirty.value && !force) return
+  byokDraft.value = {
+    provider: status.provider || 'openai',
+    base_url: status.base_url || 'https://api.openai.com/v1',
+    model: status.model || 'gpt-5.6-luna',
+    temperature: Number.isFinite(Number(status.temperature)) ? Number(status.temperature) : 0.7,
+  }
+}
+
+function syncByokFromReady(payload: CoreReadyPayload) {
+  syncByokStatus(payload.byok)
+}
+
+function selectByokPreset(preset: ByokPreset) {
+  const changingProvider = byokDraft.value.provider !== preset.id
+  byokDraft.value = {
+    ...byokDraft.value,
+    provider: preset.id,
+    base_url: preset.base_url || (changingProvider ? '' : byokDraft.value.base_url),
+    model: preset.model || (changingProvider ? '' : byokDraft.value.model),
+  }
+  byokApiKey.value = ''
+  byokResult.value = null
+  byokNotice.value = ''
+  byokDirty.value = true
+}
+
+function markByokDirty() {
+  byokDirty.value = true
+  byokNotice.value = ''
+  byokResult.value = null
+}
+
+function byokStateLabel() {
+  if (byokLoading.value) return '正在连接'
+  if (byokStatus.value?.configured) return '已连接'
+  if (byokStatus.value?.state === 'mock') return 'Mock 模式'
+  return '尚未连接'
+}
+
+function byokSecretLabel() {
+  if (!byokRequiresKey.value) return '本地模型无需 API Key'
+  const source = byokStatus.value?.secret?.source
+  if (source === 'system') return '已安全存入系统密钥库'
+  if (source === 'environment') return '正在使用环境变量'
+  if (source === 'legacy') return '正在使用现有本地配置'
+  if (source === 'not_required') return '本地模型无需密钥'
+  if (byokApiKey.value.trim()) return '新密钥将在保存时写入系统密钥库'
+  return '尚未保存密钥'
+}
+
+function byokErrorLabel(error = '') {
+  const labels: Record<string, string> = {
+    api_key_required: '请填写 API Key；已有密钥时可以留空继续使用。',
+    invalid_api_key: 'API Key 格式无效，请检查是否粘贴完整。',
+    secure_store_unavailable: '系统密钥库当前不可用，请重启 Joi 或检查依赖。',
+    secure_store_failed: '密钥没有写入系统密钥库，请再试一次。',
+    invalid_endpoint: '端点无效。云端接口需要 HTTPS，本地 Ollama 可使用 localhost。',
+    invalid_model: '请填写供应商实际提供的模型 ID。',
+    invalid_temperature: '温度必须在 0 到 2 之间。',
+    authentication_failed: '密钥验证失败，请检查 API Key 或供应商权限。',
+    endpoint_not_found: '接口地址不存在，请检查是否包含正确的 /v1 路径。',
+    endpoint_unreachable: '无法连接接口，请检查网络、代理或本地服务。',
+    connection_timeout: '连接测试超时，请检查接口是否可访问。',
+    rate_limited: '供应商正在限流或额度不足，请检查用量后重试。',
+    model_not_found: '接口可以连接，但没有找到这个模型 ID。',
+    model_unconfigured: '配置还不完整，请补齐模型和密钥。',
+    no_local_models: 'Ollama 已连接，但没有发现本地模型；请先拉取一个模型。',
+    unsupported_discovery: '当前供应商暂不支持自动检测模型。',
+    connection_test_failed: '接口测试失败；配置已保留，可以修改后重试。',
+    config_write_failed: 'Joi 无法保存本地配置。',
+    config_invalid: '现有 config.yaml 无法读取，请先修复配置格式。',
+  }
+  return labels[error] || (error ? '连接没有成功，请检查配置后重试。' : '')
+}
+
+async function refreshByokStatus() {
+  if (!connected.value) return
+  try {
+    const status = await client.byokStatus() as ByokStatus
+    syncByokStatus(status)
+  } catch (error) {
+    byokNotice.value = error instanceof Error ? error.message : '无法读取 BYOK 状态'
+  }
+}
+
+async function connectByok() {
+  if (!byokCanConnect.value) return
+  byokLoading.value = true
+  byokNotice.value = ''
+  try {
+    const payload: Record<string, unknown> = {
+      provider: byokDraft.value.provider,
+      base_url: byokDraft.value.base_url.trim(),
+      model: byokDraft.value.model.trim(),
+      temperature: Number(byokDraft.value.temperature),
+    }
+    if (byokApiKey.value.trim()) payload.api_key = byokApiKey.value.trim()
+    const result = await client.byokConnect(payload) as ByokConnectResult
+    if (result.byok) syncByokStatus(result.byok, true)
+    byokResult.value = result.test || null
+    if (result.saved) {
+      byokApiKey.value = ''
+      byokDirty.value = false
+    }
+    byokNotice.value = result.ok
+      ? `连接成功${result.test?.latency_ms ? ` · ${result.test.latency_ms}ms` : ''}`
+      : `${result.saved ? '配置已保存，但测试失败。' : ''}${byokErrorLabel(result.error || result.test?.error || '')}`
+  } catch (error) {
+    byokNotice.value = error instanceof Error ? error.message : 'BYOK 连接失败'
+  } finally {
+    byokLoading.value = false
+  }
+}
+
+async function testByokConnection() {
+  byokLoading.value = true
+  byokNotice.value = ''
+  try {
+    const result = await client.byokTest() as ByokTestResult
+    byokResult.value = result
+    byokNotice.value = result.ok
+      ? `连接正常${result.latency_ms ? ` · ${result.latency_ms}ms` : ''}`
+      : byokErrorLabel(result.error || '')
+    await refreshByokStatus()
+  } catch (error) {
+    byokNotice.value = error instanceof Error ? error.message : 'BYOK 测试失败'
+  } finally {
+    byokLoading.value = false
+  }
+}
+
+async function detectLocalModels() {
+  if (!connected.value || byokDraft.value.provider !== 'ollama' || byokDiscovering.value) return
+  byokDiscovering.value = true
+  byokNotice.value = ''
+  try {
+    const result = await client.byokModels({
+      provider: 'ollama',
+      base_url: byokDraft.value.base_url.trim(),
+    }) as ByokTestResult
+    byokResult.value = result
+    const models = result.models || []
+    if (result.ok && models.length) {
+      if (!byokDraft.value.model.trim()) byokDraft.value.model = models[0]
+      byokDirty.value = true
+      byokNotice.value = `发现 ${models.length} 个本地模型，已为你选择 ${byokDraft.value.model}。`
+    } else {
+      byokNotice.value = byokErrorLabel(result.error || '')
+    }
+  } catch (error) {
+    byokNotice.value = error instanceof Error ? error.message : '无法检测本地模型'
+  } finally {
+    byokDiscovering.value = false
+  }
+}
+
+async function disconnectByok() {
+  byokLoading.value = true
+  byokNotice.value = ''
+  try {
+    const result = await client.byokDisconnect() as { ok?: boolean; error?: string; byok?: ByokStatus; secret_removed?: boolean; secret_source?: string }
+    if (result.byok) syncByokStatus(result.byok, true)
+    byokResult.value = null
+    byokApiKey.value = ''
+    byokDirty.value = false
+    if (result.ok) {
+      byokNotice.value = result.secret_source === 'environment'
+        ? 'BYOK 已断开；环境变量中的密钥由你继续管理。'
+        : result.secret_removed
+          ? 'BYOK 已断开，密钥已从系统密钥库移除。'
+          : 'BYOK 已断开。'
+    } else {
+      byokNotice.value = byokErrorLabel(result.error || '')
+    }
+  } catch (error) {
+    byokNotice.value = error instanceof Error ? error.message : 'BYOK 断开失败'
+  } finally {
+    byokLoading.value = false
   }
 }
 
@@ -2512,8 +3803,11 @@ function blobToBase64(blob: Blob) {
 }
 
 onMounted(() => {
+  void safeWindowCall(() => getCurrentWindow().setTitleBarStyle('overlay'))
+  void setNativeWindowControlsVisible(true)
   client.connect()
   void refreshAgentClis()
+  void refreshByokStatus()
   clockTimer = window.setInterval(() => {
     nowSeconds.value = Date.now() / 1000
   }, 5000)
@@ -2554,35 +3848,192 @@ onBeforeUnmount(() => {
     @drop.capture.prevent
   >
     <!-- Header Titlebar -->
-    <header class="titlebar" @mousedown="startWindowDrag">
-      <div class="traffic-lights">
-        <button type="button" class="light close" title="关闭" aria-label="关闭窗口" @mousedown.stop @click.stop="closeWindow"></button>
-        <button type="button" class="light minimize" title="最小化" aria-label="最小化窗口" @mousedown.stop @click.stop="minimizeWindow"></button>
-        <button type="button" class="light zoom" title="缩放" aria-label="缩放窗口" @mousedown.stop @click.stop="toggleMaximizeWindow"></button>
-      </div>
-      <div class="window-title">Joi Desktop</div>
-      
-      <!-- Actions panel on right header -->
+    <header class="titlebar" data-tauri-drag-region @mousedown="startWindowDrag" @dblclick="handleTitlebarDoubleClick">
+      <button
+        v-if="!isCompactMode"
+        type="button"
+        class="context-rail-trigger"
+        :class="{ active: contextRailOpen }"
+        :aria-expanded="contextRailOpen"
+        aria-label="打开项目与对话"
+        @mousedown.stop
+        @click.stop="contextRailOpen = !contextRailOpen; contextRailOpen && refreshCollaboration()"
+      >
+        <Menu :size="17" :stroke-width="1.8" />
+        <span>{{ activeProject?.name || '项目' }}</span>
+      </button>
+      <button type="button" class="window-title" title="返回对话" @mousedown.stop @click.stop="openCabin('chat')">Joi</button>
+
       <div class="topbar-actions">
-        <!-- Speak replies -->
-        <div class="speak-replies-wrapper" :class="{ checked: runtimeDraft.tts_enabled }" @click="runtimeDraft.tts_enabled = !runtimeDraft.tts_enabled; markRuntimeDraftDirty(); applyRuntimeSettings()">
-          <div class="checkbox-custom"></div>
-          <span>Speak replies</span>
-        </div>
-        <!-- Compact Mode Switcher -->
-        <button class="compact-toggle-btn" @click="toggleCompactMode" title="切换到微缩挂件模式">
-          🗜️ 微缩模式
+        <button
+          type="button"
+          class="luna-title-action"
+          :class="{ active: activeCabin === 'inspector' }"
+          @mousedown.stop
+          @click.stop="openCabin(activeCabin === 'inspector' ? 'chat' : 'inspector')"
+        >
+          <MessageCircle v-if="activeCabin === 'inspector'" :size="17" :stroke-width="1.8" />
+          <Settings2 v-else :size="17" :stroke-width="1.8" />
+          <span>{{ activeCabin === 'inspector' ? '返回对话' : '设置' }}</span>
         </button>
+        <div class="luna-role-menu" v-if="activeCabin !== 'inspector'">
+          <button
+            type="button"
+            class="luna-title-action role-trigger"
+            :class="{ active: activeCabin === 'characters' }"
+            @mousedown.stop
+            @click.stop="openCabin('characters')"
+          >
+            <Bot :size="17" :stroke-width="1.8" />
+            {{ characterName }}
+          </button>
+        </div>
       </div>
     </header>
 
-    <section class="workspace" :class="`cabin-${activeCabin}`">
+    <button
+      v-if="contextRailOpen && !isCompactMode"
+      type="button"
+      class="context-rail-backdrop"
+      aria-label="关闭项目导航"
+      @click="contextRailOpen = false"
+    ></button>
+    <aside v-if="!isCompactMode" class="context-rail" :class="{ open: contextRailOpen }" aria-label="项目与对话导航">
+      <header class="context-rail-head">
+        <div>
+          <span>共同在场</span>
+          <strong>{{ activeProject?.name || '默认项目' }}</strong>
+          <small>{{ activeThread?.title || '原有对话' }}</small>
+        </div>
+        <button type="button" aria-label="关闭侧栏" @click="contextRailOpen = false"><X :size="17" /></button>
+      </header>
+
+      <label class="context-search">
+        <Search :size="15" />
+        <input v-model="contextSearch" type="search" placeholder="搜索对话" />
+      </label>
+
+      <div class="context-primary-actions">
+        <button type="button" @click="createThreadFromRail" :disabled="contextRailBusy">
+          <Plus :size="16" />
+          新对话
+        </button>
+      </div>
+
+      <div class="context-rail-scroll">
+        <section class="context-group">
+          <div class="context-group-title">
+            <span>项目</span>
+            <button type="button" :aria-pressed="showArchivedContext" @click="showArchivedContext = !showArchivedContext">
+              {{ showArchivedContext ? '隐藏归档' : '归档' }}
+            </button>
+          </div>
+          <div class="context-list">
+            <article
+              v-for="project in visibleProjects"
+              :key="project.id"
+              class="context-row project-row"
+              :class="{ active: project.id === activeContext.project_id, archived: project.archived }"
+            >
+              <button type="button" class="context-row-main" @click="switchProject(project.id)">
+                <FolderIcon :size="16" />
+                <span v-if="editingRailItem?.type !== 'project' || editingRailItem.id !== project.id">{{ project.name }}</span>
+              </button>
+              <form
+                v-if="editingRailItem?.type === 'project' && editingRailItem.id === project.id"
+                class="context-inline-edit"
+                @submit.prevent="saveRailRename"
+              >
+                <input v-model="editingRailValue" maxlength="80" autofocus />
+                <button type="submit"><CheckCircle2 :size="15" /></button>
+              </form>
+              <div class="context-row-actions">
+                <button type="button" title="重命名" @click="beginRailRename('project', project.id, project.name)"><Pencil :size="14" /></button>
+                <button type="button" :title="project.archived ? '恢复项目' : '归档项目'" @click="archiveProjectFromRail(project)"><Archive :size="14" /></button>
+                <button v-if="project.archived" type="button" title="永久删除" class="danger" @click="deleteArchivedProject(project)"><Trash2 :size="14" /></button>
+              </div>
+            </article>
+          </div>
+          <form class="context-new-project" @submit.prevent="createProjectFromRail">
+            <Plus :size="15" />
+            <input v-model="newProjectName" maxlength="80" placeholder="新项目名称" />
+            <button type="submit" :disabled="!newProjectName.trim() || contextRailBusy">创建</button>
+          </form>
+        </section>
+
+        <section class="context-group">
+          <div class="context-group-title">
+            <span>对话</span>
+            <small>{{ visibleThreads.length }}</small>
+          </div>
+          <div class="context-list thread-list">
+            <article
+              v-for="thread in visibleThreads"
+              :key="thread.id"
+              class="context-row thread-row"
+              :class="{ active: thread.id === activeContext.thread_id, archived: thread.archived }"
+            >
+              <button type="button" class="context-row-main" @click="activateThread(thread.id)">
+                <MessageCircle :size="15" />
+                <span v-if="editingRailItem?.type !== 'thread' || editingRailItem.id !== thread.id">{{ thread.title }}</span>
+              </button>
+              <form
+                v-if="editingRailItem?.type === 'thread' && editingRailItem.id === thread.id"
+                class="context-inline-edit"
+                @submit.prevent="saveRailRename"
+              >
+                <input v-model="editingRailValue" maxlength="100" autofocus />
+                <button type="submit"><CheckCircle2 :size="15" /></button>
+              </form>
+              <div class="context-row-actions">
+                <button type="button" title="重命名" @click="beginRailRename('thread', thread.id, thread.title)"><Pencil :size="14" /></button>
+                <button type="button" :title="thread.archived ? '恢复对话' : '归档对话'" @click="archiveThreadFromRail(thread)"><Archive :size="14" /></button>
+                <button v-if="thread.archived" type="button" title="永久删除" class="danger" @click="deleteArchivedThread(thread)"><Trash2 :size="14" /></button>
+              </div>
+            </article>
+            <p v-if="!visibleThreads.length" class="context-empty">没有匹配的对话。</p>
+          </div>
+        </section>
+
+        <section class="context-group context-bindings">
+          <div class="context-group-title"><span>项目资源</span><small>{{ resourceBindings.length }}</small></div>
+          <div class="binding-chips">
+            <span v-for="binding in resourceBindings" :key="binding.id">
+              <FolderIcon v-if="binding.kind === 'directory'" :size="13" />
+              <Globe2 v-else-if="binding.kind === 'domain'" :size="13" />
+              <Bot v-else-if="binding.kind === 'game'" :size="13" />
+              <FileIcon v-else :size="13" />
+              {{ binding.label }}
+              <button type="button" :aria-label="`移除 ${binding.label}`" @click="removeResourceBinding(binding.id)"><X :size="12" /></button>
+            </span>
+            <small v-if="!resourceBindings.length">Joi 只会在已绑定范围内协作。</small>
+          </div>
+          <div class="binding-actions">
+            <button type="button" @click="bindProjectDirectory"><FolderPlus :size="14" />文件夹</button>
+            <button type="button" @click="addTextResourceBinding('domain')"><Globe2 :size="14" />网站</button>
+            <button type="button" @click="addTextResourceBinding('application')"><AppWindow :size="14" />应用</button>
+            <button type="button" @click="addTextResourceBinding('game')"><Gamepad2 :size="14" />游戏</button>
+          </div>
+        </section>
+      </div>
+
+      <footer class="context-rail-foot">
+        <span :class="{ online: connected }"></span>
+        {{ connected ? `${characterName} 在这个对话里` : '正在重新连接 Joi' }}
+      </footer>
+    </aside>
+
+    <section ref="workspaceRef" class="workspace" :class="`cabin-${activeCabin}`">
       <div class="topbar" v-if="activeCabin !== 'inspector'">
         <div>
           <span class="brand">Joi</span>
           <span class="mode">{{ currentMode }}</span>
         </div>
         <div class="top-actions">
+          <button type="button" class="ghost-button workspace-chat-action" @click="openCabin('chat')" v-if="activeCabin !== 'chat'">
+            <MessageCircle :size="17" :stroke-width="1.8" />
+            <span>返回对话</span>
+          </button>
           <button type="button" class="ghost-button watch-loop-action" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()" v-if="activeCabin === 'workspace'">
             {{ watchLoopActive ? '停止陪看' : '实时陪看' }}
           </button>
@@ -2607,6 +4058,24 @@ onBeforeUnmount(() => {
         <p v-else>{{ watchLoopStatus.last_visual_summary || watchLoopStatus.rolling_summary || watchLoopStatus.last_summary || '后台会持续捕获当前视频画面、字幕和系统音频转写上下文。' }}</p>
         <div class="watch-session-controls">
           <label>
+            <span>模式</span>
+            <select v-model="watchSceneMode" @change="changeWatchSceneMode">
+              <option value="quiet">安静共看</option>
+              <option value="commentary">轻声解说</option>
+              <option value="translate">即时翻译</option>
+              <option value="analysis">片段分析</option>
+              <option value="accessibility">无障碍描述</option>
+            </select>
+          </label>
+          <label>
+            <span>剧透</span>
+            <select v-model="watchSpoilerLevel" @change="configureWatchLoop">
+              <option value="none">不剧透</option>
+              <option value="current_scene">仅当前片段</option>
+              <option value="full">允许完整讨论</option>
+            </select>
+          </label>
+          <label>
             <span>源</span>
             <select v-model="watchTranscriptSource" @change="configureWatchLoop">
               <option value="system_audio">系统音频</option>
@@ -2616,7 +4085,7 @@ onBeforeUnmount(() => {
           </label>
           <label class="watch-session-toggle">
             <input type="checkbox" v-model="watchProactiveEnabled" @change="configureWatchLoop" />
-            <span>主动发言</span>
+            <span>允许插话</span>
           </label>
           <label>
             <span>间隔</span>
@@ -2640,6 +4109,7 @@ onBeforeUnmount(() => {
             立即理解
           </button>
           <small v-if="watchLoopSourceHealth.length">{{ watchLoopSourceHealth.join(' / ') }}</small>
+          <small>默认不保存原始画面或音频</small>
         </div>
         <button type="button" class="ghost-button watch-session-stop" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()">
           {{ watchLoopActive ? '停止' : '重新开始' }}
@@ -2666,8 +4136,8 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="console-empty" v-else>
-          <strong>Joi 已经准备好。</strong>
-          <span>直接说你想做什么，也可以打开实时陪看。</span>
+          <strong>{{ characterName }} 已经准备好。</strong>
+          <span>{{ ready?.character?.greeting || '直接说你想做什么，也可以打开实时陪看。' }}</span>
         </div>
         <div class="approval-actions console-approval" v-if="pendingApproval && approvalIdFor(pendingApproval)">
           <button type="button" @click="resolveApproval(true)">允许执行</button>
@@ -2843,191 +4313,403 @@ onBeforeUnmount(() => {
       </section>
 
       <section class="chat-section" v-if="activeCabin === 'chat'">
-        <div class="section-title">
-          <h2>对话舱</h2>
-          <span v-if="chatRows.length">最近 {{ Math.min(chatRows.length, 8) }} 条</span>
-          <span v-else>暂无记录</span>
-        </div>
-        <div class="emotion-status-card" :class="`emotion-${activeEmotionStatus.emotion}`">
-          <div class="emotion-status-dot"></div>
-          <div class="emotion-status-copy">
-            <span>当前情绪</span>
-            <strong>{{ activeEmotionStatus.label }}</strong>
+        <header class="chat-presence">
+          <span class="chat-presence-avatar" aria-hidden="true">
+            <img v-if="characterAvatarSrc" :src="characterAvatarSrc" alt="" />
+            <Sparkles v-else :size="17" />
+          </span>
+          <div>
+            <strong>{{ characterName }}</strong>
+            <span><i :class="{ online: connected }"></i>{{ connected ? '在这里' : '正在连接' }}</span>
           </div>
-          <span class="emotion-status-sprite">立绘 {{ activeEmotionStatus.sprite }}</span>
-        </div>
-        <div class="chat-scroll-area" v-if="chatRows.length">
-          <div
-            v-for="event in chatRows.slice(-8)"
-            :key="`${event.task_id}-${event.created_at}`"
-            class="message-row"
-            :class="{ human: event.type === 'user_message', joi: event.type !== 'user_message' }"
-          >
-            <span class="chat-name">{{ event.type === 'user_message' ? '你' : 'Joi' }}</span>
-            <div class="message-bubble">{{ event.display_card.summary }}</div>
+        </header>
+        <section v-if="activeCapabilitySession" class="capability-session-card" :class="`state-${activeCapabilitySession.state}`">
+          <header>
+            <span class="capability-session-icon"><MonitorPlay :size="16" /></span>
+            <div>
+              <strong>{{ capabilityStateLabel }}</strong>
+              <small>{{ activeCapabilitySession.goal || '当前能力会话' }}</small>
+            </div>
+            <span class="capability-driver">{{ activeCapabilitySession.driver === 'cua' ? '后台 CUA' : 'Joi 原生' }}</span>
+          </header>
+          <div class="capability-session-body">
+            <div class="capability-permissions" aria-label="能力权限">
+              <button
+                v-for="profile in (['observe', 'collaborate', 'delegate'] as PermissionProfile[])"
+                :key="profile"
+                type="button"
+                :class="{ active: activeCapabilitySession.permission_profile === profile }"
+                :aria-pressed="activeCapabilitySession.permission_profile === profile"
+                @click="changeCapabilityPermission(profile)"
+              >{{ permissionProfileLabel(profile) }}</button>
+            </div>
+            <div class="capability-controls">
+              <button type="button" @click="toggleCapabilityPause" v-if="!['completed', 'failed', 'cancelled'].includes(activeCapabilitySession.state)">
+                <Play v-if="activeCapabilitySession.state === 'paused'" :size="14" />
+                <Pause v-else :size="14" />
+                {{ activeCapabilitySession.state === 'paused' ? '继续' : '暂停' }}
+              </button>
+              <button type="button" @click="takeOverCapability" v-if="activeCapabilitySession.state === 'running'"><Hand :size="14" />我来接管</button>
+              <button type="button" class="danger" @click="cancelCapability" v-if="!['completed', 'failed', 'cancelled'].includes(activeCapabilitySession.state)"><X :size="14" />取消</button>
+            </div>
           </div>
+          <details v-if="capabilityReceipts.length" class="capability-receipts">
+            <summary>
+              <ShieldCheck :size="14" />
+              {{ capabilityReceipts.length }} 个动作已记录
+              <span v-if="latestCapabilityReceipt">最近：{{ latestCapabilityReceipt.action }}</span>
+            </summary>
+            <ol>
+              <li v-for="receipt in capabilityReceipts.slice(-6).reverse()" :key="receipt.id">
+                <span>{{ receipt.step_index }}</span>
+                <div><strong>{{ receipt.action }}</strong><small>{{ receipt.after_summary || receipt.status }}</small></div>
+              </li>
+            </ol>
+          </details>
+        </section>
+        <div
+          ref="chatScrollArea"
+          class="chat-scroll-area"
+          v-if="conversationTurns.length"
+          aria-live="polite"
+          @scroll.passive="onChatScroll"
+        >
+          <article v-for="turn in conversationTurns" :key="turn.taskId" class="conversation-turn">
+            <div class="message-row human">
+              <span class="chat-name">你</span>
+              <div class="message-bubble">{{ turn.user.display_card.summary }}</div>
+            </div>
+
+            <div
+              v-if="(turn.status === 'running' || turn.status === 'queued') && !turn.assistant"
+              class="thinking-companion"
+              role="status"
+              aria-live="polite"
+            >
+              <span class="thinking-avatar">
+                <img v-if="characterAvatarSrc" :src="characterAvatarSrc" alt="" />
+                <Sparkles v-else :size="15" />
+              </span>
+              <span class="thinking-copy">
+                <strong>{{ turnProgressLabel(turn) }}</strong>
+                <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              </span>
+              <small>{{ turnTimeLabel(turn) }}</small>
+            </div>
+
+            <div class="message-row joi" v-if="turn.assistant">
+              <span class="assistant-avatar" aria-hidden="true">
+                <img v-if="characterAvatarSrc" :src="characterAvatarSrc" alt="" />
+                <Sparkles v-else :size="15" />
+              </span>
+              <div class="assistant-message">
+                <span class="chat-name">{{ characterName }}</span>
+                <div class="message-bubble">{{ hideRuntimeBrand(turn.assistant.display_card.summary) }}</div>
+              </div>
+            </div>
+
+            <section
+              v-if="turn.hasTrace && turn.status !== 'running' && turn.status !== 'queued'"
+              class="execution-rail"
+              :class="`status-${turn.status}`"
+              :aria-label="`任务状态：${turnStatusLabel(turn)}`"
+            >
+              <div class="execution-rail-head">
+                <AlertCircle v-if="turn.status === 'waiting' || turn.status === 'failed'" class="execution-status-icon" :size="16" />
+                <CheckCircle2 v-else class="execution-status-icon" :size="16" />
+                <div>
+                  <strong>{{ turnStatusLabel(turn) }}</strong>
+                  <span>{{ turnTimeLabel(turn) }}</span>
+                </div>
+                <button
+                  v-if="turn.status === 'completed' || turn.status === 'failed'"
+                  type="button"
+                  class="execution-toggle"
+                  :aria-expanded="isTurnExpanded(turn)"
+                  :aria-label="isTurnExpanded(turn) ? '收起执行过程' : '展开执行过程'"
+                  @click="toggleTurnTrace(turn)"
+                >
+                  <ChevronDown :size="15" />
+                </button>
+              </div>
+              <p class="execution-current" v-if="isTurnExpanded(turn) || turn.status === 'waiting' || turn.status === 'failed'">{{ turnStatusText(turn) }}</p>
+              <ol class="execution-steps" v-if="isTurnExpanded(turn)">
+                <li v-for="step in turn.steps" :key="step.key" :class="`step-${step.state}`">
+                  <span class="execution-step-marker" aria-hidden="true"></span>
+                  <div>
+                    <strong>{{ step.label }}</strong>
+                    <p>{{ step.detail }}</p>
+                  </div>
+                </li>
+              </ol>
+              <div class="execution-approval" v-if="turn.approval && approvalIdFor(turn.approval)">
+                <p>{{ turn.approval.display_card.summary }}</p>
+                <div>
+                  <button type="button" @click="resolveApprovalFor(turn.approval, true)">允许并继续</button>
+                  <button type="button" class="secondary" @click="resolveApprovalFor(turn.approval, false)">停在这里</button>
+                </div>
+              </div>
+              <button v-if="turn.status === 'failed'" type="button" class="execution-retry" :disabled="composerSending" @click="retryTurn(turn)">
+                <RotateCcw :size="14" />
+                重试这条请求
+              </button>
+            </section>
+          </article>
         </div>
         <div class="chat-placeholder" v-else>
-          <p>和 Joi 的交流舱已就绪</p>
-          <small>输入你的问题，或点击下方麦克风开始语音对话</small>
+          <span class="placeholder-avatar" aria-hidden="true">
+            <img v-if="characterAvatarSrc" :src="characterAvatarSrc" alt="" />
+            <Sparkles v-else :size="21" />
+          </span>
+          <span class="chat-name">{{ characterName }}</span>
+          <p>{{ characterGreeting }}</p>
+          <div class="chat-starters" aria-label="对话建议">
+            <button type="button" :disabled="!connected" @click="sendChatStarter('陪我聊聊今天发生的事')">聊聊今天</button>
+            <button type="button" :disabled="!connected" @click="sendChatStarter('帮我整理一下接下来最重要的三件事')">整理计划</button>
+            <button type="button" :disabled="!connected" @click="sendChatStarter('你看到了什么？')">看看屏幕</button>
+          </div>
         </div>
-        
-        <!-- Bottom Vocal Box & Keyboard Composer Input -->
+
         <form class="chat-composer-area" @submit.prevent="submit">
+          <div class="composer-attachments" v-if="composerAttachments.length || attachmentPickerError" aria-live="polite">
+            <div class="attachment-list" v-if="composerAttachments.length">
+              <div
+                v-for="attachment in composerAttachments"
+                :key="attachment.path"
+                class="attachment-chip"
+                :title="attachment.path"
+              >
+                <FolderIcon v-if="attachment.kind === 'folder'" :size="15" :stroke-width="1.8" />
+                <FileIcon v-else :size="15" :stroke-width="1.8" />
+                <span>{{ attachment.name }}</span>
+                <button
+                  type="button"
+                  :aria-label="`移除 ${attachment.name}`"
+                  @click="removeAttachment(attachment.path)"
+                >
+                  <X :size="13" :stroke-width="1.9" />
+                </button>
+              </div>
+            </div>
+            <p class="attachment-error" v-if="attachmentPickerError">{{ attachmentPickerError }}</p>
+          </div>
+          <div class="luna-quick-menu">
+            <button
+              type="button"
+              class="composer-icon-btn"
+              title="打开工具"
+              aria-haspopup="true"
+              :aria-expanded="quickMenuOpen"
+              @click="quickMenuOpen = !quickMenuOpen; characterMenuOpen = false"
+            >
+              <Paperclip :size="20" :stroke-width="1.75" />
+            </button>
+            <div class="luna-popover quick-popover" v-if="quickMenuOpen">
+              <button type="button" :disabled="attachmentPickerBusy" @click="addAttachments('file')">
+                <FilePlus2 :size="18" :stroke-width="1.75" />
+                <span>{{ attachmentPickerBusy ? '正在打开选择器…' : '添加文件' }}</span>
+              </button>
+              <button type="button" :disabled="attachmentPickerBusy" @click="addAttachments('folder')">
+                <FolderPlus :size="18" :stroke-width="1.75" />
+                <span>添加文件夹</span>
+              </button>
+              <div class="quick-menu-divider" role="separator"></div>
+              <button type="button" @click="openCabin('memory')">
+                <Brain :size="18" :stroke-width="1.75" />
+                <span>记忆</span>
+              </button>
+              <button type="button" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop(); quickMenuOpen = false">
+                <MonitorPlay :size="18" :stroke-width="1.75" />
+                <span>{{ watchLoopActive ? '停止实时陪看' : '开始实时陪看' }}</span>
+              </button>
+              <button type="button" :disabled="compactTransitioning" @click="toggleCompactMode(); quickMenuOpen = false">
+                <Minimize2 :size="18" :stroke-width="1.75" />
+                <span>切换微缩模式</span>
+              </button>
+              <button type="button" @click="openCabin('inspector')">
+                <Settings :size="18" :stroke-width="1.75" />
+                <span>完整设置</span>
+              </button>
+            </div>
+          </div>
+          <input
+            v-model="input"
+            class="composer-text-input"
+            :disabled="!connected || composerSending"
+            placeholder="说点什么..."
+          />
           <button
             type="button"
-            class="composer-mic-btn"
+            class="composer-icon-btn composer-mic-btn"
             :class="{ recording: voiceState === 'recording' }"
             :disabled="!connected || !asrConfigured || voiceState === 'transcribing'"
             @click="toggleVoiceInput"
             title="语音说话"
           >
-            <svg viewBox="0 0 24 24">
-              <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>
-            </svg>
+            <Mic :size="20" :stroke-width="1.75" />
           </button>
-          <div class="composer-input-wrapper">
-            <input
-              v-model="input"
-              class="composer-text-input"
-              :disabled="!connected"
-              placeholder="给 Joi 发送指令或直接与她聊天..."
-            />
-            <button class="composer-send-btn" :disabled="!connected" title="发送消息">
-              <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-            </button>
-          </div>
+          <button class="composer-send-btn" :disabled="!composerCanSubmit" title="发送消息">
+            <ArrowUp :size="22" :stroke-width="2" />
+          </button>
         </form>
       </section>
 
+      <section class="character-library-section" v-if="activeCabin === 'characters'">
+        <CharacterLibrary :client="client" :connected="connected" @activated="handleCharacterActivated" @close="openCabin('chat')" />
+      </section>
+
       <section class="memory-section" v-if="activeCabin === 'memory'">
-        <div class="section-title">
-          <h2>记忆舱</h2>
-          <span>{{ pendingMemories.length }} 待确认 · {{ recentMemories.length }} 已保存</span>
-        </div>
-
-        <div class="memory-command-panel">
-          <div class="memory-command-copy">
-            <strong>{{ memoryEnabled ? '长期记忆开启' : '长期记忆关闭' }}</strong>
-            <span>{{ memoryStatus?.vault_label ? `本地记忆库 · ${memoryStatus.vault_label}` : '等待核心连接后读取本地记忆库' }}</span>
+        <header class="memory-workspace-head">
+          <div class="memory-workspace-title">
+            <span class="memory-title-icon"><Brain :size="21" :stroke-width="1.8" /></span>
+            <div>
+              <h2>Joi 对你的理解</h2>
+              <p>{{ memoryProfile?.summary || '对话中形成的长期偏好，会在你确认后出现在这里。' }}</p>
+            </div>
           </div>
-          <div class="memory-head-actions">
-            <label class="memory-enable-toggle">
+          <div class="memory-workspace-actions">
+            <label class="memory-switch" title="长期记忆开关">
               <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
-              <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
+              <span aria-hidden="true"></span>
+              <em>{{ memoryEnabled ? '记忆开启' : '记忆关闭' }}</em>
             </label>
-            <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
-            <button type="button" class="memory-link-button" @click="browseMemoryVault">读取库</button>
-            <button type="button" class="memory-link-button danger" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
+            <button type="button" class="memory-icon-button" :disabled="memorySearchLoading" title="刷新记忆" @click="refreshMemoryWorkspace">
+              <RefreshCw :size="18" :class="{ spinning: memorySearchLoading }" />
+            </button>
+            <details class="memory-more-menu">
+              <summary title="更多记忆操作"><ChevronDown :size="18" /></summary>
+              <button type="button" :disabled="!memorySavedCount && !memoryPendingCount" @click="clearMemory">
+                <Trash2 :size="16" />清空全部记忆
+              </button>
+            </details>
           </div>
+        </header>
+
+        <div class="memory-profile-rail" aria-label="记忆画像">
+          <article v-for="section in memoryProfileSections" :key="section.key">
+            <span>{{ section.label }}</span>
+            <p v-if="section.rows.length">{{ section.rows[0] }}</p>
+            <p v-else class="empty">等待更多线索</p>
+            <small v-if="section.rows.length > 1">另有 {{ section.rows.length - 1 }} 条</small>
+          </article>
         </div>
 
-        <form class="memory-search-bar" @submit.prevent="searchMemory">
-          <input v-model="memoryQuery" type="search" placeholder="搜索 Joi 已获授权的长期记忆..." />
-          <button type="submit" :disabled="memorySearchLoading || !memoryQueryText">
-            {{ memorySearchLoading ? '检索中' : '检索' }}
-          </button>
-        </form>
-
-        <div class="memory-grid">
-          <div class="memory-panel memory-profile-panel">
-            <header>
-              <strong>记忆画像</strong>
-              <span>{{ memoryProfileCountText }}</span>
-            </header>
-            <p class="memory-profile-summary">{{ memoryProfile?.summary || '保存并授权几条长期记忆后，Joi 会在这里汇总用户画像。' }}</p>
-            <div class="memory-profile-highlights" v-if="memoryProfileHighlights.length">
-              <span v-for="highlight in memoryProfileHighlights.slice(0, 5)" :key="highlight">{{ highlight }}</span>
+        <section class="memory-library">
+          <header class="memory-library-head">
+            <div class="memory-tabs" role="tablist" aria-label="记忆列表">
+              <button type="button" role="tab" :aria-selected="memoryView === 'saved'" :class="{ active: memoryView === 'saved' }" @click="selectMemoryView('saved')">
+                已保存 <span>{{ memorySavedCount }}</span>
+              </button>
+              <button type="button" role="tab" :aria-selected="memoryView === 'pending'" :class="{ active: memoryView === 'pending' }" @click="selectMemoryView('pending')">
+                待确认 <span>{{ memoryPendingCount }}</span>
+              </button>
             </div>
-            <div class="memory-profile-sections" v-if="memoryProfileSections.length">
-              <section v-for="section in memoryProfileSections" :key="section.key">
-                <strong>{{ section.label }}</strong>
-                <p v-for="row in section.rows.slice(0, 3)" :key="`${section.key}-${row}`">{{ row }}</p>
-              </section>
-            </div>
-          </div>
+            <form v-if="memoryView === 'saved'" class="memory-search-inline" @submit.prevent="searchMemory">
+              <Search :size="17" />
+              <input v-model="memoryQuery" type="search" placeholder="搜索记忆" @search="searchMemory" />
+              <button type="submit" :disabled="memorySearchLoading" title="搜索">搜索</button>
+            </form>
+          </header>
 
-          <div class="memory-panel">
-            <header>
-              <strong>待确认</strong>
-              <span>{{ pendingMemories.length }}</span>
-            </header>
-            <div class="memory-list" v-if="pendingMemories.length">
-              <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
-                <div>
-                  <strong>{{ candidate.kind || 'note' }}</strong>
-                  <p>{{ candidate.text }}</p>
-                  <span>{{ candidate.source || 'candidate' }} · {{ memoryPriorityLabel(candidate.priority) }}</span>
-                  <small class="memory-priority-note" v-if="candidate.priority_reason">{{ candidate.priority_reason }}</small>
-                </div>
-                <div class="memory-actions">
-                  <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
-                  <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
-                </div>
-              </article>
-            </div>
-            <p class="memory-empty" v-else>没有待确认记忆</p>
-          </div>
-
-          <div class="memory-panel">
-            <header>
-              <strong>{{ memoryQueryText ? '检索结果' : '最近记忆' }}</strong>
-              <span>{{ displayedMemoryRows.length }}</span>
-            </header>
-            <div class="memory-list" v-if="displayedMemoryRows.length">
-              <article v-for="memory in displayedMemoryRows" :key="memory.id" class="memory-row">
-                <div>
-                  <strong>{{ memory.kind || 'note' }}</strong>
+          <div v-if="memoryView === 'saved'" class="memory-record-list">
+            <article v-for="memory in displayedMemoryRows" :key="memory.id" class="memory-record">
+              <template v-if="editingMemoryId !== memory.id">
+                <div class="memory-record-copy">
+                  <div class="memory-record-meta">
+                    <span>{{ memoryKindLabel(memory.kind) }}</span>
+                    <small>{{ memoryTime(memory.updated_at || memory.created_at) }}</small>
+                  </div>
                   <p>{{ memory.text }}</p>
-                  <span>{{ memory.source || 'manual' }}<template v-if="memory.relevance"> · 相关 {{ Math.round(memory.relevance) }}</template></span>
                 </div>
-                <button type="button" class="memory-delete" @click="deleteMemory(memory.id)">删除</button>
-              </article>
-            </div>
-            <p class="memory-empty" v-else>{{ memorySearchEmptyText }}</p>
+                <div class="memory-record-actions">
+                  <button type="button" title="编辑记忆" @click="beginMemoryEdit(memory)"><Pencil :size="16" /></button>
+                  <button type="button" class="danger" title="删除记忆" @click="deleteMemory(memory.id)"><Trash2 :size="16" /></button>
+                </div>
+              </template>
+              <form v-else class="memory-edit-form" @submit.prevent="saveMemoryEdit(memory.id)">
+                <select v-model="editingMemoryKind" aria-label="记忆类型">
+                  <option value="preference">偏好</option>
+                  <option value="habit">习惯</option>
+                  <option value="relationship">关系</option>
+                  <option value="project">关注</option>
+                  <option value="note">笔记</option>
+                </select>
+                <textarea v-model="editingMemoryText" rows="3" maxlength="1200" aria-label="记忆内容"></textarea>
+                <div><button type="button" @click="cancelMemoryEdit">取消</button><button type="submit" class="primary">保存</button></div>
+              </form>
+            </article>
+            <p v-if="!displayedMemoryRows.length && !memorySearchLoading" class="memory-empty-state">{{ memorySearchEmptyText }}</p>
           </div>
 
-          <div class="memory-panel memory-vault-panel">
-            <header>
-              <strong>本地 Vault</strong>
-              <button type="button" class="memory-link-button" @click="browseMemoryVault">刷新</button>
-            </header>
-            <div class="memory-vault-sections" v-if="memoryVaultSections.length">
-              <section v-for="section in memoryVaultSections" :key="section.title">
-                <strong>{{ section.title }}</strong>
-                <p v-for="line in section.lines.slice(0, 6)" :key="`${section.title}-${line}`">{{ line }}</p>
-              </section>
-            </div>
-            <p class="memory-empty" v-else>还没有可展示的本地记忆库内容</p>
+          <div v-else class="memory-record-list">
+            <article v-for="candidate in displayedMemoryCandidates" :key="candidate.id" class="memory-record pending">
+              <div class="memory-record-copy">
+                <div class="memory-record-meta"><span>{{ memoryKindLabel(candidate.kind) }}</span><small>{{ memoryPriorityLabel(candidate.priority) }}</small></div>
+                <p>{{ candidate.text }}</p>
+                <small class="memory-record-reason">{{ candidate.priority_reason || '由对话中提取，保存前需要你的确认' }}</small>
+              </div>
+              <div class="memory-candidate-actions">
+                <button type="button" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
+                <button type="button" class="primary" @click="saveMemoryCandidate(candidate.id)">记住</button>
+              </div>
+            </article>
+            <p v-if="!displayedMemoryCandidates.length && !memorySearchLoading" class="memory-empty-state">没有待确认的记忆</p>
           </div>
-        </div>
+
+          <button v-if="memoryHasMore" type="button" class="memory-load-more" :disabled="memorySearchLoading" @click="loadMemoryPage(false)">
+            {{ memorySearchLoading ? '正在读取…' : `再加载 ${Math.min(12, memoryTotal - memoryOffset)} 条` }}
+          </button>
+
+          <footer class="memory-storage-row">
+            <span><span class="memory-storage-dot"></span>本地存储</span>
+            <small>{{ memoryVault?.path_label || memoryStatus?.vault_label || 'joi_memory_vault.md' }}</small>
+          </footer>
+        </section>
       </section>
 
       <section class="debug-section open-settings" v-if="activeCabin === 'inspector'">
         <div class="settings-shell">
           <aside class="settings-sidebar" aria-label="设置导航">
-            <div class="settings-sidebar-title">设置</div>
-            <button
-              v-for="tab in settingsTabs"
-              :key="tab.id"
-              type="button"
-              class="settings-nav-row"
-              :class="{ active: activeSettingsTab === tab.id }"
-              @click="activeSettingsTab = tab.id"
-            >
-              <span class="settings-nav-icon">{{ tab.icon }}</span>
-              <span>{{ tab.label }}</span>
+            <button type="button" class="settings-back-button" @click="openCabin('chat')">
+              <ArrowLeft :size="19" :stroke-width="1.75" />
+              <span>返回对话</span>
             </button>
+            <label class="settings-search-field">
+              <Search :size="18" :stroke-width="1.75" />
+              <input v-model="settingsSearch" type="search" placeholder="搜索设置..." @keydown.esc="settingsSearch = ''" />
+            </label>
+            <nav class="settings-nav-groups">
+              <section v-for="group in filteredSettingsGroups" :key="group.label" class="settings-nav-group">
+                <h2>{{ group.label }}</h2>
+                <button
+                  v-for="tab in group.tabs"
+                  :key="tab.id"
+                  type="button"
+                  class="settings-nav-row"
+                  :class="{ active: activeSettingsTab === tab.id }"
+                  @click="activeSettingsTab = tab.id"
+                >
+                  <component :is="settingsIcon(tab.id)" class="settings-nav-icon" :size="19" :stroke-width="1.75" />
+                  <span>{{ tab.label }}</span>
+                </button>
+              </section>
+              <p class="settings-search-empty" v-if="!filteredSettingsGroups.length">没有匹配的设置</p>
+            </nav>
           </aside>
 
           <section class="settings-main">
             <header class="settings-open-header">
               <div>
-                <span>设置</span>
+                <span class="settings-header-kicker">
+                  <component :is="settingsIcon(activeSettingsTab)" :size="17" :stroke-width="1.75" />
+                  设置
+                </span>
                 <h1>{{ settingsTitle(activeSettingsTab) }}</h1>
                 <p>{{ settingsSubtitle(activeSettingsTab) }}</p>
               </div>
-              <button type="button" class="settings-close" title="关闭设置" aria-label="关闭设置" @click="activeCabin = 'workspace'">×</button>
+              <button type="button" class="settings-close" title="返回对话" aria-label="返回对话" @click="openCabin('chat')">
+                <X :size="20" :stroke-width="1.75" />
+              </button>
             </header>
 
             <template v-if="activeSettingsTab === 'execution'">
@@ -3079,15 +4761,15 @@ onBeforeUnmount(() => {
                   <div class="settings-config-title">
                     <span>模型：</span>
                     <strong>{{ selectedAgentCli?.name || 'Codex CLI' }}</strong>
-                    <em>来自 CLI 的实时列表</em>
+                    <em :class="{ warning: selectedAgentCli?.models_source === 'fallback' }">{{ selectedAgentCliModelSource }}</em>
                   </div>
                   <label class="settings-select-row">
                     <span>模型</span>
                     <select v-model="selectedAgentCliModel">
-                      <option v-for="model in selectedAgentCliModels" :key="model" :value="model">{{ model }}</option>
+                      <option v-for="model in selectedAgentCliModels" :key="model.id" :value="model.id">{{ model.label }}</option>
                     </select>
                   </label>
-                  <p>已从已安装的 CLI 刷新模型。“默认”仍使用 CLI 自身配置。</p>
+                  <p>{{ selectedAgentCliModelHint }}</p>
                   <label class="settings-select-row">
                     <span>推理强度</span>
                     <select v-model="selectedAgentCliReasoning">
@@ -3108,70 +4790,234 @@ onBeforeUnmount(() => {
               </div>
 
               <div v-else class="settings-execution-pane">
-                <div class="settings-section-head">
-                  <div>
-                    <strong>BYOK</strong>
-                    <span>使用你自己的模型供应商配置。</span>
+                <section class="byok-connect-card" :class="{ connected: byokStatus?.configured }">
+                  <header class="byok-connect-head">
+                    <div class="byok-status-icon">
+                      <CheckCircle2 v-if="byokStatus?.configured" :size="21" :stroke-width="1.9" />
+                      <KeyRound v-else :size="21" :stroke-width="1.8" />
+                    </div>
+                    <div>
+                      <strong>{{ byokStateLabel() }}</strong>
+                      <span v-if="byokStatus?.configured">{{ selectedByokPreset?.label }} · {{ byokStatus?.model }}</span>
+                      <span v-else>三步完成连接，密钥不会写入项目文件。</span>
+                    </div>
+                    <button v-if="byokStatus?.configured" type="button" class="byok-subtle-action" :disabled="byokLoading" @click="testByokConnection">
+                      {{ byokLoading ? '测试中' : '重新测试' }}
+                    </button>
+                  </header>
+
+                  <div class="byok-progress" aria-label="BYOK 配置进度">
+                    <span class="done"><b>1</b>供应商</span>
+                    <span :class="{ done: byokSecretReady }"><b>2</b>{{ byokRequiresKey ? '密钥' : '本地服务' }}</span>
+                    <span :class="{ done: byokStatus?.configured }"><b>3</b>连接</span>
                   </div>
-                </div>
-                <div class="provider-grid">
-                  <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
-                    <header>
-                      <strong>{{ row.label || row.name }}</strong>
-                      <span>{{ providerStateLabel(row.state) }}</span>
-                    </header>
-                    <p>{{ providerSummary(row) }}</p>
-                    <div class="provider-meta" v-if="providerMeta(row).length">
-                      <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
+                </section>
+
+                <form class="byok-form" @submit.prevent="connectByok">
+                  <section class="byok-form-section">
+                    <div class="byok-section-title">
+                      <span>1</span>
+                      <div><strong>选择供应商</strong><small>优先选择最接近你的使用方式</small></div>
+                    </div>
+                    <div class="byok-provider-options">
+                      <button
+                        v-for="preset in byokPresets"
+                        :key="preset.id"
+                        type="button"
+                        :class="{ selected: byokDraft.provider === preset.id }"
+                        @click="selectByokPreset(preset)"
+                      >
+                        <span class="byok-provider-mark">
+                          <WalletCards v-if="preset.id === 'openai'" :size="19" :stroke-width="1.8" />
+                          <Server v-else-if="preset.id === 'ollama'" :size="19" :stroke-width="1.8" />
+                          <Zap v-else :size="19" :stroke-width="1.8" />
+                        </span>
+                        <strong>{{ preset.label }}</strong>
+                        <small>{{ preset.description }}</small>
+                        <em>{{ preset.cost_hint }}</em>
+                      </button>
+                    </div>
+                  </section>
+
+                  <section class="byok-form-section">
+                    <div class="byok-section-title">
+                      <span>2</span>
+                      <div><strong>{{ byokRequiresKey ? '填写连接信息' : '选择本地模型' }}</strong><small>{{ byokSecretLabel() }}</small></div>
+                    </div>
+                    <div class="byok-fields">
+                      <label v-if="byokRequiresKey" class="byok-field byok-field-wide">
+                        <span>API Key <em v-if="byokStatus?.secret?.stored">已保存，留空即可沿用</em></span>
+                        <input v-model="byokApiKey" type="password" autocomplete="new-password" spellcheck="false" :placeholder="byokStatus?.secret?.stored ? '••••••••••••••••（已安全保存）' : '粘贴 API Key'" @input="markByokDirty" />
+                      </label>
+                      <label class="byok-field byok-field-wide">
+                        <span>模型 ID <em v-if="byokDraft.provider === 'ollama'">可自动检测</em></span>
+                        <div class="byok-field-with-action">
+                          <input v-model="byokDraft.model" list="byok-known-models" spellcheck="false" :placeholder="byokDraft.provider === 'ollama' ? '例如 qwen3:8b' : '例如 gpt-5.6-luna'" @input="markByokDirty" />
+                          <button v-if="byokDraft.provider === 'ollama'" type="button" :disabled="byokDiscovering || !connected" @click="detectLocalModels">
+                            {{ byokDiscovering ? '检测中…' : '自动检测' }}
+                          </button>
+                        </div>
+                        <datalist id="byok-known-models">
+                          <option v-for="model in byokKnownModels" :key="model" :value="model" />
+                        </datalist>
+                      </label>
+                      <label class="byok-field byok-field-wide" v-if="byokDraft.provider !== 'openai' || byokAdvancedOpen">
+                        <span>API 端点</span>
+                        <input v-model="byokDraft.base_url" type="url" spellcheck="false" placeholder="https://example.com/v1" @input="markByokDirty" />
+                      </label>
+                    </div>
+                  </section>
+
+                  <section class="byok-form-section byok-advanced-section">
+                    <button type="button" class="byok-advanced-toggle" :aria-expanded="byokAdvancedOpen" @click="byokAdvancedOpen = !byokAdvancedOpen">
+                      <ChevronDown :size="17" :class="{ open: byokAdvancedOpen }" />
+                      高级设置
+                    </button>
+                    <div v-if="byokAdvancedOpen" class="byok-fields byok-advanced-fields">
+                      <label class="byok-field">
+                        <span>温度</span>
+                        <input v-model.number="byokDraft.temperature" type="number" min="0" max="2" step="0.1" @input="markByokDirty" />
+                      </label>
+                      <label v-if="byokDraft.provider === 'openai'" class="byok-field">
+                        <span>官方端点</span>
+                        <input value="https://api.openai.com/v1" disabled />
+                      </label>
+                    </div>
+                  </section>
+
+                  <div class="byok-cost-note">
+                    <Shield :size="18" :stroke-width="1.8" />
+                    <span v-if="byokDraft.provider === 'ollama'"><strong>本地运行，零 API 费用</strong> 自动检测只读取 Ollama 模型列表，不生成内容、不消耗模型 token。</span>
+                    <span v-else><strong>安全且省额度</strong> 密钥存入系统密钥库；连接测试只读取模型列表，不生成内容、不消耗模型 token。</span>
+                  </div>
+
+                  <div class="byok-actions">
+                    <button type="submit" class="byok-primary-action" :disabled="!byokCanConnect">
+                      <Zap :size="17" :stroke-width="1.9" />
+                      {{ byokLoading ? '保存并测试中…' : byokStatus?.configured ? '保存并重新测试' : '保存并连接' }}
+                    </button>
+                    <button v-if="byokStatus?.configured" type="button" class="byok-danger-action" :disabled="byokLoading" @click="disconnectByok">
+                      <Unplug :size="16" :stroke-width="1.8" />断开
+                    </button>
+                  </div>
+
+                  <p v-if="byokNotice" class="byok-notice" :class="{ success: byokResult?.ok }" aria-live="polite">{{ byokNotice }}</p>
+                </form>
+
+                <details class="byok-runtime-details">
+                  <summary>查看全部运行能力</summary>
+                  <div class="provider-grid">
+                    <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
+                      <header><strong>{{ row.label || row.name }}</strong><span>{{ providerStateLabel(row.state) }}</span></header>
+                      <p>{{ providerSummary(row) }}</p>
                     </div>
                   </div>
-                </div>
-                <div class="runtime-settings">
-                  <div class="runtime-settings-head">
-                    <strong>安全设置</strong>
-                    <span>非密钥字段</span>
-                  </div>
-                  <div class="runtime-controls">
-                    <label><span>ASR</span><input v-model="runtimeDraft.asr_enabled" type="checkbox" @change="markRuntimeDraftDirty" /></label>
-                    <label><span>TTS</span><input v-model="runtimeDraft.tts_enabled" type="checkbox" @change="markRuntimeDraftDirty" /></label>
-                    <label><span>温度</span><input v-model.number="runtimeDraft.llm_temperature" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" /></label>
-                    <label><span>Mock 模型</span><input v-model="runtimeDraft.llm_use_mock" type="checkbox" @change="markRuntimeDraftDirty" /></label>
-                    <label><span>操作等待</span><input v-model.number="runtimeDraft.computer_post_action_settle_ms" type="number" min="0" max="10000" step="25" @input="markRuntimeDraftDirty" /></label>
-                    <label><span>OCR 超时</span><input v-model.number="runtimeDraft.ocr_timeout_seconds" type="number" min="1" max="120" @input="markRuntimeDraftDirty" /></label>
-                  </div>
-                  <div class="runtime-actions">
-                    <button type="button" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">{{ runtimePreviewLoading ? '预览中' : '预览' }}</button>
-                    <button type="button" class="secondary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">{{ runtimeApplyLoading ? '提交中' : '提交审批' }}</button>
-                  </div>
-                  <div class="runtime-preview" v-if="runtimePreview">
-                    <p>{{ runtimePreview.summary }}</p>
-                    <div class="runtime-preview-list" v-if="runtimePreview.changes?.length">
-                      <span v-for="change in runtimePreview.changes" :key="change.setting">
-                        <strong>{{ change.label }}</strong>{{ runtimeChangeActionLabel(change.action) }} · {{ runtimeValueKindLabel(change.value_kind) }}
-                      </span>
-                    </div>
-                    <div class="runtime-preview-list failed" v-if="runtimePreview.errors?.length">
-                      <span v-for="error in runtimePreview.errors" :key="`${error.setting}-${error.code}`">
-                        <strong>{{ error.setting }}</strong>{{ providerErrorLabel(error.code) || '无法应用' }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
+                </details>
               </div>
             </template>
 
+            <div class="settings-runtime-pane" v-else-if="activeSettingsTab === 'runtime'">
+              <div class="provider-grid settings-provider-grid">
+                <article v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
+                  <header><strong>{{ row.label || row.name }}</strong><span>{{ providerStateLabel(row.state) }}</span></header>
+                  <p>{{ providerSummary(row) }}</p>
+                </article>
+              </div>
+              <details class="runtime-advanced-card">
+                <summary><span><strong>运行参数</strong><small>语音、识别和模型行为</small></span><ChevronDown :size="18" /></summary>
+                <div class="runtime-controls">
+                  <label><span>语音识别</span><input v-model="runtimeDraft.asr_enabled" type="checkbox" @change="markRuntimeDraftDirty" /></label>
+                  <label><span>语音回复</span><input v-model="runtimeDraft.tts_enabled" type="checkbox" @change="markRuntimeDraftDirty" /></label>
+                  <label><span>音量</span><input v-model.number="runtimeDraft.tts_volume" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" /></label>
+                  <label><span>语速</span><input v-model.number="runtimeDraft.tts_speed_factor" type="number" min="0.5" max="2" step="0.05" @input="markRuntimeDraftDirty" /></label>
+                  <label><span>模型温度</span><input v-model.number="runtimeDraft.llm_temperature" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" /></label>
+                  <label><span>系统语音回退</span><input v-model="runtimeDraft.tts_fallback_to_system" type="checkbox" @change="markRuntimeDraftDirty" /></label>
+                </div>
+                <div class="runtime-actions">
+                  <button type="button" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">{{ runtimePreviewLoading ? '检查中' : '检查更改' }}</button>
+                  <button type="button" class="secondary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">{{ runtimeApplyLoading ? '提交中' : '应用' }}</button>
+                </div>
+                <p class="runtime-preview-summary" v-if="runtimePreview">{{ runtimePreview.summary }}</p>
+              </details>
+            </div>
+
             <div class="runtime-settings skill-manifest-section" v-else-if="activeSettingsTab === 'skills'">
               <div class="runtime-settings-head">
-                <strong>原生技能</strong>
+                <div><strong>Skills</strong><span>可复用工作流；代码扩展必须作为 Adapter 安装。</span></div>
                 <div class="memory-head-actions">
-                  <span>{{ skillManifestVersion() }}</span>
                   <button type="button" class="memory-link-button" :disabled="skillRefreshLoading" @click="refreshSkills">
                     {{ skillRefreshLoading ? '刷新中' : '刷新' }}
                   </button>
                 </div>
               </div>
-              <div class="skill-grid" v-if="nativeSkills().length">
-                <article v-for="skill in nativeSkills()" :key="skill.id" class="skill-card" :class="skill.local_capability || 'unavailable'">
+
+              <section class="agent-skill-import">
+                <header><div><strong>导入 Skill</strong><span>本地目录、ZIP 或 Git 仓库</span></div><ShieldCheck :size="20" /></header>
+                <div class="agent-skill-source-row">
+                  <input v-model="agentSkillSource" spellcheck="false" placeholder="粘贴路径或 Git URL" @keydown.enter.prevent="inspectAgentSkill" />
+                  <button type="button" @click="chooseAgentSkillSource('folder')"><FolderPlus :size="15" />目录</button>
+                  <button type="button" @click="chooseAgentSkillSource('file')"><FilePlus2 :size="15" />ZIP</button>
+                  <button type="button" :disabled="!agentSkillSource.trim() || agentSkillBusy" @click="inspectAgentSkill">{{ agentSkillBusy ? '检查中' : '预览' }}</button>
+                </div>
+                <article v-if="agentSkillInspection" class="agent-skill-review">
+                  <header>
+                    <div><strong>{{ agentSkillInspection.name }}</strong><span>{{ agentSkillInspection.version }} · {{ agentSkillInspection.author || '作者未声明' }}</span></div>
+                    <code>{{ agentSkillInspection.digest.slice(0, 20) }}…</code>
+                  </header>
+                  <p>{{ agentSkillInspection.description }}</p>
+                  <div class="provider-meta">
+                    <span>{{ agentSkillInspection.license || '无许可证' }}</span>
+                    <span>{{ agentSkillInspection.scripts?.length || 0 }} 个脚本</span>
+                    <span>{{ agentSkillInspection.references?.length || 0 }} 份参考</span>
+                    <span>{{ agentSkillInspection.assets?.length || 0 }} 个资源</span>
+                  </div>
+                  <p v-for="warning in agentSkillInspection.warnings || []" :key="warning" class="agent-skill-warning">{{ warning }}</p>
+                  <footer>
+                    <label><span>可见范围</span><select v-model="agentSkillScope"><option value="project">当前项目</option><option value="character">当前角色</option><option value="global">全局</option></select></label>
+                    <button type="button" :disabled="agentSkillBusy" @click="installInspectedAgentSkill"><Plus :size="15" />审核后安装</button>
+                  </footer>
+                </article>
+                <p v-if="agentSkillNotice" class="agent-skill-notice">{{ agentSkillNotice }}</p>
+              </section>
+
+              <section class="agent-skill-installations">
+                <header><strong>已安装</strong><span>{{ installedAgentSkills.length }}</span></header>
+                <div v-if="installedAgentSkills.length" class="agent-skill-list">
+                  <article v-for="skill in installedAgentSkills" :key="skill.id" :class="{ disabled: !skill.enabled }">
+                    <div class="agent-skill-mark"><Sparkles :size="17" /></div>
+                    <div><strong>{{ skill.name }}</strong><span>{{ agentSkillScopeLabel(skill.scope) }} · {{ skill.version }}<template v-if="skill.manifest?.code_bearing"> · 显式脚本</template></span></div>
+                    <button type="button" @click="toggleAgentSkill(skill)">{{ skill.enabled ? '停用' : '启用' }}</button>
+                    <button type="button" :disabled="agentSkillBusy" @click="updateAgentSkill(skill)"><RefreshCw :size="14" /></button>
+                    <button type="button" class="danger" @click="uninstallAgentSkill(skill)"><Trash2 :size="14" /></button>
+                  </article>
+                </div>
+                <p v-else class="memory-empty">还没有安装第三方 Skill。Joi 的原生工具仍可正常使用。</p>
+              </section>
+
+              <section class="game-adapter-settings">
+                <header><div><strong>游戏适配器</strong><span>独立代码扩展，不会伪装成 Skill</span></div><Gamepad2 :size="19" /></header>
+                <div class="game-adapter-list">
+                  <article v-for="adapter in gameAdapterRows" :key="adapter.id" :class="{ disabled: adapter.installed && !adapter.enabled }">
+                    <div>
+                      <strong>{{ adapter.name }}</strong>
+                      <span>{{ adapter.platforms.join(' / ') }} · {{ adapter.modes.map((mode) => mode === 'companion' ? '独立伙伴' : '角色接管').join(' / ') }}</span>
+                    </div>
+                    <em :class="{ ready: adapter.detection_status?.status === 'ready' }">{{ adapter.detection_status?.status === 'ready' ? '环境就绪' : '需要配置' }}</em>
+                    <template v-if="adapter.installed">
+                      <button type="button" @click="inspectGameAdapterRun(adapter)">检查</button>
+                      <button type="button" @click="toggleGameAdapter(adapter)">{{ adapter.enabled ? '停用' : '启用' }}</button>
+                      <button type="button" class="danger" @click="uninstallGameAdapter(adapter)"><Trash2 :size="14" /></button>
+                    </template>
+                    <button v-else type="button" class="primary" @click="installGameAdapter(adapter)">查看并安装</button>
+                  </article>
+                </div>
+                <p v-if="gameAdapterNotice" class="agent-skill-notice">{{ gameAdapterNotice }}</p>
+              </section>
+
+              <details class="agent-native-skills">
+                <summary>Joi 原生工具 <span>{{ nativeSkills().length }} · {{ skillManifestVersion() }}</span></summary>
+                <div class="skill-grid" v-if="nativeSkills().length">
+                  <article v-for="skill in nativeSkills()" :key="skill.id" class="skill-card" :class="skill.local_capability || 'unavailable'">
                   <header>
                     <strong>{{ skill.label || skill.id }}</strong>
                     <span>{{ skillCapabilityLabel(skill.local_capability) }}</span>
@@ -3187,36 +5033,27 @@ onBeforeUnmount(() => {
                       {{ skillActionLabel(skill) }}
                     </button>
                   </div>
-                </article>
-              </div>
-              <p class="memory-empty" v-else>暂无技能清单</p>
+                  </article>
+                </div>
+              </details>
             </div>
 
             <div class="runtime-settings memory-settings" v-else-if="activeSettingsTab === 'memory'">
               <div class="runtime-settings-head">
-                <strong>记忆舱</strong>
-                <div class="memory-head-actions">
-                  <label class="memory-enable-toggle">
-                    <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
-                    <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
-                  </label>
-                  <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
-                </div>
+                <div><strong>长期记忆</strong><span>仅保存你确认过的内容</span></div>
+                <label class="memory-switch">
+                  <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
+                  <span aria-hidden="true"></span>
+                  <em>{{ memoryEnabled ? '开启' : '关闭' }}</em>
+                </label>
               </div>
-              <div class="memory-list" v-if="pendingMemories.length">
-                <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
-                  <div>
-                    <strong>{{ candidate.kind || 'note' }}</strong>
-                    <p>{{ candidate.text }}</p>
-                    <span>{{ candidate.source || 'candidate' }} · {{ memoryPriorityLabel(candidate.priority) }}</span>
-                  </div>
-                  <div class="memory-actions">
-                    <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
-                    <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
-                  </div>
-                </article>
+              <div class="settings-memory-overview">
+                <div><strong>{{ memorySavedCount }}</strong><span>已保存</span></div>
+                <div><strong>{{ memoryPendingCount }}</strong><span>待确认</span></div>
+                <div><strong>{{ memoryStatus?.counts?.manual_notes || 0 }}</strong><span>手动笔记</span></div>
               </div>
-              <p class="memory-empty" v-else>没有待确认记忆</p>
+              <p class="settings-memory-summary">{{ memoryProfile?.summary || 'Joi 会从对话中提出可记忆内容，只有确认后才会进入长期记忆。' }}</p>
+              <button type="button" class="settings-memory-open" @click="openCabin('memory')"><Brain :size="18" />打开记忆管理</button>
             </div>
 
             <div class="runtime-settings" v-else-if="activeSettingsTab === 'appearance'">
@@ -3272,6 +5109,7 @@ onBeforeUnmount(() => {
             </div>
           </section>
         </div>
+        <template v-if="false">
         <nav class="settings-tabbar">
           <button
             v-for="tab in settingsTabs"
@@ -3333,10 +5171,10 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <p class="memory-disabled-note" v-if="!memoryEnabled">长期记忆已关闭，新候选不会写入待确认队列。</p>
-          <div class="memory-vault-path" v-if="memoryStatus?.vault_label">本地记忆库 · {{ memoryStatus.vault_label }}</div>
+          <div class="memory-vault-path" v-if="memoryStatus?.vault_label">本地记忆库 · {{ memoryStatus?.vault_label }}</div>
           <div class="memory-profile-inline" v-if="memoryProfile">
             <strong>记忆画像</strong>
-            <p>{{ memoryProfile.summary || '等待更多长期记忆形成画像。' }}</p>
+            <p>{{ memoryProfile?.summary || '等待更多长期记忆形成画像。' }}</p>
           </div>
           <div class="memory-list" v-if="pendingMemories.length">
             <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
@@ -3483,14 +5321,14 @@ onBeforeUnmount(() => {
             </button>
           </div>
           <div class="runtime-preview" v-if="runtimePreview">
-            <p>{{ runtimePreview.summary }}</p>
-            <div class="runtime-preview-list" v-if="runtimePreview.changes?.length">
-              <span v-for="change in runtimePreview.changes" :key="change.setting">
+            <p>{{ runtimePreview?.summary }}</p>
+            <div class="runtime-preview-list" v-if="runtimePreview?.changes?.length">
+              <span v-for="change in runtimePreview?.changes || []" :key="change.setting">
                 <strong>{{ change.label }}</strong>{{ runtimeChangeActionLabel(change.action) }} · {{ runtimeValueKindLabel(change.value_kind) }}
               </span>
             </div>
-            <div class="runtime-preview-list failed" v-if="runtimePreview.errors?.length">
-              <span v-for="error in runtimePreview.errors" :key="`${error.setting}-${error.code}`">
+            <div class="runtime-preview-list failed" v-if="runtimePreview?.errors?.length">
+              <span v-for="error in runtimePreview?.errors || []" :key="`${error.setting}-${error.code}`">
                 <strong>{{ error.setting }}</strong>{{ providerErrorLabel(error.code) || '无法应用' }}
               </span>
             </div>
@@ -3577,10 +5415,11 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </template>
+        </template>
       </section>
     </section>
 
-    <aside class="stage" v-if="activeCabin !== 'inspector'">
+    <aside class="stage" :class="{ 'backdrop-enabled': stageBackdropEnabled, 'full-body': characterFullBody }" :style="stageBackdropStyle" v-if="activeCabin !== 'inspector'">
       <div class="stage-top">
         <span>Joi Companion</span>
         <span class="stage-emotion-pill">情绪 {{ activeEmotionStatus.label }} · 立绘 {{ activeEmotionStatus.sprite }}</span>
@@ -3602,6 +5441,7 @@ onBeforeUnmount(() => {
       <!-- Mascot Container circles -->
       <div
         :class="['character', `emotion-${activeExpressionEmotion}`]"
+        :style="stageCharacterStyle"
         :title="isCompactMode ? '拖拽移动，单击输入，双击恢复主界面' : 'Joi Companion'"
         @mousedown="startMascotDrag"
         @dragstart.capture.prevent
@@ -3609,44 +5449,39 @@ onBeforeUnmount(() => {
         @click.stop="handleMascotClick"
         @dblclick.stop.prevent="handleMascotDoubleClick"
       >
-        <div class="character-fit" :style="accessoryFitStyle" @dragstart.capture.prevent @selectstart.prevent>
-          <img
-            v-if="characterImageSrc && failedImageSrc !== characterImageSrc"
-            class="character-art"
-            :src="characterImageSrc"
-            alt="Joi Mascot Digital Companion"
-            draggable="false"
-            @load="failedImageSrc = ''"
-            @error="failedImageSrc = characterImageSrc"
-            @dragstart.prevent
-            @mousedown.prevent
-          />
-          <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
-          
-          <!-- Customizable Cosplay Accessories overlays -->
-          <svg class="accessory-item wizard-hat" :style="{ display: equippedAccessories.hat ? 'block' : 'none' }" viewBox="0 0 140 100" fill="none" draggable="false" aria-hidden="true">
-            <path d="M70 10 L40 65 L100 65 Z" fill="#4f46e5"/>
-            <ellipse cx="70" cy="70" rx="60" ry="12" fill="#312e81"/>
-            <path d="M48 50 Q70 45 92 50 L89 56 Q70 51 51 56 Z" fill="#facc15"/>
-            <polygon points="70,18 73,26 81,26 74,31 77,39 70,34 63,39 66,31 59,26 67,26" fill="#facc15"/>
-          </svg>
-          
-          <svg class="accessory-item glasses" :style="{ display: equippedAccessories.glasses ? 'block' : 'none' }" viewBox="0 0 100 30" fill="none" draggable="false" aria-hidden="true">
-            <rect x="10" y="5" width="30" height="20" rx="3" fill="#111827"/>
-            <rect x="60" y="5" width="30" height="20" rx="3" fill="#111827"/>
-            <rect x="40" y="12" width="20" height="6" fill="#111827"/>
-            <rect x="15" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
-            <rect x="65" y="10" width="8" height="3" fill="#ffffff" opacity="0.7"/>
-          </svg>
-          
-          <svg class="accessory-item bunny-ears" :style="{ display: equippedAccessories.ears ? 'block' : 'none' }" viewBox="0 0 130 80" fill="none" draggable="false" aria-hidden="true">
-            <ellipse cx="40" cy="40" rx="14" ry="35" transform="rotate(-15 40 40)" fill="#fbcfe8"/>
-            <ellipse cx="38" cy="40" rx="8" ry="25" transform="rotate(-15 38 40)" fill="#f472b6"/>
-            <ellipse cx="90" cy="40" rx="14" ry="35" transform="rotate(15 90 40)" fill="#fbcfe8"/>
-            <ellipse cx="92" cy="40" rx="8" ry="25" transform="rotate(15 92 40)" fill="#f472b6"/>
-          </svg>
-        </div>
+        <JoiCharacter
+          :key="characterRenderKey"
+          :model-url="live2DModelUrl"
+          :model-type="ready?.character?.model_type || 'live2d'"
+          :runtime-mapping="live2DRuntimeMapping"
+          :fallback-image-src="characterImageSrc"
+          :character-name="characterName"
+          :emotion="activeExpressionEmotion"
+          :speech="latestSpeech"
+          :compact="isCompactMode || characterFullBody"
+          :accessory-style="accessoryFitStyle"
+          :accessories="equippedAccessories"
+        />
         <div class="character-shadow"></div>
+      </div>
+
+      <div class="luna-stage-controls" v-if="!isCompactMode">
+        <button type="button" :class="{ active: stageBackdropEnabled }" @click="stageBackdropEnabled = !stageBackdropEnabled">
+          <ImageIcon :size="18" :stroke-width="1.75" />
+          <span>背景</span>
+        </button>
+        <button type="button" @click="cycleStageZoom" :title="`当前缩放 ${stageZoomLabel}`">
+          <Search :size="18" :stroke-width="1.75" />
+          <span>缩放</span>
+        </button>
+        <button type="button" :class="{ active: characterFullBody }" @click="characterFullBody = !characterFullBody">
+          <Maximize2 :size="18" :stroke-width="1.75" />
+          <span>全身</span>
+        </button>
+      </div>
+      <div class="luna-stage-online" v-if="!isCompactMode">
+        <span :class="{ online: connected }"></span>
+        {{ connected ? '在线' : '离线' }}
       </div>
 
       <!-- Large Speech bubble (Hidden in compact mode) -->
@@ -3680,7 +5515,7 @@ onBeforeUnmount(() => {
             <div class="mini-pulse-dot" :style="{ backgroundColor: connected ? 'var(--color-primary)' : 'var(--color-error)' }"></div>
             <span>{{ connected ? 'Joi online' : 'Joi offline' }}</span>
           </div>
-          <button type="button" class="mini-restore-btn" title="恢复主界面" @click="toggleCompactMode">还原</button>
+          <button type="button" class="mini-restore-btn" :disabled="compactTransitioning" title="恢复主界面" @click="toggleCompactMode">还原</button>
         </div>
         <form class="mini-composer" @submit.prevent="submit">
           <button
@@ -3727,7 +5562,7 @@ onBeforeUnmount(() => {
             </svg>
             <span>记忆舱</span>
           </button>
-          <button type="button" class="dock-btn" @click="activeCabin = 'inspector'">
+          <button type="button" class="dock-btn" @click="openCabin('inspector')">
             <svg viewBox="0 0 24 24">
               <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
             </svg>

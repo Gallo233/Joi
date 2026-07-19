@@ -19,8 +19,14 @@
         "height": 760,
         "resizable": true,
         "transparent": true,
-        "decorations": false,
-        "shadow": false
+        "decorations": true,
+        "shadow": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 18
+        }
       }
     ]
   }

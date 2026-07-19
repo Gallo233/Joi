@@ -29,6 +29,7 @@ export class CoreClient {
     socket.onclose = () => {
       if (this.socket === socket) {
         this.options.onStatus('offline')
+        this.rejectPending('Joi runtime connection closed')
         this.scheduleReconnect()
       }
     }
@@ -46,10 +47,11 @@ export class CoreClient {
       this.socket = null
       socket.close()
     }
+    this.rejectPending('Joi runtime connection closed')
   }
 
-  sendUserText(text: string) {
-    return this.send('user.message', { text })
+  sendUserText(text: string, threadId = '') {
+    return this.send('user.message', { text, thread_id: threadId })
   }
 
   resolveApproval(approvalId: string, approved: boolean) {
@@ -120,6 +122,34 @@ export class CoreClient {
     return this.send('skills.list', {})
   }
 
+  agentSkillCatalog(projectId = '', characterId = '', includeDisabled = true) {
+    return this.send('skill.catalog', { project_id: projectId, character_id: characterId, include_disabled: includeDisabled })
+  }
+
+  agentSkillInspect(source: string) {
+    return this.send('skill.inspect', { source }, { timeoutMs: 65000, timeoutMessage: 'Skill 来源读取超时。' })
+  }
+
+  agentSkillInstall(source: string, scope: string, scopeId = '', expectedDigest = '') {
+    return this.send('skill.install', { source, scope, scope_id: scopeId, expected_digest: expectedDigest }, { timeoutMs: 65000, timeoutMessage: 'Skill 安装超时。' })
+  }
+
+  agentSkillUpdate(installationId: string, expectedDigest = '') {
+    return this.send('skill.update', { installation_id: installationId, expected_digest: expectedDigest }, { timeoutMs: 65000, timeoutMessage: 'Skill 更新超时。' })
+  }
+
+  agentSkillValidate(installationId: string) {
+    return this.send('skill.validate', { installation_id: installationId })
+  }
+
+  agentSkillEnable(installationId: string, enabled: boolean) {
+    return this.send('skill.enable', { installation_id: installationId, enabled })
+  }
+
+  agentSkillUninstall(installationId: string, confirmed = false) {
+    return this.send('skill.uninstall', { installation_id: installationId, confirmed })
+  }
+
   agentCliList() {
     return this.send('agent_cli.list', {})
   }
@@ -134,6 +164,26 @@ export class CoreClient {
 
   agentCliStatus() {
     return this.send('agent_cli.status', {})
+  }
+
+  byokStatus() {
+    return this.send('byok.status', {})
+  }
+
+  byokConnect(params: Record<string, unknown>) {
+    return this.send('byok.connect', params, { timeoutMs: 30000, timeoutMessage: 'BYOK 连接测试超时，请检查端点或本地模型。' })
+  }
+
+  byokTest() {
+    return this.send('byok.test', {}, { timeoutMs: 20000, timeoutMessage: 'BYOK 连接测试超时，请检查端点或网络。' })
+  }
+
+  byokModels(params: Record<string, unknown>) {
+    return this.send('byok.models', params, { timeoutMs: 10000, timeoutMessage: '本地模型检测超时，请确认 Ollama 已启动。' })
+  }
+
+  byokDisconnect() {
+    return this.send('byok.disconnect', {})
   }
 
   runtimeStatus() {
@@ -168,8 +218,184 @@ export class CoreClient {
     return this.send('audit.recent', { limit })
   }
 
+  conversationHistory(afterSequence = 0, limit = 160, threadId = '') {
+    return this.send('conversation.history', { after_sequence: afterSequence, limit, thread_id: threadId })
+  }
+
+  projectList(includeArchived = false) {
+    return this.send('project.list', { include_archived: includeArchived })
+  }
+
+  projectCreate(name: string, defaultCharacterId = '') {
+    return this.send('project.create', { name, default_character_id: defaultCharacterId })
+  }
+
+  projectUpdate(projectId: string, updates: Record<string, unknown>) {
+    return this.send('project.update', { project_id: projectId, ...updates })
+  }
+
+  projectArchive(projectId: string, archived = true) {
+    return this.send('project.archive', { project_id: projectId, archived })
+  }
+
+  projectDelete(projectId: string, confirmed = false) {
+    return this.send('project.delete', { project_id: projectId, confirmed })
+  }
+
+  threadList(projectId: string, query = '', includeArchived = false) {
+    return this.send('thread.list', { project_id: projectId, query, include_archived: includeArchived })
+  }
+
+  threadCreate(projectId: string, title = '', characterId = '') {
+    return this.send('thread.create', { project_id: projectId, title, character_id: characterId })
+  }
+
+  threadUpdate(threadId: string, updates: Record<string, unknown>) {
+    return this.send('thread.update', { thread_id: threadId, ...updates })
+  }
+
+  threadActivate(threadId: string) {
+    return this.send('thread.activate', { thread_id: threadId })
+  }
+
+  threadArchive(threadId: string, archived = true) {
+    return this.send('thread.archive', { thread_id: threadId, archived })
+  }
+
+  threadDelete(threadId: string, confirmed = false) {
+    return this.send('thread.delete', { thread_id: threadId, confirmed })
+  }
+
+  resourceBindingList(projectId: string) {
+    return this.send('resource_binding.list', { project_id: projectId })
+  }
+
+  resourceBindingAdd(projectId: string, kind: string, value: string, label = '') {
+    return this.send('resource_binding.add', { project_id: projectId, kind, value, label })
+  }
+
+  resourceBindingRemove(bindingId: string) {
+    return this.send('resource_binding.remove', { binding_id: bindingId })
+  }
+
+  capabilitySessionStart(params: Record<string, unknown>) {
+    return this.send('capability.session.start', params)
+  }
+
+  capabilitySessionStatus(sessionId = '') {
+    return this.send('capability.session.status', { session_id: sessionId })
+  }
+
+  capabilitySessionPause(sessionId: string) {
+    return this.send('capability.session.pause', { session_id: sessionId })
+  }
+
+  capabilitySessionResume(sessionId: string) {
+    return this.send('capability.session.resume', { session_id: sessionId })
+  }
+
+  capabilitySessionCancel(sessionId: string) {
+    return this.send('capability.session.cancel', { session_id: sessionId })
+  }
+
+  permissionGrant(sessionId: string, profile: string, scope: Record<string, unknown> = {}) {
+    return this.send('permission.grant', { session_id: sessionId, profile, scope })
+  }
+
+  permissionRevoke(sessionId: string) {
+    return this.send('permission.revoke', { session_id: sessionId })
+  }
+
+  gameAdapterList() {
+    return this.send('game.adapter.list', {})
+  }
+
+  gameAdapterStatus(adapterId: string) {
+    return this.send('game.adapter.status', { adapter_id: adapterId })
+  }
+
+  gameAdapterInstall(adapterId: string, confirmed = false) {
+    return this.send('game.adapter.install', { adapter_id: adapterId, confirmed })
+  }
+
+  gameAdapterUninstall(adapterId: string, confirmed = false) {
+    return this.send('game.adapter.uninstall', { adapter_id: adapterId, confirmed })
+  }
+
+  gameAdapterEnable(adapterId: string, enabled: boolean) {
+    return this.send('game.adapter.enable', { adapter_id: adapterId, enabled })
+  }
+
+  gameAdapterRun(params: Record<string, unknown>) {
+    return this.send('game.adapter.run', params, { timeoutMs: 920000, timeoutMessage: '游戏适配器运行超时。' })
+  }
+
+  gameAdapterPause(adapterId: string, sessionId = '') {
+    return this.send('game.adapter.pause', { adapter_id: adapterId, session_id: sessionId })
+  }
+
+  gameAdapterResume(adapterId: string, sessionId = '') {
+    return this.send('game.adapter.resume', { adapter_id: adapterId, session_id: sessionId })
+  }
+
+  characterList() {
+    return this.send('character.list', {})
+  }
+
+  characterDetail(characterId: string) {
+    return this.send('character.detail', { character_id: characterId })
+  }
+
+  characterCreate(character: Record<string, unknown>) {
+    return this.send('character.create', { character }, { timeoutMs: 120000, timeoutMessage: '角色素材复制耗时较久，请检查模型文件大小。' })
+  }
+
+  characterUpdate(characterId: string, character: Record<string, unknown>) {
+    return this.send('character.update', { character_id: characterId, character }, { timeoutMs: 120000, timeoutMessage: '角色更新耗时较久，请稍后再试。' })
+  }
+
+  characterInspect(path: string) {
+    return this.send('character.inspect', { path }, { timeoutMs: 120000, timeoutMessage: '角色包安全检查耗时较久，请检查包体大小。' })
+  }
+
+  characterImport(path: string) {
+    return this.send('character.import', { path }, { timeoutMs: 120000, timeoutMessage: '角色包导入耗时较久，请检查包体大小。' })
+  }
+
+  characterExport(characterId: string, destination: string) {
+    return this.send('character.export', { character_id: characterId, destination }, { timeoutMs: 120000, timeoutMessage: '角色包导出耗时较久，请稍后再试。' })
+  }
+
+  characterActivate(characterId: string) {
+    return this.send('character.activate', { character_id: characterId }, { timeoutMs: 60000, timeoutMessage: '角色切换耗时较久，请稍后再试。' })
+  }
+
+  characterDuplicate(characterId: string, name = '') {
+    return this.send('character.duplicate', { character_id: characterId, name })
+  }
+
+  characterUninstall(characterId: string, fallbackId = '') {
+    return this.send('character.uninstall', { character_id: characterId, fallback_id: fallbackId })
+  }
+
+  characterCheckUpdates(characterId: string) {
+    return this.send('character.check_updates', { character_id: characterId }, { timeoutMs: 15000, timeoutMessage: '检查角色更新超时。' })
+  }
+
+  characterInstallUpdate(characterId: string, packageUrl = '') {
+    return this.send('character.install_update', { character_id: characterId, package_url: packageUrl }, { timeoutMs: 180000, timeoutMessage: '角色更新耗时较久，请检查网络后重试。' })
+  }
+
   memoryStatus() {
     return this.send('memory.status', {})
+  }
+
+  memoryList(options: { query?: string; kind?: string; offset?: number; limit?: number; sort?: 'recent' | 'oldest' | 'kind' } = {}) {
+    return this.send('memory.list', options)
+  }
+
+  memoryPending(options: { offset?: number; limit?: number } = {}) {
+    return this.send('memory.pending', options)
   }
 
   memoryRecall(query: string, limit = 8) {
@@ -194,6 +420,10 @@ export class CoreClient {
 
   memoryDelete(memoryId: number) {
     return this.send('memory.delete', { memory_id: memoryId })
+  }
+
+  memoryUpdate(memoryId: number, text: string, kind?: string) {
+    return this.send('memory.update', { memory_id: memoryId, text, kind })
   }
 
   memoryClear() {
@@ -222,7 +452,10 @@ export class CoreClient {
   private handleMessage(raw: string) {
     try {
       const payload = JSON.parse(raw)
-      if (payload?.id && (payload.result || payload.error)) {
+      const isRpcResponse = payload?.id
+        && typeof payload === 'object'
+        && (Object.prototype.hasOwnProperty.call(payload, 'result') || Object.prototype.hasOwnProperty.call(payload, 'error'))
+      if (isRpcResponse) {
         const pending = this.pending.get(payload.id)
         if (pending) {
           this.pending.delete(payload.id)
@@ -246,6 +479,14 @@ export class CoreClient {
     } catch {
       this.options.onError?.('Invalid Joi runtime message')
     }
+  }
+
+  private rejectPending(message: string) {
+    for (const pending of this.pending.values()) {
+      window.clearTimeout(pending.timeoutId)
+      pending.reject(new Error(message))
+    }
+    this.pending.clear()
   }
 
   private scheduleReconnect() {

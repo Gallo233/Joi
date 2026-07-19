@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
 
-from agent_companion.core.agent_cli import resolve_agent_cli_executable
 from agent_companion.core.codex_events import (
     PERMISSION_FAIL_CLOSED_MESSAGE,
     build_codex_run_state,
     codex_card_body,
     codex_permission_approval_arguments,
 )
+from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.voice import safe_voice_line
@@ -128,7 +127,7 @@ class CodexTool(ToolAdapter):
                 status="success" if ok else "failed",
                 artifacts=artifacts,
             ),
-            voice_line=safe_voice_line("写码任务完成了。" if ok else "写码任务没有跑通，细节在卡片里。", sprite="5" if ok else "4"),
+            voice_line=safe_voice_line("写码任务完成了。" if ok else "写码任务没有跑通，可以展开执行过程查看细节。", sprite="5" if ok else "4"),
         )
 
     def _failed(self, message: str, state: dict, status: str, voice_text: str = "写码能力还没有准备好。") -> ToolResult:
@@ -153,7 +152,7 @@ class CodexTool(ToolAdapter):
 
     @staticmethod
     def _codex_executable() -> str:
-        return resolve_agent_cli_executable("codex") or shutil.which("codex") or ""
+        return codex_executable()
 
     def _rel(self, path: Path) -> str:
         try:

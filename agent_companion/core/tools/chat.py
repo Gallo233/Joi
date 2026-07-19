@@ -4,8 +4,11 @@ import json
 import os
 from pathlib import Path
 import time
+from dataclasses import dataclass
 from typing import Any
 
+from agent_companion.core.config import load_workspace_config
+from agent_companion.core.character_packages import CharacterPackageManager
 from agent_companion.core.memory_candidates import chat_memory_candidate
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
@@ -18,16 +21,17 @@ class CompanionChatTool(ToolAdapter):
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace.resolve()
         self._config: Any | None = self._load_config()
+        self._characters = CharacterPackageManager(self.workspace)
         self._client: Any | None = None
 
     def run(self, request: ToolRequest) -> ToolResult:
         text = str(request.arguments.get("text") or "").strip()
         memory_context = _memory_context(request.arguments.get("memory_context"))
-        reply, voice_text, emotion, sprite, model_usage = self._reply(text, memory_context)
-        voice_line = safe_voice_line(voice_text or reply, emotion=emotion, sprite=sprite)
+        chat = self._reply(text, memory_context)
+        voice_line = safe_voice_line(chat.voice_text or chat.reply, emotion=chat.emotion, sprite=chat.sprite)
         agent_state: dict[str, Any] = {
             "tool": self.name,
-            "reply": reply,
+            "reply": chat.reply,
             "memory_context": memory_context,
             "expression_sync": {
                 "emotion": voice_line.emotion,
@@ -41,25 +45,47 @@ class CompanionChatTool(ToolAdapter):
         memory_candidate = chat_memory_candidate(text)
         if memory_candidate:
             agent_state["memory_candidate"] = memory_candidate
-        if model_usage:
-            agent_state["model_usage"] = model_usage
+        if chat.model_usage:
+            agent_state["model_usage"] = chat.model_usage
+        if chat.error:
+            agent_state["model_error"] = chat.error
         return ToolResult(
-            ok=True,
+            ok=not chat.error,
             agent_state=agent_state,
-            display_card=DisplayCard("对话", reply, status="success"),
+            display_card=DisplayCard("对话", chat.reply, status="failed" if chat.error else "success"),
             voice_line=voice_line,
         )
 
-    def _reply(self, text: str, memory_context: list[dict[str, str]] | None = None) -> tuple[str, str, str, str, dict[str, Any] | None]:
+    def _reply(self, text: str, memory_context: list[dict[str, str]] | None = None) -> "ChatReply":
         fallback = "我在。你可以直接告诉我要看、要玩，还是要写代码。"
         fallback_emotion = _fallback_chat_emotion(text)
         config = self._config
-        if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1" or config is None or config.llm.use_mock or not config.llm.is_configured:
-            sprite = _sprite_for_character_emotion(config.primary_character if config else None, fallback_emotion)
+        if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
             memory_reply = _fallback_memory_reply(text, memory_context or [])
             if memory_reply:
-                return (memory_reply, "我记得这一点。", "thinking", sprite, None)
-            return (fallback if not text else f"我听到了：{text}", fallback if not text else f"我听到了。", fallback_emotion, sprite, None)
+                sprite = _sprite_for_character_emotion(config.primary_character if config else None, "thinking")
+                return ChatReply(memory_reply, "我记得这一点。", "thinking", sprite)
+            sprite = _sprite_for_character_emotion(config.primary_character if config else None, "worried")
+            return ChatReply("模型调用已被运行环境关闭。", "模型调用现在是关闭的。", "worried", sprite, error="model_disabled")
+        if config is None or not config.llm.is_configured:
+            memory_reply = _fallback_memory_reply(text, memory_context or [])
+            if memory_reply:
+                sprite = _sprite_for_character_emotion(config.primary_character if config else None, "thinking")
+                return ChatReply(memory_reply, "我记得这一点。", "thinking", sprite)
+            sprite = _sprite_for_character_emotion(config.primary_character if config else None, "worried")
+            return ChatReply(
+                "BYOK 还没有连接。请到“设置 → 执行模式 → BYOK”完成三步连接，或切回 Codex CLI。",
+                "BYOK 还没有连接，请先完成模型设置。",
+                "worried",
+                sprite,
+                error="model_unconfigured",
+            )
+        if config.llm.use_mock:
+            sprite = _sprite_for_character_emotion(config.primary_character, fallback_emotion)
+            memory_reply = _fallback_memory_reply(text, memory_context or [])
+            if memory_reply:
+                return ChatReply(memory_reply, "我记得这一点。", "thinking", sprite, model_usage={"mock": True})
+            return ChatReply(fallback, fallback, fallback_emotion, sprite, model_usage={"mock": True})
         try:
             from openai import OpenAI
 
@@ -68,56 +94,110 @@ class CompanionChatTool(ToolAdapter):
             router = ModelRouter(config.llm)
             endpoint = router.resolve("fast")
             if self._client is None:
-                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
+                self._client = OpenAI(api_key=endpoint.api_key or "ollama", base_url=endpoint.base_url, timeout=30.0)
             character = config.primary_character
             voice_lang = character.voice_text_lang(config.tts.text_lang)
             sprite_catalog = _sprite_catalog(character)
             memory_prompt = _memory_prompt(memory_context or [])
-            started = time.perf_counter()
-            response = self._client.chat.completions.create(
-                model=endpoint.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            f"你是{character.name}，按角色设定和用户自然聊天。\n"
-                            f"角色设定：{character.setting[:2200]}\n"
-                            f"{memory_prompt}"
-                            "只输出 JSON：{\"reply\":\"给屏幕显示的中文回复\",\"voice_text\":\"<emo: happy>适合配音朗读的短句\",\"emotion\":\"neutral|happy|thinking|alert|worried|serious\",\"sprite\":\"1\"}。"
-                            "emotion 必须贴合回复语气；sprite 必须从可用立绘 id 中选择最贴近 emotion 的一个。"
-                            f"可用立绘：{sprite_catalog}。\n"
-                            f"voice_text 使用 {voice_lang}，可在开头带 <emo: ...>，不要包含 JSON、路径、命令、密钥 token 或日志。"
-                        ),
-                    },
-                    {"role": "user", "content": text or "你好"},
-                ],
-                temperature=config.llm.temperature,
-                response_format={"type": "json_object"},
+            lore_rows = self._characters.lore_context(text)
+            lore_prompt = ""
+            if lore_rows:
+                lore_prompt = "本轮触发的角色知识：\n" + "\n".join(f"- {row['content']}" for row in lore_rows) + "\n"
+            system_prompt = (
+                f"你是{character.name}，按角色设定和用户自然聊天。\n"
+                f"角色设定：{character.setting[:2200]}\n"
+                f"{memory_prompt}"
+                f"{lore_prompt}"
+                "回复要像轻松的桌面陪伴对话：先直接回应用户，默认用 2 至 4 个短句。"
+                "只有确实存在三个以上并列事项时才使用列表，避免复述用户原话、执行日志和无关背景。"
+                "能一句说清就不要扩写；必须补充信息时最多问一个问题。\n"
+                "只输出 JSON：{\"reply\":\"给屏幕显示的中文回复\",\"voice_text\":\"<emo: happy>适合配音朗读的短句\",\"emotion\":\"neutral|happy|thinking|alert|worried|serious\",\"sprite\":\"1\"}。"
+                "emotion 必须贴合回复语气；sprite 必须从可用立绘 id 中选择最贴近 emotion 的一个。"
+                f"可用立绘：{sprite_catalog}。\n"
+                f"voice_text 使用 {voice_lang}，可在开头带 <emo: ...>，不要包含 JSON、路径、命令、密钥 token 或日志。"
             )
+            started = time.perf_counter()
+            if endpoint.provider == "openai":
+                response = self._client.responses.create(
+                    model=endpoint.model,
+                    instructions=system_prompt,
+                    input=text or "你好",
+                    max_output_tokens=600,
+                    store=False,
+                )
+                content = str(response.output_text or "").strip()
+            else:
+                response = self._client.chat.completions.create(
+                    model=endpoint.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": text or "你好"},
+                    ],
+                    temperature=config.llm.temperature,
+                )
+                content = str(response.choices[0].message.content or "").strip()
             latency_ms = (time.perf_counter() - started) * 1000
-            payload = json.loads(response.choices[0].message.content or "{}")
-            reply = str(payload.get("reply") or fallback).strip()
+            try:
+                payload = json.loads(content or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {"reply": content}
+            if not isinstance(payload, dict):
+                payload = {"reply": content}
+            reply = str(payload.get("reply") or content or fallback).strip()
             voice_text = str(payload.get("voice_text") or reply).strip()
             emotion = normalize_emotion(str(payload.get("emotion") or "") or _fallback_chat_emotion(f"{text} {reply} {voice_text}"))
             sprite = _valid_character_sprite(character, str(payload.get("sprite") or ""), emotion)
-            return reply[:600], voice_text[:180], emotion, sprite, endpoint.to_agent_state(latency_ms=latency_ms)
-        except Exception:
-            sprite = _sprite_for_character_emotion(config.primary_character if config else None, fallback_emotion)
+            return ChatReply(reply[:600], voice_text[:180], emotion, sprite, endpoint.to_agent_state(latency_ms=latency_ms))
+        except Exception as exc:
             memory_reply = _fallback_memory_reply(text, memory_context or [])
             if memory_reply:
-                return (memory_reply, "我记得这一点。", "thinking", sprite, None)
-            return (fallback if not text else f"我听到了：{text}", fallback if not text else "我听到了。", fallback_emotion, sprite, None)
+                sprite = _sprite_for_character_emotion(config.primary_character if config else None, "thinking")
+                return ChatReply(memory_reply, "我记得这一点。", "thinking", sprite)
+            error = _chat_error_code(exc)
+            message = _chat_error_message(error)
+            sprite = _sprite_for_character_emotion(config.primary_character if config else None, "worried")
+            return ChatReply(message, message, "worried", sprite, error=error)
 
     def _load_config(self) -> Any | None:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
-            return None
-        try:
-            from agent_companion.core.config import load_app_config
+        return load_workspace_config(self.workspace)
 
-            return load_app_config(config_path)
-        except Exception:
-            return None
+
+@dataclass(frozen=True)
+class ChatReply:
+    reply: str
+    voice_text: str
+    emotion: str
+    sprite: str
+    model_usage: dict[str, Any] | None = None
+    error: str = ""
+
+
+def _chat_error_code(exc: Exception) -> str:
+    status = getattr(exc, "status_code", None)
+    name = type(exc).__name__.casefold()
+    if status in {401, 403} or "authentication" in name or "permissiondenied" in name:
+        return "authentication_failed"
+    if status == 404:
+        return "model_or_endpoint_not_found"
+    if status == 429 or "ratelimit" in name:
+        return "rate_limited"
+    if "timeout" in name:
+        return "model_timeout"
+    if "connection" in name:
+        return "endpoint_unreachable"
+    return "model_request_failed"
+
+
+def _chat_error_message(error: str) -> str:
+    messages = {
+        "authentication_failed": "BYOK 密钥未通过验证，请到设置里重新连接。",
+        "model_or_endpoint_not_found": "没有找到配置的模型或接口，请检查 BYOK 的模型名与端点。",
+        "rate_limited": "模型供应商暂时限流或额度不足，请稍后再试并检查用量。",
+        "model_timeout": "模型响应超时了，请检查网络或换用更快的模型。",
+        "endpoint_unreachable": "目前连接不到 BYOK 接口，请检查端点和网络。",
+        "model_request_failed": "BYOK 请求没有成功，请到设置里运行连接测试。",
+    }
+    return messages.get(error, messages["model_request_failed"])
 
 
 def _sprite_catalog(character: Any) -> str:

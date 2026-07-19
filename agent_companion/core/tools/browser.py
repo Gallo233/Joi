@@ -26,7 +26,7 @@ class BrowserTool(ToolAdapter):
                     ok=False,
                     agent_state={"tool": request.name, "error": "browser_bridge_failed", "detail": str(exc)[:500]},
                     display_card=DisplayCard("浏览器", "本地浏览器执行器没有跑通。", str(exc)[:1800], status="failed"),
-                    voice_line=safe_voice_line("浏览器这一步没有跑通，细节在卡片里。", sprite="4"),
+                    voice_line=safe_voice_line("浏览器这一步没有跑通，可以展开执行过程查看细节。", sprite="4"),
                 )
         return self._queue_only(request)
 

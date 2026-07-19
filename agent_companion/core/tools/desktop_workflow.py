@@ -163,6 +163,8 @@ class DesktopWorkflowTool(ToolAdapter):
         computer_use["action"] = action_state
         if before_observation and before_observation.screenshot_rel:
             computer_use["before_artifact"] = before_observation.screenshot_rel
+        if before_observation and before_observation.title:
+            computer_use["before_title"] = before_observation.title
         if result.observation and result.observation.screenshot_rel:
             computer_use["after_artifact"] = result.observation.screenshot_rel
         agent_state: dict[str, Any] = {"tool": self.name, "computer_use": computer_use}
@@ -179,7 +181,7 @@ class DesktopWorkflowTool(ToolAdapter):
 
 
 def _is_macos_backend(backend: ComputerUseBackend) -> bool:
-    return sys.platform == "darwin" and backend.__class__.__name__ == "MacComputerUseBackend"
+    return sys.platform == "darwin" and backend.__class__.__name__ in {"MacComputerUseBackend", "CuaDriverBackend"}
 
 
 def _open_app_actions(app: str, *, mac_backend: bool = False) -> list[ComputerAction]:
@@ -257,7 +259,7 @@ def _workflow_label(workflow: str) -> str:
 
 def _workflow_voice(workflow: str, result: ComputerUseResult, verification: PostActionVerification | None) -> str:
     if not result.ok:
-        return "桌面操作没有完成，细节在卡片里。"
+        return "桌面操作没有完成，可以展开执行过程查看细节。"
     if workflow == "open_app" and result.summary:
         return result.summary
     if verification is None:

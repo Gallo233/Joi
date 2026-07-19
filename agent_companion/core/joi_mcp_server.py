@@ -11,6 +11,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agent_companion.core.coercion import optional_int
+from agent_companion.core.rpc import JsonRpcRouter, RpcMethodNotFound
+
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -259,6 +262,7 @@ class JoiMcpServer:
         self.workspace = workspace.resolve()
         self._next_id = 1
         self._last_observation: dict[str, Any] | None = None
+        self._tool_router = self._build_tool_router()
 
     async def handle(self, request: dict[str, Any]) -> dict[str, Any] | None:
         method = str(request.get("method") or "")
@@ -288,88 +292,112 @@ class JoiMcpServer:
         return self._error(request_id, -32601, f"unknown method: {method}")
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if name == "joi_watch_start":
-            return await self._core("watch.loop.start", {
+        try:
+            return (await self._tool_router.dispatch(name, arguments)).result
+        except RpcMethodNotFound as exc:
+            raise ValueError(f"unknown Joi MCP tool: {exc.method}") from exc
+
+    def _build_tool_router(self) -> JsonRpcRouter:
+        router = JsonRpcRouter()
+        router.register("joi_watch_start", self._tool_watch_start)
+        router.register("joi_watch_status", lambda _: self._core("watch.loop.status", {}))
+        router.register("joi_watch_recall", lambda args: self._core_skill("watch.recall", {"query": str(args.get("query") or "")}))
+        router.register("joi_screen_observe", self._tool_screen_observe)
+        router.register("joi_goal_verify", self._goal_verify)
+        router.register("joi_browser_current_state", lambda _: _browser_current_state())
+        router.register("joi_target_resolve", self._tool_target_resolve)
+        router.register("joi_computer_click_target", self._click_target)
+        router.register("joi_computer_click", lambda args: self._computer_coordinates("computer.click", args, ("x", "y", "button")))
+        router.register("joi_computer_double_click", lambda args: self._computer_coordinates("computer.double_click", args, ("x", "y", "button")))
+        router.register("joi_computer_drag", lambda args: self._computer_coordinates("computer.drag", args, ("x", "y", "end_x", "end_y", "button")))
+        router.register("joi_computer_type_text", lambda args: self._run_computer_skill("computer.type_text", {"text": str(args.get("text") or "")}, requested_arguments=args))
+        router.register("joi_computer_scroll", lambda args: self._run_computer_skill("computer.scroll", _scroll_args(args), requested_arguments=args))
+        router.register("joi_computer_hotkey", lambda args: self._run_computer_skill("computer.hotkey", {"keys": _keys(args.get("keys"))}, requested_arguments=args))
+        router.register("joi_computer_wait", self._wait_and_observe)
+        router.register("joi_computer_open_app", lambda args: self._run_computer_skill("computer.open_app", {"app_name": str(args.get("app_name") or "")}, requested_arguments=args))
+        router.register("joi_browser_open_url", self._tool_browser_open_url)
+        router.register("joi_browser_open_site", self._tool_browser_open_site)
+        router.register("joi_browser_observe", lambda args: self._core_skill("browser.observe", _browser_skill_args(args)))
+        router.register("joi_browser_search", lambda args: self._core_skill("browser.search", _browser_skill_args(args)))
+        router.register("joi_memory_recall", lambda args: self._core("memory.recall", {"query": str(args.get("query") or ""), "limit": optional_int(args.get("limit")) or 8}))
+        router.register("joi_skills_list", lambda _: self._core("skills.list", {}))
+        router.register("joi_skill_run", self._tool_skill_run)
+        router.register("joi_voice_status", lambda _: self._core("runtime.status", {}))
+        router.register("joi_files_read", lambda args: self._core_skill("files.read", {"path": str(args.get("path") or "")}))
+        router.register("joi_mcp_list", lambda args: self._core_skill("mcp.list_tools", {"query": str(args.get("query") or "")}))
+        return router
+
+    async def _tool_watch_start(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._core(
+            "watch.loop.start",
+            {
                 "query": str(arguments.get("query") or "陪我看当前画面"),
                 "interval_seconds": 6,
                 "sample_count": 3,
                 "sample_interval_ms": 700,
                 "transcript_source": str(arguments.get("transcript_source") or "auto"),
                 "transcribe": True,
-            })
-        if name == "joi_watch_status":
-            return await self._core("watch.loop.status", {})
-        if name == "joi_watch_recall":
-            return await self._core("skill.run", {"tool": "watch.recall", "arguments": {"query": str(arguments.get("query") or "")}})
-        if name == "joi_screen_observe":
-            return self._remember_from_result(await self._core("skill.run", {"tool": "observe.screen", "arguments": _screen_observe_args(arguments)}))
-        if name == "joi_goal_verify":
-            return await self._goal_verify(arguments)
-        if name == "joi_browser_current_state":
-            return _browser_current_state()
-        if name == "joi_target_resolve":
-            return self._remember_from_result(await self._core_skill_wait("vision.resolve_target", {"query": str(arguments.get("query") or arguments.get("target") or ""), "target": str(arguments.get("target") or "")}, timeout_seconds=180.0))
-        if name == "joi_computer_click_target":
-            return await self._click_target(arguments)
-        if name == "joi_computer_click":
-            return await self._run_computer_skill("computer.click", self._coordinate_args(arguments, ("x", "y", "button")), requested_arguments=arguments)
-        if name == "joi_computer_double_click":
-            return await self._run_computer_skill("computer.double_click", self._coordinate_args(arguments, ("x", "y", "button")), requested_arguments=arguments)
-        if name == "joi_computer_drag":
-            return await self._run_computer_skill("computer.drag", self._coordinate_args(arguments, ("x", "y", "end_x", "end_y", "button")), requested_arguments=arguments)
-        if name == "joi_computer_type_text":
-            return await self._run_computer_skill("computer.type_text", {"text": str(arguments.get("text") or "")}, requested_arguments=arguments)
-        if name == "joi_computer_scroll":
-            return await self._run_computer_skill("computer.scroll", _scroll_args(arguments), requested_arguments=arguments)
-        if name == "joi_computer_hotkey":
-            return await self._run_computer_skill("computer.hotkey", {"keys": _keys(arguments.get("keys"))}, requested_arguments=arguments)
-        if name == "joi_computer_wait":
-            return await self._wait_and_observe(arguments)
-        if name == "joi_computer_open_app":
-            return await self._run_computer_skill("computer.open_app", {"app_name": str(arguments.get("app_name") or "")}, requested_arguments=arguments)
-        if name == "joi_browser_open_url":
-            workflow_args = {
+            },
+        )
+
+    async def _tool_screen_observe(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._remember_from_result(await self._core_skill("observe.screen", _screen_observe_args(arguments)))
+
+    async def _tool_target_resolve(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = await self._core_skill_wait(
+            "vision.resolve_target",
+            {
+                "query": str(arguments.get("query") or arguments.get("target") or ""),
+                "target": str(arguments.get("target") or ""),
+            },
+            timeout_seconds=180.0,
+        )
+        return self._remember_from_result(result)
+
+    async def _computer_coordinates(self, tool: str, arguments: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+        return await self._run_computer_skill(
+            tool,
+            self._coordinate_args(arguments, keys),
+            requested_arguments=arguments,
+        )
+
+    async def _tool_browser_open_url(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._run_computer_skill(
+            "computer.workflow",
+            {
                 "workflow": "open_url",
                 "url": str(arguments.get("url") or ""),
                 "browser": _browser_argument(arguments),
-            }
-            return await self._run_computer_skill(
-                "computer.workflow",
-                workflow_args,
-                requested_arguments=arguments,
-            )
-        if name == "joi_browser_open_site":
-            workflow_args = {
+            },
+            requested_arguments=arguments,
+        )
+
+    async def _tool_browser_open_site(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._run_computer_skill(
+            "computer.workflow",
+            {
                 "workflow": "open_url",
-                "url": _site_url(str(arguments.get("site") or ""), str(arguments.get("section") or ""), str(arguments.get("query") or "")),
+                "url": _site_url(
+                    str(arguments.get("site") or ""),
+                    str(arguments.get("section") or ""),
+                    str(arguments.get("query") or ""),
+                ),
                 "browser": _browser_argument(arguments),
-            }
-            return await self._run_computer_skill(
-                "computer.workflow",
-                workflow_args,
-                requested_arguments=arguments,
-            )
-        if name == "joi_browser_observe":
-            return await self._core("skill.run", {"tool": "browser.observe", "arguments": {"query": str(arguments.get("query") or ""), "url": str(arguments.get("url") or "")}})
-        if name == "joi_browser_search":
-            return await self._core("skill.run", {"tool": "browser.search", "arguments": {"query": str(arguments.get("query") or ""), "url": str(arguments.get("url") or "")}})
-        if name == "joi_memory_recall":
-            return await self._core("memory.recall", {"query": str(arguments.get("query") or ""), "limit": int(arguments.get("limit") or 8)})
-        if name == "joi_skills_list":
-            return await self._core("skills.list", {})
-        if name == "joi_skill_run":
-            tool = str(arguments.get("tool") or "")
-            skill_args = arguments.get("arguments") if isinstance(arguments.get("arguments"), dict) else {}
-            if _waits_for_approval(tool):
-                return self._remember_from_result(await self._core_skill_wait(tool, skill_args, timeout_seconds=180.0))
-            return self._remember_from_result(await self._core("skill.run", {"tool": tool, "arguments": skill_args}))
-        if name == "joi_voice_status":
-            return await self._core("runtime.status", {})
-        if name == "joi_files_read":
-            return await self._core("skill.run", {"tool": "files.read", "arguments": {"path": str(arguments.get("path") or "")}})
-        if name == "joi_mcp_list":
-            return await self._core("skill.run", {"tool": "mcp.list_tools", "arguments": {"query": str(arguments.get("query") or "")}})
-        raise ValueError(f"unknown Joi MCP tool: {name}")
+            },
+            requested_arguments=arguments,
+        )
+
+    async def _tool_skill_run(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        tool = str(arguments.get("tool") or "")
+        skill_args = arguments.get("arguments") if isinstance(arguments.get("arguments"), dict) else {}
+        if _waits_for_approval(tool):
+            result = await self._core_skill_wait(tool, skill_args, timeout_seconds=180.0)
+        else:
+            result = await self._core_skill(tool, skill_args)
+        return self._remember_from_result(result)
+
+    async def _core_skill(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._core("skill.run", {"tool": tool, "arguments": arguments})
 
     async def _run_computer_skill(self, tool: str, arguments: dict[str, Any], *, requested_arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         before_observation = self._last_observation
@@ -674,6 +702,13 @@ def _browser_argument(arguments: dict[str, Any]) -> str:
     if requested and requested.casefold() not in {"default", "默认", "auto", "current", "当前"}:
         return requested
     return _preferred_browser_from_state(_browser_current_state()) or "default"
+
+
+def _browser_skill_args(arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "query": str(arguments.get("query") or ""),
+        "url": str(arguments.get("url") or ""),
+    }
 
 
 def _preferred_browser_from_state(state: dict[str, Any]) -> str:

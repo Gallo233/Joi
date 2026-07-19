@@ -1,4 +1,5 @@
 .venv/
+.DS_Store
 __pycache__/
 *.pyc
 .env
@@ -18,6 +19,12 @@ logs/
 --output-last-message
 agent_companion/shell/node_modules/
 agent_companion/shell/dist/
+agent_companion/shell/public/live2d/joi/
+agent_companion/shell/public/vendor/live2d/
 agent_companion/shell/src-tauri/target/
 agent_companion/shell/src-tauri/gen/
 *.log
+/design-qa*.png
+/joi-*.png
+/design-qa.md
+/agent_companion/web_widget/design-qa.md

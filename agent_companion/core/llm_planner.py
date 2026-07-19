@@ -7,7 +7,7 @@ import re
 import uuid
 from typing import Any
 
-from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
+from agent_companion.core.config import AppConfig, ModelRouter, load_workspace_config
 from agent_companion.core.schemas import AgentPlan, ToolRequest
 
 
@@ -32,6 +32,10 @@ class LlmPlanParser:
         self.workspace = workspace.resolve()
         self._config = self._load_config()
         self._client: Any | None = None
+
+    def reload(self) -> None:
+        self._config = self._load_config()
+        self._client = None
 
     def should_try(self, user_text: str, rule_plan: AgentPlan) -> bool:
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
@@ -118,13 +122,7 @@ class LlmPlanParser:
             return None
 
     def _load_config(self) -> AppConfig | None:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
-            return None
-        try:
-            return load_app_config(config_path)
-        except Exception:
-            return None
+        return load_workspace_config(self.workspace)
 
 
 def plan_from_llm_payload(user_text: str, payload: dict[str, Any], task_id: str | None = None) -> AgentPlan | None:

@@ -59,11 +59,20 @@ export interface ComputerUseAuditEvent {
 }
 
 export interface AgentEvent {
+  event_id?: string
+  sequence?: number
   type: EventType
   task_id: string
+  project_id?: string
+  thread_id?: string
+  session_id?: string
+  character_id?: string
   display_card: DisplayCard
   voice_line: VoiceLine
   agent_state?: {
+    ui_phase?: 'received' | 'understanding' | 'thinking' | 'acting' | 'waiting' | 'done' | 'failed' | 'idle' | string
+    ui_label?: string
+    ui_transient?: boolean
     voice_audio_path?: string
     voice_audio_rel?: string
     voice_audio_data_url?: string
@@ -89,6 +98,78 @@ export interface AgentEvent {
     [key: string]: unknown
   }
   created_at: number
+}
+
+export type PermissionProfile = 'observe' | 'collaborate' | 'delegate'
+
+export interface JoiProject {
+  id: string
+  name: string
+  default_character_id: string
+  archived: boolean
+  created_at: number
+  updated_at: number
+}
+
+export interface JoiThread {
+  id: string
+  project_id: string
+  title: string
+  character_id: string
+  archived: boolean
+  created_at: number
+  updated_at: number
+}
+
+export interface ResourceBinding {
+  id: string
+  project_id: string
+  kind: 'directory' | 'application' | 'domain' | 'game' | string
+  value: string
+  label: string
+  metadata?: Record<string, unknown>
+  created_at: number
+}
+
+export interface ActionReceipt {
+  id: string
+  session_id: string
+  step_index: number
+  action: string
+  risk: string
+  before_summary?: string
+  after_summary?: string
+  verification?: Record<string, unknown>
+  duration_ms?: number
+  status: string
+  created_at: number
+}
+
+export interface CapabilitySession {
+  id: string
+  project_id: string
+  thread_id: string
+  capability: string
+  goal: string
+  permission_profile: PermissionProfile
+  state: 'created' | 'running' | 'paused' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled' | string
+  driver: string
+  budget?: Record<string, number>
+  stop_conditions?: string[]
+  permission?: { id?: string; profile?: PermissionProfile; scope?: Record<string, unknown>; status?: string }
+  receipts?: ActionReceipt[]
+  created_at: number
+  updated_at: number
+  completed_at?: number | null
+}
+
+export interface CollaborationSnapshot {
+  schema_version?: number
+  active?: { project_id?: string; thread_id?: string; session_id?: string; character_id?: string }
+  projects?: JoiProject[]
+  threads?: JoiThread[]
+  bindings?: ResourceBinding[]
+  capability_session?: CapabilitySession
 }
 
 export interface VoiceAudioPayload {
@@ -182,6 +263,10 @@ export interface WatchLoopStatus {
   last_comment_at?: number
   proactive_reason?: string
   last_error?: string
+  mode?: 'quiet' | 'commentary' | 'translate' | 'analysis' | 'accessibility' | string
+  spoiler_level?: 'none' | 'current_scene' | 'full' | string
+  raw_media_retention?: boolean
+  scene_observation?: Record<string, unknown>
 }
 
 export interface MemoryRecord {
@@ -190,7 +275,16 @@ export interface MemoryRecord {
   text?: string
   source?: string
   created_at?: number
+  updated_at?: number
   relevance?: number
+}
+
+export interface MemoryPage {
+  items: MemoryRecord[]
+  total: number
+  offset: number
+  limit: number
+  has_more: boolean
 }
 
 export interface MemoryCandidate {
@@ -205,6 +299,14 @@ export interface MemoryCandidate {
   priority?: 'high' | 'medium' | 'low' | string
   priority_score?: number
   priority_reason?: string
+}
+
+export interface MemoryCandidatePage {
+  items: MemoryCandidate[]
+  total: number
+  offset: number
+  limit: number
+  has_more: boolean
 }
 
 export interface MemoryProfile {
@@ -227,6 +329,13 @@ export interface MemoryStatus {
   recent?: MemoryRecord[]
   pending?: MemoryCandidate[]
   profile?: MemoryProfile
+  counts?: {
+    saved?: number
+    pending?: number
+    manual_notes?: number
+    updated_at?: number
+    by_kind?: Record<string, number>
+  }
 }
 
 export interface MemoryVaultSection {
@@ -239,6 +348,7 @@ export interface MemoryVault {
   storage?: string
   updated_at?: number
   sections?: MemoryVaultSection[]
+  counts?: MemoryStatus['counts']
 }
 
 export interface BackgroundContextScope {
@@ -299,6 +409,70 @@ export interface NativeSkillManifest {
   skills?: NativeSkill[]
 }
 
+export interface AgentSkillInspection {
+  source: string
+  source_kind: string
+  name: string
+  description: string
+  version: string
+  author?: string
+  license?: string
+  digest: string
+  scripts?: string[]
+  references?: string[]
+  assets?: string[]
+  permissions?: Record<string, string[]>
+  dependencies?: string[]
+  warnings?: string[]
+  code_bearing?: boolean
+  implicit_invocation?: boolean
+  instructions?: string
+}
+
+export interface AgentSkillInstallation {
+  id: string
+  name: string
+  version: string
+  scope: 'global' | 'project' | 'character' | string
+  scope_id: string
+  source: string
+  root_path: string
+  digest: string
+  manifest?: AgentSkillInspection
+  enabled: boolean
+  created_at: number
+  updated_at: number
+}
+
+export interface GameAdapterManifest {
+  id: string
+  name: string
+  version: string
+  author: string
+  license: string
+  platforms: string[]
+  modes: string[]
+  detection: string[]
+  observation_sources: string[]
+  action_sets: string[]
+  pause_strategy: string
+  verification: string[]
+  checkpoint_strategy: string
+  source: string
+  code_bearing: boolean
+  installed?: boolean
+  enabled?: boolean
+  paused?: boolean
+  detection_status?: Record<string, unknown>
+}
+
+export interface AgentCliModelOption {
+  id: string
+  label: string
+  reasoning?: string[]
+  default_reasoning?: string
+}
+
 export interface AgentCliProfile {
   id: string
   name: string
@@ -309,6 +483,9 @@ export interface AgentCliProfile {
   probe_ok?: boolean
   error?: string
   models?: string[]
+  model_options?: AgentCliModelOption[]
+  models_source?: 'cli_live' | 'profile' | 'fallback' | string
+  models_error?: string
   reasoning?: string[]
   run_strategy?: string
   supports_takeover?: boolean
@@ -360,9 +537,203 @@ export interface JoiMcpStatus {
   status?: string
 }
 
+export interface ByokPreset {
+  id: string
+  label: string
+  description?: string
+  base_url?: string
+  model?: string
+  requires_key?: boolean
+  cost_hint?: string
+}
+
+export interface ByokSecretStatus {
+  stored?: boolean
+  source?: 'system' | 'environment' | 'legacy' | 'not_required' | 'missing' | string
+  secure_store_available?: boolean
+}
+
+export interface ByokTestResult {
+  ok?: boolean
+  error?: string
+  latency_ms?: number
+  models?: string[]
+  checked_without_generation?: boolean
+}
+
+export interface ByokStatus {
+  ok?: boolean
+  configured?: boolean
+  state?: 'ready' | 'not_configured' | 'incomplete' | 'mock' | string
+  provider?: string
+  base_url?: string
+  model?: string
+  temperature?: number
+  requires_key?: boolean
+  secret?: ByokSecretStatus
+  presets?: ByokPreset[]
+  last_test?: ByokTestResult | null
+}
+
+export interface ByokConnectResult {
+  ok?: boolean
+  saved?: boolean
+  error?: string
+  test?: ByokTestResult
+  byok?: ByokStatus
+}
+
+export interface CharacterSummary {
+  id: string
+  name: string
+  version: string
+  active?: boolean
+  built_in?: boolean
+  model_type?: 'static' | 'live2d' | 'vrm'
+  avatar_path?: string
+  avatar_url?: string
+  avatar_data_url?: string
+  portrait_path?: string
+  portrait_url?: string
+  portrait_data_url?: string
+  accent_color?: string
+  memory_namespace?: 'isolated' | 'shared' | 'disabled'
+  license?: string
+  greeting?: string
+  tone?: string
+  creator?: { name?: string; notes?: string }
+  requested_skills?: string[]
+  package_hash?: string
+  has_update_source?: boolean
+}
+
+export interface CharacterManifest {
+  schema?: string
+  id: string
+  version: string
+  identity: {
+    name: string
+    avatar?: string
+    persona?: string
+    personality?: string
+    scenario?: string
+    tone?: string
+    boundaries?: string[]
+    system_prompt?: string
+    post_history_instructions?: string
+    greeting?: string
+    alternate_greetings?: string[]
+    example_dialogue?: string
+  }
+  appearance?: {
+    model_type?: 'static' | 'live2d' | 'vrm'
+    portrait?: string
+    model?: string
+    background?: string
+    accent_color?: string
+    expressions?: Array<Record<string, unknown>>
+    motions?: Array<Record<string, unknown>>
+    lip_sync?: Record<string, unknown>
+  }
+  voice?: {
+    id?: string
+    label?: string
+    language?: string
+    prompt_language?: string
+    speed?: number
+    volume?: number
+    reference_audio?: string
+    prompt_text?: string
+    emotion_map?: Record<string, unknown>
+  }
+  knowledge?: {
+    lorebook?: { name?: string; description?: string; entries?: Array<Record<string, unknown>> }
+    memory_namespace?: 'isolated' | 'shared' | 'disabled'
+  }
+  capabilities?: { requested_skills?: string[]; approved_skills?: string[] }
+  creator?: { name?: string; notes?: string }
+  source?: { type?: string; url?: string; update_url?: string }
+  security?: { license?: string; compatibility?: string; built_in?: boolean; package_hash?: string }
+  extensions?: Record<string, unknown>
+}
+
+export interface CharacterDetail extends CharacterSummary {
+  manifest?: CharacterManifest
+}
+
+export interface CharacterListResult {
+  ok?: boolean
+  active_id?: string
+  characters?: CharacterSummary[]
+  error?: string
+  message?: string
+}
+
+export interface CharacterMutationResult {
+  ok?: boolean
+  active_id?: string
+  installed?: string
+  uninstalled?: string
+  path?: string
+  character?: CharacterDetail
+  warnings?: string[]
+  security?: Record<string, unknown>
+  ready?: CoreReadyPayload
+  error?: string
+  message?: string
+}
+
+export interface CharacterInspectResult {
+  ok?: boolean
+  source?: string
+  preview?: CharacterDetail
+  warnings?: string[]
+  security?: {
+    executable_content?: boolean
+    secret_content?: boolean
+    license?: string
+    requested_skills?: string[]
+    compatibility?: string
+    installable?: boolean
+    asset_report?: {
+      model_type?: string
+      status?: 'ready' | 'warning' | 'invalid' | string
+      installable?: boolean
+      checks?: Array<{ name?: string; ok?: boolean; detail?: string; required?: boolean }>
+      errors?: string[]
+      warnings?: string[]
+    }
+  }
+  error?: string
+  message?: string
+}
+
+export interface CharacterRuntime extends CharacterSummary {
+  background_path?: string
+  background_url?: string
+  background_data_url?: string
+  model_path?: string
+  model_url?: string
+  expression_mappings?: Array<{
+    emotion?: string
+    expression_id?: string
+    motion_group?: string
+    motion_index?: number | string
+  }>
+  motion_mappings?: Array<Record<string, unknown>>
+  lip_sync?: { parameter?: string }
+  sprites?: Array<{
+    id: string
+    label?: string
+    image_data_url?: string
+  }>
+}
+
 export interface CoreReadyPayload {
   workspace_label?: string
   workspace_bound?: boolean
+  event_cursor?: number
+  active_approval_ids?: string[]
   asr?: {
     enabled?: boolean
     configured?: boolean
@@ -398,7 +769,12 @@ export interface CoreReadyPayload {
   agent_cli?: AgentCliRuntimeStatus
   codex_runtime?: CodexRuntimeStatus
   joi_mcp?: JoiMcpStatus
+  byok?: ByokStatus
   skills?: NativeSkillManifest
+  agent_skills?: AgentSkillInstallation[]
+  game_adapters?: GameAdapterManifest[]
+  collaboration?: CollaborationSnapshot
+  characters?: CharacterListResult
   runtime_settings?: {
     asr?: {
       enabled?: boolean
@@ -424,12 +800,5 @@ export interface CoreReadyPayload {
     }
     skills?: Record<string, { enabled?: boolean }>
   }
-  character?: {
-    name?: string
-    sprites?: Array<{
-      id: string
-      label?: string
-      image_data_url?: string
-    }>
-  }
+  character?: CharacterRuntime
 }

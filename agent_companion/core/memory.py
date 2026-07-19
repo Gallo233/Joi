@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 import time
@@ -39,19 +40,38 @@ class MemoryStore:
         sensitive: bool = False,
     ) -> dict[str, Any] | None:
         cleaned = _clean_memory_text(text)
-        if not self.enabled() or not cleaned or ephemeral or sensitive or _rejection_reason(cleaned):
-            return None
         safe_kind = _safe_label(kind, "note")
         safe_source = _safe_label(source, "manual")
+        if not self.enabled() or not cleaned or ephemeral or sensitive or _retention_rejection_reason(safe_kind, cleaned, safe_source):
+            return None
+        safe_text = cleaned[:1200]
+        fingerprint = _memory_fingerprint(safe_text)
+        now = time.time()
         with sqlite3.connect(self.path) as db:
-            cursor = db.execute(
-                "insert into memories(kind, text, source, created_at, ephemeral, sensitive) values (?, ?, ?, ?, ?, ?)",
-                (safe_kind, cleaned[:1200], safe_source, time.time(), int(ephemeral), int(sensitive)),
-            )
-            memory_id = int(cursor.lastrowid)
-            self._index_memory(db, memory_id, safe_kind, cleaned[:1200])
+            duplicate = db.execute("select id from memories where fingerprint = ?", (fingerprint,)).fetchone()
+            if duplicate:
+                memory_id = int(duplicate[0])
+            else:
+                try:
+                    cursor = db.execute(
+                        """
+                        insert into memories(kind, text, source, created_at, updated_at, fingerprint, ephemeral, sensitive)
+                        values (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (safe_kind, safe_text, safe_source, now, now, fingerprint, int(ephemeral), int(sensitive)),
+                    )
+                    memory_id = int(cursor.lastrowid)
+                    self._index_memory(db, memory_id, safe_kind, safe_text)
+                except sqlite3.IntegrityError:
+                    duplicate = db.execute("select id from memories where fingerprint = ?", (fingerprint,)).fetchone()
+                    if not duplicate:
+                        raise
+                    memory_id = int(duplicate[0])
         self._rewrite_vault()
-        return self.memory(memory_id)
+        memory = self.memory(memory_id)
+        if memory is not None:
+            memory["deduplicated"] = bool(duplicate)
+        return memory
 
     def propose(
         self,
@@ -63,7 +83,9 @@ class MemoryStore:
         sensitive: bool = False,
     ) -> dict[str, Any]:
         cleaned = _clean_memory_text(text)
-        reason = _rejection_reason(cleaned)
+        safe_kind = _safe_label(kind, "note")
+        safe_source = _safe_label(source, "candidate")
+        reason = _retention_rejection_reason(safe_kind, cleaned, safe_source)
         if not self.enabled():
             return {"ok": False, "error": "memory_disabled", "reason": "disabled"}
         if not cleaned:
@@ -88,7 +110,7 @@ class MemoryStore:
                 insert into memory_candidates(kind, text, source, status, created_at, resolved_at, rejection_reason)
                 values (?, ?, ?, 'pending', ?, 0, '')
                 """,
-                (_safe_label(kind, "note"), cleaned[:1200], _safe_label(source, "candidate"), now),
+                (safe_kind, cleaned[:1200], safe_source, now),
             )
             candidate_id = int(cursor.lastrowid)
         candidate = self.candidate(candidate_id) or {}
@@ -119,10 +141,36 @@ class MemoryStore:
         self._rewrite_vault()
         return {"ok": bool(cursor.rowcount), "deleted": int(memory_id)}
 
+    def update(self, memory_id: int, *, text: str, kind: str | None = None) -> dict[str, Any]:
+        current = self.memory(memory_id)
+        if current is None:
+            return {"ok": False, "error": "memory_not_found"}
+        cleaned = _clean_memory_text(text)[:1200]
+        reason = _rejection_reason(cleaned)
+        if not cleaned or reason:
+            return {"ok": False, "error": "unsafe_memory", "reason": reason or "empty"}
+        fingerprint = _memory_fingerprint(cleaned)
+        safe_kind = _safe_label(kind or str(current.get("kind") or "note"), "note")
+        with sqlite3.connect(self.path) as db:
+            duplicate = db.execute(
+                "select id from memories where fingerprint = ? and id != ?",
+                (fingerprint, int(memory_id)),
+            ).fetchone()
+            if duplicate:
+                return {"ok": False, "error": "duplicate_memory", "duplicate_id": int(duplicate[0])}
+            db.execute(
+                "update memories set kind = ?, text = ?, fingerprint = ?, updated_at = ? where id = ?",
+                (safe_kind, cleaned, fingerprint, time.time(), int(memory_id)),
+            )
+            self._delete_memory_index(db, int(memory_id))
+            self._index_memory(db, int(memory_id), safe_kind, cleaned)
+        self._rewrite_vault()
+        return {"ok": True, "memory": self.memory(memory_id)}
+
     def memory(self, memory_id: int) -> dict[str, Any] | None:
         with sqlite3.connect(self.path) as db:
             row = db.execute(
-                "select id, kind, text, source, created_at, ephemeral, sensitive from memories where id = ?",
+                "select id, kind, text, source, created_at, updated_at, ephemeral, sensitive from memories where id = ?",
                 (int(memory_id),),
             ).fetchone()
         return _memory_row(row) if row else None
@@ -149,7 +197,34 @@ class MemoryStore:
             ).fetchall()
         return [_candidate_row(row) for row in rows]
 
-    def profile(self, *, recent_limit: int = 80, manual_limit: int = 24) -> dict[str, Any]:
+    def pending_page(self, *, offset: int = 0, limit: int = 20) -> dict[str, Any]:
+        safe_offset = max(0, int(offset or 0))
+        safe_limit = min(50, max(1, int(limit or 20)))
+        with sqlite3.connect(self.path) as db:
+            total = int(db.execute("select count(*) from memory_candidates where status = 'pending'").fetchone()[0])
+            rows = db.execute(
+                """
+                select id, kind, text, source, status, created_at, resolved_at, rejection_reason
+                from memory_candidates where status = 'pending' order by id desc limit ? offset ?
+                """,
+                (safe_limit, safe_offset),
+            ).fetchall()
+        items = [_candidate_row(row) for row in rows]
+        return {
+            "items": items,
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+            "has_more": safe_offset + len(items) < total,
+        }
+
+    def profile(
+        self,
+        *,
+        recent_limit: int = 80,
+        manual_limit: int = 24,
+        count_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.enabled():
             return {
                 "version": "joi.memory_profile.v1",
@@ -174,7 +249,8 @@ class MemoryStore:
         relationship = _profile_bucket_items(memories, manual_notes, "relationship", limit=5)
         recent_focus = _profile_bucket_items(memories, manual_notes, "recent_focus", limit=5)
         highlights = _profile_highlights(preferences, habits, relationship, recent_focus)
-        updated_at = max([float(row.get("created_at") or 0) for row in memories] or [0.0])
+        counts = count_snapshot or self.counts(manual_notes=manual_notes)
+        updated_at = max([float(row.get("updated_at") or row.get("created_at") or 0) for row in memories] or [0.0])
         return {
             "version": "joi.memory_profile.v1",
             "enabled": True,
@@ -185,9 +261,9 @@ class MemoryStore:
             "relationship": relationship,
             "recent_focus": recent_focus,
             "counts": {
-                "saved": len(memories),
-                "manual_notes": len(manual_notes),
-                "pending": len(self.pending(50)),
+                "saved": counts["saved"],
+                "manual_notes": counts["manual_notes"],
+                "pending": counts["pending"],
             },
             "updated_at": updated_at,
         }
@@ -201,10 +277,72 @@ class MemoryStore:
         where = f"where {' and '.join(filters)}" if filters else ""
         with sqlite3.connect(self.path) as db:
             rows = db.execute(
-                f"select id, kind, text, source, created_at, ephemeral, sensitive from memories {where} order by id desc limit ?",
+                f"select id, kind, text, source, created_at, updated_at, ephemeral, sensitive from memories {where} order by id desc limit ?",
                 (max(1, int(limit or 12)),),
             ).fetchall()
         return [_memory_row(row) for row in rows]
+
+    def list_memories(
+        self,
+        *,
+        query: str = "",
+        kind: str = "",
+        offset: int = 0,
+        limit: int = 20,
+        sort: str = "recent",
+    ) -> dict[str, Any]:
+        safe_offset = max(0, int(offset or 0))
+        safe_limit = min(50, max(1, int(limit or 20)))
+        clauses = ["ephemeral = 0", "sensitive = 0"]
+        params: list[Any] = []
+        safe_kind = _safe_label(kind, "") if kind else ""
+        if safe_kind:
+            clauses.append("kind = ?")
+            params.append(safe_kind)
+        terms = _recall_terms(_clean_memory_text(query))[:8]
+        for term in terms:
+            clauses.append("(lower(text) like ? or lower(kind) like ?)")
+            pattern = f"%{term.casefold()}%"
+            params.extend([pattern, pattern])
+        where = " and ".join(clauses)
+        order = {
+            "oldest": "created_at asc, id asc",
+            "kind": "kind asc, updated_at desc, id desc",
+        }.get(sort, "updated_at desc, id desc")
+        with sqlite3.connect(self.path) as db:
+            total = int(db.execute(f"select count(*) from memories where {where}", params).fetchone()[0])
+            rows = db.execute(
+                f"""
+                select id, kind, text, source, created_at, updated_at, ephemeral, sensitive
+                from memories where {where} order by {order} limit ? offset ?
+                """,
+                [*params, safe_limit, safe_offset],
+            ).fetchall()
+        items = [_memory_row(row) for row in rows]
+        return {
+            "items": items,
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+            "has_more": safe_offset + len(items) < total,
+        }
+
+    def counts(self, *, manual_notes: list[str] | None = None) -> dict[str, Any]:
+        with sqlite3.connect(self.path) as db:
+            saved = int(db.execute("select count(*) from memories where ephemeral = 0 and sensitive = 0").fetchone()[0])
+            pending = int(db.execute("select count(*) from memory_candidates where status = 'pending'").fetchone()[0])
+            updated_at = float(db.execute("select coalesce(max(updated_at), 0) from memories").fetchone()[0] or 0)
+            kind_rows = db.execute(
+                "select kind, count(*) from memories where ephemeral = 0 and sensitive = 0 group by kind order by count(*) desc"
+            ).fetchall()
+        notes = manual_notes if manual_notes is not None else self._manual_vault_notes(limit=200)
+        return {
+            "saved": saved,
+            "pending": pending,
+            "manual_notes": len(notes),
+            "updated_at": updated_at,
+            "by_kind": {str(kind): int(count) for kind, count in kind_rows},
+        }
 
     def context(self, limit: int = 8, query: str = "") -> list[dict[str, Any]]:
         if not self.enabled():
@@ -291,16 +429,18 @@ class MemoryStore:
         return self.status()
 
     def status(self, *, recent_limit: int = 8, pending_limit: int = 8) -> dict[str, Any]:
+        counts = self.counts()
         return {
             "enabled": self.enabled(),
             "vault_label": self.vault_path.name,
             "storage": "local",
             "recent": self.recent(recent_limit),
             "pending": self.pending(pending_limit),
-            "profile": self.profile(recent_limit=max(40, recent_limit * 8)),
+            "profile": self.profile(recent_limit=max(40, recent_limit * 8), count_snapshot=counts),
+            "counts": counts,
         }
 
-    def browse_vault(self, *, max_lines_per_section: int = 18) -> dict[str, Any]:
+    def browse_vault(self, *, max_lines_per_section: int = 18, include_saved: bool = True) -> dict[str, Any]:
         if not self.vault_path.is_file():
             self._rewrite_vault()
         try:
@@ -313,10 +453,13 @@ class MemoryStore:
         for raw in text.splitlines():
             line = raw.strip()
             if line.startswith("## "):
-                current = {"title": _clean_memory_text(line[3:])[:80] or "Section", "lines": []}
+                title = _clean_memory_text(line[3:])[:80] or "Section"
+                current = {"title": title, "lines": []}
                 sections.append(current)
                 continue
             if current is None or not line or line.startswith("#") or line.startswith("_"):
+                continue
+            if not include_saved and str(current.get("title") or "").casefold() == "saved memories":
                 continue
             if line.startswith("-"):
                 line = line[1:].strip()
@@ -326,7 +469,14 @@ class MemoryStore:
             lines = current.setdefault("lines", [])
             if len(lines) < max(1, int(max_lines_per_section or 18)):
                 lines.append(cleaned[:500])
-        return {"path_label": self.vault_path.name, "storage": "local", "updated_at": float(updated_at), "sections": sections}
+        sections = [section for section in sections if include_saved or section.get("title", "").casefold() != "saved memories"]
+        return {
+            "path_label": self.vault_path.name,
+            "storage": "local",
+            "updated_at": float(updated_at),
+            "sections": sections,
+            "counts": self.counts(),
+        }
 
     def clear(self) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:
@@ -345,7 +495,7 @@ class MemoryStore:
             with sqlite3.connect(self.path) as db:
                 rows = db.execute(
                     """
-                    select m.id, m.kind, m.text, m.source, m.created_at, bm25(memories_fts) as rank
+                    select m.id, m.kind, m.text, m.source, m.created_at, m.updated_at, bm25(memories_fts) as rank
                     from memories_fts
                     join memories m on m.id = memories_fts.rowid
                     where memories_fts match ?
@@ -365,9 +515,10 @@ class MemoryStore:
                 "text": text,
                 "source": source,
                 "created_at": float(created_at),
+                "updated_at": float(updated_at or created_at),
                 "relevance": max(0.0, 10.0 - float(rank or 0)),
             }
-            for memory_id, kind, text, source, created_at, rank in rows
+            for memory_id, kind, text, source, created_at, updated_at, rank in rows
         ]
 
     def _recall_by_score(self, query: str, limit: int, exclude_ids: set[int] | None = None) -> list[dict[str, Any]]:
@@ -499,6 +650,40 @@ class MemoryStore:
                 db.execute("alter table memories add column sensitive integer not null default 0")
             if "source" not in columns:
                 db.execute("alter table memories add column source text not null default 'legacy'")
+            if "updated_at" not in columns:
+                db.execute("alter table memories add column updated_at real not null default 0")
+            if "fingerprint" not in columns:
+                db.execute("alter table memories add column fingerprint text not null default ''")
+            db.execute(
+                """
+                create table if not exists memory_dedupe_archive(
+                    original_id integer not null,
+                    kind text not null,
+                    text text not null,
+                    source text not null,
+                    created_at real not null,
+                    archived_at real not null,
+                    duplicate_of integer not null,
+                    primary key(original_id)
+                )
+                """
+            )
+            db.execute(
+                """
+                create table if not exists memory_cleanup_archive(
+                    original_id integer not null,
+                    kind text not null,
+                    text text not null,
+                    source text not null,
+                    created_at real not null,
+                    archived_at real not null,
+                    reason text not null,
+                    primary key(original_id)
+                )
+                """
+            )
+            self._migrate_memory_rows(db)
+            db.execute("create unique index if not exists memories_fingerprint_unique on memories(fingerprint) where fingerprint != ''")
             try:
                 db.execute(
                     """
@@ -510,13 +695,7 @@ class MemoryStore:
                     )
                     """
                 )
-                db.execute(
-                    """
-                    insert into memories_fts(rowid, kind, text)
-                    select id, kind, text from memories
-                    where id not in (select rowid from memories_fts)
-                    """
-                )
+                db.execute("insert into memories_fts(memories_fts) values ('rebuild')")
             except Exception:
                 pass
             db.execute(
@@ -544,15 +723,58 @@ class MemoryStore:
             )
             db.execute("insert or ignore into memory_settings(key, value, updated_at) values ('enabled', '1', ?)", (time.time(),))
 
+    @staticmethod
+    def _migrate_memory_rows(db: sqlite3.Connection) -> None:
+        rows = db.execute(
+            "select id, kind, text, source, created_at, updated_at, fingerprint from memories order by id asc"
+        ).fetchall()
+        seen: dict[str, int] = {}
+        now = time.time()
+        for memory_id, kind, text, source, created_at, updated_at, stored_fingerprint in rows:
+            cleanup_reason = _retention_rejection_reason(str(kind or ""), str(text or ""), str(source or ""))
+            if cleanup_reason:
+                db.execute(
+                    """
+                    insert or ignore into memory_cleanup_archive(
+                        original_id, kind, text, source, created_at, archived_at, reason
+                    ) values (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (memory_id, kind, text, source, created_at, now, cleanup_reason),
+                )
+                db.execute("delete from memories where id = ?", (memory_id,))
+                continue
+            fingerprint = _memory_fingerprint(str(text or ""))
+            duplicate_of = seen.get(fingerprint) if fingerprint else None
+            if duplicate_of is not None:
+                db.execute(
+                    """
+                    insert or ignore into memory_dedupe_archive(
+                        original_id, kind, text, source, created_at, archived_at, duplicate_of
+                    ) values (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (memory_id, kind, text, source, created_at, now, duplicate_of),
+                )
+                db.execute("delete from memories where id = ?", (memory_id,))
+                continue
+            if fingerprint:
+                seen[fingerprint] = int(memory_id)
+            normalized_updated_at = float(updated_at or created_at or now)
+            if stored_fingerprint != fingerprint or float(updated_at or 0) <= 0:
+                db.execute(
+                    "update memories set fingerprint = ?, updated_at = ? where id = ?",
+                    (fingerprint, normalized_updated_at, memory_id),
+                )
+
 
 def _memory_row(row: tuple) -> dict[str, Any]:
-    memory_id, kind, text, source, created_at, ephemeral, sensitive = row
+    memory_id, kind, text, source, created_at, updated_at, ephemeral, sensitive = row
     return {
         "id": int(memory_id),
         "kind": kind,
         "text": text,
         "source": source,
         "created_at": float(created_at),
+        "updated_at": float(updated_at or created_at),
         "ephemeral": bool(ephemeral),
         "sensitive": bool(sensitive),
     }
@@ -708,7 +930,8 @@ def _memory_fingerprint(text: str) -> str:
     cleaned = _clean_memory_text(text).casefold()
     if not cleaned or _rejection_reason(cleaned):
         return ""
-    return re.sub(r"[\s，。,.!！?？:：;；\"'“”‘’（）()【】\[\]<>《》]+", "", cleaned)
+    normalized = re.sub(r"[\s，。,.!！?？:：;；\"'“”‘’（）()【】\[\]<>《》]+", "", cleaned)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _rejection_reason(text: str) -> str:
@@ -724,6 +947,21 @@ def _rejection_reason(text: str) -> str:
         return "internal_id_like"
     if _RAW_SCREEN_RE.search(text):
         return "raw_screen_or_log_like"
+    return ""
+
+
+def _retention_rejection_reason(kind: str, text: str, source: str) -> str:
+    reason = _rejection_reason(text)
+    if reason:
+        return reason
+    normalized_kind = (kind or "").casefold()
+    normalized_source = (source or "").casefold()
+    if normalized_kind in {"task_result", "tool_result", "execution_result", "task_outcome", "runtime_outcome"}:
+        return "operational_result"
+    if normalized_source in {"task_result", "tool_result"}:
+        return "operational_result"
+    if re.match(r"^(?:companion_chat|coding|game_assist|task_result)\s*[:：]", text, re.IGNORECASE):
+        return "assistant_replay"
     return ""
 
 
