@@ -181,7 +181,10 @@ class DesktopWorkflowTool(ToolAdapter):
 
 
 def _is_macos_backend(backend: ComputerUseBackend) -> bool:
-    return sys.platform == "darwin" and backend.__class__.__name__ in {"MacComputerUseBackend", "CuaDriverBackend"}
+    # The CUA driver may be wrapped for safe native fallback, so look through
+    # the wrapper rather than at the outermost class name.
+    underlying = getattr(backend, "primary", backend)
+    return sys.platform == "darwin" and underlying.__class__.__name__ in {"MacComputerUseBackend", "CuaDriverBackend"}
 
 
 def _open_app_actions(app: str, *, mac_backend: bool = False) -> list[ComputerAction]:

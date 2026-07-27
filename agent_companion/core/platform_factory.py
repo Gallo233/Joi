@@ -21,15 +21,24 @@ def get_computer_backend(
     """Instantiate the dynamic computer use automation backend for the current platform."""
     if driver == "cua":
         from agent_companion.core.computer_use.cua_driver import CuaDriverBackend
+        from agent_companion.core.computer_use.driver_fallback import FallbackComputerUseBackend
 
-        return CuaDriverBackend(workspace, session_id=session_id)
+        # CUA is optional, so a session using it keeps the native driver in
+        # reserve -- but only reaches for it when the failed call provably
+        # never touched the application (see driver_fallback).
+        return FallbackComputerUseBackend(
+            CuaDriverBackend(workspace, session_id=session_id),
+            lambda: _native_computer_backend(workspace, observer),
+        )
+    return _native_computer_backend(workspace, observer)
+
+
+def _native_computer_backend(workspace: Path, observer: VisionObserver | None = None) -> ComputerUseBackend:
     if sys.platform == "win32":
         from agent_companion.core.computer_use.windows import WindowsComputerUseBackend
         return WindowsComputerUseBackend(workspace, observer)
-    else:
-        from agent_companion.core.computer_use.mac import MacComputerUseBackend
-        observer = observer or get_screen_observer(workspace)
-        return MacComputerUseBackend(workspace, observer)
+    from agent_companion.core.computer_use.mac import MacComputerUseBackend
+    return MacComputerUseBackend(workspace, observer or get_screen_observer(workspace))
 
 
 def get_screen_observer(workspace: Path) -> VisionObserver:
