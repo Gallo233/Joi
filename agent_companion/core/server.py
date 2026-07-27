@@ -25,6 +25,7 @@ from agent_companion.core.action_intent import ActionIntent, request_signals
 from agent_companion.core.capability_orchestrator import ComputerUseOrchestrator
 from agent_companion.core.run_coordinator import RunCoordinator
 from agent_companion.core.run_journal import StoreRunJournal
+from agent_companion.core.vision.target_evidence import TargetEvidence, evaluate_evidence
 from agent_companion.core.collaboration_store import CollaborationStore, DEFAULT_PROJECT_ID, DEFAULT_THREAD_ID
 from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.codex_runtime import CodexRuntimeSession
@@ -212,7 +213,7 @@ class JsonRpcBridge:
             return PolicyDecision(risk, True, False, "委托模式在本次 Joi 启动期间持续执行。")
         permission = self.collaboration.permission_for_session(session_id)
         scope = permission.get("scope") if isinstance(permission.get("scope"), dict) else {}
-        if not _request_within_bound_scope(request, scope):
+        if not _request_within_bound_scope(request, scope, self.app.current_target_evidence()):
             return PolicyDecision(risk, False, True, "这一步超出项目绑定范围，需要确认扩权。")
         return PolicyDecision(risk, True, False, f"{profile} 模式在项目绑定范围内自动执行。")
 
@@ -2031,7 +2032,7 @@ def _sensitive_request_signals(request: ToolRequest) -> list[str]:
     return [request.name, *request_signals(request)]
 
 
-def _request_within_bound_scope(request: ToolRequest, scope: dict[str, Any]) -> bool:
+def _request_within_bound_scope(request: ToolRequest, scope: dict[str, Any], evidence: TargetEvidence | None = None) -> bool:
     directories = [str(item) for item in scope.get("directory", []) if str(item)]
     applications = [str(item).casefold() for item in scope.get("application", []) if str(item)]
     domains = [str(item).casefold().lstrip(".") for item in scope.get("domain", []) if str(item)]
@@ -2060,10 +2061,34 @@ def _request_within_bound_scope(request: ToolRequest, scope: dict[str, Any]) -> 
             except (OSError, ValueError):
                 continue
         return False
-    # Coordinate, keyboard and DOM actions target the currently selected view.
-    # They are auto-authorized only when the project has at least one explicit
-    # binding; changing focus outside it is caught by post-action verification.
-    return bool(directories or applications or domains or games)
+    # Coordinate, keyboard and DOM actions name nothing in their arguments, so
+    # the only thing that can place them inside the binding is the evidence
+    # gathered when the target was resolved. "The project has some binding" is
+    # not evidence about *this* action, and waiting for post-action focus drift
+    # to notice means the click already happened (TDD §9.1).
+    if evidence is None:
+        return False
+    if not evaluate_evidence(evidence, evidence.identity).usable:
+        return False
+    observed_app = str(evidence.identity.app_id or "").strip().casefold()
+    if observed_app and any(observed_app == app or observed_app in app or app in observed_app for app in applications):
+        return True
+    observed_domain = str(evidence.domain or "").strip().casefold().lstrip(".")
+    if observed_domain and any(observed_domain == domain or observed_domain.endswith("." + domain) for domain in domains):
+        return True
+    observed_path = str(evidence.path or "").strip()
+    if observed_path:
+        try:
+            resolved = Path(observed_path).expanduser().resolve()
+        except OSError:
+            return False
+        for directory in directories:
+            try:
+                resolved.relative_to(Path(directory).expanduser().resolve())
+                return True
+            except (OSError, ValueError):
+                continue
+    return False
 
 
 def _event_applied_runtime_config(event: AgentEvent) -> bool:

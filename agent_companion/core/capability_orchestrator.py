@@ -123,7 +123,7 @@ class ComputerUseOrchestrator:
                 "after_summary": event.display_card.summary,
                 "verification": verification,
                 "duration_ms": _duration_ms(state),
-                "status": "completed" if event.type == EventType.TOOL_COMPLETED else "failed",
+                "status": _receipt_status(event, verification, computer),
             },
         )
         runtime = self._runtime.setdefault(session_id, SessionRuntime(session_id))
@@ -182,6 +182,20 @@ def _cua_available() -> bool:
         return CuaDriverBackend.available()
     except Exception:
         return False
+
+
+def _receipt_status(event: AgentEvent, verification: dict[str, Any], computer: dict[str, Any]) -> str:
+    """A tool returning ok is not evidence that the world changed.
+
+    Without an observation taken after the action there is nothing to compare
+    against, so the receipt says `unverified` rather than `completed`. Claiming
+    success Joi cannot demonstrate is the failure mode this whole pipeline
+    exists to prevent (TDD §9.4).
+    """
+    if event.type is EventType.TOOL_FAILED:
+        return "failed"
+    observed_after = bool(verification) or bool(computer.get("after_artifact")) or bool(computer.get("observation"))
+    return "completed" if observed_after else "unverified"
 
 
 def _failure_count(receipts: list[dict[str, Any]]) -> int:

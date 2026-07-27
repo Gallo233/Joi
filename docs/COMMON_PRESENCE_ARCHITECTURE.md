@@ -89,6 +89,28 @@
 
 `tests/test_run_lifecycle.py` 覆盖 TDD Phase 1 的全部退出条件：crash-before-act、act-before-receipt、duplicate-resume、过期/指纹不符/scope 变更、同 thread 拒绝第二个 run、跨 thread 身份不串线、并发审批只能有一个赢家。
 
+## 坐标信任与目标证据
+
+原实现把三个坐标空间压成一个：用**主显示器**宽度除截图宽度得到一个全局 scale，套用到所有显示器。单显示器下恰好正确；接上第二块屏后，副屏窗口的裁剪框会落错位置，clamp 又会把错误伪装成"回退到全屏"——Joi 于是在看主屏、点副屏。
+
+`vision/capture_geometry.py` 把它拆开：
+
+- **logical**：全局桌面点坐标，左侧/上方的显示器原点为负；
+- **pixel**：单个显示器的 backing store，Retina 笔记本与 1x 外接屏同一时刻有两个不同 scale；
+- **capture**：截图图像内的偏移，原点是被截取的矩形而非桌面。
+
+scale 是**显示器的属性，不是会话的属性**。窗口归属按最大重叠面积判定（跨屏窗口的左上角可能属于邻屏）。无法测量布局时返回 `trusted=False` 而不是猜——没装 PyObjC 但检测到多显示器，就明确报告"知道不止一块屏，但不知道它们在哪"。
+
+`vision/target_evidence.py` 定义 `TargetEvidence`：坐标不是目标，而是"某个目标在某块屏、某个窗口、某张截图、某个时刻"被识别后派生出来的东西。证据携带 `CaptureIdentity`（display 布局 digest、display_id、window_id、app_id、scale、capture digest），并在动作前重新校验。以下任一变化即失效并要求重新观察：显示器增减/移动/改 scale、窗口切换、应用切换、截图内容变化、TTL 过期。
+
+视觉/OCR/坐标来源的目标**永远不能自动执行**——像素能看出一个像按钮的东西，但只有应用 API 或 Accessibility 能确认它就是用户说的那个。歧义、低置信度、不可点击/禁用同样要求用户选择。
+
+## 绑定范围证明与回执
+
+坐标、键盘和 DOM 动作的参数里不含任何可识别对象，因此"项目存在任意 binding"不再构成授权证据（这是原先的漏洞）。`collaborate` 自动执行现在要求当前 `TargetEvidence` 的 `app_id`/`domain`/`path` 与某条绑定匹配，且证据本身仍然有效。没有证据 → 走审批，而不是等动作后的 focus drift 才发现越界。
+
+回执方面：工具返回 ok 不等于外部世界真的变了。没有动作后观察就没有可比对的东西，回执状态记为 `unverified` 而非 `completed`。
+
 ## Computer Use
 
 感知顺序固定为应用 API/DOM、Accessibility、OCR/视觉、坐标兜底。动作改变外部状态后必须再次观察，并生成 `ActionReceipt`。连续无变化、观察签名循环或焦点漂移会暂停会话；步骤、时间、模型调用和失败次数均有预算。

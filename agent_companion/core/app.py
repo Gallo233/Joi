@@ -38,6 +38,7 @@ from agent_companion.core.planner import build_plan
 from agent_companion.core.action_intent import ActionIntent
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.run_journal import RunJournal
+from agent_companion.core.vision.target_evidence import TargetEvidence
 from agent_companion.core.runtime import build_tool_registry
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.skill_manifest import annotate_agent_state_with_skill, skill_boundaries_for_plan, skill_boundary_for_tool
@@ -103,6 +104,7 @@ class AgentCompanionApp:
         # No-op until the server injects the store-backed journal; see run_journal.
         self.run_journal: RunJournal = RunJournal()
         self._plan_runs: dict[str, str] = {}
+        self._target_evidence: TargetEvidence | None = None
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
@@ -317,6 +319,21 @@ class AgentCompanionApp:
 
     def set_run_journal(self, journal: RunJournal) -> None:
         self.run_journal = journal
+
+    def set_target_evidence(self, evidence: TargetEvidence | None) -> None:
+        """Record what the last resolved target was, and under what conditions."""
+        self._target_evidence = evidence
+
+    def current_target_evidence(self) -> TargetEvidence | None:
+        """The evidence policy may use to place a coordinate action in scope.
+
+        Returned only while it is still current: stale or superseded evidence
+        must send the step to approval rather than quietly authorize it.
+        """
+        evidence = self._target_evidence
+        if evidence is None or evidence.expired():
+            return None
+        return evidence
 
     def set_session_authorizer(self, authorizer: Any) -> None:
         self._session_authorizer = authorizer

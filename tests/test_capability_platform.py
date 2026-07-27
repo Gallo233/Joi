@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +11,24 @@ from agent_companion.core.capability_orchestrator import ComputerUseOrchestrator
 from agent_companion.core.collaboration_store import CollaborationStore
 from agent_companion.core.game_adapters import GameAdapterRegistry
 from agent_companion.core.ok_ww import ok_ww_runner_path, ok_ww_setup_hint
+from agent_companion.core.vision.target_evidence import CaptureIdentity, TargetEvidence
+
+
+def _evidence(*, app_id: str = "", domain: str = "", path: str = "", source: str = "accessibility", geometry_trusted: bool = True, observed_at: float | None = None) -> TargetEvidence:
+    """Evidence that is current and actionable unless a test says otherwise."""
+    return TargetEvidence(
+        target_id="t-1",
+        label="下一页",
+        source=source,
+        confidence=0.9,
+        identity=CaptureIdentity(display_id="1", window_id="w-1", app_id=app_id, scale=2.0, capture_digest="cap-1", geometry_trusted=geometry_trusted),
+        clickable=True,
+        enabled=True,
+        logical_bounds=(10, 10, 40, 30),
+        domain=domain,
+        path=path,
+        observed_at=time.time() if observed_at is None else observed_at,
+    )
 from agent_companion.core.scene_session import SceneSession
 from agent_companion.core.schemas import AgentEvent, DisplayCard, EventType, ToolRequest, VoiceLine
 from agent_companion.core.action_intent import ActionIntent, EffectKind
@@ -52,6 +71,62 @@ class CapabilityPlatformTests(unittest.TestCase):
         self.assertTrue(_request_within_bound_scope(ToolRequest("computer.open_app", {"app_name": "Safari"}), scope))
         self.assertTrue(_request_within_bound_scope(ToolRequest("computer.workflow", {"url": "https://docs.example.com/a"}), scope))
         self.assertFalse(_request_within_bound_scope(ToolRequest("computer.workflow", {"url": "https://unbound.test"}), scope))
+
+    def test_a_coordinate_click_needs_evidence_not_merely_some_binding(self) -> None:
+        scope = {"directory": [str(self.workspace)], "application": ["Safari"], "domain": ["example.com"], "game": []}
+        click = ToolRequest("computer.click", {"x": 10, "y": 20}, "点击候选目标：下一页")
+
+        # The arguments name nothing, so without evidence the step cannot be
+        # placed inside the binding and must go to approval.
+        self.assertFalse(_request_within_bound_scope(click, scope, None))
+
+        in_scope = _evidence(app_id="Safari")
+        self.assertTrue(_request_within_bound_scope(click, scope, in_scope))
+
+        # Same click, evidence gathered in an application nobody bound.
+        self.assertFalse(_request_within_bound_scope(click, scope, _evidence(app_id="Mail")))
+
+    def test_evidence_that_is_no_longer_current_does_not_authorize(self) -> None:
+        scope = {"application": ["Safari"]}
+        click = ToolRequest("computer.click", {"x": 10, "y": 20}, "点击")
+        self.assertFalse(_request_within_bound_scope(click, scope, _evidence(app_id="Safari", observed_at=time.time() - 600)))
+        self.assertFalse(_request_within_bound_scope(click, scope, _evidence(app_id="Safari", source="vision")))
+        self.assertFalse(_request_within_bound_scope(click, scope, _evidence(app_id="Safari", geometry_trusted=False)))
+
+    def test_bound_domain_and_directory_also_place_a_click_in_scope(self) -> None:
+        scope = {"domain": ["example.com"], "directory": [str(self.workspace)]}
+        click = ToolRequest("computer.click", {"x": 1, "y": 1}, "点击")
+        self.assertTrue(_request_within_bound_scope(click, scope, _evidence(domain="docs.example.com")))
+        self.assertTrue(_request_within_bound_scope(click, scope, _evidence(path=str(self.workspace / "notes.md"))))
+        self.assertFalse(_request_within_bound_scope(click, scope, _evidence(domain="unbound.test")))
+
+    def test_an_action_without_an_after_observation_is_not_completed(self) -> None:
+        session = self.store.start_session("computer_use", "点击", "collaborate")["session"]
+        orchestrator = ComputerUseOrchestrator(self.workspace, self.store)
+
+        blind = AgentEvent(
+            EventType.TOOL_COMPLETED,
+            "task-blind",
+            DisplayCard("电脑操作", "已点击"),
+            VoiceLine(""),
+            {"tool": "computer.click", "computer_use": {"before_title": "Safari"}},
+        )
+        orchestrator.record_tool_event(session["id"], blind)
+        self.assertEqual(self.store.list_receipts(session["id"])[-1]["status"], "unverified")
+
+        observed = AgentEvent(
+            EventType.TOOL_COMPLETED,
+            "task-observed",
+            DisplayCard("电脑操作", "已点击"),
+            VoiceLine(""),
+            {
+                "tool": "computer.click",
+                "computer_use": {"before_title": "Safari", "observation": {"title": "Safari", "width": 100, "height": 100}},
+                "post_action_verification": {"status": "changed"},
+            },
+        )
+        orchestrator.record_tool_event(session["id"], observed)
+        self.assertEqual(self.store.list_receipts(session["id"])[-1]["status"], "completed")
 
     def test_effect_kind_comes_from_the_tool_not_its_wording(self) -> None:
         # Typed red lines hold regardless of how the step is described.
