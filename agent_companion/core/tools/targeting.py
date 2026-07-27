@@ -451,6 +451,10 @@ def _screen_center_from_values(
     screen_origin_y = _int_value(rect.get("screen_y"))
     if observation_width <= 0 or observation_height <= 0 or rect_width is None or rect_height is None or screen_origin_x is None or screen_origin_y is None:
         return None
+    if rect.get("geometry_trusted") is False:
+        # The capture could not be tied to a measured display, so any point
+        # derived from it would be a guess about which screen it lands on.
+        return None
     scale_x = _positive_float(rect.get("scale_x")) or observation_width / rect_width
     scale_y = _positive_float(rect.get("scale_y")) or observation_height / rect_height
     if scale_x <= 0 or scale_y <= 0:

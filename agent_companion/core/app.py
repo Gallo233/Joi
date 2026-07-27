@@ -38,7 +38,7 @@ from agent_companion.core.planner import build_plan
 from agent_companion.core.action_intent import ActionIntent
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.run_journal import RunJournal
-from agent_companion.core.vision.target_evidence import TargetEvidence
+from agent_companion.core.vision.target_evidence import TargetEvidence, evidence_from_tool_state
 from agent_companion.core.runtime import build_tool_registry
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.skill_manifest import annotate_agent_state_with_skill, skill_boundaries_for_plan, skill_boundary_for_tool
@@ -711,12 +711,28 @@ class AgentCompanionApp:
         }
 
     def _process_tool_result(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
+        self._record_target_evidence(result)
         self._record_semantic_selection(plan, result)
         self._attach_result_audit(plan, step, result)
         self._emit_result(plan.task_id, result, plan.user_text)
         self._record_watch_context(plan, step, result)
         self._record_desktop_context(plan, step, result)
         self._record_result_memory_candidate(plan, step, result)
+
+    def _record_target_evidence(self, result: ToolResult) -> None:
+        """Keep the evidence a targeting step produced, and drop it once acted on.
+
+        A resolved target authorizes the click that follows it, not every later
+        click: leaving it in place would let one confirmed target vouch for
+        whatever the plan does next.
+        """
+        state = result.agent_state if isinstance(result.agent_state, dict) else {}
+        tool = str(state.get("tool") or "")
+        evidence = evidence_from_tool_state(state)
+        if evidence is not None:
+            self.set_target_evidence(evidence)
+        elif tool.startswith("computer.") or tool.startswith("browser."):
+            self.set_target_evidence(None)
 
     def _finish_plan(self, plan: AgentPlan, final_ok: bool, approved_step: PendingStep | None) -> None:
         run_id = self._plan_runs.pop(plan.task_id, "")

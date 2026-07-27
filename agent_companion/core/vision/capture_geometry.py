@@ -27,7 +27,8 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import subprocess
-from typing import Any, Iterable, Sequence
+import time
+from typing import Any, Iterable
 
 
 Rect = tuple[int, int, int, int]  # x, y, width, height
@@ -44,6 +45,9 @@ class DisplayInfo:
     height: int
     backing_scale: float = 1.0
     is_main: bool = False
+    # 1-based position in the active display list, which is what
+    # `screencapture -D` expects. 0 means "unknown, capture the main display".
+    capture_index: int = 0
 
     @property
     def bounds(self) -> Rect:
@@ -69,6 +73,7 @@ class DisplayInfo:
             "height": self.height,
             "backing_scale": round(float(self.backing_scale), 4),
             "is_main": self.is_main,
+            "capture_index": self.capture_index,
         }
 
 
@@ -250,7 +255,7 @@ def _probe_via_quartz() -> DisplayLayout | None:
             return None
         main_id = Quartz.CGMainDisplayID()
         displays: list[DisplayInfo] = []
-        for display_id in display_ids:
+        for index, display_id in enumerate(display_ids, start=1):
             bounds = Quartz.CGDisplayBounds(display_id)
             mode = Quartz.CGDisplayCopyDisplayMode(display_id)
             logical_width = int(bounds.size.width) or 1
@@ -264,6 +269,7 @@ def _probe_via_quartz() -> DisplayLayout | None:
                     height=int(bounds.size.height) or 1,
                     backing_scale=round(pixel_width / logical_width, 4) if logical_width else 1.0,
                     is_main=display_id == main_id,
+                    capture_index=index,
                 )
             )
         return DisplayLayout(tuple(displays), trusted=bool(displays), source="quartz")
@@ -323,3 +329,32 @@ def _count_displays(nodes: Any) -> int:
 def layout_from_displays(displays: Iterable[DisplayInfo], *, trusted: bool = True, source: str = "explicit") -> DisplayLayout:
     """Build a layout directly -- used by tests and by injected probes."""
     return DisplayLayout(tuple(displays), trusted=trusted, source=source)
+
+
+class DisplayLayoutCache:
+    """Re-probes the arrangement, but not on every single screenshot.
+
+    The Quartz path is cheap; the fallback shells out to `system_profiler` and
+    costs about a second, which is far too slow per observation. A short TTL
+    keeps observation responsive while still noticing a display being plugged
+    in within a few seconds -- and evidence carries the layout digest, so a
+    change that slips through the window invalidates the target rather than
+    producing a stale coordinate.
+    """
+
+    def __init__(self, ttl_seconds: float = 5.0, prober: Any = None) -> None:
+        self.ttl_seconds = max(0.0, float(ttl_seconds))
+        self._prober = prober or probe_display_layout
+        self._layout: DisplayLayout | None = None
+        self._probed_at = 0.0
+
+    def get(self, now: float | None = None, *, force: bool = False) -> DisplayLayout:
+        moment = time.time() if now is None else float(now)
+        if force or self._layout is None or moment - self._probed_at >= self.ttl_seconds:
+            self._layout = self._prober()
+            self._probed_at = moment
+        return self._layout
+
+    def invalidate(self) -> None:
+        self._layout = None
+        self._probed_at = 0.0

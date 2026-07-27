@@ -12,6 +12,7 @@ from agent_companion.core.vision.target_evidence import (
     TargetEvidence,
     evaluate_evidence,
     evidence_from_capture,
+    evidence_from_tool_state,
     strongest_source,
 )
 
@@ -123,6 +124,69 @@ class EvidenceDerivationTests(unittest.TestCase):
         self.assertEqual(first.evidence_digest, same.evidence_digest)
         self.assertNotEqual(first.evidence_digest, moved.evidence_digest)
         self.assertNotEqual(first.evidence_digest, elsewhere.evidence_digest)
+
+
+class EvidenceFromToolStateTests(unittest.TestCase):
+    """The producer side: targeting output becomes evidence policy can use."""
+
+    def _state(self, **overrides) -> dict:
+        capture_rect = {
+            "screen_x": 100,
+            "screen_y": 50,
+            "width": 400,
+            "height": 300,
+            "capture_scale": 2.0,
+            "display_id": "1",
+            "display_layout_digest": "sha256:layout-a",
+            "geometry_trusted": True,
+        }
+        capture_rect.update(overrides.pop("capture_rect", {}))
+        state = {
+            "tool": "vision.resolve_target",
+            "observation": {
+                "title": "Safari",
+                "window_handle": 42,
+                "screenshot_rel": "data/shot.png",
+                "created_at": time.time(),
+                "capture_rect": capture_rect,
+            },
+            "target_candidate": {
+                "label": "下一页",
+                "source": "accessibility",
+                "confidence": 0.91,
+                "ambiguity": "none",
+                "clickable": True,
+                "enabled": True,
+                "role": "button",
+                "screen_bbox": [200, 120, 260, 150],
+            },
+        }
+        state.update(overrides)
+        return state
+
+    def test_a_resolved_target_becomes_usable_evidence(self) -> None:
+        evidence = evidence_from_tool_state(self._state())
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence.label, "下一页")
+        self.assertEqual(evidence.identity.app_id, "Safari")
+        self.assertEqual(evidence.identity.window_id, "42")
+        self.assertEqual(evidence.logical_bounds, (200, 120, 260, 150))
+        self.assertTrue(evaluate_evidence(evidence, evidence.identity).usable)
+
+    def test_untrusted_capture_produces_evidence_that_cannot_be_acted_on(self) -> None:
+        evidence = evidence_from_tool_state(self._state(capture_rect={"geometry_trusted": False}))
+        self.assertFalse(evidence.identity.geometry_trusted)
+        self.assertEqual(evaluate_evidence(evidence, evidence.identity).reason, "geometry_untrusted")
+
+    def test_multiple_candidates_are_reported_as_alternatives(self) -> None:
+        evidence = evidence_from_tool_state(self._state(target_candidates=[{"label": "a"}, {"label": "b"}, {"label": "c"}]))
+        self.assertEqual(evidence.alternatives, 2)
+        self.assertTrue(evaluate_evidence(evidence, evidence.identity).requires_selection)
+
+    def test_state_without_a_located_target_yields_nothing(self) -> None:
+        self.assertIsNone(evidence_from_tool_state({}))
+        self.assertIsNone(evidence_from_tool_state({"tool": "computer.click"}))
+        self.assertIsNone(evidence_from_tool_state(self._state(target_candidate=None)))
 
 
 class PerceptionPriorityTests(unittest.TestCase):

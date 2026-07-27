@@ -105,6 +105,12 @@ scale 是**显示器的属性，不是会话的属性**。窗口归属按最大�
 
 视觉/OCR/坐标来源的目标**永远不能自动执行**——像素能看出一个像按钮的东西，但只有应用 API 或 Accessibility 能确认它就是用户说的那个。歧义、低置信度、不可点击/禁用同样要求用户选择。
 
+模型已接入实际链路：`vision/mac.py` 的截图按窗口所在显示器调用 `screencapture -D <index>`（`screencapture` 一次只写一块屏，从主屏图像里裁副屏窗口无论 scale 多准都是错的），裁剪前先减去该显示器的原点，scale 取该显示器自己的 `backing_scale`。被 clamp 掉的裁剪不再当作"窗口的一个较小视图"——那是另一张图，会连同 `geometry_trusted=False` 一起上报。`CaptureRect` 因此新增 `display_id / display_layout_digest / geometry_trusted`，`targeting.py` 在 `geometry_trusted=False` 时拒绝产出点击坐标。
+
+`DisplayLayoutCache` 给探测加了 5 秒 TTL：Quartz 路径很便宜，但无 PyObjC 时要 shell 出去跑 `system_profiler`（约 1 秒），每次观察都跑不可接受。漏进这个窗口的布局变化由证据里的 layout digest 兜底。
+
+证据的生产者是 `app._record_target_evidence()`：从 targeting 工具已有的 `agent_state` 里读（因此 `targeting.py` 不需要反向依赖证据模块）。目标定位产生的证据只为紧随其后的那次点击背书——`computer.*`/`browser.*` 执行后即清除，否则一次确认过的目标会替计划后面的任意点击担保。
+
 ## 绑定范围证明与回执
 
 坐标、键盘和 DOM 动作的参数里不含任何可识别对象，因此"项目存在任意 binding"不再构成授权证据（这是原先的漏洞）。`collaborate` 自动执行现在要求当前 `TargetEvidence` 的 `app_id`/`domain`/`path` 与某条绑定匹配，且证据本身仍然有效。没有证据 → 走审批，而不是等动作后的 focus drift 才发现越界。

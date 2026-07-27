@@ -204,6 +204,50 @@ def strongest_source(sources: Any) -> str:
     return ""
 
 
+def evidence_from_tool_state(state: dict[str, Any], *, ttl_seconds: float = DEFAULT_EVIDENCE_TTL_SECONDS) -> TargetEvidence | None:
+    """Read evidence out of a targeting tool's agent_state.
+
+    The targeting tools already publish the candidate and the observation it
+    came from; this reads that rather than making them depend on this module.
+    Returns None when the state does not describe a located target, so callers
+    fall through to "no evidence" instead of a half-populated one.
+    """
+    if not isinstance(state, dict):
+        return None
+    candidate = state.get("target_candidate")
+    observation = state.get("observation")
+    if not isinstance(candidate, dict) or not isinstance(observation, dict):
+        return None
+    rect = observation.get("capture_rect") if isinstance(observation.get("capture_rect"), dict) else {}
+    screen_bbox = candidate.get("screen_bbox")
+    bounds = tuple(int(value) for value in screen_bbox) if isinstance(screen_bbox, (list, tuple)) and len(screen_bbox) == 4 else None
+    identity = CaptureIdentity(
+        display_layout_digest=str(rect.get("display_layout_digest") or ""),
+        display_id=str(rect.get("display_id") or ""),
+        window_id=str(observation.get("window_handle") or ""),
+        app_id=str(observation.get("title") or ""),
+        scale=float(rect.get("capture_scale") or 1.0),
+        capture_digest=str(observation.get("screenshot_rel") or ""),
+        geometry_trusted=rect.get("geometry_trusted") is not False,
+    )
+    alternatives = state.get("target_candidates")
+    return TargetEvidence(
+        target_id=str(candidate.get("target_id") or candidate.get("label") or "target"),
+        label=str(candidate.get("label") or ""),
+        source=str(candidate.get("source") or "coordinate"),
+        confidence=float(candidate.get("confidence") or 0.0),
+        identity=identity,
+        role=str(candidate.get("role") or ""),
+        ambiguity=str(candidate.get("ambiguity") or "none"),
+        clickable=candidate.get("clickable"),
+        enabled=candidate.get("enabled"),
+        logical_bounds=bounds,
+        observed_at=float(observation.get("created_at") or time.time()),
+        ttl_seconds=ttl_seconds,
+        alternatives=max(0, len(alternatives) - 1) if isinstance(alternatives, list) else 0,
+    )
+
+
 def evidence_from_capture(
     target_id: str,
     label: str,
