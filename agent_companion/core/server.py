@@ -7,6 +7,7 @@ import functools
 import http.server
 import json
 import mimetypes
+import os
 import subprocess
 import sys
 import threading
@@ -20,7 +21,10 @@ from agent_companion.core.agent_skills import AgentSkillError, AgentSkillService
 from agent_companion.core.app import AgentCompanionApp
 from agent_companion.core.byok import ByokService
 from agent_companion.core.character_packages import CharacterPackageError
+from agent_companion.core.action_intent import ActionIntent, request_signals
 from agent_companion.core.capability_orchestrator import ComputerUseOrchestrator
+from agent_companion.core.run_coordinator import RunCoordinator
+from agent_companion.core.run_journal import StoreRunJournal
 from agent_companion.core.collaboration_store import CollaborationStore, DEFAULT_PROJECT_ID, DEFAULT_THREAD_ID
 from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.codex_runtime import CodexRuntimeSession
@@ -62,6 +66,9 @@ SPEAKABLE_EVENTS = {
     EventType.TASK_FAILED,
 }
 
+JOI_CORE_PRODUCT = "joi-core"
+JOI_CORE_PROTOCOL_VERSION = 1
+
 
 class JsonRpcBridge:
     def __init__(
@@ -72,11 +79,19 @@ class JsonRpcBridge:
         asr_provider: SpeechInputProvider | None = None,
         asr_state: AsrRuntimeState | None = None,
         allow_mock_asr: bool = False,
+        session_token: str = "",
+        instance_id: str = "",
+        ready_file: Path | None = None,
+        parent_pid: int = 0,
     ) -> None:
         self.workspace = workspace.resolve()
         self.host = host
         self.port = port
         self.asset_port = port + 1
+        self.session_token = session_token.strip()
+        self.instance_id = instance_id.strip() or f"core-{uuid.uuid4().hex}"
+        self.ready_file = ready_file.expanduser().resolve() if ready_file else None
+        self.parent_pid = max(0, int(parent_pid or 0))
         self._asset_server: http.server.ThreadingHTTPServer | None = None
         self._asset_thread: threading.Thread | None = None
         self.app = AgentCompanionApp(self.workspace)
@@ -110,8 +125,9 @@ class JsonRpcBridge:
         self.clients: set[Any] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.queue: asyncio.Queue[AgentEvent] | None = None
-        self._command_lock = threading.Lock()
-        self._command_sequence = 0
+        # Serialization is per conversation, not global -- see RunCoordinator.
+        self.run_coordinator = RunCoordinator(self.collaboration.runs)
+        self.app.set_run_journal(StoreRunJournal(self.collaboration.runs, self.run_coordinator, self.collaboration.context))
         self.agent_cli_takeover: dict[str, Any] = {
             "enabled": False,
             "mode": "byok",
@@ -141,15 +157,24 @@ class JsonRpcBridge:
         try:
             async with websockets.serve(self._client_handler, self.host, self.port):
                 print(f"Joi Core listening on ws://{self.host}:{self.port}")
+                self._write_ready_file()
                 pump = asyncio.create_task(self._event_pump())
                 try:
-                    await asyncio.Future()
+                    if self.parent_pid > 1:
+                        await self._wait_for_parent_exit()
+                    else:
+                        await asyncio.Future()
                 finally:
                     self.watch_loop.stop(emit=False)
                     pump.cancel()
                     self.tts.shutdown()
         finally:
             self._stop_character_asset_server()
+            self._remove_ready_file()
+
+    async def _wait_for_parent_exit(self) -> None:
+        while _process_is_alive(self.parent_pid):
+            await asyncio.sleep(1.0)
 
     def _on_event(self, event: AgentEvent) -> None:
         if self.loop is None or self.queue is None:
@@ -166,11 +191,25 @@ class JsonRpcBridge:
             return None
         if session.get("state") != "running":
             return PolicyDecision(risk, False, True, "当前能力会话已暂停，请先继续或由你接管。")
-        if _is_always_sensitive_request(request):
-            return PolicyDecision(risk, False, True, "敏感操作始终需要这一次明确确认。")
-        profile = str(session.get("permission_profile") or "observe")
-        if profile == "observe":
+        intent = ActionIntent.from_request(request)
+        verdict = self.collaboration.action_allowed(
+            session_id,
+            request.name,
+            risk.value,
+            signals=_sensitive_request_signals(request),
+            effect_kind=intent.effect_kind.value,
+        )
+        if verdict.get("reason") == "sensitive_action":
+            label = _SENSITIVE_ACTION_LABELS.get(str(verdict.get("sensitive_action") or ""), "敏感操作")
+            return PolicyDecision(risk, False, True, f"这一步看起来涉及{label}，始终需要这一次明确确认。")
+        if not verdict.get("allowed"):
+            if verdict.get("reason") == "delegate_launch_expired":
+                return PolicyDecision(risk, False, True, "这次委托是给上一次启动的 Joi 的，重启后需要你再确认一次。")
             return PolicyDecision(risk, False, True, "观察模式不能改变外部状态，可切换到协作后继续。")
+        profile = str(session.get("permission_profile") or "observe")
+        if not verdict.get("scope_bound"):
+            # delegate: bounded by this Joi launch rather than by project bindings.
+            return PolicyDecision(risk, True, False, "委托模式在本次 Joi 启动期间持续执行。")
         permission = self.collaboration.permission_for_session(session_id)
         scope = permission.get("scope") if isinstance(permission.get("scope"), dict) else {}
         if not _request_within_bound_scope(request, scope):
@@ -189,9 +228,18 @@ class JsonRpcBridge:
         self.capability_orchestrator.record_tool_event(session_id, event)
 
     async def _client_handler(self, websocket: Any) -> None:
+        if self.session_token and _websocket_session_token(websocket) != self.session_token:
+            await websocket.close(code=4401, reason="joi_core_auth_required")
+            return
         self.clients.add(websocket)
         try:
-            await websocket.send(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
+            ready_payload = await asyncio.to_thread(self._ready_payload)
+            await websocket.send(
+                json.dumps(
+                    {"jsonrpc": "2.0", "method": "core.ready", "params": ready_payload},
+                    ensure_ascii=False,
+                )
+            )
             async for raw in websocket:
                 await self._handle_message(websocket, raw)
         except Exception:
@@ -219,6 +267,8 @@ class JsonRpcBridge:
 
     def _build_rpc_router(self) -> JsonRpcRouter:
         router = JsonRpcRouter()
+        router.register("core.livez", lambda _: self._health_payload(ready=False))
+        router.register("core.readyz", lambda _: self._health_payload(ready=True))
         router.register("user.message", self._rpc_user_message)
         router.register("runtime.status", lambda _: self.runtime_status_command())
         router.register("runtime.configure", self.runtime_configure_command, run_in_thread=True, broadcast_ready=True)
@@ -259,7 +309,7 @@ class JsonRpcBridge:
         router.register("agent_cli.test", self.agent_cli_test_command, run_in_thread=True)
         router.register("agent_cli.configure", self.agent_cli_configure_command, run_in_thread=True, broadcast_ready=True)
         router.register("agent_cli.status", lambda _: self.agent_cli_status_command())
-        router.register("byok.status", lambda _: self.byok.status())
+        router.register("byok.status", lambda _: self.byok.status(), run_in_thread=True)
         router.register("byok.connect", self.byok_connect_command, run_in_thread=True, broadcast_ready=True)
         router.register("byok.test", lambda _: self.byok.test(), run_in_thread=True, broadcast_ready=True)
         router.register("byok.models", self.byok.discover_models, run_in_thread=True)
@@ -286,7 +336,7 @@ class JsonRpcBridge:
         router.register("capability.session.resume", lambda params: self.capability_session_transition_command(params, "running"), run_in_thread=True, broadcast_ready=True)
         router.register("capability.session.cancel", lambda params: self.capability_session_transition_command(params, "cancelled"), run_in_thread=True, broadcast_ready=True)
         router.register("permission.grant", self.permission_grant_command, run_in_thread=True, broadcast_ready=True)
-        router.register("permission.expand", self.permission_grant_command, run_in_thread=True, broadcast_ready=True)
+        router.register("permission.expand", self.permission_expand_command, run_in_thread=True, broadcast_ready=True)
         router.register("permission.revoke", self.permission_revoke_command, run_in_thread=True, broadcast_ready=True)
         router.register("action_receipt.list", self.action_receipt_list_command)
         router.register("game.adapter.list", lambda _: self.game_adapter_list_command())
@@ -514,6 +564,34 @@ class JsonRpcBridge:
             str(params.get("profile") or "observe"),
             params.get("scope") if isinstance(params.get("scope"), dict) else {},
         )
+
+    def permission_expand_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        session_id = str(params.get("session_id") or self.collaboration.context().get("session_id") or "")
+        result = self.collaboration.expand_permission(
+            session_id,
+            params.get("scope") if isinstance(params.get("scope"), dict) else {},
+            confirmed=bool(params.get("confirmed")),
+        )
+        if result.get("changed"):
+            additions = result.get("additions") if isinstance(result.get("additions"), dict) else {}
+            self.app.bus.emit(
+                AgentEvent(
+                    EventType.AUDIT_EVENT,
+                    f"permission-expand-{uuid.uuid4().hex[:8]}",
+                    DisplayCard("权限范围已扩大", _scope_additions_summary(additions), status="info"),
+                    safe_voice_line("", fallback=""),
+                    {
+                        "tool": "permission.expand",
+                        "skill_permission_level": "high",
+                        "skill_audit": "permission_expand_audit",
+                        "session_id": session_id,
+                        "permission_expand": additions,
+                    },
+                    session_id=session_id,
+                )
+            )
+        return result
 
     def permission_revoke_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.collaboration.revoke_permission(str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or ""))
@@ -768,9 +846,10 @@ class JsonRpcBridge:
         return sorted({*self.app.pending_steps, *self.codex_runtime.pending_approval_ids()})
 
     async def _broadcast_ready(self) -> None:
+        ready_payload = await asyncio.to_thread(self._ready_payload)
         await self._broadcast(
             json.dumps(
-                {"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()},
+                {"jsonrpc": "2.0", "method": "core.ready", "params": ready_payload},
                 ensure_ascii=False,
             )
         )
@@ -784,7 +863,7 @@ class JsonRpcBridge:
             await self._broadcast(message)
             if _event_applied_runtime_config(event):
                 self._reload_runtime_after_config_change()
-                await self._broadcast(json.dumps({"jsonrpc": "2.0", "method": "core.ready", "params": self._ready_payload()}, ensure_ascii=False))
+                await self._broadcast_ready()
             if event.type in SPEAKABLE_EVENTS:
                 asyncio.create_task(self._synthesize_voice(event))
 
@@ -882,7 +961,7 @@ class JsonRpcBridge:
             "asr": self._asr_payload(),
             "tts": self.tts.status_payload(),
             "joi_mcp": dict(self._joi_mcp_status),
-            "byok": self.byok.status(),
+            "byok": self.byok.status(probe_secret=False),
         }
 
     def byok_connect_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1280,15 +1359,19 @@ class JsonRpcBridge:
     def _watch_loop_tick(self, options: WatchLoopOptions) -> WatchLoopTick:
         next_iteration = self.watch_loop.snapshot().iterations + 1
         run_vision_summary = _watch_loop_should_summarize(options, next_iteration)
-        with self._command_lock:
-            result = self.app.refresh_watch_context(
+        # The watch loop ticks on its own timer, so it has to queue behind the
+        # conversation's own work instead of observing mid-action.
+        _, result = self._run_serial(
+            "watch.loop.tick",
+            lambda: self.app.refresh_watch_context(
                 options.query,
                 sample_count=options.sample_count,
                 sample_interval_ms=options.sample_interval_ms,
                 transcript_source=options.transcript_source,
                 transcribe=options.transcribe,
                 skip_summary=not run_vision_summary,
-            )
+            ),
+        )
         state = result.agent_state if isinstance(result.agent_state, dict) else {}
         transcript = state.get("transcript") if isinstance(state.get("transcript"), dict) else {}
         segments = transcript.get("segments") if isinstance(transcript.get("segments"), list) else []
@@ -1432,12 +1515,16 @@ class JsonRpcBridge:
         except Exception:
             return
 
-    def _run_serial(self, label: str, callback: Callable[[], list[AgentEvent]]) -> tuple[int, list[AgentEvent]]:
-        with self._command_lock:
-            self._command_sequence += 1
-            sequence = self._command_sequence
-            events = callback()
-        return sequence, events
+    def _run_serial(self, label: str, callback: Callable[[], list[AgentEvent]], thread_id: str = "") -> tuple[int, list[AgentEvent]]:
+        """Serialize within one conversation, not across all of them.
+
+        ``thread_id`` defaults to whichever conversation is active, which is
+        correct for user-initiated commands; background work that already knows
+        its conversation should pass it explicitly rather than re-reading the
+        active one.
+        """
+        target = thread_id or str(self.collaboration.context().get("thread_id") or "")
+        return self.run_coordinator.run_serial(target, callback)
 
     def _asr_error(self, error: str, message: str) -> dict[str, Any]:
         error_code = _safe_asr_error_code(error)
@@ -1477,6 +1564,13 @@ class JsonRpcBridge:
         tts_status = self.tts.status_payload()
         memory_status = self.app.memory.status()
         payload: dict[str, Any] = {
+            "product": JOI_CORE_PRODUCT,
+            "protocol_version": JOI_CORE_PROTOCOL_VERSION,
+            "instance_id": self.instance_id,
+            "health": {
+                "livez": f"http://{self.host}:{self.asset_port}/livez",
+                "readyz": f"http://{self.host}:{self.asset_port}/readyz",
+            },
             "workspace_label": self.workspace.name,
             "workspace_bound": True,
             "event_cursor": self.app.bus.latest_sequence,
@@ -1491,7 +1585,7 @@ class JsonRpcBridge:
             "audit": self.app.audit_store.status(),
             "background": self.app.background_context.status(),
             "agent_cli": self._agent_cli_status_payload(),
-            "byok": self.byok.status(),
+            "byok": self.byok.status(probe_secret=False),
             "collaboration": self.collaboration.snapshot(),
             "agent_skills": self.agent_skills.list(
                 project_id=str(self.collaboration.context().get("project_id") or ""),
@@ -1572,6 +1666,8 @@ class JsonRpcBridge:
         handler = functools.partial(
             _CharacterAssetRequestHandler,
             directory=str(self.app.character_packages.packages_dir),
+            health_provider=self._health_payload,
+            session_token=self.session_token,
         )
         try:
             server = http.server.ThreadingHTTPServer((self.host, self.asset_port), handler)
@@ -1581,6 +1677,52 @@ class JsonRpcBridge:
         self._asset_server = server
         self._asset_thread = threading.Thread(target=server.serve_forever, name="joi-character-assets", daemon=True)
         self._asset_thread.start()
+
+    def _health_payload(self, ready: bool = True) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "ready": bool(ready),
+            "product": JOI_CORE_PRODUCT,
+            "protocol_version": JOI_CORE_PROTOCOL_VERSION,
+            "instance_id": self.instance_id,
+            "pid": os.getpid(),
+            "parent_pid": self.parent_pid,
+        }
+
+    def _write_ready_file(self) -> None:
+        path = self.ready_file
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps(
+                    {
+                        **self._health_payload(ready=True),
+                        "host": self.host,
+                        "port": self.port,
+                        "asset_port": self.asset_port,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(path)
+        except OSError:
+            return
+
+    def _remove_ready_file(self) -> None:
+        path = self.ready_file
+        if path is None or not path.is_file():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if str(payload.get("instance_id") or "") == self.instance_id:
+                path.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            return
 
     def _stop_character_asset_server(self) -> None:
         server = self._asset_server
@@ -1597,7 +1739,10 @@ class JsonRpcBridge:
             relative = path.resolve().relative_to(self.app.character_packages.packages_dir.resolve()).as_posix()
         except ValueError:
             return ""
-        return f"http://{self.host}:{self.asset_port}/characters/{urllib.parse.quote(relative, safe='/')}"
+        asset_url = f"http://{self.host}:{self.asset_port}/characters/{urllib.parse.quote(relative, safe='/')}"
+        if self.session_token:
+            asset_url = f"{asset_url}?token={urllib.parse.quote(self.session_token, safe='')}"
+        return asset_url
 
     @staticmethod
     def _image_data_url(path: Path) -> str:
@@ -1624,22 +1769,63 @@ class JsonRpcBridge:
 class _CharacterAssetRequestHandler(http.server.SimpleHTTPRequestHandler):
     """Read-only HTTP surface scoped to installed character assets."""
 
+    def __init__(
+        self,
+        *args: Any,
+        health_provider: Callable[[bool], dict[str, Any]],
+        session_token: str = "",
+        **kwargs: Any,
+    ) -> None:
+        self.health_provider = health_provider
+        self.session_token = session_token
+        super().__init__(*args, **kwargs)
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
+        if self._serve_health():
+            return
         if not self._prepare_character_path():
             self.send_error(404)
             return
         super().do_GET()
 
     def do_HEAD(self) -> None:  # noqa: N802 - stdlib handler contract
+        if self._serve_health(head_only=True):
+            return
         if not self._prepare_character_path():
             self.send_error(404)
             return
         super().do_HEAD()
 
+    def _serve_health(self, *, head_only: bool = False) -> bool:
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path not in {"/livez", "/readyz"}:
+            return False
+        if parsed.path == "/readyz" and self.session_token:
+            token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
+            if token != self.session_token:
+                self.send_error(401)
+                return True
+        payload = json.dumps(
+            self.health_provider(parsed.path == "/readyz"),
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(payload)
+        return True
+
     def _prepare_character_path(self) -> bool:
         parsed = urllib.parse.urlsplit(self.path)
         if not parsed.path.startswith("/characters/"):
             return False
+        if self.session_token:
+            token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
+            if token != self.session_token:
+                return False
         relative = urllib.parse.unquote(parsed.path[len("/characters/") :])
         parts = Path(relative).parts
         if not relative or ".." in parts or any(part.startswith(".") for part in parts):
@@ -1654,11 +1840,22 @@ class _CharacterAssetRequestHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
-        self.send_header("Cache-Control", "public, max-age=300")
+        self.send_header("Cache-Control", "private, no-store" if self.session_token else "public, max-age=300")
         super().end_headers()
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+
+def _websocket_session_token(websocket: Any) -> str:
+    """Read the per-launch token across supported ``websockets`` versions."""
+
+    request = getattr(websocket, "request", None)
+    request_path = getattr(request, "path", "") if request is not None else ""
+    if not request_path:
+        request_path = getattr(websocket, "path", "")
+    parsed = urllib.parse.urlsplit(str(request_path or ""))
+    return urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
 
 
 def _decode_audio_base64(audio_base64: str) -> bytes:
@@ -1802,13 +1999,36 @@ def _looks_like_computer_goal(text: str) -> bool:
     )
 
 
-def _is_always_sensitive_request(request: ToolRequest) -> bool:
-    name = request.name.casefold()
-    if name in {"files.delete", "package.install", "git.push", "external.launch_admin"}:
-        return True
-    action = str(request.arguments.get("action") or request.arguments.get("intent") or "").casefold()
-    sensitive_tokens = ("payment", "pay", "付款", "购买", "login", "登录", "authorize", "授权", "send_message", "发消息", "delete", "删除", "install", "安装")
-    return any(token in action for token in sensitive_tokens)
+_SENSITIVE_ACTION_LABELS = {
+    "payment": "付款或下单",
+    "authentication": "登录或授权",
+    "external_send": "对外发送消息",
+    "deletion": "删除",
+    "installation": "安装",
+    "permission_expansion": "扩大权限范围",
+}
+
+
+_SCOPE_KIND_LABELS = {"directory": "目录", "application": "应用", "domain": "网站", "game": "游戏"}
+
+
+def _scope_additions_summary(additions: dict[str, Any]) -> str:
+    parts = [
+        f"{_SCOPE_KIND_LABELS.get(kind, kind)}：{'、'.join(str(value) for value in values[:4])}"
+        for kind, values in additions.items()
+        if isinstance(values, list) and values
+    ]
+    return "新增 " + "；".join(parts) if parts else "权限范围没有变化。"
+
+
+def _sensitive_request_signals(request: ToolRequest) -> list[str]:
+    """Free-text fields that could name a sensitive action.
+
+    The planner's ``reason`` matters most: a coordinate click onto a "立即支付"
+    button looks identical to any other click in its arguments, and only the
+    reason records which control was resolved.
+    """
+    return [request.name, *request_signals(request)]
 
 
 def _request_within_bound_scope(request: ToolRequest, scope: dict[str, Any]) -> bool:
@@ -1902,13 +2122,39 @@ def _friendly_asr_message(error: str) -> str:
     return messages.get(code, messages["asr_failed"])
 
 
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Joi WebSocket JSON-RPC bridge.")
     parser.add_argument("--workspace", default=".", help="Workspace root")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--session-token", default=os.environ.get("JOI_CORE_SESSION_TOKEN", ""))
+    parser.add_argument("--instance-id", default=os.environ.get("JOI_CORE_INSTANCE_ID", ""))
+    parser.add_argument("--ready-file", default=os.environ.get("JOI_CORE_READY_FILE", ""))
+    parser.add_argument("--parent-pid", type=int, default=0)
     args = parser.parse_args(argv)
-    bridge = JsonRpcBridge(Path(args.workspace), args.host, args.port)
+    bridge = JsonRpcBridge(
+        Path(args.workspace),
+        args.host,
+        args.port,
+        session_token=args.session_token,
+        instance_id=args.instance_id,
+        ready_file=Path(args.ready_file) if args.ready_file else None,
+        parent_pid=args.parent_pid,
+    )
     asyncio.run(bridge.serve())
     return 0
 

@@ -7,7 +7,6 @@ from PIL import Image, ImageDraw
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE = Path("/Users/liujialuo/Downloads/已生成图像 4 (1).png")
 ASSET_DIR = ROOT / "assets"
 
 CROPS = {
@@ -87,7 +86,7 @@ def erase_original_head(image: Image.Image) -> Image.Image:
     return image
 
 
-def build_assets(source: Path = DEFAULT_SOURCE) -> None:
+def build_assets(source: Path) -> None:
     if not source.exists():
         raise FileNotFoundError(f"source image not found: {source}")
 
@@ -109,6 +108,6 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Build transparent Joi widget assets from the character sheet.")
-    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--source", type=Path, required=True, help="Path to the character sheet PNG to slice.")
     args = parser.parse_args()
     build_assets(args.source)

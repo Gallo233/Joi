@@ -30,6 +30,26 @@ _UI_PHASES: dict[EventType, tuple[str, str, bool]] = {
     EventType.TASK_FAILED: ("failed", "没有完成", False),
 }
 
+# The coarse phase every public event carries, so any surface reading the event
+# stream -- chat, capability card, audit -- agrees on what Joi was doing without
+# replaying the whole thread.
+PUBLIC_PHASES = ("idle", "received", "understanding", "thinking", "acting", "waiting", "paused", "done", "failed")
+
+# While a capability session is held, its state outranks the per-event phase: a
+# paused session must not keep publishing "acting" just because a late tool
+# event arrived.
+_SESSION_PHASE_OVERRIDES = {"paused": "paused", "waiting_approval": "waiting"}
+_IN_FLIGHT_PHASES = {"understanding", "thinking", "acting"}
+
+
+def _public_phase(event: AgentEvent, ui_phase: str, session_state: str) -> str:
+    if event.public_phase in PUBLIC_PHASES:
+        return event.public_phase
+    override = _SESSION_PHASE_OVERRIDES.get(session_state, "")
+    if override and ui_phase in _IN_FLIGHT_PHASES:
+        return override
+    return ui_phase if ui_phase in PUBLIC_PHASES else "idle"
+
 
 class EventBus:
     def __init__(self, event_path: Path) -> None:
@@ -65,6 +85,8 @@ class EventBus:
             state.setdefault("ui_phase", phase)
             state.setdefault("ui_label", label)
             state.setdefault("ui_transient", transient)
+            public_phase = _public_phase(event, phase, str(context.get("session_state") or ""))
+            state.setdefault("public_phase", public_phase)
             for key in ("project_id", "thread_id", "session_id", "character_id"):
                 value = getattr(event, key, "") or context.get(key) or state.get(key) or ""
                 if value:
@@ -78,6 +100,7 @@ class EventBus:
                 thread_id=event.thread_id or str(context.get("thread_id") or state.get("thread_id") or ""),
                 session_id=event.session_id or str(context.get("session_id") or state.get("session_id") or ""),
                 character_id=event.character_id or str(context.get("character_id") or state.get("character_id") or ""),
+                public_phase=public_phase,
             )
             self.event_path.parent.mkdir(parents=True, exist_ok=True)
             with self.event_path.open("a", encoding="utf-8") as handle:

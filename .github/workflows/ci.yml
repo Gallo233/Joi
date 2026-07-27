@@ -1,5 +1,10 @@
 name: Joi CI
 
+# macOS is the required lane: Joi 1.0 ships macOS-first, so a green Windows run
+# is never sufficient evidence for the primary platform. Windows remains a
+# compatibility lane for the shared RPC/event/schema surface and its adapters.
+# See docs/JOI_TDD.md §15.2.
+
 on:
   push:
     branches:
@@ -12,23 +17,50 @@ env:
   PYTHONIOENCODING: "utf-8"
 
 jobs:
-  python-core:
-    name: Python core tests
-    runs-on: windows-latest
+  macos-required:
+    name: macOS required lane
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: agent_companion/shell/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements.txt -r requirements-build.txt
+      - name: Install frontend dependencies
+        working-directory: agent_companion/shell
+        run: npm ci
+      - name: Run unit, contract, migration and recovery tests
+        run: python -m unittest discover -s tests -v
       - name: Run core regression suite
         run: python run_agent_companion_tests.py
+      - name: Typecheck and build shell
+        working-directory: agent_companion/shell
+        run: npm run build
+      - name: Check Tauri shell
+        working-directory: agent_companion/shell/src-tauri
+        run: cargo check
+      - name: Build standalone Core sidecar
+        working-directory: agent_companion/shell
+        run: npm run core:bundle
+      - name: Smoke-test sidecar ready handshake and auth
+        run: python tools/smoke_core_sidecar.py
+      - name: Run packaging and release privacy scan
+        run: python tools/packaging_smoke.py
+      - name: Check adapter bridge syntax
+        run: node --check agent_companion/adapters/minecraft-bridge/index.js
 
-  shell-and-packaging:
-    name: Shell build and packaging smoke
+  windows-compatibility:
+    name: Windows compatibility lane
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,10 +76,14 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements.txt -r requirements-build.txt
       - name: Install frontend dependencies
         working-directory: agent_companion/shell
         run: npm ci
+      - name: Run shared contract and core regression suite
+        run: |
+          python -m unittest discover -s tests -v
+          python run_agent_companion_tests.py
       - name: Run packaging metadata smoke
         run: python tools/packaging_smoke.py
       - name: Run setup wizard dry-run
@@ -65,6 +101,11 @@ jobs:
       - name: Build frontend
         working-directory: agent_companion/shell
         run: npm run build
-      - name: Tauri debug smoke build
+      - name: Build standalone Core sidecar
         working-directory: agent_companion/shell
-        run: npm run tauri -- build --debug --no-bundle
+        run: npm run core:bundle
+      - name: Smoke-test standalone Core sidecar
+        run: python tools/smoke_core_sidecar.py
+      - name: Check Tauri shell
+        working-directory: agent_companion/shell/src-tauri
+        run: cargo check

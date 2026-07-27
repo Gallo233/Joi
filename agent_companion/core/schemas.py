@@ -77,6 +77,9 @@ class AgentEvent:
     thread_id: str = ""
     session_id: str = ""
     character_id: str = ""
+    # What the shared presence is doing when this event is published -- see
+    # PUBLIC_PHASES in event_bus.  Filled in by the bus on emit.
+    public_phase: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

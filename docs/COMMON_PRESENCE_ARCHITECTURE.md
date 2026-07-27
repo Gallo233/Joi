@@ -16,6 +16,10 @@
 - `character_id`
 - `public_phase`
 
+`public_phase` 取值为 `idle / received / understanding / thinking / acting / waiting / paused / done / failed`，由 `EventBus` 在 emit 时写入事件顶层字段与 `agent_state`，并单独入库为 events 表的一列。它与 `ui_phase` 的区别在于会让位于能力会话状态：会话暂停时不会继续对外播报 `acting`。
+
+数据库列在首次创建后如有新增，由 `_ensure_columns()` 用 `ALTER TABLE` 补齐；旧库升级不需要重建。
+
 ## 能力会话与权限
 
 每次 Computer Use、Scene Session 或 GameAdapter 运行均建立 `CapabilitySession`。会话记录目标、权限档位、驱动、预算、停止条件及状态。
@@ -24,9 +28,66 @@
 
 - `observe`：只读。
 - `collaborate`：只在项目绑定范围内自动执行。
-- `delegate`：当前 Joi 启动会话内持续执行。
+- `delegate`：跳过项目绑定范围，但绑定当前 Joi 启动会话。
 
-付款、登录授权、对外发消息、删除、安装和扩权不会因档位升级而跳过确认。暂停、继续、取消与用户接管都通过同一状态机处理，接管不会删除目标或动作回执。
+`delegate` 的边界由 `LAUNCH_ID` 实现：授权时把当前进程的启动标识写入 `permission_grants.launch_id`，Joi 重启后从 SQLite 恢复的授权带着旧标识，会以 `delegate_launch_expired` 退回确认，不会静默继续替用户操作。
+
+`CollaborationStore.action_allowed()` 是唯一的自动执行闸门（TDD ADR-005），服务端策略网关直接调用它，不存在第二套并行判断。付款、登录授权、对外发消息、删除、安装和扩权不会因档位升级而跳过确认。
+
+敏感判定分两层，实现在 `agent_companion/core/action_intent.py`：
+
+1. **typed effect（主）**：`ActionIntent.from_request()` 按工具名查 `TOOL_EFFECTS`，得出 `EffectKind`。六种红线 effect 为 `payment / authentication / external_send / deletion / installation / permission_expansion`。未注册的工具落到 `desktop_input`，不会被当作无害。
+2. **文本信号（只能升高）**：坐标点击本身不携带语义，因此还会扫描 `ToolRequest.reason` 与 `action`/`intent`/`text`/`url` 等参数——目标定位解析出的候选标签（如"点击候选目标：立即支付"）只存在于 reason 中。
+
+方向是单向的：文本能把 `desktop_input` 升成 `payment`，但**不能**把已 typed 为 `deletion` 的 `files.delete` 说成安全。判定偏向宁可多问一次：多一次确认只是一次点击，漏一次就是真实付款。
+
+`ActionIntent` 同时产出 `normalized_args_digest` 与 `idempotency_key`（对参数顺序稳定、忽略 `memory_context` 等易变键），为后续 schema v3 的 effect lease 与崩溃对账预留。
+
+扩权是独立动作：`permission.expand` 不改变档位，只增加 scope 条目，且必须携带 `confirmed`；未确认时返回将要新增的具体条目供界面展示，确认后写入审计事件。
+
+暂停、继续、取消与用户接管都通过同一状态机处理，接管不会删除目标或动作回执。
+
+## 冷启动恢复
+
+数据库里写着 `running` 只说明"写它的那个进程当时在跑"。崩溃或退出后那个进程已经不在，会话既不能显示为正在执行，也不能自行续跑。
+
+`CollaborationStore` 构造时执行一次 reconciliation 事务（`_reconcile_previous_launch()`）：
+
+- `running` 会话统一转为 `paused`，`pause_reason = recovery_required`；
+- `waiting_approval` **保持不动**——它本来就在等人，降级会丢掉那个待决定；
+- 上一次启动遗留的 `delegate` 授权标记为 `status=expired` / `status_reason=launch_ended`。
+
+因为 `permission_for_session()` 只返回 `active` 授权，被过期的 delegate 会让会话回落到 observe，任何后续动作都要重新确认——这是构造上的 fail closed，不依赖调用方记得检查。
+
+动作回执在恢复中完整保留；`pause_reason` 持久化在 `capability_sessions` 上，因此恢复出来的会话仍能解释自己为什么停着（进程内的 orchestrator runtime 会随进程消失）。恢复后显式 resume 会清空 `pause_reason`。
+
+对应 PRD-CTX-007、PRD-PLT-006。
+
+## 可恢复 Run（schema v3）
+
+`agent_companion/core/run_store.py` 保存 `runs / run_steps / checkpoints / approval_challenges / effect_attempts / audit_entries / resource_leases / rpc_dedup / deletion_jobs`，与 `CollaborationStore` 共用同一个 SQLite 连接和锁（这些表引用 projects/threads，必须同事务）。现有 v2 表语义未改动。
+
+核心不变量是：**崩溃不能看起来像成功**。
+
+- **不可变 RunContext**：`project/thread/run/session/capability/character` 在 run 创建时冻结。执行中不再读"当前激活对话"补身份，否则排队中的任务会把事件和审批记到用户刚切过去的对话上（ADR-010）。
+- **审批是持久化的一次性交易**，不是 UI 布尔值。challenge 记录 `args_hash`/`scope_hash`/`nonce`/TTL/revision；消费时重新校验工具、参数指纹、scope、线程与 TTL。参数被编辑 → `fingerprint_mismatch` 且旧记录转 `superseded`（不修改旧审批）；scope 变了 → `scope_changed`。`approved → consumed` 的 UPDATE 带 `AND status='approved'`，并发第二个消费者拿到 rowcount 0（ADR-004）。
+- **CAS effect lease**：`effect_attempts.idempotency_key` 是 UNIQUE。重复 resume 抢不到 insert，会得到原始尝试的状态而不是再执行一次。
+- **崩溃对账**：`leased` 无回执 → 重启后标为 `abandoned`，可重新请求决定；`acting` 无回执 → `effect_needs_reconciliation`，只能由人判断外部世界是否已改变，**不自动重放**。
+- **audit_entries 是唯一可查询审计账本**，run/step/effect/approval/receipt 互相链接（ADR-011）。
+
+启动 reconciliation 除会话外还处理：`created/running` 的 run 转 `paused/recovery_required`；上次启动残留的 `approved` 审批全部转 `expired`（否则重启后仍可被消费）；清空资源租约；`leased` 无回执的 effect 标为 `abandoned`。
+
+## 并发模型
+
+`RunCoordinator` 用 per-`thread_id` 互斥替代了原来的全局 `_command_lock`：同一对话内严格串行，不同对话并行。但并行不等于可以同时抢桌面——`desktop_input / microphone / speaker` 走 `resource_leases` 独立互斥（TDD §6.6）。
+
+同一 thread 最多一个 active run（`create_run` 返回 `thread_run_active`）；终态 run 不可复活，重试要新建并用 `retry_of` 关联。
+
+执行主干已接入：`app.py` 通过注入式 `RunJournal`（`run_journal.py`）与 store 通信——runtime 不 import store，store 也不认识 planner。`_start_plan` 开 run，`_run_plan` 记 step、在动作前 CAS 取 effect lease、动作后结算，`_make_pending_step` 创建持久化 challenge 并把它的 id 作为交给 Shell 的 `approval_id`，`resolve_approval` 记录决定，`_finish_plan` 收尾。审批在**动作前**才被消费（`spend_challenge`），不是用户点击时——两者之间正是计划可能被改写的窗口。
+
+默认 journal 是空实现：`AgentCompanionApp` 在很多没有数据库的地方被独立构造，用一个 no-op 对象可以让 `app.py` 保持单一代码路径，而不是到处 `if journal is not None`。生产由 `JsonRpcBridge` 注入 `StoreRunJournal`，`tests/test_run_journal.py` 会盯住这一点。
+
+`tests/test_run_lifecycle.py` 覆盖 TDD Phase 1 的全部退出条件：crash-before-act、act-before-receipt、duplicate-resume、过期/指纹不符/scope 变更、同 thread 拒绝第二个 run、跨 thread 身份不串线、并发审批只能有一个赢家。
 
 ## Computer Use
 
@@ -45,7 +106,9 @@ Joi 原生 macOS 驱动始终可用。可选 CUA 驱动使用 `cua-driver` 的�
 
 ZIP 路径穿越、符号链接、未知脚本和安装后哈希变化会被拒绝。代码型 Skill 默认禁用隐式运行，并且只有非观察会话加显式首次确认才能执行。脚本从不导入 Joi 主进程；macOS 使用独立进程和 Seatbelt 配置，默认禁止网络，仅允许声明的项目与运行目录写入。
 
-成功操作只能生成 Skill 草稿，审核输入、步骤与权限后才可以安装。
+成功操作只能生成 Skill 草稿，审核输入、步骤与权限后才可以安装。草稿在设置页"待审阅草稿"面板列出，展示步骤后由用户选择作用域安装或丢弃；未审核的草稿不会安装，也不会运行。
+
+已知平台缺口：脚本沙箱依赖 macOS Seatbelt，非 darwin 平台上 `skill.run` 返回 `sandbox_runner_unavailable`，脚本型 Skill 不可执行。
 
 ## Scene Session
 
@@ -57,7 +120,7 @@ ZIP 路径穿越、符号链接、未知脚本和安装后哈希变化会被拒�
 
 GameAdapter manifest 声明检测、观察源、动作集、暂停、验证、存档点和平台。安装、启停与卸载状态独立于角色包。
 
-- OK-WW 已包装为经过审查的可安装适配器，保留 dry-run 和显式授权。
+- OK-WW 已包装为经过审查的可安装适配器，保留 dry-run 和显式授权。runner 路径只能来自 `OK_WW_RUNNER` 环境变量，没有内置默认值；未配置、路径无效或非 Windows 平台都会返回 `setup_required` 并给出对应的 setup hint。解析逻辑集中在 `agent_companion/core/ok_ww.py`，适配器检测、技能清单与工具执行共用同一份。
 - Minecraft bridge 使用 JSON Lines 协议与 Mineflayer，支持独立伙伴的跟随、探索、采集、建造、断线重连、暂停和 checkpoint。
 - 角色接管模式会监听控制文件；用户输入或接管标记出现时立即暂停。
 
@@ -83,3 +146,7 @@ cd agent_companion/shell && npm run build
 cd agent_companion/shell/src-tauri && cargo check
 node --check agent_companion/adapters/minecraft-bridge/index.js
 ```
+
+CI 按 TDD §15.2 分为两条 lane：`macos-required` 是主平台必过项（单元/契约/迁移/恢复测试、Shell typecheck+build、cargo check、sidecar 握手 smoke、发布隐私扫描），`windows-compatibility` 只验证共享契约与 Windows 打包工具，不能替代 macOS 结论。
+
+`tests/test_protocol_contract.py` 冻结 Core↔Shell 边界：JSON-RPC 信封与错误码、`AgentEvent` 字段集、`public_phase` 词表、`ToolResult` 五通道、SQLite schema 与旧库迁移，并逐项校验 `protocol.ts` 的枚举与 Core 一致——任一侧漂移都会失败。

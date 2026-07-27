@@ -11,6 +11,8 @@ import threading
 import time
 from typing import Any, Protocol
 
+from agent_companion.core.ok_ww import ok_ww_runner_path, ok_ww_setup_hint
+
 
 class GameAdapter(Protocol):
     manifest: "GameAdapterManifest"
@@ -125,12 +127,14 @@ class GameAdapterRegistry:
 
     def detect(self, adapter_id: str) -> dict[str, Any]:
         if adapter_id == "ok-ww":
-            runner = Path(os.environ.get("OK_WW_RUNNER", r"C:\Users\liujialuo\.codex\skills\github_issue_solver\scripts\run_ok_ww.ps1"))
+            runner = ok_ww_runner_path()
+            ready = sys.platform == "win32" and runner is not None and bool(shutil.which("powershell") or shutil.which("pwsh"))
             return {
-                "available": sys.platform == "win32" and runner.is_file() and bool(shutil.which("powershell") or shutil.which("pwsh")),
+                "available": ready,
                 "platform": sys.platform,
-                "runner_found": runner.is_file(),
-                "status": "ready" if sys.platform == "win32" and runner.is_file() else "setup_required",
+                "runner_found": runner is not None,
+                "status": "ready" if ready else "setup_required",
+                "setup_hint": "" if ready else ok_ww_setup_hint(),
             }
         if adapter_id == "minecraft":
             command = _minecraft_bridge_command(self.workspace)

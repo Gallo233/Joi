@@ -106,9 +106,8 @@ onBeforeUnmount(() => {
       role="img"
     ></canvas>
 
-    <div class="character-fallback-layer" aria-hidden="true">
+    <div v-if="showFallbackImage" class="character-fallback-layer" aria-hidden="true">
       <img
-        v-if="showFallbackImage"
         class="character-art"
         :src="fallbackImageSrc"
         alt=""
@@ -118,12 +117,11 @@ onBeforeUnmount(() => {
         @dragstart.prevent
         @mousedown.prevent
       />
-      <div v-else class="character-fallback">{{ characterName.slice(0, 1) }}</div>
     </div>
 
     <span v-if="live2dState === 'ready'" class="live2d-status-badge" aria-hidden="true">{{ modelType === 'vrm' ? 'VRM' : 'LIVE2D' }}</span>
     <span class="sr-only" role="status" aria-live="polite">
-      {{ live2dState === 'ready' ? `${modelType === 'vrm' ? 'VRM' : 'Live2D'} 模型已就绪` : live2dState === 'error' ? `动态模型不可用，已显示静态角色。${live2dError}` : '正在加载角色模型' }}
+      {{ live2dState === 'ready' ? `${modelType === 'vrm' ? 'VRM' : 'Live2D'} 模型已就绪` : live2dState === 'error' ? `动态模型暂不可用。${live2dError}` : '正在加载角色模型' }}
     </span>
 
     <svg class="accessory-item wizard-hat" :style="{ display: accessories.hat ? 'block' : 'none' }" viewBox="0 0 140 100" fill="none" draggable="false" aria-hidden="true">

@@ -13,21 +13,42 @@ export interface CoreClientOptions {
 
 export class CoreClient {
   private socket: WebSocket | null = null
+  private url: string
   private nextId = 1
   private reconnectTimer: number | null = null
+  private connectionTimer: number | null = null
+  private reconnectAttempts = 0
+  private readonly maxReconnectAttempts = 2
   private pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void; timeoutId: number }>()
 
-  constructor(private readonly options: CoreClientOptions) {}
+  constructor(private readonly options: CoreClientOptions) {
+    this.url = options.url
+  }
 
-  connect() {
+  connect(url?: string) {
+    if (url) {
+      this.url = url
+      this.reconnectAttempts = 0
+    }
     this.close()
     this.options.onStatus('connecting')
-    const socket = new WebSocket(this.options.url)
+    const socket = new WebSocket(this.url)
     this.socket = socket
 
-    socket.onopen = () => this.options.onStatus('online')
+    this.connectionTimer = window.setTimeout(() => {
+      if (this.socket !== socket || socket.readyState === WebSocket.OPEN) return
+      this.options.onError?.('Joi Core 连接超时，请重新连接。')
+      socket.close()
+    }, 5000)
+
+    socket.onopen = () => {
+      this.clearConnectionTimer()
+      this.reconnectAttempts = 0
+      this.options.onStatus('online')
+    }
     socket.onclose = () => {
       if (this.socket === socket) {
+        this.clearConnectionTimer()
         this.options.onStatus('offline')
         this.rejectPending('Joi runtime connection closed')
         this.scheduleReconnect()
@@ -38,6 +59,7 @@ export class CoreClient {
   }
 
   close() {
+    this.clearConnectionTimer()
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -148,6 +170,27 @@ export class CoreClient {
 
   agentSkillUninstall(installationId: string, confirmed = false) {
     return this.send('skill.uninstall', { installation_id: installationId, confirmed })
+  }
+
+  // Omitting `script` returns the skill's instructions instead of executing it.
+  agentSkillRun(installationId: string, params: Record<string, unknown> = {}) {
+    return this.send('skill.run', { installation_id: installationId, ...params }, { timeoutMs: 125000, timeoutMessage: 'Skill 运行超时。' })
+  }
+
+  agentSkillDraftList(projectId = '', threadId = '') {
+    return this.send('skill.draft.list', { project_id: projectId, thread_id: threadId })
+  }
+
+  agentSkillDraftCreate(name: string, draft: Record<string, unknown>, projectId = '', threadId = '') {
+    return this.send('skill.draft.create', { name, draft, project_id: projectId, thread_id: threadId })
+  }
+
+  agentSkillDraftApprove(draftId: string, scope: string, scopeId = '') {
+    return this.send('skill.draft.approve', { draft_id: draftId, scope, scope_id: scopeId }, { timeoutMs: 65000, timeoutMessage: 'Skill 草稿安装超时。' })
+  }
+
+  agentSkillDraftReject(draftId: string) {
+    return this.send('skill.draft.reject', { draft_id: draftId })
   }
 
   agentCliList() {
@@ -302,8 +345,17 @@ export class CoreClient {
     return this.send('permission.grant', { session_id: sessionId, profile, scope })
   }
 
+  // Omit `confirmed` first to preview exactly which entries would be added.
+  permissionExpand(sessionId: string, scope: Record<string, unknown>, confirmed = false) {
+    return this.send('permission.expand', { session_id: sessionId, scope, confirmed })
+  }
+
   permissionRevoke(sessionId: string) {
     return this.send('permission.revoke', { session_id: sessionId })
+  }
+
+  actionReceiptList(sessionId = '') {
+    return this.send('action_receipt.list', { session_id: sessionId })
   }
 
   gameAdapterList() {
@@ -491,9 +543,20 @@ export class CoreClient {
 
   private scheduleReconnect() {
     if (this.reconnectTimer !== null) return
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.options.onError?.('Joi Core 没有响应，请点“重新连接”。')
+      return
+    }
+    this.reconnectAttempts += 1
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null
       this.connect()
-    }, 1600)
+    }, 800 * this.reconnectAttempts)
+  }
+
+  private clearConnectionTimer() {
+    if (this.connectionTimer === null) return
+    window.clearTimeout(this.connectionTimer)
+    this.connectionTimer = null
   }
 }

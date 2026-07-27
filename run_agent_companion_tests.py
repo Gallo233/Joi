@@ -76,6 +76,13 @@ def assert_true(value: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def _yaml_jobs(workflow_source: str) -> dict:
+    """Parse a workflow's jobs so lane assertions survive step reordering."""
+    parsed = yaml.safe_load(workflow_source)
+    jobs = parsed.get("jobs") if isinstance(parsed, dict) else None
+    return jobs if isinstance(jobs, dict) else {}
+
+
 def _runtime_with_ocr_probe(
     workspace: Path,
     *,
@@ -2239,7 +2246,12 @@ characters:
                     "name": "joi-shell",
                     "private": True,
                     "version": "0.1.0",
-                    "scripts": {"build": "vue-tsc --noEmit && vite build", "tauri": "tauri"},
+                    "scripts": {
+                        "build": "vue-tsc --noEmit && vite build",
+                        "build:release": "npm run core:bundle && npm run assets:verify && vite build",
+                        "core:bundle": "node scripts/build-core-sidecar.mjs",
+                        "tauri": "tauri",
+                    },
                 }
             ),
             encoding="utf-8",
@@ -2258,9 +2270,10 @@ edition = "2021"
                 {
                     "productName": "Joi",
                     "version": "0.1.0",
-                    "identifier": "local.joi",
-                    "build": {"beforeBuildCommand": "npm run build", "frontendDist": "../dist"},
-                    "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": False}]},
+                    "identifier": "com.gallo233.joi",
+                    "build": {"beforeBuildCommand": "npm run build:release", "frontendDist": "../dist"},
+                    "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": True, "titleBarStyle": "Overlay"}]},
+                    "bundle": {"externalBin": ["binaries/joi-core"]},
                 }
             ),
             encoding="utf-8",
@@ -2290,6 +2303,24 @@ edition = "2021"
         (packaging_root / "tools" / "windows_handoff_report.py").write_text("", encoding="utf-8")
         (packaging_root / "tools" / "windows_release_check.py").write_text("", encoding="utf-8")
         (packaging_root / "tools" / "windows_setup_wizard.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "build_core_sidecar.py").write_text("", encoding="utf-8")
+        (packaging_root / "tools" / "smoke_core_sidecar.py").write_text("", encoding="utf-8")
+        (packaging_root / "requirements-build.txt").write_text("pyinstaller==6.21.0\n", encoding="utf-8")
+        (packaging_root / "docs").mkdir(parents=True, exist_ok=True)
+        (packaging_root / "docs" / "PRIVACY.md").write_text("Privacy draft", encoding="utf-8")
+        (packaging_root / "docs" / "THIRD_PARTY_NOTICES.md").write_text("Notices draft", encoding="utf-8")
+        (shell_dir / "release-assets.json").write_text('{"version":1,"files":[]}', encoding="utf-8")
+        (shell_dir / "scripts").mkdir(parents=True, exist_ok=True)
+        (shell_dir / "scripts" / "verify-release-assets.mjs").write_text("", encoding="utf-8")
+        (tauri_dir / "Info.plist").write_text(
+            """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>NSMicrophoneUsageDescription</key><string>Microphone</string>
+<key>NSAudioCaptureUsageDescription</key><string>Audio</string>
+<key>NSAppleEventsUsageDescription</key><string>Automation</string>
+</dict></plist>""",
+            encoding="utf-8",
+        )
         packaging_report = build_packaging_smoke_report(packaging_root)
         assert_true(packaging_report["status"] == "ok" and packaging_smoke_exit_code(packaging_report) == 0, "packaging smoke should pass valid release metadata")
         assert_true(any(item["name"] == "mvp_demo_check" and item["status"] == "ok" for item in packaging_report["items"]), "packaging smoke should require MVP demo check tooling")
@@ -2314,28 +2345,37 @@ edition = "2021"
         for relative in (
             "README.md",
             "config.example.yaml",
+            "docs/PRIVACY.md",
+            "docs/THIRD_PARTY_NOTICES.md",
             "secrets.example.yaml",
             "requirements.txt",
             "requirements-accessibility.txt",
             "requirements-audio.txt",
+            "requirements-build.txt",
             "requirements-ocr.txt",
             "start_joi.bat",
             "agent_companion/README.md",
             "agent_companion/shell/index.html",
             "agent_companion/shell/package.json",
             "agent_companion/shell/package-lock.json",
+            "agent_companion/shell/release-assets.json",
+            "agent_companion/shell/scripts/build-core-sidecar.mjs",
+            "agent_companion/shell/scripts/verify-release-assets.mjs",
             "agent_companion/shell/tsconfig.json",
             "agent_companion/shell/vite.config.ts",
             "agent_companion/shell/src-tauri/build.rs",
             "agent_companion/shell/src-tauri/Cargo.lock",
             "agent_companion/shell/src-tauri/Cargo.toml",
+            "agent_companion/shell/src-tauri/Info.plist",
             "agent_companion/shell/src-tauri/tauri.conf.json",
             "run_agent_companion_tests.py",
             "tools/joi_doctor.py",
+            "tools/build_core_sidecar.py",
             "tools/mvp_demo_check.py",
             "tools/package_windows_release.py",
             "tools/packaging_smoke.py",
             "tools/provider_preflight.py",
+            "tools/smoke_core_sidecar.py",
             "tools/smoke_ws_bridge.py",
             "tools/start_joi.ps1",
             "tools/windows_handoff_report.py",
@@ -2351,7 +2391,12 @@ edition = "2021"
                             "name": "joi-shell",
                             "private": True,
                             "version": "0.1.0",
-                            "scripts": {"build": "vue-tsc --noEmit && vite build", "tauri": "tauri"},
+                            "scripts": {
+                                "build": "vue-tsc --noEmit && vite build",
+                                "build:release": "npm run core:bundle && npm run assets:verify && vite build",
+                                "core:bundle": "node scripts/build-core-sidecar.mjs",
+                                "tauri": "tauri",
+                            },
                         }
                     ),
                     encoding="utf-8",
@@ -2372,11 +2417,22 @@ edition = "2021"
                         {
                             "productName": "Joi",
                             "version": "0.1.0",
-                            "identifier": "local.joi",
-                            "build": {"beforeBuildCommand": "npm run build", "frontendDist": "../dist"},
-                            "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": False}]},
+                            "identifier": "com.gallo233.joi",
+                            "build": {"beforeBuildCommand": "npm run build:release", "frontendDist": "../dist"},
+                            "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": True, "titleBarStyle": "Overlay"}]},
+                            "bundle": {"externalBin": ["binaries/joi-core"]},
                         }
                     ),
+                    encoding="utf-8",
+                )
+            elif relative.endswith("Info.plist"):
+                target.write_text(
+                    """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>NSMicrophoneUsageDescription</key><string>Microphone</string>
+<key>NSAudioCaptureUsageDescription</key><string>Audio</string>
+<key>NSAppleEventsUsageDescription</key><string>Automation</string>
+</dict></plist>""",
                     encoding="utf-8",
                 )
             elif relative == "start_joi.bat":
@@ -2419,6 +2475,8 @@ edition = "2021"
         release_exe = release_root / "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
         release_exe.parent.mkdir(parents=True, exist_ok=True)
         release_exe.write_bytes(b"fake exe")
+        release_sidecar = release_exe.with_name("joi-core.exe")
+        release_sidecar.write_bytes(b"fake sidecar")
         for forbidden in (
             "config.yaml",
             "secrets.yaml",
@@ -2468,9 +2526,14 @@ characters:
             names = archive.namelist()
         names_text = "\n".join(names)
         assert_true(any(name.endswith("agent_companion/shell/src-tauri/target/release/joi-shell.exe") for name in names), "Release zip should include the built shell exe")
+        assert_true(any(name.endswith("agent_companion/shell/src-tauri/target/release/joi-core.exe") for name in names), "Release zip should include the standalone Core sidecar")
         assert_true(any(name.endswith("tools/windows_handoff_report.py") for name in names), "Release zip should include the Windows handoff report")
         assert_true("RELEASE_MANIFEST.json" in names_text, "Release zip should include a safe manifest")
         assert_true(not any(fragment in names_text for fragment in ["config.yaml", "secrets.yaml", ".env", "node_modules", "logs/", "data/", "__pycache__", "private.pdb", "target/debug"]), "Release zip leaked local config, runtime data, dependency folders, or debug artifacts")
+        release_sidecar.unlink()
+        missing_sidecar_report = build_windows_release_package(release_root, output_dir=release_root / "out2", require_exe=True)
+        assert_true(missing_sidecar_report["status"] == "fail" and "release_sidecar_missing" in missing_sidecar_report["errors"], "Release packager should require the standalone Core sidecar")
+        release_sidecar.write_bytes(b"fake sidecar")
         release_exe.unlink()
         missing_exe_report = build_windows_release_package(release_root, output_dir=release_root / "out3", require_exe=True)
         assert_true(missing_exe_report["status"] == "fail" and "release_exe_missing" in missing_exe_report["errors"], "Release packager should require the release shell by default")
@@ -4618,12 +4681,26 @@ llm:
     assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
     assert_true("build_mvp_demo_check_report" in demo_check_source and "watch_together" in demo_check_source and "coding_task" in demo_check_source and "game_skill" in demo_check_source and "privacy_boundary" in demo_check_source, "P10 MVP demo check should expose safe watch/coding/game demo scripts")
     assert_true("build_windows_setup_plan" in setup_wizard_source and "windows_setup_exit_code" in setup_wizard_source and "config.example.yaml" in setup_wizard_source and "config.yaml" in setup_wizard_source and "safe_for_display" in setup_wizard_source, "P10 setup wizard should create local config safely without secrets")
-    assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source and "tools/mvp_demo_check.py" in release_packager_source and "tools/provider_preflight.py" in release_packager_source and "tools/windows_handoff_report.py" in release_packager_source and "tools/windows_release_check.py" in release_packager_source and "tools/windows_setup_wizard.py" in release_packager_source, "P10 release packager should create a safe portable Windows zip and include release/handoff tooling")
+    assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source and "RELEASE_SIDECAR" in release_packager_source and "tools/mvp_demo_check.py" in release_packager_source and "tools/provider_preflight.py" in release_packager_source and "tools/windows_handoff_report.py" in release_packager_source and "tools/windows_release_check.py" in release_packager_source and "tools/windows_setup_wizard.py" in release_packager_source, "P10 release packager should create a safe portable Windows zip with its Core sidecar and release/handoff tooling")
     assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source and "release_privacy_policy" in packaging_smoke_source and "mvp_demo_check" in packaging_smoke_source and "provider_preflight" in packaging_smoke_source and "windows_handoff_report" in packaging_smoke_source and "windows_release_check" in packaging_smoke_source and "windows_setup_wizard" in packaging_smoke_source and "setup_launcher" in packaging_smoke_source, "P10 packaging smoke should validate release metadata, Tauri permissions, release privacy policy, MVP demo check, provider preflight, handoff report, setup wizard, and release readiness tooling")
     assert_true("build_provider_preflight_report" in provider_preflight_source and "build_runtime_status" in provider_preflight_source and "REQUIRED_DEMO_PROVIDERS" in provider_preflight_source and "probe_system_audio_readiness" in provider_preflight_source and "safe_for_display" in provider_preflight_source, "P10 provider preflight should expose sanitized offline provider and system-audio readiness")
     assert_true("build_windows_handoff_report" in handoff_report_source and "build_windows_release_check_report" in handoff_report_source and "safe_for_display" in handoff_report_source and "handoff_ready" in handoff_report_source and "start_joi.bat -Setup" in handoff_report_source, "P10 handoff report should expose safe cross-machine release readiness")
     assert_true("build_windows_release_check_report" in release_check_source and "build_doctor_report" in release_check_source and "build_mvp_demo_check_report" in release_check_source and "build_provider_preflight_report" in release_check_source and "build_packaging_smoke_report" in release_check_source and "build_windows_release_package" in release_check_source and "build_windows_setup_plan" in release_check_source and "release_ready" in release_check_source, "P10 release check should aggregate doctor, setup, demo, provider, smoke, privacy, and package dry-run status")
-    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "PYTHONUTF8" in ci_workflow_source and "python -m pip install -r requirements.txt" in ci_workflow_source and "npm run build" in ci_workflow_source and "build --debug --no-bundle" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source and "tools/mvp_demo_check.py" in ci_workflow_source and "tools/provider_preflight.py" in ci_workflow_source and "tools/package_windows_release.py --dry-run" in ci_workflow_source and "tools/windows_handoff_report.py" in ci_workflow_source and "tools/windows_release_check.py" in ci_workflow_source and "tools/windows_setup_wizard.py" in ci_workflow_source, "CI should force UTF-8 output, install Python dependencies, and cover Python tests, frontend build, packaging smoke, MVP demo check, provider preflight, release dry-run, release readiness, handoff report, setup wizard, and Tauri debug smoke build")
+    assert_true("run_agent_companion_tests.py" in ci_workflow_source and "PYTHONUTF8" in ci_workflow_source and "requirements-build.txt" in ci_workflow_source and "npm run build" in ci_workflow_source and "npm run core:bundle" in ci_workflow_source and "cargo check" in ci_workflow_source and "tools/packaging_smoke.py" in ci_workflow_source and "tools/mvp_demo_check.py" in ci_workflow_source and "tools/provider_preflight.py" in ci_workflow_source and "tools/package_windows_release.py --dry-run" in ci_workflow_source and "tools/windows_handoff_report.py" in ci_workflow_source and "tools/windows_release_check.py" in ci_workflow_source and "tools/windows_setup_wizard.py" in ci_workflow_source, "CI should force UTF-8 output and cover Python tests, frontend build, packaging smoke, provider checks, standalone Core packaging, and the Tauri Rust shell")
+    ci_workflow_jobs = _yaml_jobs(ci_workflow_source)
+    ci_macos_lane = ci_workflow_jobs.get("macos-required", {})
+    ci_macos_steps = " ".join(str(step) for step in ci_macos_lane.get("steps", []))
+    assert_true(str(ci_macos_lane.get("runs-on", "")).startswith("macos"), "Joi 1.0 ships macOS-first, so CI must run a required macOS lane (TDD 15.2)")
+    assert_true(
+        "unittest discover" in ci_macos_steps
+        and "run_agent_companion_tests.py" in ci_macos_steps
+        and "npm run build" in ci_macos_steps
+        and "cargo check" in ci_macos_steps
+        and "smoke_core_sidecar.py" in ci_macos_steps
+        and "packaging_smoke.py" in ci_macos_steps,
+        "macOS required lane should cover unit/contract tests, shell typecheck+build, cargo check, sidecar handshake smoke, and the release privacy scan",
+    )
+    assert_true(str(ci_workflow_jobs.get("windows-compatibility", {}).get("runs-on", "")).startswith("windows"), "Windows should remain a named compatibility lane rather than the primary platform check")
     assert_true("workflow_dispatch" in release_candidate_workflow_source and "PYTHONUTF8" in release_candidate_workflow_source and "npm run tauri -- build" in release_candidate_workflow_source and "tools/package_windows_release.py --output-dir dist" in release_candidate_workflow_source and "actions/upload-artifact" in release_candidate_workflow_source, "Release candidate workflow should force UTF-8 output, build a real Tauri release, package without allow-missing-exe, and upload the zip")
     assert_true("-Doctor" in start_joi_source and "joi_doctor.py" in start_joi_source and "-Setup" in start_joi_source and "windows_setup_wizard.py" in start_joi_source, "Windows launcher should expose doctor and setup modes")
     assert_true("start_joi.bat -Doctor" in first_run_doc_source and "start_joi.bat -Setup" in first_run_doc_source and "windows_setup_wizard.py" in first_run_doc_source and "windows_handoff_report.py" in first_run_doc_source and "Tesseract" in first_run_doc_source and "requirements-audio.txt" in first_run_doc_source and "package_windows_release.py" in first_run_doc_source, "Windows first-run docs should cover setup wizard, doctor, OCR, audio, handoff, and release packaging setup")

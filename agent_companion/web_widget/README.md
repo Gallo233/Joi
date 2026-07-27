@@ -26,6 +26,8 @@ Do not expose Joi Core directly on the public internet. Put a server-side auth a
 
 ## Rebuild Assets
 
+Pass the character sheet PNG you want sliced; there is no default path.
+
 ```bash
-/Users/liujialuo/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 scripts/build_assets.py --source "/Users/liujialuo/Downloads/已生成图像 4 (1).png"
+.venv/bin/python scripts/build_assets.py --source /path/to/character-sheet.png
 ```

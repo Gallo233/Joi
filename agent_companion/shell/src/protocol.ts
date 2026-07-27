@@ -58,6 +58,19 @@ export interface ComputerUseAuditEvent {
   candidate_evidence?: Array<Record<string, unknown>>
 }
 
+// What the shared presence is doing. Unlike ui_phase it accounts for the
+// capability session: a paused session reads as 'paused', not 'acting'.
+export type PublicPhase =
+  | 'idle'
+  | 'received'
+  | 'understanding'
+  | 'thinking'
+  | 'acting'
+  | 'waiting'
+  | 'paused'
+  | 'done'
+  | 'failed'
+
 export interface AgentEvent {
   event_id?: string
   sequence?: number
@@ -67,12 +80,14 @@ export interface AgentEvent {
   thread_id?: string
   session_id?: string
   character_id?: string
+  public_phase?: PublicPhase | string
   display_card: DisplayCard
   voice_line: VoiceLine
   agent_state?: {
     ui_phase?: 'received' | 'understanding' | 'thinking' | 'acting' | 'waiting' | 'done' | 'failed' | 'idle' | string
     ui_label?: string
     ui_transient?: boolean
+    public_phase?: PublicPhase | string
     voice_audio_path?: string
     voice_audio_rel?: string
     voice_audio_data_url?: string
@@ -444,6 +459,27 @@ export interface AgentSkillInstallation {
   updated_at: number
 }
 
+export interface AgentSkillDraftPayload {
+  description?: string
+  instructions?: string
+  steps?: string
+  permissions?: Record<string, unknown>
+  [key: string]: unknown
+}
+
+// A successful run can only ever produce a draft; installing one is a separate
+// reviewed step, so drafts stay inert until the user approves them.
+export interface AgentSkillDraft {
+  id: string
+  project_id: string
+  thread_id: string
+  name: string
+  payload: AgentSkillDraftPayload
+  status: 'draft' | 'approved' | 'rejected' | 'installed' | string
+  created_at: number
+  updated_at: number
+}
+
 export interface GameAdapterManifest {
   id: string
   name: string
@@ -730,6 +766,13 @@ export interface CharacterRuntime extends CharacterSummary {
 }
 
 export interface CoreReadyPayload {
+  product?: string
+  protocol_version?: number
+  instance_id?: string
+  health?: {
+    livez?: string
+    readyz?: string
+  }
   workspace_label?: string
   workspace_bound?: boolean
   event_cursor?: number

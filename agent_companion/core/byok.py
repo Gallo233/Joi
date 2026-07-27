@@ -59,9 +59,9 @@ class ByokService:
         self.reload_callback = reload_callback
         self.last_test: dict[str, Any] | None = None
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, probe_secret: bool = True) -> dict[str, Any]:
         config = load_workspace_config(self.workspace)
-        secret = managed_secret_status(LLM_API_KEY_ENV)
+        secret = managed_secret_status(LLM_API_KEY_ENV) if probe_secret else _unprobed_secret_status(config)
         if config is None:
             return {
                 "ok": True,
@@ -350,6 +350,19 @@ def _valid_endpoint(value: str, *, allow_local_http: bool) -> bool:
 def _normalized_provider(value: object) -> str:
     provider = str(value or "openai").strip().casefold().replace("-", "_")
     return provider if provider in {row["id"] for row in _PRESETS} else provider
+
+
+def _unprobed_secret_status(config: Any) -> dict[str, Any]:
+    """Return startup-safe BYOK state without opening the system keychain."""
+
+    if os.environ.get(LLM_API_KEY_ENV, "").strip():
+        return {"stored": True, "source": "environment", "secure_store_available": True}
+    configured = bool(config and config.llm.is_configured and not config.llm.use_mock)
+    return {
+        "stored": configured,
+        "source": "configured" if configured else "unchecked",
+        "secure_store_available": True,
+    }
 
 
 def _safe_model(value: object) -> str:

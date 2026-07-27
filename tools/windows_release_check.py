@@ -62,12 +62,12 @@ def build_windows_release_check_report(
     phases.append(_phase("packaging_smoke", smoke, _counts_summary(smoke), required=True))
 
     package = build_windows_release_package(root, dry_run=True, require_exe=not allow_missing_exe)
-    package_summary = f"Dry-run entries: {int(package.get('entry_count', 0) or 0)}; release shell: {'present' if package.get('includes_release_exe') else 'missing'}."
+    package_summary = f"Dry-run entries: {int(package.get('entry_count', 0) or 0)}; release shell: {'present' if package.get('includes_release_exe') else 'missing'}; Core sidecar: {'present' if package.get('includes_core_sidecar') else 'missing'}."
     phases.append(_phase("release_package_dry_run", package, package_summary, required=True))
 
     status = _overall_status(phases)
     counts = {name: sum(1 for phase in phases if phase["status"] == name) for name in ("ok", "warn", "fail")}
-    release_ready = status == "ok" and bool(package.get("includes_release_exe"))
+    release_ready = status == "ok" and bool(package.get("includes_release_exe")) and bool(package.get("includes_core_sidecar"))
     return {
         "version": CHECK_VERSION,
         "safe_for_display": True,

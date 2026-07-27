@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "path": "live2d/joi/joi.model3.json",
+      "size": 375,
+      "sha256": "67f9d302075260418424122ef11407828be248f7a5dd278d759ec1f9d86b4501"
+    },
+    {
+      "path": "live2d/joi/joi.moc3",
+      "size": 26496,
+      "sha256": "e926bc91b53cfca6c052cf81038e87da562f8de71b45e7a880a5dfbdaaa4e802"
+    },
+    {
+      "path": "live2d/joi/joi.cdi3.json",
+      "size": 2572,
+      "sha256": "c0ea27bd7616bf048b7fb8ff1b26db442b2cc7edddfe78e239de45b74aaeb5ef"
+    },
+    {
+      "path": "live2d/joi/joi.2048/texture_00.png",
+      "size": 1683989,
+      "sha256": "3e25f4f73688931873083a6cfb2fdf507c54715049979e3951638784eed5daf3"
+    },
+    {
+      "path": "vendor/live2d/live2dcubismcore.min.js",
+      "size": 206492,
+      "sha256": "942783587666a3a1bddea93afd349e26f798ed19dcd7a52449d0ae3322fcff7c"
+    },
+    {
+      "path": "vendor/live2d/pixi.min.js",
+      "size": 797792,
+      "sha256": "83b2d7edf27bb77460f5f5f5e25cd73c91b77a53f44c80ac63096d6c0b5cfda7"
+    },
+    {
+      "path": "vendor/live2d/cubism.min.js",
+      "size": 221772,
+      "sha256": "607301246564feca9e5291996d8d1ed97665525a627550a595a129f71083184e"
+    }
+  ]
+}

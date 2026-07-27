@@ -7,6 +7,7 @@ import shutil
 import sys
 from typing import Any
 
+from agent_companion.core.ok_ww import ok_ww_runner_path
 from agent_companion.core.speech_input import AsrRuntimeState
 
 
@@ -438,8 +439,7 @@ def _agent_cli_available() -> bool:
 
 
 def _ok_ww_available() -> bool:
-    script = os.environ.get("OK_WW_RUNNER", r"C:\Users\liujialuo\.codex\skills\github_issue_solver\scripts\run_ok_ww.ps1")
-    return Path(script).is_file()
+    return ok_ww_runner_path() is not None
 
 
 def _skill_binding(tool_name: str) -> dict[str, str]:

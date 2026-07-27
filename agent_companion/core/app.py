@@ -35,7 +35,9 @@ from agent_companion.core.memory import MemoryStore
 from agent_companion.core.memory_candidates import tool_result_memory_candidate
 from agent_companion.core.platform_factory import get_computer_backend
 from agent_companion.core.planner import build_plan
+from agent_companion.core.action_intent import ActionIntent
 from agent_companion.core.policy import PolicyGate
+from agent_companion.core.run_journal import RunJournal
 from agent_companion.core.runtime import build_tool_registry
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.skill_manifest import annotate_agent_state_with_skill, skill_boundaries_for_plan, skill_boundary_for_tool
@@ -59,6 +61,10 @@ class PendingStep:
     arguments_hash: str
     request_override: ToolRequest | None = None
     created_at: float = 0.0
+    # Set when a run journal is attached: the persisted approval this in-memory
+    # entry mirrors. The challenge is what survives a restart; this is a cache.
+    challenge_id: str = ""
+    step_id: str = ""
 
 
 class AgentCompanionApp:
@@ -94,6 +100,9 @@ class AgentCompanionApp:
         self.approval_history: dict[str, PendingStep] = {}
         self.resolved_approval_ids: set[str] = set()
         self.approval_ttl_seconds = 120.0
+        # No-op until the server injects the store-backed journal; see run_journal.
+        self.run_journal: RunJournal = RunJournal()
+        self._plan_runs: dict[str, str] = {}
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
@@ -226,6 +235,9 @@ class AgentCompanionApp:
         plan_voice: str = "我整理了一下步骤。",
     ) -> list[AgentEvent]:
         self._emit_user_request(plan, user_state)
+        run_id = self.run_journal.begin_run(plan.task_id, plan.intent, plan.user_text)
+        if run_id:
+            self._plan_runs[plan.task_id] = run_id
         if record_memory:
             self._record_explicit_memory_candidate(plan)
         if emit_plan:
@@ -303,6 +315,9 @@ class AgentCompanionApp:
             reload_planner()
         self._register_tools()
 
+    def set_run_journal(self, journal: RunJournal) -> None:
+        self.run_journal = journal
+
     def set_session_authorizer(self, authorizer: Any) -> None:
         self._session_authorizer = authorizer
         self.policy.session_authorizer = authorizer
@@ -350,6 +365,22 @@ class AgentCompanionApp:
             self._emit_duplicate_approval_audit(approval_id)
             return self.bus.drain()
         self.resolved_approval_ids.add(approval_id)
+        # Record the decision before acting on it. Approval alone still does not
+        # permit the step: it is re-verified and spent in _run_plan.
+        decided = self.run_journal.decide_challenge(pending.challenge_id, approved)
+        if pending.challenge_id and not decided.get("ok"):
+            self._emit_failed_approval(
+                pending,
+                approval_id,
+                state_flag="approval_expired" if "expired" in str(decided.get("error") or "") else "approval_mismatch",
+                title="审批已失效",
+                summary="这次确认已经不能使用，我没有继续执行。",
+                voice="这次确认已经失效，我没有继续执行。",
+                audit_status="expired",
+                audit_summary=f"Approval could not be recorded: {decided.get('error') or 'unknown'}.",
+                codex_reason="expired",
+            )
+            return self.bus.drain()
         if self._pending_step_expired(pending):
             self._emit_failed_approval(
                 pending,
@@ -445,6 +476,7 @@ class AgentCompanionApp:
 
     def _run_plan(self, plan: AgentPlan, start_index: int, approved_step: PendingStep | None = None) -> None:
         final_ok = True
+        run_id = self._plan_runs.get(plan.task_id, "")
         for index, plan_step in enumerate(plan.steps[start_index:], start=start_index):
             step = self._step_for_execution(plan, index, plan_step, approved_step)
             step = self._step_with_memory_context(step)
@@ -457,13 +489,37 @@ class AgentCompanionApp:
             if decision.requires_approval:
                 self._request_step_approval(plan, index, step, decision.risk)
                 return
+            intent = ActionIntent.from_request(step)
+            step_id = self.run_journal.record_step(run_id, index, intent)
+            # An approval is spent here, not when the user clicked: the gap
+            # between the two is exactly where a plan can be edited.
+            if is_approved_step and approved_step is not None and approved_step.challenge_id:
+                spent = self.run_journal.spend_challenge(approved_step.challenge_id, intent)
+                if not spent.get("ok"):
+                    self._emit_policy_block(plan, step, decision.risk, f"approval_{spent.get('error') or 'invalid'}")
+                    final_ok = False
+                    break
+            lease = self.run_journal.begin_effect(run_id, step_id, intent, approval_id=getattr(approved_step, "challenge_id", "") or "")
+            if not lease.get("ok"):
+                # Another attempt on this exact effect is in flight or already
+                # happened; acting again could double a real-world change.
+                self._emit_policy_block(plan, step, decision.risk, str(lease.get("error") or "effect_unavailable"))
+                final_ok = False
+                break
+            effect_id = str((lease.get("effect") or {}).get("id") or "")
             self._emit_tool_started(plan, step)
             result = self._run_tool_safely(step)
             if result.requires_approval:
                 pending_request = self._approval_request_from_result(result)
                 if pending_request is not None:
+                    # The tool asked rather than acted, so release the lease for
+                    # the follow-up attempt instead of leaving it dangling.
+                    self.run_journal.complete_effect(effect_id, ok=False)
                     self._request_result_approval(plan, index, pending_request, result)
                     return
+            self.run_journal.complete_effect(effect_id, ok=result.ok)
+            if step_id:
+                self.run_journal.record_step_outcome(step_id, result.ok)
             self._process_tool_result(plan, step, result)
             final_ok = final_ok and result.ok
             if not result.ok:
@@ -646,6 +702,9 @@ class AgentCompanionApp:
         self._record_result_memory_candidate(plan, step, result)
 
     def _finish_plan(self, plan: AgentPlan, final_ok: bool, approved_step: PendingStep | None) -> None:
+        run_id = self._plan_runs.pop(plan.task_id, "")
+        if run_id:
+            self.run_journal.finish_run(run_id, "completed" if final_ok else "failed")
         if final_ok:
             if self._should_emit_task_completion(plan.intent) or self._approved_computer_step_completed(approved_step):
                 self._emit(
@@ -946,14 +1005,32 @@ class AgentCompanionApp:
         return SystemAudioTranscriptProvider(asr, max_seconds=min(max(1, int(state.max_seconds or 8)), 10))
 
     def _make_pending_step(self, plan: AgentPlan, index: int, step: ToolRequest, request_override: ToolRequest | None = None) -> PendingStep:
+        """Create the approval, persisting it first when a journal is attached.
+
+        The persisted challenge id becomes the approval id handed to the shell,
+        so resolving an approval targets the durable row rather than a value
+        that only exists in this process.
+        """
+        run_id = self._plan_runs.get(plan.task_id, "")
+        intent = ActionIntent.from_request(request_override or step)
+        step_id = self.run_journal.record_step(run_id, index, intent)
+        challenge_id = self.run_journal.open_challenge(
+            run_id,
+            step_id,
+            intent,
+            payload={"tool": step.name, "reason": step.reason},
+            ttl_seconds=self.approval_ttl_seconds,
+        )
         return PendingStep(
             plan=plan,
             index=index,
-            approval_id=f"approval-{uuid.uuid4().hex[:12]}",
+            approval_id=challenge_id or f"approval-{uuid.uuid4().hex[:12]}",
             tool=step.name,
             arguments_hash=_arguments_hash(step.arguments),
             request_override=request_override,
             created_at=time.time(),
+            challenge_id=challenge_id,
+            step_id=step_id,
         )
 
     def _store_pending_step(self, pending: PendingStep) -> None:

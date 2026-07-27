@@ -23,6 +23,7 @@ agent_companion/shell/public/live2d/joi/
 agent_companion/shell/public/vendor/live2d/
 agent_companion/shell/src-tauri/target/
 agent_companion/shell/src-tauri/gen/
+agent_companion/shell/src-tauri/binaries/joi-core-*
 *.log
 /design-qa*.png
 /joi-*.png

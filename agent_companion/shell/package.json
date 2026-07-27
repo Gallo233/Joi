@@ -4,9 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "core:bundle": "node scripts/build-core-sidecar.mjs",
     "live2d:sync": "node scripts/sync-live2d-assets.mjs",
-    "dev": "npm run live2d:sync -- --optional && vite --host 127.0.0.1",
+    "assets:verify": "node scripts/verify-release-assets.mjs",
+    "dev": "npm run core:bundle -- --if-missing && npm run live2d:sync -- --optional && vite --host 127.0.0.1",
     "build": "npm run live2d:sync -- --optional && vue-tsc --noEmit && vite build",
+    "build:release": "npm run core:bundle && npm run live2d:sync && npm run assets:verify && vue-tsc --noEmit && vite build",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -151,16 +151,22 @@ class ComputerUseOrchestrator:
     def pause(self, session_id: str, reason: str) -> dict[str, Any]:
         runtime = self._runtime.setdefault(session_id, SessionRuntime(session_id))
         runtime.pause_reason = reason
-        result = self.store.transition_session(session_id, "paused")
+        # Persist the reason too: in-memory runtime dies with the process, and a
+        # session that reappears after a restart still has to explain itself.
+        result = self.store.transition_session(session_id, "paused", reason)
         result["pause_reason"] = reason
         return result
 
     def runtime_payload(self, session_id: str) -> dict[str, Any]:
         runtime = self._runtime.get(session_id) or SessionRuntime(session_id)
         preflight = self.preflight(session_id) if session_id else {"allowed": False, "reason": "session_not_found"}
+        session = self.store.session_payload(session_id, include_receipts=False) if session_id else {}
         return {
             "model_calls": runtime.model_calls,
-            "pause_reason": runtime.pause_reason,
+            # Fall back to the stored reason so a session recovered from a
+            # previous launch still reports why it is paused.
+            "pause_reason": runtime.pause_reason or str(session.get("pause_reason") or ""),
+            "recovery_required": bool(session.get("recovery_required")),
             "repeated_noops": runtime.repeated_noops,
             "budget": preflight,
             "drivers": self.driver_inventory(str((self.store.session_payload(session_id, False) or {}).get("driver") or "auto")).payload() if session_id else self.driver_inventory().payload(),

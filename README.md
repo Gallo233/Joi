@@ -25,6 +25,9 @@ The current repository is intentionally focused on the Joi main line.
 - [Private Semantic Calibration](docs/SEMANTIC_CALIBRATION.md)
 - [Architecture](agent_companion/docs/architecture.md)
 - [Windows Toolchain and Bridge](agent_companion/docs/windows_toolchain_and_bridge.md)
+- [macOS MVP Release Guide](docs/MACOS_RELEASE.md)
+- [Privacy Notice (Draft)](docs/PRIVACY.md)
+- [Third-Party Notices (Draft)](docs/THIRD_PARTY_NOTICES.md)
 
 ## Quick Start
 
@@ -38,7 +41,7 @@ cd path\to\Joi
 The launcher starts the Python Core on `ws://127.0.0.1:8765` and opens the Joi desktop shell. Core logs are written to `logs/joi_core.out.log` and `logs/joi_core.err.log`.
 `-Setup` creates a local `config.yaml` from `config.example.yaml` when missing and never writes secrets.
 
-On macOS, use the same core and shell with the local venv and npm toolchain:
+On macOS, development uses the local venv and npm toolchain. Packaged releases instead carry a standalone authenticated Core sidecar and select a fresh loopback port on every launch:
 
 ```bash
 cd /path/to/Joi

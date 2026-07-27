@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import plistlib
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,14 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
     handoff_report_path = root / "tools" / "windows_handoff_report.py"
     release_check_path = root / "tools" / "windows_release_check.py"
     setup_wizard_path = root / "tools" / "windows_setup_wizard.py"
+    core_builder_path = root / "tools" / "build_core_sidecar.py"
+    core_smoke_path = root / "tools" / "smoke_core_sidecar.py"
+    build_requirements_path = root / "requirements-build.txt"
+    release_assets_path = shell_dir / "release-assets.json"
+    release_asset_verifier_path = shell_dir / "scripts" / "verify-release-assets.mjs"
+    mac_info_plist_path = tauri_path.parent / "Info.plist"
+    privacy_notice_path = root / "docs" / "PRIVACY.md"
+    third_party_notices_path = root / "docs" / "THIRD_PARTY_NOTICES.md"
 
     package = _read_json(package_path, add, "package_json")
     tauri = _read_json(tauri_path, add, "tauri_config")
@@ -59,15 +68,28 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
             "windows_handoff_report": handoff_report_path,
             "windows_release_check": release_check_path,
             "windows_setup_wizard": setup_wizard_path,
+            "core_sidecar_builder": core_builder_path,
+            "core_sidecar_smoke": core_smoke_path,
+            "build_requirements": build_requirements_path,
+            "release_asset_manifest": release_assets_path,
+            "release_asset_verifier": release_asset_verifier_path,
+            "mac_info_plist": mac_info_plist_path,
+            "privacy_notice": privacy_notice_path,
+            "third_party_notices": third_party_notices_path,
         },
         add,
     )
+    _check_mac_info_plist(mac_info_plist_path, add)
     if package and tauri and cargo:
         _check_versions(package, tauri, cargo, add)
     if package:
         scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
-        _expect(scripts.get("build") == "vue-tsc --noEmit && vite build", add, "frontend_build_script", "Frontend build script type-checks and builds Vite.", "Keep npm run build as vue-tsc plus Vite build.")
+        frontend_build = str(scripts.get("build") or "")
+        _expect("vue-tsc --noEmit" in frontend_build and "vite build" in frontend_build, add, "frontend_build_script", "Frontend build script type-checks and builds Vite.", "Keep npm run build wired to vue-tsc plus Vite build.")
         _expect(scripts.get("tauri") == "tauri", add, "tauri_script", "Tauri CLI script is present.", "Expose Tauri through npm run tauri for local and CI reuse.")
+        _expect(bool(scripts.get("core:bundle")), add, "core_sidecar_script", "Standalone Joi Core build script is present.", "Restore the PyInstaller sidecar build script.")
+        release_build = str(scripts.get("build:release") or "")
+        _expect("core:bundle" in release_build and "assets:verify" in release_build, add, "release_build_gate", "Release build requires the Core sidecar and pinned assets.", "Require both the Core sidecar and release asset verification before Tauri packaging.")
     if tauri:
         _check_tauri_config(tauri, add)
     if capabilities:
@@ -121,6 +143,29 @@ def _check_required_files(paths: dict[str, Path], add: Any) -> None:
         _expect(path.is_file(), add, name, "Found.", "Restore the packaging file before release.")
 
 
+def _check_mac_info_plist(path: Path, add: Any) -> None:
+    if not path.is_file():
+        return
+    try:
+        payload = plistlib.loads(path.read_bytes())
+    except Exception:
+        add("fail", "mac_privacy_descriptions", "Info.plist is invalid.", "Restore a valid macOS Info.plist.")
+        return
+    required = {
+        "NSMicrophoneUsageDescription",
+        "NSAudioCaptureUsageDescription",
+        "NSAppleEventsUsageDescription",
+    }
+    available = {key for key in required if str(payload.get(key) or "").strip()}
+    _expect(
+        available == required,
+        add,
+        "mac_privacy_descriptions",
+        "macOS microphone, audio capture, and Apple Events purpose strings are present.",
+        "Add non-empty microphone, audio capture, and Apple Events purpose strings to src-tauri/Info.plist.",
+    )
+
+
 def _check_versions(package: dict[str, Any], tauri: dict[str, Any], cargo: dict[str, Any], add: Any) -> None:
     package_version = str(package.get("version", "") or "")
     tauri_version = str(tauri.get("version", "") or "")
@@ -135,11 +180,14 @@ def _check_tauri_config(tauri: dict[str, Any], add: Any) -> None:
     main_window = windows[0] if windows and isinstance(windows[0], dict) else {}
     _expect(tauri.get("productName") == "Joi", add, "product_name", "Product name is Joi.", "Set Tauri productName to Joi.")
     _expect(bool(str(tauri.get("identifier", "")).strip()), add, "app_identifier", "Application identifier is set.", "Set a stable Tauri identifier.")
-    _expect(build.get("beforeBuildCommand") == "npm run build", add, "tauri_before_build", "Tauri build runs frontend build first.", "Keep beforeBuildCommand as npm run build.")
+    _expect(build.get("beforeBuildCommand") == "npm run build:release", add, "tauri_before_build", "Tauri build runs the release-gated build first.", "Keep beforeBuildCommand as npm run build:release.")
     _expect(build.get("frontendDist") == "../dist", add, "tauri_frontend_dist", "Tauri uses the Vite dist directory.", "Keep frontendDist pointed at ../dist.")
     _expect(main_window.get("label") == "main", add, "main_window_label", "Main window label is stable.", "Keep the main window label as main for capability matching.")
-    _expect(main_window.get("decorations") is False and main_window.get("transparent") is True, add, "frameless_window", "Main shell is configured as a transparent frameless window.", "Keep decorations=false and transparent=true for Joi shell chrome.")
+    _expect(main_window.get("decorations") is True and main_window.get("titleBarStyle") == "Overlay", add, "native_window_chrome", "Main shell uses native window controls with an overlay title bar.", "Keep native decorations and the overlay title bar for correct macOS traffic lights.")
     _expect(int(main_window.get("width", 0) or 0) >= 1000 and int(main_window.get("height", 0) or 0) >= 700, add, "window_size", "Default desktop window size is release-ready.", "Keep the default shell window large enough for chat and stage panes.")
+    bundle = tauri.get("bundle") if isinstance(tauri.get("bundle"), dict) else {}
+    external = bundle.get("externalBin") if isinstance(bundle.get("externalBin"), list) else []
+    _expect("binaries/joi-core" in external, add, "core_sidecar_bundle", "Tauri bundles the standalone Joi Core sidecar.", "Add binaries/joi-core to bundle.externalBin.")
 
 
 def _check_capabilities(capabilities: dict[str, Any], add: Any) -> None:

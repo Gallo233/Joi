@@ -13,13 +13,33 @@ import time
 from typing import Any, Iterable
 import uuid
 
+from agent_companion.core.action_intent import EffectKind, RED_LINE_EFFECTS, marker_effect
+from agent_companion.core.run_store import RunStore
 
-COLLABORATION_SCHEMA_VERSION = 1
+
+COLLABORATION_SCHEMA_VERSION = 2
 DEFAULT_PROJECT_ID = "project-default"
 DEFAULT_THREAD_ID = "thread-legacy"
 PERMISSION_PROFILES = {"observe", "collaborate", "delegate"}
+
+# Identifies this Joi process.  ``delegate`` trades the project-binding limit for
+# a lifetime limit: it keeps acting outside the bound scope, but only for as long
+# as the Joi the user granted it to is still running.  Grants restored from
+# SQLite after a restart carry a stale launch id and fall back to confirmation.
+LAUNCH_ID = f"launch-{uuid.uuid4().hex[:16]}"
 SESSION_STATES = {"created", "running", "paused", "waiting_approval", "completed", "failed", "cancelled"}
-SENSITIVE_ACTIONS = {"payment", "login", "send_message", "delete", "install", "expand_scope"}
+
+# Pause reason for a session whose owning Joi process ended before it finished.
+# It is a reason rather than a state so the public phase projection stays the
+# small frozen vocabulary the shell already renders (TDD 8.1/8.2).
+RECOVERY_REQUIRED = "recovery_required"
+SENSITIVE_ACTIONS = {effect.value for effect in RED_LINE_EFFECTS}
+
+
+def _red_line_name(effect: Any) -> str:
+    """Normalize a typed or inferred effect to a red-line name, else ""."""
+    value = effect.value if isinstance(effect, EffectKind) else str(effect or "")
+    return value if value in SENSITIVE_ACTIONS else ""
 
 
 @dataclass(frozen=True)
@@ -95,13 +115,19 @@ class CollaborationStore:
         self.skill_root = self.data_home / "skills"
         self.skill_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._connection = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA busy_timeout = 5000")
         self._connection.execute("PRAGMA journal_mode = WAL")
         self._create_schema()
+        self._ensure_columns()
         self._ensure_defaults(default_character_id)
         self._migrate_legacy_events()
+        # Schema v3 lives in its own module but the same database: its rows
+        # reference projects/threads and must share transactions with them.
+        self.runs = RunStore(self._connection, self._lock)
+        self.launch_reconciliation = self._reconcile_previous_launch()
 
     def close(self) -> None:
         with self._lock:
@@ -151,6 +177,7 @@ class CollaborationStore:
                     thread_id TEXT NOT NULL REFERENCES conversation_threads(id) ON DELETE CASCADE,
                     session_id TEXT NOT NULL DEFAULT '',
                     character_id TEXT NOT NULL DEFAULT '',
+                    public_phase TEXT NOT NULL DEFAULT '',
                     task_id TEXT NOT NULL DEFAULT '',
                     type TEXT NOT NULL,
                     created_at REAL NOT NULL,
@@ -166,6 +193,7 @@ class CollaborationStore:
                     goal TEXT NOT NULL DEFAULT '',
                     permission_profile TEXT NOT NULL,
                     state TEXT NOT NULL,
+                    pause_reason TEXT NOT NULL DEFAULT '',
                     driver TEXT NOT NULL DEFAULT 'native',
                     budget_json TEXT NOT NULL DEFAULT '{}',
                     stop_conditions_json TEXT NOT NULL DEFAULT '[]',
@@ -181,6 +209,8 @@ class CollaborationStore:
                     profile TEXT NOT NULL,
                     scope_json TEXT NOT NULL DEFAULT '{}',
                     status TEXT NOT NULL DEFAULT 'active',
+                    status_reason TEXT NOT NULL DEFAULT '',
+                    launch_id TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL,
                     expires_at REAL
                 );
@@ -239,6 +269,55 @@ class CollaborationStore:
             )
             self._set_meta("schema_version", str(COLLABORATION_SCHEMA_VERSION))
 
+    def _ensure_columns(self) -> None:
+        """Add columns introduced after a database was first created.
+
+        ``CREATE TABLE IF NOT EXISTS`` silently keeps an older table's shape, so
+        every column added later needs an explicit backfill here.
+        """
+        added: dict[str, tuple[tuple[str, str], ...]] = {
+            "permission_grants": (("launch_id", "TEXT NOT NULL DEFAULT ''"), ("status_reason", "TEXT NOT NULL DEFAULT ''")),
+            "events": (("public_phase", "TEXT NOT NULL DEFAULT ''"),),
+            "capability_sessions": (("pause_reason", "TEXT NOT NULL DEFAULT ''"),),
+        }
+        with self._lock, self._connection:
+            for table, columns in added.items():
+                existing = {str(row["name"]) for row in self._connection.execute(f"PRAGMA table_info({table})")}
+                if not existing:
+                    continue
+                for name, definition in columns:
+                    if name not in existing:
+                        self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+    def _reconcile_previous_launch(self) -> dict[str, Any]:
+        """Settle whatever the previous Joi process left mid-flight.
+
+        A row saying ``running`` only ever meant "running in the process that
+        wrote it". After a crash or quit that process is gone, so the session
+        cannot be shown as executing and must not resume on its own: it becomes
+        ``paused`` with ``recovery_required`` and waits for the user.
+
+        ``waiting_approval`` is deliberately left alone -- it is already a state
+        that blocks on a person, and downgrading it would discard the pending
+        decision. Delegate grants from an ended launch are expired here so no
+        later code path can find an active one (see LAUNCH_ID).
+        """
+        now = time.time()
+        with self._lock, self._connection:
+            expired = self._connection.execute(
+                "UPDATE permission_grants SET status='expired',status_reason='launch_ended' WHERE status='active' AND profile='delegate' AND launch_id<>?",
+                (LAUNCH_ID,),
+            ).rowcount
+            recovered = self._connection.execute(
+                "UPDATE capability_sessions SET state='paused',pause_reason=?,updated_at=? WHERE state='running'",
+                (RECOVERY_REQUIRED, now),
+            ).rowcount
+        return {
+            "expired_delegate_grants": max(0, expired),
+            "sessions_recovery_required": max(0, recovered),
+            **self.runs.reconcile_launch(LAUNCH_ID),
+        }
+
     def _ensure_defaults(self, character_id: str) -> None:
         now = time.time()
         with self._lock, self._connection:
@@ -264,10 +343,12 @@ class CollaborationStore:
                 character_id = thread.character_id
             if not character_id and project:
                 character_id = project.default_character_id
+            session_id, session_state = self._active_session(thread_id)
             return {
                 "project_id": project_id,
                 "thread_id": thread_id,
-                "session_id": self._active_session_id(thread_id),
+                "session_id": session_id,
+                "session_state": session_state,
                 "character_id": character_id or "builtin-hikari",
             }
 
@@ -466,7 +547,7 @@ class CollaborationStore:
             return
         context = self.context()
         state = payload.get("agent_state") if isinstance(payload.get("agent_state"), dict) else {}
-        for key in ("project_id", "thread_id", "session_id", "character_id"):
+        for key in ("project_id", "thread_id", "session_id", "character_id", "public_phase"):
             payload[key] = str(payload.get(key) or state.get(key) or context.get(key) or "")
         event_id = str(payload.get("event_id") or _event_digest(payload))
         payload["event_id"] = event_id
@@ -478,8 +559,8 @@ class CollaborationStore:
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT OR IGNORE INTO events(
-                    event_id,sequence,project_id,thread_id,session_id,character_id,task_id,type,created_at,payload_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    event_id,sequence,project_id,thread_id,session_id,character_id,public_phase,task_id,type,created_at,payload_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     event_id,
                     _safe_int(payload.get("sequence")),
@@ -487,6 +568,7 @@ class CollaborationStore:
                     thread_id,
                     payload.get("session_id") or "",
                     payload.get("character_id") or "",
+                    payload.get("public_phase") or "",
                     str(payload.get("task_id") or ""),
                     str(payload.get("type") or "event"),
                     _safe_float(payload.get("created_at"), time.time()),
@@ -540,8 +622,8 @@ class CollaborationStore:
                 (session_id, project_id, thread_id, _clean_identifier(capability, "computer_use"), str(goal or "")[:2000], profile, "running", _clean_identifier(driver, "native"), _json(safe_budget), _json(safe_stops), now, now),
             )
             self._connection.execute(
-                "INSERT INTO permission_grants(id,session_id,profile,scope_json,status,created_at) VALUES(?,?,?,?,?,?)",
-                (f"grant-{uuid.uuid4().hex[:12]}", session_id, profile, _json(self._project_scope(project_id)), "active", now),
+                "INSERT INTO permission_grants(id,session_id,profile,scope_json,status,launch_id,created_at) VALUES(?,?,?,?,?,?,?)",
+                (f"grant-{uuid.uuid4().hex[:12]}", session_id, profile, _json(self._project_scope(project_id)), "active", LAUNCH_ID, now),
             )
         return {"ok": True, "session": self.session_payload(session_id)}
 
@@ -561,13 +643,16 @@ class CollaborationStore:
             row = self._connection.execute("SELECT id FROM capability_sessions WHERE thread_id=? ORDER BY updated_at DESC LIMIT 1", (thread_id,)).fetchone()
         return self.session_payload(str(row["id"])) if row else {}
 
-    def transition_session(self, session_id: str, state: str) -> dict[str, Any]:
+    def transition_session(self, session_id: str, state: str, pause_reason: str = "") -> dict[str, Any]:
         clean_state = state if state in SESSION_STATES else "paused"
         completed_at = time.time() if clean_state in {"completed", "failed", "cancelled"} else None
+        # The reason only describes a pause; leaving it set on resume would keep
+        # a recovered session looking unrecovered.
+        clean_reason = _clean_identifier(pause_reason)[:60] if clean_state == "paused" else ""
         with self._lock, self._connection:
             cursor = self._connection.execute(
-                "UPDATE capability_sessions SET state=?,updated_at=?,completed_at=COALESCE(?,completed_at) WHERE id=?",
-                (clean_state, time.time(), completed_at, session_id),
+                "UPDATE capability_sessions SET state=?,pause_reason=?,updated_at=?,completed_at=COALESCE(?,completed_at) WHERE id=?",
+                (clean_state, clean_reason, time.time(), completed_at, session_id),
             )
         if not cursor.rowcount:
             return {"ok": False, "error": "session_not_found"}
@@ -581,11 +666,14 @@ class CollaborationStore:
             ).fetchone()
         if not row:
             return {}
+        launch_id = str(row["launch_id"] or "")
         return {
             "id": row["id"],
             "profile": row["profile"],
             "scope": _object(row["scope_json"]),
             "status": row["status"],
+            "launch_id": launch_id,
+            "current_launch": launch_id == LAUNCH_ID,
             "created_at": row["created_at"],
             "expires_at": row["expires_at"],
         }
@@ -601,11 +689,50 @@ class CollaborationStore:
         with self._lock, self._connection:
             self._connection.execute("UPDATE permission_grants SET status='revoked' WHERE session_id=? AND status='active'", (session_id,))
             self._connection.execute(
-                "INSERT INTO permission_grants(id,session_id,profile,scope_json,status,created_at) VALUES(?,?,?,?,?,?)",
-                (grant_id, session_id, profile, _json(scope or self._project_scope(str(session.get("project_id") or ""))), "active", now),
+                "INSERT INTO permission_grants(id,session_id,profile,scope_json,status,launch_id,created_at) VALUES(?,?,?,?,?,?,?)",
+                (grant_id, session_id, profile, _json(scope or self._project_scope(str(session.get("project_id") or ""))), "active", LAUNCH_ID, now),
             )
             self._connection.execute("UPDATE capability_sessions SET permission_profile=?,updated_at=? WHERE id=?", (profile, now, session_id))
         return {"ok": True, "permission": self.permission_for_session(session_id), "session": self.session_payload(session_id)}
+
+    def expand_permission(self, session_id: str, scope: dict[str, Any] | None = None, *, confirmed: bool = False) -> dict[str, Any]:
+        """Widen an existing grant's scope, never its profile.
+
+        Expansion is its own step because it is the one permission change the
+        user cannot infer from the profile they picked: the session keeps the
+        档位 they chose while reaching somewhere new.  Unconfirmed calls return
+        exactly what would be added so the UI can name it before anything moves.
+        """
+        permission = self.permission_for_session(session_id)
+        if not permission:
+            return {"ok": False, "error": "permission_not_found"}
+        current = permission.get("scope") if isinstance(permission.get("scope"), dict) else {}
+        additions = _scope_additions(current, scope or {})
+        if not additions:
+            return {"ok": True, "changed": False, "additions": {}, "permission": permission}
+        if not confirmed:
+            return {
+                "ok": False,
+                "error": "expand_confirmation_required",
+                "requires_approval": True,
+                "additions": additions,
+                "permission": permission,
+            }
+        merged = _merged_scope(current, additions)
+        now = time.time()
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE permission_grants SET scope_json=?,launch_id=? WHERE id=? AND status='active'",
+                (_json(merged), LAUNCH_ID, permission["id"]),
+            )
+            self._connection.execute("UPDATE capability_sessions SET updated_at=? WHERE id=?", (now, session_id))
+        return {
+            "ok": True,
+            "changed": True,
+            "additions": additions,
+            "permission": self.permission_for_session(session_id),
+            "session": self.session_payload(session_id),
+        }
 
     def revoke_permission(self, session_id: str) -> dict[str, Any]:
         with self._lock, self._connection:
@@ -613,15 +740,29 @@ class CollaborationStore:
             self._connection.execute("UPDATE capability_sessions SET state='paused',updated_at=? WHERE id=?", (time.time(), session_id))
         return {"ok": bool(cursor.rowcount), "session": self.session_payload(session_id)}
 
-    def action_allowed(self, session_id: str, action: str, risk: str = "medium") -> dict[str, Any]:
+    def action_allowed(self, session_id: str, action: str, risk: str = "medium", *, signals: Iterable[Any] = (), effect_kind: str = "") -> dict[str, Any]:
+        """Single gate for "may this session run this action unattended?".
+
+        ``effect_kind`` is the typed classification derived from the tool's own
+        schema and is authoritative. ``signals`` carries free text the caller
+        knows about the action (planner reason, resolved target label, typed
+        text, URL); it can only raise the verdict, never lower it, so a bare
+        coordinate click onto a payment control is still caught while a tool
+        already typed as a red line cannot be talked down. See TDD §9.
+        """
         permission = self.permission_for_session(session_id)
         profile = str(permission.get("profile") or "observe")
         action_key = _clean_identifier(action)
-        if action_key in SENSITIVE_ACTIONS:
-            return {"allowed": False, "requires_approval": True, "reason": "sensitive_action"}
+        sensitive = _red_line_name(effect_kind) or _red_line_name(marker_effect(action, *signals))
+        if sensitive:
+            return {"allowed": False, "requires_approval": True, "reason": "sensitive_action", "sensitive_action": sensitive}
         if profile == "observe":
             return {"allowed": risk == "low" and action_key.startswith("observe"), "requires_approval": risk != "low" or not action_key.startswith("observe"), "reason": "observe_only"}
-        return {"allowed": True, "requires_approval": False, "reason": f"{profile}_session_grant"}
+        if profile == "delegate" and not permission.get("current_launch"):
+            # The user delegated to a Joi that has since exited; a restored grant
+            # must not silently keep acting on their behalf.
+            return {"allowed": False, "requires_approval": True, "reason": "delegate_launch_expired"}
+        return {"allowed": True, "requires_approval": False, "reason": f"{profile}_session_grant", "scope_bound": profile != "delegate"}
 
     def add_receipt(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.session_payload(session_id, include_receipts=False):
@@ -806,13 +947,16 @@ class CollaborationStore:
             grouped.setdefault(binding["kind"], []).append(binding["value"])
         return grouped
 
-    def _active_session_id(self, thread_id: str) -> str:
+    def _active_session(self, thread_id: str) -> tuple[str, str]:
         with self._lock:
             row = self._connection.execute(
-                "SELECT id FROM capability_sessions WHERE thread_id=? AND state IN ('running','paused','waiting_approval') ORDER BY updated_at DESC LIMIT 1",
+                "SELECT id,state FROM capability_sessions WHERE thread_id=? AND state IN ('running','paused','waiting_approval') ORDER BY updated_at DESC LIMIT 1",
                 (thread_id,),
             ).fetchone()
-        return str(row["id"]) if row else ""
+        return (str(row["id"]), str(row["state"])) if row else ("", "")
+
+    def _active_session_id(self, thread_id: str) -> str:
+        return self._active_session(thread_id)[0]
 
     def _migrate_legacy_events(self) -> None:
         if self._get_meta("legacy_events_migrated") == "1":
@@ -868,7 +1012,8 @@ class CollaborationStore:
 
     @staticmethod
     def _session_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        return {"id": row["id"], "project_id": row["project_id"], "thread_id": row["thread_id"], "capability": row["capability"], "goal": row["goal"], "permission_profile": row["permission_profile"], "state": row["state"], "driver": row["driver"], "budget": _object(row["budget_json"]), "stop_conditions": _array(row["stop_conditions_json"]), "created_at": row["created_at"], "updated_at": row["updated_at"], "completed_at": row["completed_at"]}
+        pause_reason = str(row["pause_reason"] or "")
+        return {"id": row["id"], "project_id": row["project_id"], "thread_id": row["thread_id"], "capability": row["capability"], "goal": row["goal"], "permission_profile": row["permission_profile"], "state": row["state"], "pause_reason": pause_reason, "recovery_required": pause_reason == RECOVERY_REQUIRED, "driver": row["driver"], "budget": _object(row["budget_json"]), "stop_conditions": _array(row["stop_conditions_json"]), "created_at": row["created_at"], "updated_at": row["updated_at"], "completed_at": row["completed_at"]}
 
     @staticmethod
     def _receipt_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -898,6 +1043,30 @@ def _binding_label(kind: str, value: str) -> str:
 def _clean_label(value: object, fallback: str, limit: int) -> str:
     text = " ".join(str(value or "").strip().split())
     return (text or fallback)[:limit]
+
+
+SCOPE_KINDS = ("directory", "application", "domain", "game")
+
+
+def _scope_values(scope: dict[str, Any], kind: str) -> set[str]:
+    raw = scope.get(kind)
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    return {str(item).strip() for item in raw if str(item).strip()}
+
+
+def _scope_additions(current: dict[str, Any], requested: dict[str, Any]) -> dict[str, list[str]]:
+    """Entries in ``requested`` that ``current`` does not already cover."""
+    additions: dict[str, list[str]] = {}
+    for kind in SCOPE_KINDS:
+        new_values = sorted(_scope_values(requested, kind) - _scope_values(current, kind))
+        if new_values:
+            additions[kind] = new_values
+    return additions
+
+
+def _merged_scope(current: dict[str, Any], additions: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {kind: sorted(_scope_values(current, kind) | set(additions.get(kind, []))) for kind in SCOPE_KINDS}
 
 
 def _clean_identifier(value: object, fallback: str = "") -> str:

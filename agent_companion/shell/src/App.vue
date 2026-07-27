@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow, LogicalSize, type PhysicalPosition, type PhysicalSize } from '@tauri-apps/api/window'
 import {
   AlertCircle,
@@ -16,6 +16,7 @@ import {
   Code2,
   Cpu,
   File as FileIcon,
+  FileClock,
   FilePlus2,
   FileText,
   Folder as FolderIcon,
@@ -63,13 +64,14 @@ import { CoreClient, type CoreStatus } from './api'
 import JoiCharacter from './components/JoiCharacter.vue'
 import CharacterLibrary from './components/CharacterLibrary.vue'
 import type { Live2DEmotion, Live2DRuntimeMapping } from './live2d/runtime'
-import type { ActionReceipt, AgentCliListResult, AgentCliModelOption, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, AgentSkillInspection, AgentSkillInstallation, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ByokConnectResult, ByokPreset, ByokStatus, ByokTestResult, CapabilitySession, CodexRuntimeStatus, CollaborationSnapshot, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, GameAdapterManifest, JoiMcpStatus, JoiProject, JoiThread, MemoryCandidate, MemoryCandidatePage, MemoryPage, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, PermissionProfile, ResourceBinding, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { ActionReceipt, AgentCliListResult, AgentCliModelOption, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, AgentSkillDraft, AgentSkillInspection, AgentSkillInstallation, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ByokConnectResult, ByokPreset, ByokStatus, ByokTestResult, CapabilitySession, CodexRuntimeStatus, CollaborationSnapshot, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, GameAdapterManifest, JoiMcpStatus, JoiProject, JoiThread, MemoryCandidate, MemoryCandidatePage, MemoryPage, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, PermissionProfile, ResourceBinding, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { settingsSubtitle, settingsTabs, settingsTitle, type SettingsTabId } from './settings'
 import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
 
 const input = ref('')
 const status = ref<CoreStatus>('offline')
 const errorText = ref('')
+const coreRetrying = ref(false)
 type AttachmentKind = 'file' | 'folder'
 interface ComposerAttachment {
   kind: AttachmentKind
@@ -91,6 +93,16 @@ let chatPinnedToBottom = true
 let chatHasAutoScrolled = false
 const developerMode = ref(false)
 const ready = ref<CoreReadyPayload | null>(null)
+interface CoreConnectionInfo {
+  url: string
+  token: string
+  protocol_version: number
+  instance_id: string
+  status: string
+  error?: string | null
+}
+let expectedCoreConnection: CoreConnectionInfo | null = null
+let coreConnectionGeneration = 0
 const contextRailOpen = ref(false)
 const contextRailBusy = ref(false)
 const contextSearch = ref('')
@@ -164,6 +176,7 @@ const agentSkillBusy = ref(false)
 const agentSkillNotice = ref('')
 const gameAdapterRows = ref<GameAdapterManifest[]>([])
 const gameAdapterNotice = ref('')
+const agentSkillDrafts = ref<AgentSkillDraft[]>([])
 const executionMode = ref<'local_cli' | 'byok'>('local_cli')
 const selectedAgentCliId = ref('codex')
 const selectedAgentCliModel = ref('默认')
@@ -583,6 +596,12 @@ const client = new CoreClient({
     }
   },
   onReady: (payload) => {
+    if (!isExpectedCore(payload)) {
+      errorText.value = 'Joi Core 身份校验失败。请重新启动 Joi；若仍然出现，请重新安装官方版本。'
+      client.close()
+      status.value = 'offline'
+      return
+    }
     ready.value = payload
     syncCollaborationSnapshot(payload.collaboration)
     if (isTransientRuntimeNotice(errorText.value)) errorText.value = ''
@@ -617,6 +636,74 @@ const connectionLabel = computed(() => {
   if (status.value === 'connecting') return 'Joi 启动中'
   return 'Joi 离线'
 })
+const connectionPresenceLabel = computed(() => {
+  if (status.value === 'online') return '在这里'
+  if (status.value === 'connecting') return '正在启动 · 首次约 20 秒'
+  return '连接失败'
+})
+
+function isExpectedCore(payload: CoreReadyPayload) {
+  const expected = expectedCoreConnection
+  if (!expected || expected.status === 'external') return true
+  return payload.product === 'joi-core'
+    && payload.protocol_version === expected.protocol_version
+    && payload.instance_id === expected.instance_id
+}
+
+async function connectToCore(restart = false) {
+  const generation = ++coreConnectionGeneration
+  client.close()
+  status.value = 'connecting'
+  errorText.value = ''
+  let url = 'ws://127.0.0.1:8765'
+  if (!isTauri()) {
+    expectedCoreConnection = null
+    client.connect(url)
+    return
+  }
+  try {
+    if (restart) await invoke<CoreConnectionInfo>('restart_core')
+    // The signed PyInstaller sidecar can take about 20 seconds to unpack on its
+    // first macOS launch. Keep this bounded, but do not turn a healthy cold
+    // start into a manual reconnect flow.
+    const deadline = Date.now() + 30000
+    let connection: CoreConnectionInfo | null = null
+    while (Date.now() < deadline && generation === coreConnectionGeneration) {
+      connection = await invoke<CoreConnectionInfo>('core_connection_info')
+      if (connection.status === 'error') {
+        throw new Error(connection.error || 'Joi Core 无法启动')
+      }
+      if (connection.status === 'ready' || connection.status === 'external') break
+      await new Promise((resolve) => window.setTimeout(resolve, 250))
+    }
+    if (generation !== coreConnectionGeneration) return
+    if (!connection || !['ready', 'external'].includes(connection.status)) {
+      throw new Error('Joi Core 启动超过 30 秒。请点“重新连接”；若仍失败，请退出其他 Joi 后再试。')
+    }
+    if (!connection.url) throw new Error('Joi Core 没有返回连接地址')
+    expectedCoreConnection = connection
+    const endpoint = new URL(connection.url)
+    if (connection.token) endpoint.searchParams.set('token', connection.token)
+    url = endpoint.toString()
+  } catch (error) {
+    if (generation !== coreConnectionGeneration) return
+    errorText.value = error instanceof Error ? error.message : String(error || 'Joi Core 无法启动')
+    status.value = 'offline'
+    return
+  }
+  client.connect(url)
+}
+
+async function retryCoreConnection() {
+  if (coreRetrying.value) return
+  coreRetrying.value = true
+  try {
+    const connection = isTauri() ? await invoke<CoreConnectionInfo>('core_connection_info') : null
+    await connectToCore(connection?.status === 'error')
+  } finally {
+    coreRetrying.value = false
+  }
+}
 
 const activeProject = computed(() => projectRows.value.find((project) => project.id === activeContext.value.project_id))
 const activeThread = computed(() => threadRows.value.find((thread) => thread.id === activeContext.value.thread_id))
@@ -3156,14 +3243,16 @@ async function setSkillEnabled(skill: NativeSkill, enabled: boolean) {
 async function refreshSkills() {
   skillRefreshLoading.value = true
   try {
-    const [result, catalog, adapters] = await Promise.all([
+    const [result, catalog, adapters, drafts] = await Promise.all([
       client.skillsList() as Promise<{ ok?: boolean; skills?: NativeSkillManifest }>,
       client.agentSkillCatalog(activeContext.value.project_id || '', ready.value?.character?.id || '', true) as Promise<{ skills?: AgentSkillInstallation[] }>,
       client.gameAdapterList() as Promise<{ adapters?: GameAdapterManifest[] }>,
+      client.agentSkillDraftList(activeContext.value.project_id || '') as Promise<{ drafts?: AgentSkillDraft[] }>,
     ])
     if (result.skills) skillManifest.value = result.skills
     installedAgentSkills.value = catalog.skills || []
     gameAdapterRows.value = adapters.adapters || []
+    agentSkillDrafts.value = (drafts.drafts || []).filter((draft) => draft.status === 'draft')
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '技能清单刷新失败'
   } finally {
@@ -3258,6 +3347,33 @@ async function uninstallAgentSkill(skill: AgentSkillInstallation) {
 
 function agentSkillScopeLabel(scope: string) {
   return ({ global: '全局', project: '当前项目', character: '当前角色' } as Record<string, string>)[scope] || scope
+}
+
+function agentSkillDraftSteps(draft: AgentSkillDraft) {
+  const body = String(draft.payload?.instructions || draft.payload?.steps || '').trim()
+  return body ? body.split('\n').filter((line) => line.trim()).slice(0, 6) : []
+}
+
+async function approveAgentSkillDraft(draft: AgentSkillDraft) {
+  const steps = agentSkillDraftSteps(draft)
+  const review = `${draft.name}\n\n${steps.join('\n') || '（草稿没有记录步骤）'}\n\n安装为 ${agentSkillScopeLabel(agentSkillScope.value)} Skill？安装后仍不会隐式运行脚本。`
+  if (!window.confirm(review)) return
+  agentSkillBusy.value = true
+  try {
+    const result = await client.agentSkillDraftApprove(draft.id, agentSkillScope.value, agentSkillScopeId()) as { ok?: boolean; error?: string; message?: string }
+    agentSkillNotice.value = result.ok ? `${draft.name} 已从草稿安装。` : result.message || result.error || '草稿安装失败'
+    await refreshSkills()
+  } catch (error) {
+    agentSkillNotice.value = error instanceof Error ? error.message : '草稿安装失败'
+  } finally {
+    agentSkillBusy.value = false
+  }
+}
+
+async function rejectAgentSkillDraft(draft: AgentSkillDraft) {
+  const result = await client.agentSkillDraftReject(draft.id) as { ok?: boolean; error?: string }
+  agentSkillNotice.value = result.ok ? `${draft.name} 草稿已丢弃。` : result.error || '草稿丢弃失败'
+  await refreshSkills()
 }
 
 async function installGameAdapter(adapter: GameAdapterManifest) {
@@ -3805,7 +3921,7 @@ function blobToBase64(blob: Blob) {
 onMounted(() => {
   void safeWindowCall(() => getCurrentWindow().setTitleBarStyle('overlay'))
   void setNativeWindowControlsVisible(true)
-  client.connect()
+  void connectToCore()
   void refreshAgentClis()
   void refreshByokStatus()
   clockTimer = window.setInterval(() => {
@@ -4313,16 +4429,30 @@ onBeforeUnmount(() => {
       </section>
 
       <section class="chat-section" v-if="activeCabin === 'chat'">
-        <header class="chat-presence">
+        <header class="chat-presence" :class="{ offline: status === 'offline' }">
           <span class="chat-presence-avatar" aria-hidden="true">
             <img v-if="characterAvatarSrc" :src="characterAvatarSrc" alt="" />
             <Sparkles v-else :size="17" />
           </span>
           <div>
             <strong>{{ characterName }}</strong>
-            <span><i :class="{ online: connected }"></i>{{ connected ? '在这里' : '正在连接' }}</span>
+            <span><i :class="{ online: connected }"></i>{{ connectionPresenceLabel }}</span>
           </div>
+          <button
+            v-if="status === 'offline'"
+            type="button"
+            class="chat-reconnect-button"
+            :disabled="coreRetrying"
+            @click="retryCoreConnection"
+          >
+            <RefreshCw :size="13" :class="{ spinning: coreRetrying }" />
+            {{ coreRetrying ? '重启中' : '重新连接' }}
+          </button>
         </header>
+        <div class="chat-connection-notice" role="alert" v-if="status === 'offline' && errorText">
+          <AlertCircle :size="15" />
+          <span>{{ errorText }}</span>
+        </div>
         <section v-if="activeCapabilitySession" class="capability-session-card" :class="`state-${activeCapabilitySession.state}`">
           <header>
             <span class="capability-session-icon"><MonitorPlay :size="16" /></span>
@@ -4980,6 +5110,24 @@ onBeforeUnmount(() => {
                 <p v-if="agentSkillNotice" class="agent-skill-notice">{{ agentSkillNotice }}</p>
               </section>
 
+              <section class="agent-skill-drafts" v-if="agentSkillDrafts.length">
+                <header><div><strong>待审阅草稿</strong><span>成功的操作只会写成草稿，安装前不会自动运行</span></div><FileClock :size="19" /></header>
+                <article v-for="draft in agentSkillDrafts" :key="draft.id">
+                  <div class="agent-skill-draft-head">
+                    <strong>{{ draft.name }}</strong>
+                    <span>{{ draft.payload?.description || '来自一次成功的操作' }}</span>
+                  </div>
+                  <ol v-if="agentSkillDraftSteps(draft).length" class="agent-skill-draft-steps">
+                    <li v-for="(step, index) in agentSkillDraftSteps(draft)" :key="index">{{ step }}</li>
+                  </ol>
+                  <p v-else class="memory-empty">这份草稿还没有记录可复用的步骤。</p>
+                  <footer>
+                    <button type="button" :disabled="agentSkillBusy" @click="approveAgentSkillDraft(draft)"><Plus :size="15" />审核后安装</button>
+                    <button type="button" class="danger" @click="rejectAgentSkillDraft(draft)"><Trash2 :size="14" />丢弃</button>
+                  </footer>
+                </article>
+              </section>
+
               <section class="agent-skill-installations">
                 <header><strong>已安装</strong><span>{{ installedAgentSkills.length }}</span></header>
                 <div v-if="installedAgentSkills.length" class="agent-skill-list">
@@ -5442,7 +5590,7 @@ onBeforeUnmount(() => {
       <div
         :class="['character', `emotion-${activeExpressionEmotion}`]"
         :style="stageCharacterStyle"
-        :title="isCompactMode ? '拖拽移动，单击输入，双击恢复主界面' : 'Joi Companion'"
+        :title="isCompactMode ? '拖拽移动，单击输入，双击恢复主界面' : undefined"
         @mousedown="startMascotDrag"
         @dragstart.capture.prevent
         @selectstart.prevent

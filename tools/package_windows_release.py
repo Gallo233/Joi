@@ -17,6 +17,7 @@ ROOT_FILES = [
     "requirements.txt",
     "requirements-accessibility.txt",
     "requirements-audio.txt",
+    "requirements-build.txt",
     "requirements-ocr.txt",
     "start_joi.bat",
 ]
@@ -31,11 +32,15 @@ SHELL_FILES = [
     "agent_companion/shell/index.html",
     "agent_companion/shell/package.json",
     "agent_companion/shell/package-lock.json",
+    "agent_companion/shell/release-assets.json",
+    "agent_companion/shell/scripts/build-core-sidecar.mjs",
+    "agent_companion/shell/scripts/verify-release-assets.mjs",
     "agent_companion/shell/tsconfig.json",
     "agent_companion/shell/vite.config.ts",
     "agent_companion/shell/src-tauri/build.rs",
     "agent_companion/shell/src-tauri/Cargo.lock",
     "agent_companion/shell/src-tauri/Cargo.toml",
+    "agent_companion/shell/src-tauri/Info.plist",
     "agent_companion/shell/src-tauri/tauri.conf.json",
 ]
 SHELL_DIRS = [
@@ -46,18 +51,21 @@ SHELL_DIRS = [
 ]
 TOOLS_FILES = [
     "run_agent_companion_tests.py",
+    "tools/build_core_sidecar.py",
     "tools/joi_doctor.py",
     "tools/mvp_demo_check.py",
     "tools/package_windows_release.py",
     "tools/packaging_smoke.py",
     "tools/provider_preflight.py",
     "tools/smoke_ws_bridge.py",
+    "tools/smoke_core_sidecar.py",
     "tools/start_joi.ps1",
     "tools/windows_handoff_report.py",
     "tools/windows_release_check.py",
     "tools/windows_setup_wizard.py",
 ]
 RELEASE_EXE = "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
+RELEASE_SIDECAR = "agent_companion/shell/src-tauri/target/release/joi-core.exe"
 FORBIDDEN_NAMES = {"config.yaml", "secrets.yaml", ".env"}
 FORBIDDEN_SUFFIXES = (".local.yaml", ".pyc", ".log")
 FORBIDDEN_PARTS = {".git", ".venv", "__pycache__", "data", "dist", "logs", "node_modules", "gen", "target"}
@@ -98,10 +106,15 @@ def build_windows_release_package(
     for relative in ROOT_DIRS + SHELL_DIRS:
         _add_tree(root, relative, entries, errors)
     release_exe = root / RELEASE_EXE
+    release_sidecar = _release_sidecar_source(root)
     if release_exe.is_file():
         _append_entry(root, release_exe, entries, errors, allow_release_exe=True)
     elif require_exe:
         errors.append("release_exe_missing")
+    if release_sidecar.is_file():
+        entries.append((release_sidecar, RELEASE_SIDECAR))
+    elif require_exe:
+        errors.append("release_sidecar_missing")
 
     deduped = _dedupe_entries(entries)
     forbidden_hits = _forbidden_hits([arc for _, arc in deduped])
@@ -119,6 +132,7 @@ def build_windows_release_package(
         "package_root": package_root,
         "entry_count": len(deduped) + 1,
         "includes_release_exe": release_exe.is_file(),
+        "includes_core_sidecar": release_sidecar.is_file(),
         "forbidden_hits": forbidden_hits,
     }
     if not errors and not dry_run:
@@ -141,6 +155,7 @@ def build_windows_release_package(
         "sha256": digest,
         "entry_count": manifest["entry_count"],
         "includes_release_exe": manifest["includes_release_exe"],
+        "includes_core_sidecar": manifest["includes_core_sidecar"],
         "privacy_policy": {
             "version": privacy_report["version"],
             "status": privacy_report["status"],
@@ -169,6 +184,7 @@ def build_release_privacy_report() -> dict[str, Any]:
         "forbidden_suffixes": list(FORBIDDEN_SUFFIXES),
         "forbidden_parts": sorted(FORBIDDEN_PARTS),
         "release_exe_exception": RELEASE_EXE,
+        "release_sidecar_exception": RELEASE_SIDECAR,
     }
 
 
@@ -226,6 +242,14 @@ def _add_file(root: Path, relative: str, entries: list[tuple[Path, str]], errors
     _append_entry(root, path, entries, errors)
 
 
+def _release_sidecar_source(root: Path) -> Path:
+    bundled = root / RELEASE_SIDECAR
+    if bundled.is_file():
+        return bundled
+    candidates = sorted((root / "agent_companion" / "shell" / "src-tauri" / "binaries").glob("joi-core-*.exe"))
+    return candidates[0] if len(candidates) == 1 else bundled
+
+
 def _add_tree(root: Path, relative: str, entries: list[tuple[Path, str]], errors: list[str]) -> None:
     path = root / relative
     if not path.is_dir():
@@ -263,7 +287,7 @@ def _is_forbidden(relative: str) -> bool:
 def _forbidden_hits(entries: list[str]) -> list[str]:
     hits: list[str] = []
     for entry in entries:
-        if entry == RELEASE_EXE:
+        if entry in {RELEASE_EXE, RELEASE_SIDECAR}:
             continue
         if _is_forbidden(entry):
             hits.append(entry)
@@ -274,6 +298,8 @@ def _next_actions(errors: list[str]) -> list[str]:
     actions: list[str] = []
     if any(error == "release_exe_missing" for error in errors):
         actions.append("Build the release shell first: cd agent_companion\\shell; npm run tauri -- build")
+    if any(error == "release_sidecar_missing" for error in errors):
+        actions.append("Build the standalone Joi Core sidecar before packaging the Windows release.")
     if any(error.startswith("missing:") for error in errors):
         actions.append("Restore missing release inputs before packaging.")
     if any(error.startswith("forbidden_entry:") for error in errors):
