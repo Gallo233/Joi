@@ -84,9 +84,19 @@ class EventBusTests(unittest.TestCase):
             paused = bus.emit(AgentEvent(EventType.TOOL_STARTED, "task-2", DisplayCard("电脑操作", "点击"), VoiceLine("")))
             self.assertEqual(paused.public_phase, "paused")
 
-            # Terminal phases stay terminal regardless of session state.
-            done = bus.emit(AgentEvent(EventType.TASK_COMPLETED, "task-3", DisplayCard("完成", "好了"), VoiceLine("")))
+            # A suspended session has not finished: a late completion must not
+            # tell the user the work is over while they are still being waited on.
+            done_while_paused = bus.emit(AgentEvent(EventType.TASK_COMPLETED, "task-3", DisplayCard("完成", "好了"), VoiceLine("")))
+            self.assertEqual(done_while_paused.public_phase, "paused")
+
+            context["session_state"] = "running"
+            done = bus.emit(AgentEvent(EventType.TASK_COMPLETED, "task-4", DisplayCard("完成", "好了"), VoiceLine("")))
             self.assertEqual(done.public_phase, "done")
+
+            # A failure stays visible even while suspended.
+            context["session_state"] = "paused"
+            failed = bus.emit(AgentEvent(EventType.TASK_FAILED, "task-5", DisplayCard("失败", "没跑通"), VoiceLine("")))
+            self.assertEqual(failed.public_phase, "failed")
 
             explicit = bus.emit(AgentEvent(EventType.TOOL_STARTED, "task-4", DisplayCard("x", "y"), VoiceLine(""), public_phase="waiting"))
             self.assertEqual(explicit.public_phase, "waiting")

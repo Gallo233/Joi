@@ -89,6 +89,23 @@
 
 `tests/test_run_lifecycle.py` 覆盖 TDD Phase 1 的全部退出条件：crash-before-act、act-before-receipt、duplicate-resume、过期/指纹不符/scope 变更、同 thread 拒绝第二个 run、跨 thread 身份不串线、并发审批只能有一个赢家。
 
+## 角色表达
+
+角色是用户读取状态的界面。它在会话等着用户时微笑、或在缺权限时一脸平静，这个界面就在说谎——而用户会照着它行动。
+
+所以 `expression_map.py` 让表达由**真实状态推导**，而不是由模型建议。覆盖优先级（PRD §13.3）：
+
+```
+approval > takeover > permission_missing > failed > acting > thinking > received > idle
+```
+
+模型仍然负责写词，也可以建议语气，但只能在真实状态允许的集合内：`acting` 时可在 `alert/thinking` 之间选，风险态（等待审批、接管、缺权限、失败）则**锁死**，模型给什么都不生效。未经验证的"成功"不算成功，映射为 `failed` 而非 `happy`。
+
+两处顺带修正：
+
+- `express()` 在 `EventBus.emit()` 之前运行，读不到 bus 即将写入的 `public_phase`。新增 `derive_public_phase()` 供两边共用同一份定义，而不是复制一份会漂移的逻辑。
+- `paused/waiting_approval` 现在也覆盖 `done`。挂起的会话并没有完成，迟到的完成事件不能在用户还被等着的时候告诉他"活干完了"。`failed` 不被覆盖——失败要保持可见。
+
 ## 坐标信任与目标证据
 
 原实现把三个坐标空间压成一个：用**主显示器**宽度除截图宽度得到一个全局 scale，套用到所有显示器。单显示器下恰好正确；接上第二块屏后，副屏窗口的裁剪框会落错位置，clamp 又会把错误伪装成"回退到全屏"——Joi 于是在看主屏、点副屏。

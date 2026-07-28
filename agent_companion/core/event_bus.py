@@ -39,14 +39,28 @@ PUBLIC_PHASES = ("idle", "received", "understanding", "thinking", "acting", "wai
 # paused session must not keep publishing "acting" just because a late tool
 # event arrived.
 _SESSION_PHASE_OVERRIDES = {"paused": "paused", "waiting_approval": "waiting"}
-_IN_FLIGHT_PHASES = {"understanding", "thinking", "acting"}
+# "done" is overridable too. A suspended session has not finished, so a late
+# completion event must not tell the user the work is over while the session is
+# still waiting on them. "failed" is left alone -- a failure stays visible.
+_OVERRIDABLE_PHASES = {"understanding", "thinking", "acting", "done"}
+
+
+def derive_public_phase(event: AgentEvent, session_state: str = "") -> str:
+    """The phase an event will publish, computed before it is emitted.
+
+    Expression runs ahead of `emit()`, so it cannot read the field the bus is
+    about to write. Deriving it here keeps both on one definition instead of a
+    second copy that can drift.
+    """
+    phase, _label, _transient = _UI_PHASES.get(event.type, ("idle", "", False))
+    return _public_phase(event, phase, session_state)
 
 
 def _public_phase(event: AgentEvent, ui_phase: str, session_state: str) -> str:
     if event.public_phase in PUBLIC_PHASES:
         return event.public_phase
     override = _SESSION_PHASE_OVERRIDES.get(session_state, "")
-    if override and ui_phase in _IN_FLIGHT_PHASES:
+    if override and ui_phase in _OVERRIDABLE_PHASES:
         return override
     return ui_phase if ui_phase in PUBLIC_PHASES else "idle"
 

@@ -105,6 +105,7 @@ class AgentCompanionApp:
         self.run_journal: RunJournal = RunJournal()
         self._plan_runs: dict[str, str] = {}
         self._target_evidence: TargetEvidence | None = None
+        self._session_provider: Any = None
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
@@ -783,7 +784,20 @@ class AgentCompanionApp:
         state = dict(event.agent_state or {})
         state.setdefault("character_id", self.character.id)
         tagged = replace(event, agent_state=state)
-        self.bus.emit(self.expression.express(tagged, user_text))
+        # The capability session outranks the event: a paused session must not
+        # be repainted by whichever tool event happens to arrive next.
+        self.bus.emit(self.expression.express(tagged, user_text, session=self._session_snapshot()))
+
+    def set_session_provider(self, provider: Any) -> None:
+        self._session_provider = provider
+
+    def _session_snapshot(self) -> dict[str, Any]:
+        if self._session_provider is None:
+            return {}
+        try:
+            return dict(self._session_provider() or {})
+        except Exception:
+            return {}
 
     @staticmethod
     def _plan_agent_state(plan: AgentPlan, *, include_steps: bool = True) -> dict[str, object]:

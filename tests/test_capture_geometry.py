@@ -9,6 +9,7 @@ can be pinned down here.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from agent_companion.core.vision.capture_geometry import (
     DisplayInfo,
@@ -106,6 +107,18 @@ class CaptureGeometryTests(unittest.TestCase):
 
 
 class ProbeTests(unittest.TestCase):
+    """The no-PyObjC fallback, forced on regardless of what is installed here.
+
+    These originally passed only because this machine happened to lack PyObjC.
+    Patching the Quartz probe makes them test the fallback rather than the
+    environment.
+    """
+
+    def setUp(self) -> None:
+        patcher = patch("agent_companion.core.vision.capture_geometry._probe_via_quartz", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_more_than_one_display_without_quartz_is_untrusted(self) -> None:
         class Completed:
             stdout = '{"SPDisplaysDataType": [{"spdisplays_ndrvs": [{"_name": "A"}, {"_name": "B"}]}]}'
@@ -127,6 +140,16 @@ class ProbeTests(unittest.TestCase):
         layout = probe_display_layout()
         # Either Quartz measured it, or we admit we do not know.
         self.assertTrue(layout.trusted == bool(layout.displays))
+        if layout.source == "quartz":
+            # When PyObjC is installed the measurement must be usable: every
+            # display needs a positive size, a real scale and a capture index.
+            self.assertTrue(layout.displays)
+            self.assertEqual(sum(1 for display in layout.displays if display.is_main), 1)
+            for display in layout.displays:
+                self.assertGreater(display.width, 0)
+                self.assertGreater(display.height, 0)
+                self.assertGreaterEqual(display.backing_scale, 1.0)
+                self.assertGreater(display.capture_index, 0)
 
 
 if __name__ == "__main__":

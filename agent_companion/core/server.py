@@ -129,6 +129,7 @@ class JsonRpcBridge:
         # Serialization is per conversation, not global -- see RunCoordinator.
         self.run_coordinator = RunCoordinator(self.collaboration.runs)
         self.app.set_run_journal(StoreRunJournal(self.collaboration.runs, self.run_coordinator, self.collaboration.context))
+        self.app.set_session_provider(self._active_session_snapshot)
         self.agent_cli_takeover: dict[str, Any] = {
             "enabled": False,
             "mode": "byok",
@@ -181,6 +182,11 @@ class JsonRpcBridge:
         if self.loop is None or self.queue is None:
             return
         self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
+
+    def _active_session_snapshot(self) -> dict[str, Any]:
+        """The capability session the character's expression must respect."""
+        session_id = str(self.collaboration.context().get("session_id") or "")
+        return self.collaboration.session_payload(session_id, include_receipts=False) if session_id else {}
 
     def _session_policy_decision(self, request: ToolRequest, risk: RiskLevel) -> PolicyDecision | None:
         context = self.collaboration.context()
