@@ -21,6 +21,40 @@ _ID_RE = re.compile(r"\b(?:task|approval|selection|codex|run|resume)[-_]?[0-9a-f
 _URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 _RAW_SCREEN_RE = re.compile(r"\b(?:OCR|screenshot|traceback|stderr|stdout|window_handle|bbox|坐标|截图)\b", re.IGNORECASE)
 
+# How far a memory reaches. Recall filters on this *before* ranking, so a fact
+# that belongs to one project never competes for context budget in another
+# (TDD §10.2, PRD-AIM-007).
+RETENTION_CLASSES = ("session", "project", "long_term", "protected")
+DEFAULT_RETENTION_CLASS = "long_term"
+
+# Reaches every scope: things about the user rather than about a piece of work.
+GLOBAL_RETENTION_CLASSES = frozenset({"long_term", "protected"})
+
+# `protected` covers system identity, safety policy, permission history and
+# boundaries the user set. The model may read these but never rewrite them, so
+# edits and deletes need an explicit user-driven override (TDD §10.2).
+PROTECTED_RETENTION_CLASS = "protected"
+
+
+def normalize_retention_class(value: Any) -> str:
+    candidate = str(value or "").strip().casefold()
+    return candidate if candidate in RETENTION_CLASSES else DEFAULT_RETENTION_CLASS
+
+
+def _scope_clause(project_id: str, thread_id: str) -> tuple[str, list[Any]]:
+    """SQL restricting rows to those that may be recalled in this scope.
+
+    Rows written before scoping exist with empty ids; they were recalled
+    everywhere and continue to be, rather than vanishing on upgrade.
+    """
+    placeholders = ",".join("?" for _ in GLOBAL_RETENTION_CLASSES)
+    clause = (
+        f"(retention_class in ({placeholders})"
+        " or (retention_class = 'project' and (project_id = ? or project_id = ''))"
+        " or (retention_class = 'session' and (thread_id = ? or thread_id = '')))"
+    )
+    return clause, [*sorted(GLOBAL_RETENTION_CLASSES), str(project_id or ""), str(thread_id or "")]
+
 
 class MemoryStore:
     def __init__(self, path: Path, vault_path: Path | None = None) -> None:
@@ -38,6 +72,9 @@ class MemoryStore:
         source: str = "manual",
         ephemeral: bool = False,
         sensitive: bool = False,
+        project_id: str = "",
+        thread_id: str = "",
+        retention_class: str = DEFAULT_RETENTION_CLASS,
     ) -> dict[str, Any] | None:
         cleaned = _clean_memory_text(text)
         safe_kind = _safe_label(kind, "note")
@@ -46,24 +83,35 @@ class MemoryStore:
             return None
         safe_text = cleaned[:1200]
         fingerprint = _memory_fingerprint(safe_text)
+        safe_project = str(project_id or "")
+        safe_thread = str(thread_id or "")
+        safe_retention = normalize_retention_class(retention_class)
         now = time.time()
         with sqlite3.connect(self.path) as db:
-            duplicate = db.execute("select id from memories where fingerprint = ?", (fingerprint,)).fetchone()
+            # Deduplicate within the scope only: the same sentence can be true
+            # of two projects without one standing in for the other.
+            duplicate = db.execute(
+                "select id from memories where fingerprint = ? and project_id = ? and thread_id = ?",
+                (fingerprint, safe_project, safe_thread),
+            ).fetchone()
             if duplicate:
                 memory_id = int(duplicate[0])
             else:
                 try:
                     cursor = db.execute(
                         """
-                        insert into memories(kind, text, source, created_at, updated_at, fingerprint, ephemeral, sensitive)
-                        values (?, ?, ?, ?, ?, ?, ?, ?)
+                        insert into memories(kind, text, source, created_at, updated_at, fingerprint, ephemeral, sensitive, project_id, thread_id, retention_class)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (safe_kind, safe_text, safe_source, now, now, fingerprint, int(ephemeral), int(sensitive)),
+                        (safe_kind, safe_text, safe_source, now, now, fingerprint, int(ephemeral), int(sensitive), safe_project, safe_thread, safe_retention),
                     )
                     memory_id = int(cursor.lastrowid)
                     self._index_memory(db, memory_id, safe_kind, safe_text)
                 except sqlite3.IntegrityError:
-                    duplicate = db.execute("select id from memories where fingerprint = ?", (fingerprint,)).fetchone()
+                    duplicate = db.execute(
+                        "select id from memories where fingerprint = ? and project_id = ? and thread_id = ?",
+                        (fingerprint, safe_project, safe_thread),
+                    ).fetchone()
                     if not duplicate:
                         raise
                     memory_id = int(duplicate[0])
@@ -134,7 +182,11 @@ class MemoryStore:
         self._resolve_candidate(candidate_id, "rejected", _safe_label(reason, "user_rejected"))
         return {"ok": True, "candidate": self.candidate(candidate_id)}
 
-    def delete(self, memory_id: int) -> dict[str, Any]:
+    def delete(self, memory_id: int, *, allow_protected: bool = False) -> dict[str, Any]:
+        if not allow_protected and self._is_protected(memory_id):
+            # Identity, safety policy and boundaries the user set are not the
+            # model's to remove; only an explicit user action may.
+            return {"ok": False, "error": "protected_memory", "deleted": 0}
         with sqlite3.connect(self.path) as db:
             # Index first: FTS5 needs the row's values to remove its tokens.
             self._delete_memory_index(db, int(memory_id))
@@ -142,10 +194,12 @@ class MemoryStore:
         self._rewrite_vault()
         return {"ok": bool(cursor.rowcount), "deleted": int(memory_id)}
 
-    def update(self, memory_id: int, *, text: str, kind: str | None = None) -> dict[str, Any]:
+    def update(self, memory_id: int, *, text: str, kind: str | None = None, allow_protected: bool = False) -> dict[str, Any]:
         current = self.memory(memory_id)
         if current is None:
             return {"ok": False, "error": "memory_not_found"}
+        if not allow_protected and normalize_retention_class(current.get("retention_class")) == PROTECTED_RETENTION_CLASS:
+            return {"ok": False, "error": "protected_memory"}
         cleaned = _clean_memory_text(text)[:1200]
         reason = _rejection_reason(cleaned)
         if not cleaned or reason:
@@ -173,10 +227,14 @@ class MemoryStore:
     def memory(self, memory_id: int) -> dict[str, Any] | None:
         with sqlite3.connect(self.path) as db:
             row = db.execute(
-                "select id, kind, text, source, created_at, updated_at, ephemeral, sensitive from memories where id = ?",
+                "select id, kind, text, source, created_at, updated_at, ephemeral, sensitive, project_id, thread_id, retention_class from memories where id = ?",
                 (int(memory_id),),
             ).fetchone()
         return _memory_row(row) if row else None
+
+    def _is_protected(self, memory_id: int) -> bool:
+        current = self.memory(memory_id)
+        return bool(current) and normalize_retention_class(current.get("retention_class")) == PROTECTED_RETENTION_CLASS
 
     def candidate(self, candidate_id: int) -> dict[str, Any] | None:
         with sqlite3.connect(self.path) as db:
@@ -227,6 +285,9 @@ class MemoryStore:
         recent_limit: int = 80,
         manual_limit: int = 24,
         count_snapshot: dict[str, Any] | None = None,
+        scoped: bool = False,
+        project_id: str = "",
+        thread_id: str = "",
     ) -> dict[str, Any]:
         if not self.enabled():
             return {
@@ -241,7 +302,7 @@ class MemoryStore:
                 "counts": {"saved": 0, "manual_notes": 0, "pending": 0},
                 "updated_at": 0.0,
             }
-        memories = self.recent(recent_limit)
+        memories = self.recent(recent_limit, scoped=scoped, project_id=project_id, thread_id=thread_id)
         manual_notes = [
             note
             for note in self._manual_vault_notes(limit=manual_limit)
@@ -271,17 +332,36 @@ class MemoryStore:
             "updated_at": updated_at,
         }
 
-    def recent(self, limit: int = 12, *, include_ephemeral: bool = False, include_sensitive: bool = False) -> list[dict[str, Any]]:
+    def recent(
+        self,
+        limit: int = 12,
+        *,
+        include_ephemeral: bool = False,
+        include_sensitive: bool = False,
+        scoped: bool = False,
+        project_id: str = "",
+        thread_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Most recent memories. `scoped` restricts them to one project/thread.
+
+        Browsing the library shows everything; recall passes scoped=True so a
+        neighbouring project's facts never surface as context.
+        """
         filters = []
+        values: list[Any] = []
         if not include_ephemeral:
             filters.append("ephemeral = 0")
         if not include_sensitive:
             filters.append("sensitive = 0")
+        if scoped:
+            clause, scope_values = _scope_clause(project_id, thread_id)
+            filters.append(clause)
+            values.extend(scope_values)
         where = f"where {' and '.join(filters)}" if filters else ""
         with sqlite3.connect(self.path) as db:
             rows = db.execute(
-                f"select id, kind, text, source, created_at, updated_at, ephemeral, sensitive from memories {where} order by id desc limit ?",
-                (max(1, int(limit or 12)),),
+                f"select id, kind, text, source, created_at, updated_at, ephemeral, sensitive, project_id, thread_id, retention_class from memories {where} order by id desc limit ?",
+                (*values, max(1, int(limit or 12))),
             ).fetchall()
         return [_memory_row(row) for row in rows]
 
@@ -347,13 +427,16 @@ class MemoryStore:
             "by_kind": {str(kind): int(count) for kind, count in kind_rows},
         }
 
-    def context(self, limit: int = 8, query: str = "") -> list[dict[str, Any]]:
+    def context(self, limit: int = 8, query: str = "", *, project_id: str = "", thread_id: str = "") -> list[dict[str, Any]]:
         if not self.enabled():
             return []
         safe_limit = max(1, int(limit or 8))
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
-        profile_text = _profile_context_text(self.profile())
+        # The profile is a summary of memories, so it has to be built from the
+        # same scoped set -- otherwise it smuggles other projects' facts in as
+        # a single "用户画像" line.
+        profile_text = _profile_context_text(self.profile(scoped=True, project_id=project_id, thread_id=thread_id))
         if profile_text:
             rows.append(
                 {
@@ -364,7 +447,7 @@ class MemoryStore:
                 }
             )
             seen.add(profile_text)
-        for memory in self.recall(query, safe_limit) if query else []:
+        for memory in (self.recall(query, safe_limit, project_id=project_id, thread_id=thread_id) if query else []):
             text = str(memory.get("text") or "")
             cleaned = _clean_memory_text(text)
             if not cleaned or cleaned in seen:
@@ -388,7 +471,10 @@ class MemoryStore:
             seen.add(cleaned)
             if len(rows) >= safe_limit:
                 return rows[:safe_limit]
-        for memory in self.recent(safe_limit):
+        # Scoped like recall: this is the padding that fills the remaining
+        # context budget, and unscoped padding leaks other projects' facts just
+        # as surely as an unscoped search would.
+        for memory in self.recent(safe_limit, scoped=True, project_id=project_id, thread_id=thread_id):
             text = str(memory.get("text") or "")
             cleaned = _clean_memory_text(text)
             if not cleaned or cleaned in seen:
@@ -405,15 +491,21 @@ class MemoryStore:
                 break
         return rows[:safe_limit]
 
-    def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    def recall(self, query: str, limit: int = 5, *, project_id: str = "", thread_id: str = "") -> list[dict[str, Any]]:
+        """Find relevant memories, scoped first and ranked second.
+
+        Filtering before ranking is deliberate: a fact belonging to another
+        project must not compete for the context budget here, even if it looks
+        like the best textual match (PRD-AIM-007).
+        """
         if not self.enabled():
             return []
         cleaned = _clean_memory_text(query)
         if not cleaned:
             return self.recent(limit)
-        rows = self._recall_fts(cleaned, max(1, int(limit or 5)))
+        rows = self._recall_fts(cleaned, max(1, int(limit or 5)), project_id=project_id, thread_id=thread_id)
         seen_ids = {int(row.get("id") or 0) for row in rows}
-        fallback = self._recall_by_score(cleaned, max(1, int(limit or 5)) * 2, seen_ids)
+        fallback = self._recall_by_score(cleaned, max(1, int(limit or 5)) * 2, seen_ids, project_id=project_id, thread_id=thread_id)
         combined = [*rows, *fallback]
         combined.sort(key=lambda row: (float(row.get("relevance") or 0), float(row.get("created_at") or 0)), reverse=True)
         return combined[: max(1, int(limit or 5))]
@@ -489,25 +581,27 @@ class MemoryStore:
         self._rewrite_vault()
         return {"ok": True}
 
-    def _recall_fts(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def _recall_fts(self, query: str, limit: int, *, project_id: str = "", thread_id: str = "") -> list[dict[str, Any]]:
         terms = _fts_query_terms(query)
         if not terms:
             return []
         fts_query = " OR ".join(f'"{term}"' for term in terms[:8])
+        scope_clause, scope_values = _scope_clause(project_id, thread_id)
         try:
             with sqlite3.connect(self.path) as db:
                 rows = db.execute(
-                    """
+                    f"""
                     select m.id, m.kind, m.text, m.source, m.created_at, m.updated_at, bm25(memories_fts) as rank
                     from memories_fts
                     join memories m on m.id = memories_fts.rowid
                     where memories_fts match ?
                       and m.ephemeral = 0
                       and m.sensitive = 0
+                      and {scope_clause}
                     order by rank
                     limit ?
                     """,
-                    (fts_query, limit),
+                    (fts_query, *scope_values, limit),
                 ).fetchall()
         except Exception:
             return []
@@ -524,10 +618,10 @@ class MemoryStore:
             for memory_id, kind, text, source, created_at, updated_at, rank in rows
         ]
 
-    def _recall_by_score(self, query: str, limit: int, exclude_ids: set[int] | None = None) -> list[dict[str, Any]]:
+    def _recall_by_score(self, query: str, limit: int, exclude_ids: set[int] | None = None, *, project_id: str = "", thread_id: str = "") -> list[dict[str, Any]]:
         exclude_ids = exclude_ids or set()
         scored: list[dict[str, Any]] = []
-        for memory in self.recent(200):
+        for memory in self.recent(200, scoped=True, project_id=project_id, thread_id=thread_id):
             memory_id = int(memory.get("id") or 0)
             if memory_id in exclude_ids:
                 continue
@@ -676,6 +770,14 @@ class MemoryStore:
                 db.execute("alter table memories add column updated_at real not null default 0")
             if "fingerprint" not in columns:
                 db.execute("alter table memories add column fingerprint text not null default ''")
+            if "project_id" not in columns:
+                db.execute("alter table memories add column project_id text not null default ''")
+            if "thread_id" not in columns:
+                db.execute("alter table memories add column thread_id text not null default ''")
+            if "retention_class" not in columns:
+                # Existing rows predate scoping and were recalled everywhere, so
+                # they keep that reach rather than silently narrowing.
+                db.execute(f"alter table memories add column retention_class text not null default '{DEFAULT_RETENTION_CLASS}'")
             db.execute(
                 """
                 create table if not exists memory_dedupe_archive(
@@ -705,7 +807,14 @@ class MemoryStore:
                 """
             )
             self._migrate_memory_rows(db)
-            db.execute("create unique index if not exists memories_fingerprint_unique on memories(fingerprint) where fingerprint != ''")
+            # Uniqueness is per scope: the same sentence can be true of two
+            # different projects, and a global constraint would let whichever
+            # project saved it first silently own it.
+            db.execute("drop index if exists memories_fingerprint_unique")
+            db.execute(
+                "create unique index if not exists memories_scope_fingerprint_unique"
+                " on memories(fingerprint, project_id, thread_id) where fingerprint != ''"
+            )
             try:
                 db.execute(
                     """
@@ -789,7 +898,10 @@ class MemoryStore:
 
 
 def _memory_row(row: tuple) -> dict[str, Any]:
-    memory_id, kind, text, source, created_at, updated_at, ephemeral, sensitive = row
+    # Scope columns are optional so callers that select the older shape keep
+    # working; they fall back to the pre-scoping "reaches everywhere" default.
+    memory_id, kind, text, source, created_at, updated_at, ephemeral, sensitive = row[:8]
+    project_id, thread_id, retention_class = (list(row[8:]) + ["", "", DEFAULT_RETENTION_CLASS])[:3]
     return {
         "id": int(memory_id),
         "kind": kind,
@@ -799,6 +911,9 @@ def _memory_row(row: tuple) -> dict[str, Any]:
         "updated_at": float(updated_at or created_at),
         "ephemeral": bool(ephemeral),
         "sensitive": bool(sensitive),
+        "project_id": str(project_id or ""),
+        "thread_id": str(thread_id or ""),
+        "retention_class": normalize_retention_class(retention_class),
     }
 
 

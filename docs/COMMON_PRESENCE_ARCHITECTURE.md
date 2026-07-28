@@ -101,7 +101,25 @@
 
 现在三条路径都用 FTS5 的命令式写法（`'delete'` / `'delete-all'`）并调整了顺序。`tests/test_memory_deletion.py` 会 dump 数据库全部表加 Markdown 投影，断言删除后任何地方都不再包含该文本。
 
-**已知缺口**：`memories` 表没有 `project_id`/`thread_id` 列，PRD-AIM-007 要求的按项目/对话作用域召回尚未实现。当前隔离只来自每个角色包各有独立数据库文件。测试里如实记录了这一点，而不是假装它存在。
+## 记忆作用域
+
+`memories` 现有 `project_id` / `thread_id` / `retention_class` 三列（通过 additive `alter table` 迁移，旧行默认 `long_term`，升级后照旧全局可召回，不会突然消失）。
+
+`retention_class` 取值 `session / project / long_term / protected`：
+
+- `long_term` / `protected` 触达所有作用域——关于用户本人的事，而非关于某件工作的事；
+- `project` 只在同一项目可召回；
+- `session` 只在同一对话可召回。
+
+**先过滤，再排序**。别的项目的事实不能参与上下文预算的竞争，哪怕它文本匹配度更高。
+
+`fingerprint` 上原有的**全局唯一索引已改为按作用域唯一**——否则同一句话（比如"下周三评审"）先被哪个项目保存，就被那个项目独占了。
+
+`context()` 的泄漏面比 `recall()` 大，三处都做了隔离：语义召回、填充上下文预算的 `recent()` 兜底、以及**profile 摘要**（它是记忆的摘要，不隔离就会把别的项目的事实塞进一行"用户画像"里）。这两处是在实测生产链路时才发现的，`recall()` 层面看不出来。
+
+`protected` 类别覆盖系统身份、安全政策、权限历史和用户设定的边界：模型可读不可改，`update()`/`delete()` 默认拒绝，只有显式的用户操作（`allow_protected=True`）才能动。
+
+**仍未做**：语义冲突治理（同一事实的不同版本同时保留来源与时间、提示用户选择）。当前只按完全相同的文本去重。
 
 ## 角色表达
 

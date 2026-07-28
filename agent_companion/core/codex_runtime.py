@@ -389,7 +389,7 @@ class CodexRuntimeSession:
         character = getattr(self.app, "character", None)
         if character is not None:
             sections.append("Joi 角色设定：\n" + character.prompt_header()[:2400])
-        memory_context = self.app.memory.context(8, query=user_text)
+        memory_context = self.app.memory.context(8, query=user_text, **self.app._memory_scope())
         if memory_context:
             lines = [str(row.get("text") or "") for row in memory_context[:8] if isinstance(row, dict) and row.get("text")]
             if lines:

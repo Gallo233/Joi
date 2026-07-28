@@ -140,16 +140,11 @@ class MemoryIsolationTests(unittest.TestCase):
         self.assertTrue(first.recall("备用邮箱"))
         self.assertEqual(second.recall("备用邮箱"), [])
 
-    def test_memories_carry_no_project_or_thread_scope_yet(self) -> None:
-        # Documents a real gap rather than asserting behaviour that does not
-        # exist: PRD-AIM-007 wants per-project/thread recall scoping, and the
-        # schema has no column to filter on. Isolation today comes only from
-        # each character package having its own database file.
+    def test_memories_carry_scope_columns(self) -> None:
         store = MemoryStore(self.root / "c.sqlite3", self.root / "c.md")
         with sqlite3.connect(store.path) as db:
             columns = {row[1] for row in db.execute("pragma table_info(memories)")}
-        self.assertNotIn("project_id", columns)
-        self.assertNotIn("thread_id", columns)
+        self.assertLessEqual({"project_id", "thread_id", "retention_class"}, columns)
 
 
 if __name__ == "__main__":

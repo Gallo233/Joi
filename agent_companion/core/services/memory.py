@@ -27,7 +27,12 @@ class MemoryService:
         limit = min(self.MAX_RECALL_LIMIT, max(1, requested_limit or self.DEFAULT_RECALL_LIMIT))
         return {
             "ok": True,
-            "memories": self.store.recall(query, limit),
+            "memories": self.store.recall(
+                query,
+                limit,
+                project_id=str(values.get("project_id") or ""),
+                thread_id=str(values.get("thread_id") or ""),
+            ),
         }
 
     def list(self, params: dict[str, Any] | None = None) -> dict[str, Any]:

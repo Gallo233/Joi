@@ -18,8 +18,9 @@ class FakeMemoryStore:
     def status(self) -> dict[str, object]:
         return {"enabled": self.enabled}
 
-    def recall(self, query: str, limit: int) -> list[dict[str, object]]:
+    def recall(self, query: str, limit: int, *, project_id: str = "", thread_id: str = "") -> list[dict[str, object]]:
         self.last_recall = (query, limit)
+        self.last_recall_scope = (project_id, thread_id)
         return [{"id": 1, "text": query}]
 
     def list_memories(self, **values: object) -> dict[str, object]:

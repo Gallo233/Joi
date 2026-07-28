@@ -992,7 +992,7 @@ class AgentCompanionApp:
             "model": model or "默认",
             "reasoning": reasoning or "默认",
         }
-        memory_context = self.memory.context(8, query=user_text)
+        memory_context = self.memory.context(8, query=user_text, **self._memory_scope())
         if memory_context:
             arguments["memory_context"] = memory_context
         desktop_context = self._active_desktop_context()
@@ -1134,10 +1134,15 @@ class AgentCompanionApp:
             return pending.request_override
         return step
 
+    def _memory_scope(self) -> dict[str, str]:
+        """Which project/thread recall is allowed to draw from right now."""
+        context = self.bus.context()
+        return {"project_id": str(context.get("project_id") or ""), "thread_id": str(context.get("thread_id") or "")}
+
     def _step_with_memory_context(self, step: ToolRequest) -> ToolRequest:
         if step.name != "companion.chat":
             return step
-        context = self.memory.context(8, query=str(step.arguments.get("text") or ""))
+        context = self.memory.context(8, query=str(step.arguments.get("text") or ""), **self._memory_scope())
         if not context:
             return step
         arguments = dict(step.arguments)
