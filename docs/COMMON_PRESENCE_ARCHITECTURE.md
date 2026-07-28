@@ -101,6 +101,18 @@
 
 现在三条路径都用 FTS5 的命令式写法（`'delete'` / `'delete-all'`）并调整了顺序。`tests/test_memory_deletion.py` 会 dump 数据库全部表加 Markdown 投影，断言删除后任何地方都不再包含该文本。
 
+## 模型调用预算与安全投影
+
+`model_call.py` 把三件事分开处理，因为它们各自会以不同方式出问题：
+
+**调用前的 data manifest**。用户同意的是"某些类别的数据可以给 provider 看"。如果这个判断埋在 prompt 构造里临时做，就没法检查。manifest 提前声明类别与体积（不含内容），因此可展示、可测试、可拒绝——`CallBudget.permits()` 会挡下未声明类别、未授权类别和超预算的载荷，**调用根本不会发出**。
+
+**有边界的调用**。超时、取消和 fallback 都必须终止。超时覆盖**整条 fallback 链**而不是每次尝试，否则三个慢 provider 串起来就是三倍等待。取消在两次尝试**之间**检查——已经发出的请求收不回来，但下一个可以不发。fallback 次数有上限。
+
+**安全投影**。延迟和状态有用；API key、endpoint、本地模型路径和 provider 原始错误没用。记录只保留异常**类型**——provider 的错误消息经常把请求、端点甚至 key 原样回显。`provider_ref` 形如 `openai#1`，够区分"第二个 provider 挂了"，但不暴露它在哪。
+
+降级是明确状态而非静默失败：路由未配置返回 `unavailable`（不是错误，是用户还没配）。`degradation_notice()` 会说清替代方案的**性质差异**——Accessibility 和 OCR 确实在观察屏幕，但那不是视觉模型的理解；规则引导不计入 `ai_conversation_success`。
+
 ## 记忆作用域
 
 `memories` 现有 `project_id` / `thread_id` / `retention_class` 三列（通过 additive `alter table` 迁移，旧行默认 `long_term`，升级后照旧全局可召回，不会突然消失）。
