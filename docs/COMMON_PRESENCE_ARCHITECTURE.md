@@ -89,6 +89,20 @@
 
 `tests/test_run_lifecycle.py` 覆盖 TDD Phase 1 的全部退出条件：crash-before-act、act-before-receipt、duplicate-resume、过期/指纹不符/scope 变更、同 thread 拒绝第二个 run、跨 thread 身份不串线、并发审批只能有一个赢家。
 
+## 语音代次
+
+语音生产得慢、失效得快。合成与请求它的那一轮是分离执行的，等音频就绪时用户可能已经发了新消息、取消、接管或换了角色。照样播放就是在回答没人还在问的问题，更糟的是让角色对已放弃的工作显得胸有成竹。
+
+`voice_generation.py` 把"一轮用户输入的语音"作为一个代次。新一轮、取消、接管、换角色都会让旧代次退休；为退休代次生成的音频直接丢弃，只记录事实、不记录文本。`_synthesize_voice` 在合成**前后各查一次**——真正的竞态是合成期间用户又说了话。
+
+## 记忆删除传播
+
+`memories_fts` 是 external-content FTS5 表。删除时必须先移除索引再删内容行：内容行一旦消失，FTS 就再也读不到该删哪些 token，旧文本会继续留在索引里被搜到，且任何命中它的查询会以 `missing row from content table` 报错。同理，改写记忆时若不先退休旧 token，上一版文本仍然可搜。
+
+现在三条路径都用 FTS5 的命令式写法（`'delete'` / `'delete-all'`）并调整了顺序。`tests/test_memory_deletion.py` 会 dump 数据库全部表加 Markdown 投影，断言删除后任何地方都不再包含该文本。
+
+**已知缺口**：`memories` 表没有 `project_id`/`thread_id` 列，PRD-AIM-007 要求的按项目/对话作用域召回尚未实现。当前隔离只来自每个角色包各有独立数据库文件。测试里如实记录了这一点，而不是假装它存在。
+
 ## 角色表达
 
 角色是用户读取状态的界面。它在会话等着用户时微笑、或在缺权限时一脸平静，这个界面就在说谎——而用户会照着它行动。

@@ -39,6 +39,7 @@ from agent_companion.core.action_intent import ActionIntent
 from agent_companion.core.policy import PolicyGate
 from agent_companion.core.run_journal import RunJournal
 from agent_companion.core.vision.target_evidence import TargetEvidence, evidence_from_tool_state
+from agent_companion.core.voice_generation import VoiceGenerationTracker
 from agent_companion.core.runtime import build_tool_registry
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.skill_manifest import annotate_agent_state_with_skill, skill_boundaries_for_plan, skill_boundary_for_tool
@@ -106,6 +107,7 @@ class AgentCompanionApp:
         self._plan_runs: dict[str, str] = {}
         self._target_evidence: TargetEvidence | None = None
         self._session_provider: Any = None
+        self.voice_generations = VoiceGenerationTracker()
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
@@ -237,6 +239,8 @@ class AgentCompanionApp:
         user_state: dict[str, object] | None = None,
         plan_voice: str = "我整理了一下步骤。",
     ) -> list[AgentEvent]:
+        # A new turn supersedes whatever the previous one was still saying.
+        self.begin_voice_generation()
         self._emit_user_request(plan, user_state)
         run_id = self.run_journal.begin_run(plan.task_id, plan.intent, plan.user_text)
         if run_id:
@@ -780,9 +784,28 @@ class AgentCompanionApp:
             user_text,
         )
 
+    def begin_voice_generation(self, run_id: str = "") -> str:
+        """Open a new turn's worth of speech, retiring the previous one."""
+        return self.voice_generations.begin(
+            self._active_thread_id(),
+            character_id=self.character.id,
+            run_id=run_id,
+        ).generation_id
+
+    def _active_thread_id(self) -> str:
+        try:
+            return str((self.bus.context() or {}).get("thread_id") or "")
+        except Exception:
+            return ""
+
     def _emit(self, event: AgentEvent, user_text: str = "") -> None:
         state = dict(event.agent_state or {})
         state.setdefault("character_id", self.character.id)
+        # Tag the utterance with the turn it belongs to so audio that finishes
+        # after the user has moved on can be recognised and dropped.
+        generation = self.voice_generations.current_id(self._active_thread_id())
+        if generation:
+            state.setdefault("voice_generation", generation)
         tagged = replace(event, agent_state=state)
         # The capability session outranks the event: a paused session must not
         # be repainted by whichever tool event happens to arrive next.

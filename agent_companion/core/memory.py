@@ -136,8 +136,9 @@ class MemoryStore:
 
     def delete(self, memory_id: int) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:
-            cursor = db.execute("delete from memories where id = ?", (int(memory_id),))
+            # Index first: FTS5 needs the row's values to remove its tokens.
             self._delete_memory_index(db, int(memory_id))
+            cursor = db.execute("delete from memories where id = ?", (int(memory_id),))
         self._rewrite_vault()
         return {"ok": bool(cursor.rowcount), "deleted": int(memory_id)}
 
@@ -158,11 +159,13 @@ class MemoryStore:
             ).fetchone()
             if duplicate:
                 return {"ok": False, "error": "duplicate_memory", "duplicate_id": int(duplicate[0])}
+            # Retire the old tokens while the old values are still readable,
+            # otherwise the previous text stays searchable after the rewrite.
+            self._delete_memory_index(db, int(memory_id))
             db.execute(
                 "update memories set kind = ?, text = ?, fingerprint = ?, updated_at = ? where id = ?",
                 (safe_kind, cleaned, fingerprint, time.time(), int(memory_id)),
             )
-            self._delete_memory_index(db, int(memory_id))
             self._index_memory(db, int(memory_id), safe_kind, cleaned)
         self._rewrite_vault()
         return {"ok": True, "memory": self.memory(memory_id)}
@@ -480,9 +483,9 @@ class MemoryStore:
 
     def clear(self) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:
+            self._clear_memory_index(db)
             db.execute("delete from memories")
             db.execute("delete from memory_candidates")
-            self._clear_memory_index(db)
         self._rewrite_vault()
         return {"ok": True}
 
@@ -538,21 +541,40 @@ class MemoryStore:
     @staticmethod
     def _index_memory(db: sqlite3.Connection, memory_id: int, kind: str, text: str) -> None:
         try:
-            db.execute("insert or replace into memories_fts(rowid, kind, text) values (?, ?, ?)", (memory_id, kind, text))
+            db.execute("insert into memories_fts(rowid, kind, text) values (?, ?, ?)", (memory_id, kind, text))
         except Exception:
             return
 
     @staticmethod
     def _delete_memory_index(db: sqlite3.Connection, memory_id: int) -> None:
+        """Remove a row's tokens from the full-text index.
+
+        `memories_fts` is an external-content FTS5 table, so a plain DELETE does
+        not touch the index -- it only stops the table reading through to the
+        content row. The tokens stay searchable, and any query that matches them
+        then fails with "missing row from content table". FTS5 requires the
+        'delete' command with the row's *old* values, so they are read back
+        before the caller mutates or removes the row.
+        """
         try:
-            db.execute("delete from memories_fts where rowid = ?", (memory_id,))
+            row = db.execute("select kind, text from memories where id = ?", (memory_id,)).fetchone()
+            if row is None:
+                # Already gone from the content table; the index cannot be
+                # repaired for this row without its old values.
+                return
+            db.execute(
+                "insert into memories_fts(memories_fts, rowid, kind, text) values ('delete', ?, ?, ?)",
+                (memory_id, row[0], row[1]),
+            )
         except Exception:
             return
 
     @staticmethod
     def _clear_memory_index(db: sqlite3.Connection) -> None:
+        # External-content FTS5 needs the 'delete-all' command; a plain DELETE
+        # leaves every token behind.
         try:
-            db.execute("delete from memories_fts")
+            db.execute("insert into memories_fts(memories_fts) values ('delete-all')")
         except Exception:
             return
 

@@ -560,6 +560,11 @@ class JsonRpcBridge:
     def capability_session_transition_command(self, params: dict[str, Any] | None, state: str) -> dict[str, Any]:
         session_id = str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or "")
         result = self.collaboration.transition_session(session_id, state)
+        if state in {"cancelled", "paused"}:
+            # Stopping the work stops the commentary about it; audio already in
+            # synthesis for this turn is discarded rather than played after.
+            reason = "cancelled" if state == "cancelled" else "taken_over"
+            self.app.voice_generations.retire(str(self.collaboration.context().get("thread_id") or ""), reason)
         if state in {"cancelled", "completed", "failed"}:
             self.app.set_computer_driver("native")
         return result
@@ -725,6 +730,8 @@ class JsonRpcBridge:
         def activate() -> dict[str, Any]:
             result = self.app.character_packages.activate(character_id)
             self._reload_active_character()
+            # A different character must not finish the previous one's sentence.
+            self.app.voice_generations.retire_for_character_change(character_id)
             self.collaboration.update_thread(self.collaboration.context()["thread_id"], character_id=character_id)
             result["memory"] = self.app.memory.status()
             result["ready"] = self._ready_payload()
@@ -875,12 +882,25 @@ class JsonRpcBridge:
                 asyncio.create_task(self._synthesize_voice(event))
 
     async def _synthesize_voice(self, event: AgentEvent) -> None:
+        generation = str(event.agent_state.get("voice_generation") or "")
+        thread_id = str(event.thread_id or "")
+        generations = self.app.voice_generations
+        if not generations.is_current(generation, thread_id):
+            # Already superseded before synthesis even started.
+            generations.drop(generation, thread_id, "superseded")
+            return
         audio = await asyncio.to_thread(self.tts.synthesize, event.voice_line.text, event.voice_line.sprite, event.voice_line.emotion)
         if not audio:
             return
         if not audio.get("voice_audio_path") and not audio.get("voice_audio_error"):
             return
+        if not generations.is_current(generation, thread_id):
+            # Synthesis outlived its turn: the user has moved on, so this audio
+            # is never played. Only the fact is recorded, never the text.
+            generations.drop(generation, thread_id, "superseded")
+            return
         payload = {
+            "voice_generation": generation,
             "task_id": event.task_id,
             "event_type": event.type.value,
             "event_created_at": event.created_at,

@@ -80,6 +80,15 @@ class EventBus:
     def set_context_provider(self, provider: Callable[[], dict[str, Any]] | None) -> None:
         self._context_provider = provider
 
+    def context(self) -> dict[str, Any]:
+        """Current project/thread/session identity, or empty if unavailable."""
+        if self._context_provider is None:
+            return {}
+        try:
+            return dict(self._context_provider() or {})
+        except Exception:
+            return {}
+
     @property
     def latest_sequence(self) -> int:
         with self._lock:
