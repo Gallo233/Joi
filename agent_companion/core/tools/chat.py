@@ -10,6 +10,7 @@ from typing import Any
 from agent_companion.core.config import load_workspace_config
 from agent_companion.core.character_packages import CharacterPackageManager
 from agent_companion.core.memory_candidates import chat_memory_candidate
+from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.voice import normalize_emotion, safe_voice_line, sprite_for_emotion
@@ -87,14 +88,6 @@ class CompanionChatTool(ToolAdapter):
                 return ChatReply(memory_reply, "我记得这一点。", "thinking", sprite, model_usage={"mock": True})
             return ChatReply(fallback, fallback, fallback_emotion, sprite, model_usage={"mock": True})
         try:
-            from openai import OpenAI
-
-            from agent_companion.core.config import ModelRouter
-
-            router = ModelRouter(config.llm)
-            endpoint = router.resolve("fast")
-            if self._client is None:
-                self._client = OpenAI(api_key=endpoint.api_key or "ollama", base_url=endpoint.base_url, timeout=30.0)
             character = config.primary_character
             voice_lang = character.voice_text_lang(config.tts.text_lang)
             sprite_catalog = _sprite_catalog(character)
@@ -117,25 +110,20 @@ class CompanionChatTool(ToolAdapter):
                 f"voice_text 使用 {voice_lang}，可在开头带 <emo: ...>，不要包含 JSON、路径、命令、密钥 token 或日志。"
             )
             started = time.perf_counter()
-            if endpoint.provider == "openai":
-                response = self._client.responses.create(
-                    model=endpoint.model,
-                    instructions=system_prompt,
-                    input=text or "你好",
-                    max_output_tokens=600,
-                    store=False,
-                )
-                content = str(response.output_text or "").strip()
-            else:
-                response = self._client.chat.completions.create(
-                    model=endpoint.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": text or "你好"},
-                    ],
-                    temperature=config.llm.temperature,
-                )
-                content = str(response.choices[0].message.content or "").strip()
+            outcome = chat_completion(
+                config.llm,
+                "fast",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text or "你好"},
+                ],
+                temperature=config.llm.temperature,
+                instructions=system_prompt,
+                user_input=text or "你好",
+            )
+            if not outcome.ok:
+                raise ChatProviderError(outcome.error_code or outcome.status)
+            content = str(outcome.value or "").strip()
             latency_ms = (time.perf_counter() - started) * 1000
             try:
                 payload = json.loads(content or "{}")
@@ -147,7 +135,8 @@ class CompanionChatTool(ToolAdapter):
             voice_text = str(payload.get("voice_text") or reply).strip()
             emotion = normalize_emotion(str(payload.get("emotion") or "") or _fallback_chat_emotion(f"{text} {reply} {voice_text}"))
             sprite = _valid_character_sprite(character, str(payload.get("sprite") or ""), emotion)
-            return ChatReply(reply[:600], voice_text[:180], emotion, sprite, endpoint.to_agent_state(latency_ms=latency_ms))
+            usage = outcome.endpoint.to_agent_state(latency_ms=latency_ms) if outcome.endpoint is not None else {"latency_ms": max(0, int(latency_ms))}
+            return ChatReply(reply[:600], voice_text[:180], emotion, sprite, usage)
         except Exception as exc:
             memory_reply = _fallback_memory_reply(text, memory_context or [])
             if memory_reply:
@@ -172,7 +161,45 @@ class ChatReply:
     error: str = ""
 
 
+class ChatProviderError(RuntimeError):
+    """A model call that did not produce a reply, carrying only its code.
+
+    The provider's own message routinely echoes the endpoint and the key, so it
+    is never propagated -- `code` comes from the recorded outcome instead.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code or "model_request_failed"
+
+
+# Outcome codes from model_call mapped onto the user-facing vocabulary the
+# settings UI already explains.
+_OUTCOME_ERROR_CODES = {
+    "route_not_configured": "model_not_configured",
+    "budget_timeout": "model_timeout",
+    "all_providers_failed": "model_request_failed",
+    "unavailable": "model_not_configured",
+    "cancelled": "model_request_cancelled",
+    "AuthenticationError": "authentication_failed",
+    "PermissionDeniedError": "authentication_failed",
+    "NotFoundError": "model_or_endpoint_not_found",
+    "RateLimitError": "rate_limited",
+    "APITimeoutError": "model_timeout",
+    "APIConnectionError": "endpoint_unreachable",
+}
+
+
 def _chat_error_code(exc: Exception) -> str:
+    if isinstance(exc, ChatProviderError):
+        code = exc.code
+        if code in _OUTCOME_ERROR_CODES:
+            return _OUTCOME_ERROR_CODES[code]
+        if code.startswith("category_not_allowed") or code.startswith("unknown_data_category"):
+            return "model_request_refused"
+        if code == "input_budget_exceeded":
+            return "model_input_too_large"
+        return "model_request_failed"
     status = getattr(exc, "status_code", None)
     name = type(exc).__name__.casefold()
     if status in {401, 403} or "authentication" in name or "permissiondenied" in name:
@@ -195,6 +222,10 @@ def _chat_error_message(error: str) -> str:
         "rate_limited": "模型供应商暂时限流或额度不足，请稍后再试并检查用量。",
         "model_timeout": "模型响应超时了，请检查网络或换用更快的模型。",
         "endpoint_unreachable": "目前连接不到 BYOK 接口，请检查端点和网络。",
+        "model_not_configured": "还没有配置可用的文本模型，请先在设置里连接 BYOK 或本地端点。",
+        "model_request_cancelled": "这轮请求已取消。",
+        "model_request_refused": "这轮请求包含未获授权发送的数据类型，已经拦下。",
+        "model_input_too_large": "这轮请求超出了输入预算，请缩短内容后再试。",
         "model_request_failed": "BYOK 请求没有成功，请到设置里运行连接测试。",
     }
     return messages.get(error, messages["model_request_failed"])

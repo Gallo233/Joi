@@ -8,6 +8,7 @@ from agent_companion.core.config import AppConfig
 from agent_companion.core.tools.agent_cli import AgentCliRunTool
 from agent_companion.core.tools.browser import BrowserTool
 from agent_companion.core.tools.chat import CompanionChatTool
+from agent_companion.core.tools.character import CharacterPerformTool
 from agent_companion.core.tools.codex import CodexTool
 from agent_companion.core.tools.computer import ComputerActionTool
 from agent_companion.core.tools.desktop_workflow import DesktopWorkflowTool
@@ -49,6 +50,7 @@ def build_tool_registry(
     registry = ToolRegistry()
     post_action_settle_ms = config.computer_use.post_action_settle_ms if config else 200
     registry.register(CompanionChatTool(workspace))
+    registry.register(CharacterPerformTool())
     registry.register(AgentCliRunTool(workspace))
     registry.register(CodexTool(workspace))
     registry.register(BrowserTool(workspace, "browser.search"))

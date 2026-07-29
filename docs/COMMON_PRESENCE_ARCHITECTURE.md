@@ -150,6 +150,16 @@ approval > takeover > permission_missing > failed > acting > thinking > received
 - `express()` 在 `EventBus.emit()` 之前运行，读不到 bus 即将写入的 `public_phase`。新增 `derive_public_phase()` 供两边共用同一份定义，而不是复制一份会漂移的逻辑。
 - `paused/waiting_approval` 现在也覆盖 `done`。挂起的会话并没有完成，迟到的完成事件不能在用户还被等着的时候告诉他"活干完了"。`failed` 不被覆盖——失败要保持可见。
 
+角色动作同样只接收稳定的语义意图，不接受模型生成的骨骼或脚本。`character.perform` 当前白名单为
+`idle / greet / talk / happy / finger_gun / dance`，Core 只发出有界的动作名、时长、循环与强度；
+Shell 将它投影到 VRM 程序化骨骼、Live2D Motion/参数或静态立绘降级。新用户输入、审批、暂停或失败会
+打断当前动作并回到待机，系统 reduced-motion 偏好会关闭非必要位移。角色包的 `appearance.motions`
+可覆盖 Live2D Motion 组、时长、循环和强度，但不能引入可执行代码。
+
+内置角色的 Live2D 包没有四肢 Motion 资源，因此 Shell 会自动使用原创的程序化 3D Joi，而不是把
+全身动作伪装成几度的平面摆动。这个本地 Three.js 角色复用同一语义协议，负责骨架、镜头、视线、口型、
+表情和粒子表现；安装了真实 VRM 或带 Motion 的 Live2D 角色包时仍优先使用角色包自己的资产。
+
 ## 坐标信任与目标证据
 
 原实现把三个坐标空间压成一个：用**主显示器**宽度除截图宽度得到一个全局 scale，套用到所有显示器。单显示器下恰好正确；接上第二块屏后，副屏窗口的裁剪框会落错位置，clamp 又会把错误伪装成"回退到全屏"——Joi 于是在看主屏、点副屏。

@@ -240,6 +240,10 @@ class CallOutcome:
     status: str = "succeeded"
     error_code: str = ""
     records: tuple[ModelCallRecord, ...] = ()
+    # The endpoint that answered, for callers that need its own safe
+    # projection. Deliberately absent from payload(): this object holds a key
+    # and a base URL, and must never be serialised into an event.
+    endpoint: Any = None
 
     @property
     def degraded(self) -> bool:
@@ -327,7 +331,7 @@ def execute_call(
             )
             continue
         note(status="succeeded", fallback_index=index, provider_ref=provider_ref(endpoint, index), elapsed_ms=(clock() - attempt_started) * 1000)
-        return CallOutcome(True, value, "succeeded", "", tuple(records))
+        return CallOutcome(True, value, "succeeded", "", tuple(records), endpoint)
 
     return CallOutcome(False, None, "provider_error", "all_providers_failed", tuple(records))
 

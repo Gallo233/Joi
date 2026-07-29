@@ -7,7 +7,8 @@ import re
 import uuid
 from typing import Any
 
-from agent_companion.core.config import AppConfig, ModelRouter, load_workspace_config
+from agent_companion.core.config import AppConfig, load_workspace_config
+from agent_companion.core.provider_client import PLANNER_BUDGET, chat_completion
 from agent_companion.core.schemas import AgentPlan, ToolRequest
 
 
@@ -66,17 +67,13 @@ class LlmPlanParser:
         config = self._config
         if config is None:
             return None
-        try:
-            from openai import OpenAI
-        except Exception:
-            return None
-        try:
-            endpoint = ModelRouter(config.llm).resolve("reasoning")
-            if self._client is None or self._client.base_url != endpoint.base_url:
-                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url, timeout=8.0)
-            response = self._client.chat.completions.create(
-                model=endpoint.model,
-                messages=[
+        outcome = chat_completion(
+            config.llm,
+            "reasoning",
+            budget=PLANNER_BUDGET,
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            messages=[
                     {
                         "role": "system",
                         "content": (
@@ -112,14 +109,17 @@ class LlmPlanParser:
                             ensure_ascii=False,
                         ),
                     },
-                ],
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            parsed = json.loads(response.choices[0].message.content or "{}")
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
+            ],
+        )
+        if not outcome.ok:
+            # Planning falls back to the rule planner; the outcome is already
+            # recorded, so this does not need to raise or log anything.
             return None
+        try:
+            parsed = json.loads(str(outcome.value or "{}"))
+        except (TypeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _load_config(self) -> AppConfig | None:
         return load_workspace_config(self.workspace)

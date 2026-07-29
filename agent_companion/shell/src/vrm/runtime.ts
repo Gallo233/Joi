@@ -6,19 +6,84 @@ import {
 } from '@pixiv/three-vrm'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
-import type { Live2DEmotion } from '../live2d/runtime'
+import {
+  motionEnvelope,
+  motionExpired,
+  resolveCharacterMotion,
+  type CharacterMotionRequest,
+  type ResolvedCharacterMotion,
+} from '../characterMotion'
+import type { Live2DEmotion, Live2DRuntimeMapping } from '../live2d/runtime'
 
 export interface VrmController {
   resize: () => void
   setCompact: (compact: boolean) => void
   setEmotion: (emotion: Live2DEmotion) => void
   speak: (text: string) => void
+  playMotion: (request: CharacterMotionRequest) => void
   destroy: () => void
 }
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value))
 
-export async function mountVRM(canvas: HTMLCanvasElement, modelUrl: string): Promise<VrmController> {
+type MotionBoneName =
+  | 'hips'
+  | 'spine'
+  | 'chest'
+  | 'upperChest'
+  | 'neck'
+  | 'head'
+  | 'leftShoulder'
+  | 'leftUpperArm'
+  | 'leftLowerArm'
+  | 'leftHand'
+  | 'rightShoulder'
+  | 'rightUpperArm'
+  | 'rightLowerArm'
+  | 'rightHand'
+  | 'leftUpperLeg'
+  | 'leftLowerLeg'
+  | 'rightUpperLeg'
+  | 'rightLowerLeg'
+
+type BoneRotation = [number, number, number]
+type MotionPose = {
+  bones: Partial<Record<MotionBoneName, BoneRotation>>
+  root: [number, number, number]
+}
+
+interface RunningMotion {
+  motion: ResolvedCharacterMotion
+  startedAt: number
+  fadeStartedAt?: number
+}
+
+const MOTION_BONES: MotionBoneName[] = [
+  'hips',
+  'spine',
+  'chest',
+  'upperChest',
+  'neck',
+  'head',
+  'leftShoulder',
+  'leftUpperArm',
+  'leftLowerArm',
+  'leftHand',
+  'rightShoulder',
+  'rightUpperArm',
+  'rightLowerArm',
+  'rightHand',
+  'leftUpperLeg',
+  'leftLowerLeg',
+  'rightUpperLeg',
+  'rightLowerLeg',
+]
+
+export async function mountVRM(
+  canvas: HTMLCanvasElement,
+  modelUrl: string,
+  mapping: Live2DRuntimeMapping = {},
+): Promise<VrmController> {
   const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, powerPreference: 'high-performance' })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
   renderer.outputColorSpace = THREE.SRGBColorSpace
@@ -68,6 +133,20 @@ export async function mountVRM(canvas: HTMLCanvasElement, modelUrl: string): Pro
   let targetPointerX = 0
   let targetPointerY = 0
   let nextBlinkAt = previous + 2200
+  let activeMotion: RunningMotion | null = null
+  let outgoingMotion: RunningMotion | null = null
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const baseScenePosition = vrm.scene.position.clone()
+  const motionBones = new Map<MotionBoneName, THREE.Object3D>()
+  const baseBoneRotations = new Map<MotionBoneName, THREE.Quaternion>()
+  const motionQuaternion = new THREE.Quaternion()
+  const motionEuler = new THREE.Euler()
+  for (const name of MOTION_BONES) {
+    const bone = vrm.humanoid?.getNormalizedBoneNode(name)
+    if (!bone) continue
+    motionBones.set(name, bone)
+    baseBoneRotations.set(name, bone.quaternion.clone())
+  }
 
   const setExpression = (manager: VRMExpressionManager | null | undefined, name: string, value: number) => {
     try {
@@ -117,18 +196,77 @@ export async function mountVRM(canvas: HTMLCanvasElement, modelUrl: string): Pro
     targetPointerY = clamp((event.clientY - rect.top) / rect.height * 2 - 1, -1, 1)
   }
 
+  const applyMotion = (now: number) => {
+    if (activeMotion && motionExpired(activeMotion.motion, activeMotion.startedAt, now)) activeMotion = null
+    if (outgoingMotion?.fadeStartedAt && now - outgoingMotion.fadeStartedAt >= 180) outgoingMotion = null
+
+    const rotations = new Map<MotionBoneName, BoneRotation>()
+    const root: [number, number, number] = [0, 0, 0]
+    const blend = (running: RunningMotion | null, fadeWeight = 1) => {
+      if (!running || reducedMotion) return
+      const elapsed = Math.max(0, now - running.startedAt) / 1000
+      const weight = motionEnvelope(running.motion, running.startedAt, now) * running.motion.intensity * fadeWeight
+      if (weight <= 0) return
+      const pose = vrmMotionPose(running.motion.name, elapsed)
+      for (const [name, value] of Object.entries(pose.bones) as Array<[MotionBoneName, BoneRotation]>) {
+        const current = rotations.get(name) || [0, 0, 0]
+        rotations.set(name, [
+          current[0] + value[0] * weight,
+          current[1] + value[1] * weight,
+          current[2] + value[2] * weight,
+        ])
+      }
+      root[0] += pose.root[0] * weight
+      root[1] += pose.root[1] * weight
+      root[2] += pose.root[2] * weight
+    }
+
+    if (!reducedMotion) {
+      const idlePose = vrmMotionPose('idle', now / 1000)
+      for (const [name, value] of Object.entries(idlePose.bones) as Array<[MotionBoneName, BoneRotation]>) {
+        rotations.set(name, value)
+      }
+      root[0] += idlePose.root[0]
+      root[1] += idlePose.root[1]
+      root[2] += idlePose.root[2]
+    }
+    if (outgoingMotion?.fadeStartedAt) {
+      blend(outgoingMotion, clamp(1 - (now - outgoingMotion.fadeStartedAt) / 180, 0, 1))
+    }
+    blend(activeMotion)
+
+    const gaze = rotations.get('head') || [0, 0, 0]
+    rotations.set('head', [
+      gaze[0] + pointerY * -0.08,
+      gaze[1] + pointerX * 0.18,
+      gaze[2] + pointerX * -0.025,
+    ])
+
+    for (const name of MOTION_BONES) {
+      const bone = motionBones.get(name)
+      const base = baseBoneRotations.get(name)
+      if (!bone || !base) continue
+      bone.quaternion.copy(base)
+      const value = rotations.get(name)
+      if (!value) continue
+      motionEuler.set(value[0], value[1], value[2], 'XYZ')
+      motionQuaternion.setFromEuler(motionEuler)
+      bone.quaternion.multiply(motionQuaternion)
+    }
+    vrm.scene.position.set(
+      baseScenePosition.x + root[0],
+      baseScenePosition.y + root[1],
+      baseScenePosition.z + root[2],
+    )
+  }
+
   const render = (now: number) => {
     if (destroyed) return
     const delta = clamp((now - previous) / 1000, 0.008, 0.05)
     previous = now
     pointerX += (targetPointerX - pointerX) * Math.min(1, delta * 6)
     pointerY += (targetPointerY - pointerY) * Math.min(1, delta * 6)
-    const head = vrm.humanoid?.getNormalizedBoneNode('head')
-    if (head) {
-      head.rotation.y = pointerX * 0.18
-      head.rotation.x = pointerY * -0.08
-      head.rotation.z = pointerX * -0.025
-    }
+    applyMotion(now)
     applyEmotion(now)
     vrm.update(delta)
     renderer.render(scene, camera)
@@ -152,6 +290,14 @@ export async function mountVRM(canvas: HTMLCanvasElement, modelUrl: string): Pro
       const value = text.trim()
       talkUntil = value ? performance.now() + clamp(value.length * 85, 900, 6500) : 0
     },
+    playMotion(request) {
+      const now = performance.now()
+      if (activeMotion) outgoingMotion = { ...activeMotion, fadeStartedAt: now }
+      activeMotion = {
+        motion: resolveCharacterMotion(request, mapping.motions || []),
+        startedAt: now,
+      }
+    },
     destroy() {
       if (destroyed) return
       destroyed = true
@@ -162,4 +308,76 @@ export async function mountVRM(canvas: HTMLCanvasElement, modelUrl: string): Pro
       renderer.dispose()
     },
   }
+}
+
+function vrmMotionPose(name: ResolvedCharacterMotion['name'], time: number): MotionPose {
+  const pose: MotionPose = { bones: {}, root: [0, 0, 0] }
+  if (name === 'idle') {
+    pose.bones.chest = [Math.sin(time * 1.7) * 0.012, 0, Math.sin(time * 0.8) * 0.008]
+    pose.bones.head = [Math.sin(time * 0.7) * 0.006, Math.sin(time * 0.45) * 0.01, 0]
+    pose.root[1] = Math.sin(time * 1.7) * 0.003
+    return pose
+  }
+  if (name === 'greet') {
+    const wave = Math.sin(time * 8.5)
+    pose.bones.chest = [0, -0.08, -0.04]
+    pose.bones.head = [0.03, -0.08, -0.08]
+    pose.bones.rightShoulder = [0, 0, -0.18]
+    pose.bones.rightUpperArm = [-0.28, -0.18, -1.08]
+    pose.bones.rightLowerArm = [-0.12, 0.12, -1.08]
+    pose.bones.rightHand = [0, wave * 0.36, wave * 0.18]
+    return pose
+  }
+  if (name === 'talk') {
+    const gesture = Math.sin(time * 3.3)
+    pose.bones.chest = [0, gesture * 0.035, gesture * 0.025]
+    pose.bones.head = [0, gesture * -0.025, gesture * -0.018]
+    pose.bones.leftUpperArm = [-0.08, 0, 0.18 + gesture * 0.08]
+    pose.bones.rightUpperArm = [-0.08, 0, -0.18 - gesture * 0.08]
+    pose.bones.leftLowerArm = [0, gesture * 0.05, 0.18]
+    pose.bones.rightLowerArm = [0, gesture * -0.05, -0.18]
+    return pose
+  }
+  if (name === 'happy') {
+    const bounce = Math.abs(Math.sin(time * 5.8))
+    pose.bones.chest = [-0.08, 0, Math.sin(time * 5.8) * 0.04]
+    pose.bones.head = [-0.04, 0, Math.sin(time * 5.8) * -0.035]
+    pose.bones.leftUpperArm = [-0.22, -0.12, 1.08]
+    pose.bones.rightUpperArm = [-0.22, 0.12, -1.08]
+    pose.bones.leftLowerArm = [-0.18, 0, 0.52]
+    pose.bones.rightLowerArm = [-0.18, 0, -0.52]
+    pose.root[1] = bounce * 0.035
+    return pose
+  }
+  if (name === 'finger_gun') {
+    pose.bones.hips = [0, -0.12, -0.04]
+    pose.bones.chest = [-0.06, 0.25, 0.09]
+    pose.bones.head = [0.04, 0.15, -0.09]
+    pose.bones.rightUpperArm = [-1.08, -0.18, -0.42]
+    pose.bones.rightLowerArm = [-0.18, 0.18, -0.12]
+    pose.bones.rightHand = [0.05, -0.08, 0.08]
+    pose.bones.leftUpperArm = [-0.62, 0.18, 0.34]
+    pose.bones.leftLowerArm = [-0.12, -0.15, 0.48]
+    pose.root[0] = 0.025
+    return pose
+  }
+
+  const sway = Math.sin(time * 4.1)
+  const counter = Math.sin(time * 4.1 + Math.PI)
+  const bounce = Math.abs(Math.sin(time * 4.1))
+  pose.bones.hips = [0, sway * 0.16, sway * 0.16]
+  pose.bones.spine = [0, counter * 0.08, counter * 0.08]
+  pose.bones.chest = [0, counter * 0.12, counter * 0.11]
+  pose.bones.head = [Math.sin(time * 8.2) * 0.025, sway * -0.05, sway * -0.08]
+  pose.bones.leftUpperArm = [-0.18 + counter * 0.18, 0, 0.68 + sway * 0.38]
+  pose.bones.rightUpperArm = [-0.18 + sway * 0.18, 0, -0.68 + sway * 0.38]
+  pose.bones.leftLowerArm = [-0.2, counter * 0.16, 0.42]
+  pose.bones.rightLowerArm = [-0.2, sway * 0.16, -0.42]
+  pose.bones.leftUpperLeg = [counter * 0.12, 0, counter * 0.08]
+  pose.bones.rightUpperLeg = [sway * 0.12, 0, sway * 0.08]
+  pose.bones.leftLowerLeg = [Math.max(0, sway) * 0.14, 0, 0]
+  pose.bones.rightLowerLeg = [Math.max(0, counter) * 0.14, 0, 0]
+  pose.root[0] = sway * 0.045
+  pose.root[1] = bounce * 0.028
+  return pose
 }

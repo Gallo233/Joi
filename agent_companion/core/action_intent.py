@@ -55,6 +55,7 @@ SENSITIVITY_ORDER = ("none", "low", "medium", "high", "red_line")
 # classifier; anything absent is treated as UNKNOWN_EFFECT rather than safe.
 TOOL_EFFECTS: dict[str, EffectKind] = {
     # Read-only observation and retrieval.
+    "character.perform": EffectKind.NONE,
     "companion.chat": EffectKind.NONE,
     "observe.screen": EffectKind.NONE,
     "watch.recall": EffectKind.NONE,

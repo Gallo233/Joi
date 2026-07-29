@@ -4,6 +4,7 @@ import re
 import sys
 import uuid
 
+from agent_companion.core.character_motion import character_motion_from_text
 from agent_companion.core.schemas import AgentPlan, ToolRequest
 
 SEARCH_VERB_RE = r"(?:搜索|搜一下|查找|搜(?!集))"
@@ -14,6 +15,20 @@ def build_plan(user_text: str) -> AgentPlan:
     task_id = f"task-{uuid.uuid4().hex[:10]}"
     lowered = text.casefold()
 
+    character_motion = character_motion_from_text(text)
+    if character_motion:
+        return AgentPlan(
+            task_id=task_id,
+            user_text=text,
+            intent="character_motion",
+            steps=[
+                ToolRequest(
+                    "character.perform",
+                    {"motion": character_motion},
+                    "播放本地角色动作，不操作外部应用。",
+                )
+            ],
+        )
     if _is_game_task(text):
         return AgentPlan(
             task_id=task_id,

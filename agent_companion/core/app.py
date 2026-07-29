@@ -606,6 +606,26 @@ class AgentCompanionApp:
         )
 
     def _emit_tool_started(self, plan: AgentPlan, step: ToolRequest) -> None:
+        if step.name == "character.perform":
+            self._emit(
+                AgentEvent(
+                    EventType.TOOL_STARTED,
+                    plan.task_id,
+                    DisplayCard("角色动作", "Joi 正在准备动作。"),
+                    safe_voice_line("", fallback=""),
+                    annotate_agent_state_with_skill(
+                        {
+                            "tool": step.name,
+                            "ui_phase": "acting",
+                            "ui_label": "正在准备动作",
+                            "ui_transient": True,
+                        },
+                        step.name,
+                    ),
+                ),
+                plan.user_text,
+            )
+            return
         if step.name == "companion.chat":
             self._emit(
                 AgentEvent(
@@ -844,6 +864,7 @@ class AgentCompanionApp:
     def _tool_label(name: str) -> str:
         labels = {
             "companion.chat": "角色对话",
+            "character.perform": "角色动作",
             "agent_cli.run": "Agent CLI 接管",
             "codex.run": "写码任务",
             "game.ok_ww.run": "游戏自动化",
@@ -871,6 +892,7 @@ class AgentCompanionApp:
     def _intent_label(intent: str) -> str:
         labels = {
             "companion_chat": "日常对话",
+            "character_motion": "角色动作",
             "agent_cli_takeover": "Agent CLI 接管",
             "coding": "写码",
             "game_assist": "游戏",
@@ -887,7 +909,7 @@ class AgentCompanionApp:
 
     @staticmethod
     def _should_emit_task_completion(intent: str) -> bool:
-        return intent not in {"companion_chat", "watch_together", "watch_followup", "semantic_target", "semantic_target_selection"}
+        return intent not in {"companion_chat", "character_motion", "watch_together", "watch_followup", "semantic_target", "semantic_target_selection"}
 
     @staticmethod
     def _approved_computer_step_completed(pending: PendingStep | None) -> bool:
@@ -896,7 +918,7 @@ class AgentCompanionApp:
 
     @staticmethod
     def _is_ephemeral_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
-        if plan.intent in {"watch_together", "watch_followup"}:
+        if plan.intent in {"watch_together", "watch_followup", "character_motion"}:
             return True
         if plan.intent in {"semantic_target", "semantic_target_selection"}:
             return True

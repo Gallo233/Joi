@@ -1,3 +1,12 @@
+import {
+  motionEnvelope,
+  motionExpired,
+  resolveCharacterMotion,
+  type CharacterMotionMapping,
+  type CharacterMotionRequest,
+  type ResolvedCharacterMotion,
+} from '../characterMotion'
+
 export type Live2DEmotion = 'happy' | 'thinking' | 'alert' | 'worried' | 'serious' | 'neutral'
 
 interface PointLike {
@@ -157,6 +166,7 @@ export interface Live2DController {
   setCompact: (compact: boolean) => void
   setEmotion: (emotion: Live2DEmotion) => void
   speak: (text: string) => void
+  playMotion: (request: CharacterMotionRequest) => void
   destroy: () => void
 }
 
@@ -169,6 +179,7 @@ export interface Live2DExpressionMapping {
 
 export interface Live2DRuntimeMapping {
   expressions?: Live2DExpressionMapping[]
+  motions?: CharacterMotionMapping[]
   lipSync?: { parameter?: string }
 }
 
@@ -227,6 +238,8 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
   let emotion: Live2DEmotion = 'neutral'
   let compact = false
   let talkUntil = 0
+  let activeMotion: ResolvedCharacterMotion | null = null
+  let activeMotionStartedAt = 0
   let nextBlinkAt = previousFrame + 1800 + Math.random() * 2600
   let blinkUntil = 0
   let lookX = 0
@@ -309,12 +322,18 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
     const pose = expressionPose()
     const blink = now < blinkUntil ? 0 : 1
     const mouth = now < talkUntil ? 0.2 + Math.abs(Math.sin(now / 78)) * 0.58 : 0
+    if (activeMotion && motionExpired(activeMotion, activeMotionStartedAt, now)) activeMotion = null
+    const motionWeight = activeMotion && !reducedMotion
+      ? motionEnvelope(activeMotion, activeMotionStartedAt, now) * activeMotion.intensity
+      : 0
+    const motionTime = Math.max(0, now - activeMotionStartedAt) / 1000
+    const motionPose = live2dMotionPose(activeMotion?.name || 'idle', motionTime, motionWeight)
     const breath = reducedMotion ? 0.5 : (Math.sin(now / 850) + 1) * 0.5
     const hair = reducedMotion ? 0 : Math.sin(now / 1050) * 0.16 - lookX * 0.18
 
-    setParameter(coreModel, 'ParamAngleX', lookX * 25)
-    setParameter(coreModel, 'ParamAngleY', lookY * 18)
-    setParameter(coreModel, 'ParamAngleZ', -lookX * 5 + pose.tilt)
+    setParameter(coreModel, 'ParamAngleX', lookX * 25 + motionPose.headX)
+    setParameter(coreModel, 'ParamAngleY', lookY * 18 + motionPose.headY)
+    setParameter(coreModel, 'ParamAngleZ', -lookX * 5 + pose.tilt + motionPose.headZ)
     setParameter(coreModel, 'ParamEyeBallX', lookX)
     setParameter(coreModel, 'ParamEyeBallY', -lookY)
     setParameter(coreModel, 'ParamEyeLOpen', pose.eye * blink)
@@ -323,9 +342,9 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
     setParameter(coreModel, 'ParamEyeRSmile', pose.eyeSmile)
     setParameter(coreModel, 'ParamBrowLY', pose.brow)
     setParameter(coreModel, 'ParamBrowRY', pose.brow)
-    setParameter(coreModel, 'ParamBodyAngleX', lookX * 7)
-    setParameter(coreModel, 'ParamBodyAngleY', lookY * 5)
-    setParameter(coreModel, 'ParamBodyAngleZ', -lookX * 4)
+    setParameter(coreModel, 'ParamBodyAngleX', lookX * 7 + motionPose.bodyX)
+    setParameter(coreModel, 'ParamBodyAngleY', lookY * 5 + motionPose.bodyY)
+    setParameter(coreModel, 'ParamBodyAngleZ', -lookX * 4 + motionPose.bodyZ)
     setParameter(coreModel, 'ParamBreath', breath)
     setParameter(coreModel, 'ParamHairFront', hair)
     setParameter(coreModel, 'ParamHairSide', hair * 0.8)
@@ -354,8 +373,13 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
 
     model.update?.(delta)
     applyParameters(now)
+    const motionWeight = activeMotion && !reducedMotion
+      ? motionEnvelope(activeMotion, activeMotionStartedAt, now) * activeMotion.intensity
+      : 0
+    const motionTime = Math.max(0, now - activeMotionStartedAt) / 1000
+    const motionPose = live2dMotionPose(activeMotion?.name || 'idle', motionTime, motionWeight)
     const floatY = reducedMotion ? 0 : Math.sin(now / 1250) * 1.6
-    model.position?.set?.(baseX + lookX * 2.5, baseY + floatY - lookY * 2)
+    model.position?.set?.(baseX + lookX * 2.5 + motionPose.offsetX, baseY + floatY + motionPose.offsetY - lookY * 2)
     model.scale?.set?.(baseScale)
     if (typeof model.rotation === 'number') model.rotation = lookX * 0.025
     app.render?.()
@@ -401,6 +425,15 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
       const duration = clamp(text.trim().length * 85, 900, 6500)
       talkUntil = text.trim() ? performance.now() + duration : 0
     },
+    playMotion(request) {
+      activeMotion = resolveCharacterMotion(request, mapping.motions || [])
+      activeMotionStartedAt = performance.now()
+      const group = String(activeMotion.mapping?.motion_group || '').trim()
+      if (group) {
+        const index = Number(activeMotion.mapping?.motion_index || 0)
+        void model?.motion?.(group, Number.isFinite(index) ? index : 0, 3)
+      }
+    },
     destroy() {
       if (destroyed) return
       destroyed = true
@@ -410,4 +443,38 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
       app.destroy?.(false)
     },
   }
+}
+
+function live2dMotionPose(name: ResolvedCharacterMotion['name'], time: number, weight: number) {
+  const idle = {
+    headX: 0,
+    headY: 0,
+    headZ: 0,
+    bodyX: 0,
+    bodyY: 0,
+    bodyZ: 0,
+    offsetX: 0,
+    offsetY: 0,
+  }
+  if (weight <= 0 || name === 'idle') return idle
+  if (name === 'dance') {
+    return {
+      ...idle,
+      headZ: Math.sin(time * 4.2) * 5 * weight,
+      bodyX: Math.sin(time * 3.2) * 8 * weight,
+      bodyZ: Math.sin(time * 4.2) * 10 * weight,
+      offsetX: Math.sin(time * 3.2) * 5 * weight,
+      offsetY: -Math.abs(Math.sin(time * 6.4)) * 3 * weight,
+    }
+  }
+  if (name === 'greet') {
+    return { ...idle, headZ: -4 * weight, bodyX: Math.sin(time * 4) * 3 * weight, bodyZ: -3 * weight }
+  }
+  if (name === 'happy') {
+    return { ...idle, headZ: Math.sin(time * 7) * 2 * weight, bodyZ: Math.sin(time * 7) * 4 * weight, offsetY: -Math.abs(Math.sin(time * 7)) * 3 * weight }
+  }
+  if (name === 'finger_gun') {
+    return { ...idle, headZ: -6 * weight, bodyX: -5 * weight, bodyZ: 5 * weight, offsetX: 2 * weight }
+  }
+  return { ...idle, headZ: Math.sin(time * 2.4) * 1.5 * weight, bodyX: Math.sin(time * 2.4) * 2 * weight }
 }

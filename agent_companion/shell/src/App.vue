@@ -63,6 +63,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Compon
 import { CoreClient, type CoreStatus } from './api'
 import JoiCharacter from './components/JoiCharacter.vue'
 import CharacterLibrary from './components/CharacterLibrary.vue'
+import { normalizeCharacterMotion, type CharacterMotionRequest } from './characterMotion'
 import type { Live2DEmotion, Live2DRuntimeMapping } from './live2d/runtime'
 import type { ActionReceipt, AgentCliListResult, AgentCliModelOption, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, AgentSkillDraft, AgentSkillInspection, AgentSkillInstallation, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ByokConnectResult, ByokPreset, ByokStatus, ByokTestResult, CapabilitySession, CodexRuntimeStatus, CollaborationSnapshot, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, GameAdapterManifest, JoiMcpStatus, JoiProject, JoiThread, MemoryCandidate, MemoryCandidatePage, MemoryPage, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, PermissionProfile, ResourceBinding, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { settingsSubtitle, settingsTabs, settingsTitle, type SettingsTabId } from './settings'
@@ -226,11 +227,21 @@ const live2DModelUrl = computed(() => {
 })
 const live2DRuntimeMapping = computed<Live2DRuntimeMapping>(() => ({
   expressions: ready.value?.character?.expression_mappings || [],
+  motions: ready.value?.character?.motion_mappings || [],
   lipSync: ready.value?.character?.lip_sync || {},
 }))
+const characterDisplayModelType = computed(() => {
+  const character = ready.value?.character
+  const configuredType = character?.model_type || 'live2d'
+  const hasAuthoredMotions = Boolean(character?.motion_mappings?.some((motion) => motion.motion_group))
+  if (character?.id === 'builtin-hikari' && configuredType === 'live2d' && !hasAuthoredMotions) {
+    return 'procedural3d' as const
+  }
+  return configuredType
+})
 const characterRenderKey = computed(() => [
   ready.value?.character?.id || 'joi',
-  ready.value?.character?.model_type || 'static',
+  characterDisplayModelType.value,
   live2DModelUrl.value,
 ].join(':'))
 const stageBackdropStyle = computed(() => {
@@ -1255,6 +1266,36 @@ const activeExpressionEmotion = computed(() => {
   const latest = latestExpressionEvent.value
   const sync = asRecord(latest?.agent_state?.expression_sync)
   return expressionEmotionClass(stringValue(sync.emotion) || latest?.voice_line?.emotion || 'neutral')
+})
+
+const activeCharacterMotion = computed<CharacterMotionRequest | undefined>(() => {
+  const motionEvent = [...events.value]
+    .reverse()
+    .find((event) => normalizeCharacterMotion(asRecord(event.agent_state?.character_motion).name))
+  if (!motionEvent) return undefined
+  const motionState = asRecord(motionEvent.agent_state?.character_motion)
+  const motion = normalizeCharacterMotion(motionState.name)
+  if (!motion) return undefined
+  const motionOrder = eventOrder(motionEvent)
+  const interruptingEvent = [...events.value]
+    .reverse()
+    .find((event) => eventOrder(event) > motionOrder && interruptsCharacterMotion(event))
+  if (interruptingEvent) {
+    return {
+      motion: 'idle',
+      eventKey: `motion-stop:${eventOrder(interruptingEvent)}`,
+      durationMs: 0,
+      loop: true,
+      intensity: 0.25,
+    }
+  }
+  return {
+    motion,
+    eventKey: String(motionEvent.event_id || `motion:${motionOrder}`),
+    durationMs: Number(motionState.duration_ms || 0),
+    loop: Boolean(motionState.loop),
+    intensity: Number(motionState.intensity || 0.8),
+  }
 })
 
 const activeEmotionStatus = computed(() => ({
@@ -2338,6 +2379,20 @@ function expressionEmotionLabel(value: string) {
     serious: '专注',
     neutral: '平静',
   }[expressionEmotionClass(value)]
+}
+
+function eventOrder(event: AgentEvent) {
+  const sequence = Number(event.sequence || 0)
+  return sequence > 0 ? sequence : Math.round(Number(event.created_at || 0) * 1000)
+}
+
+function interruptsCharacterMotion(event: AgentEvent) {
+  if (event.type === 'user_message') return true
+  if (['approval_required', 'runtime_error', 'tool_failed', 'task_failed'].includes(event.type)) return true
+  const expressionIntent = asRecord(event.agent_state?.expression_intent)
+  if (expressionIntent.locked) return true
+  const phase = stringValue(event.public_phase || event.agent_state?.public_phase)
+  return ['waiting', 'paused', 'failed'].includes(phase)
 }
 
 function trimText(value: string, max: number) {
@@ -5600,12 +5655,13 @@ onBeforeUnmount(() => {
         <JoiCharacter
           :key="characterRenderKey"
           :model-url="live2DModelUrl"
-          :model-type="ready?.character?.model_type || 'live2d'"
+          :model-type="characterDisplayModelType"
           :runtime-mapping="live2DRuntimeMapping"
           :fallback-image-src="characterImageSrc"
           :character-name="characterName"
           :emotion="activeExpressionEmotion"
           :speech="latestSpeech"
+          :motion="activeCharacterMotion"
           :compact="isCompactMode || characterFullBody"
           :accessory-style="accessoryFitStyle"
           :accessories="equippedAccessories"

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+from threading import RLock
 from typing import Any
 
 
 SERVICE_NAME = "Joi BYOK"
 LLM_API_KEY_ACCOUNT = "llm.api_key"
 LLM_API_KEY_ENV = "JOI_LLM_API_KEY"
+_SECRET_CACHE: dict[str, str] = {}
+_SECRET_READ_BLOCKED: set[str] = set()
+_SECRET_CACHE_LOCK = RLock()
 
 
 def managed_secret(name: str) -> str:
@@ -20,10 +24,7 @@ def managed_secret(name: str) -> str:
     backend = _keyring_backend()
     if backend is None:
         return ""
-    try:
-        return str(backend.get_password(SERVICE_NAME, account) or "").strip()
-    except Exception:
-        return ""
+    return _read_managed_secret(name, account, backend)
 
 
 def managed_secret_status(name: str) -> dict[str, Any]:
@@ -33,11 +34,12 @@ def managed_secret_status(name: str) -> dict[str, Any]:
     backend = _keyring_backend()
     if not account or backend is None:
         return {"stored": False, "source": "missing", "secure_store_available": False}
-    try:
-        stored = bool(backend.get_password(SERVICE_NAME, account))
-    except Exception:
+    secret = _read_managed_secret(name, account, backend)
+    with _SECRET_CACHE_LOCK:
+        blocked = name in _SECRET_READ_BLOCKED
+    if blocked:
         return {"stored": False, "source": "missing", "secure_store_available": False}
-    return {"stored": stored, "source": "system" if stored else "missing", "secure_store_available": True}
+    return {"stored": bool(secret), "source": "system" if secret else "missing", "secure_store_available": True}
 
 
 def store_managed_secret(name: str, value: str) -> tuple[bool, str]:
@@ -53,7 +55,11 @@ def store_managed_secret(name: str, value: str) -> tuple[bool, str]:
     try:
         backend.set_password(SERVICE_NAME, account, secret)
     except Exception:
+        _block_secret_reads(name)
         return False, "secure_store_failed"
+    with _SECRET_CACHE_LOCK:
+        _SECRET_CACHE[name] = secret
+        _SECRET_READ_BLOCKED.discard(name)
     return True, ""
 
 
@@ -68,7 +74,11 @@ def delete_managed_secret(name: str) -> tuple[bool, str]:
         backend.delete_password(SERVICE_NAME, account)
     except Exception as exc:
         if type(exc).__name__ != "PasswordDeleteError":
+            _block_secret_reads(name)
             return False, "secure_store_failed"
+    with _SECRET_CACHE_LOCK:
+        _SECRET_CACHE[name] = ""
+        _SECRET_READ_BLOCKED.discard(name)
     return True, ""
 
 
@@ -85,3 +95,31 @@ def _keyring_backend() -> Any | None:
         return backend if priority > 0 else None
     except Exception:
         return None
+
+
+def _read_managed_secret(name: str, account: str, backend: Any) -> str:
+    """Read a keychain item at most once after the user or OS denies access."""
+    with _SECRET_CACHE_LOCK:
+        if name in _SECRET_READ_BLOCKED:
+            return ""
+        if name in _SECRET_CACHE:
+            return _SECRET_CACHE[name]
+        try:
+            secret = str(backend.get_password(SERVICE_NAME, account) or "").strip()
+        except Exception:
+            _SECRET_READ_BLOCKED.add(name)
+            return ""
+        _SECRET_CACHE[name] = secret
+        return secret
+
+
+def _block_secret_reads(name: str) -> None:
+    with _SECRET_CACHE_LOCK:
+        _SECRET_CACHE.pop(name, None)
+        _SECRET_READ_BLOCKED.add(name)
+
+
+def _reset_secret_cache_for_tests() -> None:
+    with _SECRET_CACHE_LOCK:
+        _SECRET_CACHE.clear()
+        _SECRET_READ_BLOCKED.clear()

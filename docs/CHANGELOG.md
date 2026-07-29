@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added local semantic character control through `character.perform`, with deterministic Chinese/English motion routing, low-risk policy typing, interruptible VRM full-body procedural motion blending, Live2D Motion/parameter fallback, static-sprite fallback, and reduced-motion support.
+- Added an original built-in procedural 3D Joi renderer for the default character when its Live2D package has no authored body motions, preserving the same semantic motion, interruption, gaze, speech, emotion, and reduced-motion contracts.
+- Prevented repeated macOS Keychain authorization prompts by caching successful secret reads and session-level access denial, with explicit invalidation after BYOK save or delete.
 - Merged the win-desktop-fixes core work into the Mac branch while preserving macOS screen observation, accessibility, and CoreGraphics/AppleScript Computer Use adapters.
 - Updated native skill metadata so Computer Use reports ready on macOS as well as Windows, including double-click, drag, open-app, and workflow tool bindings.
 - Reworked desktop workflow execution to choose the platform backend dynamically; real macOS workflows now use the Mac backend with Spotlight/open-a app launch and Command+L browser navigation.

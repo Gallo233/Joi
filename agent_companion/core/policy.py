@@ -9,6 +9,7 @@ from agent_companion.core.skill_manifest import skill_id_for_tool
 
 LOW_RISK = {
     "agent_cli.run",
+    "character.perform",
     "companion.chat",
     "observe.screen",
     "watch.recall",

@@ -10,7 +10,7 @@ Joi is a character-fronted multimodal agent. The character is not a skin for cha
 - `think`: planner, character harness, memory retrieval, task decomposition.
 - `act`: Codex, browser, MCP, shell/files, game skills.
 - `policy`: risk classification, approval, audit log, denial handling.
-- `express`: display cards, voice lines, sprite/emotion, task timeline.
+- `express`: display cards, voice lines, sprite/emotion, bounded semantic character motions, task timeline.
 
 ## Result Contract
 

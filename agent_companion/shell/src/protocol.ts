@@ -97,6 +97,14 @@ export interface AgentEvent {
       sprite?: string
       voice_style?: string
     }
+    character_motion?: {
+      name?: 'idle' | 'greet' | 'talk' | 'happy' | 'finger_gun' | 'dance' | string
+      label?: string
+      duration_ms?: number
+      loop?: boolean
+      intensity?: number
+      interruptible?: boolean
+    }
     policy?: {
       tool?: string
       reason?: string
@@ -756,7 +764,17 @@ export interface CharacterRuntime extends CharacterSummary {
     motion_group?: string
     motion_index?: number | string
   }>
-  motion_mappings?: Array<Record<string, unknown>>
+  motion_mappings?: Array<{
+    id?: string
+    name?: string
+    motion?: string
+    aliases?: string[]
+    motion_group?: string
+    motion_index?: number | string
+    duration_ms?: number
+    loop?: boolean
+    intensity?: number
+  }>
   lip_sync?: { parameter?: string }
   sprites?: Array<{
     id: string

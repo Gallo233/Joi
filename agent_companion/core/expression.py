@@ -10,6 +10,7 @@ from agent_companion.core.character import CharacterHarness
 from agent_companion.core.config import load_workspace_config
 from agent_companion.core.event_bus import derive_public_phase
 from agent_companion.core.expression_map import ExpressionIntent, expression_state_from_event, resolve_expression
+from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.schemas import AgentEvent, EventType, VoiceLine
 from agent_companion.core.voice import safe_voice_line
 
@@ -74,17 +75,6 @@ class ExpressionEngine:
             return None
 
         try:
-            from openai import OpenAI
-        except Exception:
-            return None
-
-        try:
-            from agent_companion.core.config import ModelRouter
-
-            router = ModelRouter(config.llm)
-            endpoint = router.resolve("voice_style")
-            if self._client is None or self._client.base_url != endpoint.base_url:
-                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             character = config.primary_character if config.characters else None
             character_name = character.name if character else self.character.name
             persona = character.setting if character else self.character.persona
@@ -98,8 +88,11 @@ class ExpressionEngine:
                 "voice_lang": voice_lang,
                 "fallback_voice": event.voice_line.text,
             }
-            response = self._client.chat.completions.create(
-                model=endpoint.model,
+            outcome = chat_completion(
+                config.llm,
+                "voice_style",
+                temperature=min(max(config.llm.temperature, 0.2), 0.9),
+                response_format={"type": "json_object"},
                 messages=[
                     {
                         "role": "system",
@@ -115,11 +108,12 @@ class ExpressionEngine:
                     },
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
-                temperature=min(max(config.llm.temperature, 0.2), 0.9),
-                response_format={"type": "json_object"},
             )
-            content = response.choices[0].message.content or ""
-            parsed = json.loads(content)
+            if not outcome.ok:
+                # Expression degrades to the deterministic voice line; the
+                # attempt is already recorded in the ledger.
+                return None
+            parsed = json.loads(str(outcome.value or ""))
             return parsed if isinstance(parsed, dict) else None
         except Exception:
             return None

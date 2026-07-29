@@ -113,9 +113,9 @@ def _companion_chat_skill() -> NativeSkillManifest:
         label="Companion Chat",
         category="companion",
         description="Character-safe conversation with emotion and memory context.",
-        tools=("companion.chat",),
-        input_schema=_object_schema("text", "memory_context"),
-        result_schema=_tool_result_schema("reply", "expression_sync", "model_usage"),
+        tools=("companion.chat", "character.perform"),
+        input_schema=_object_schema("text", "memory_context", "motion", "duration_ms", "loop", "intensity"),
+        result_schema=_tool_result_schema("reply", "expression_sync", "model_usage", "character_motion"),
         permission_level="low",
         state_policy="session",
     )
@@ -457,6 +457,13 @@ _UNKNOWN_SKILL_BINDING = {
 
 
 _TOOL_SKILL_BINDINGS: dict[str, dict[str, str]] = {
+    "character.perform": {
+        "skill_id": "joi.companion.chat",
+        "category": "companion",
+        "permission_level": "low",
+        "state_policy": "session",
+        "audit": "event_log",
+    },
     "companion.chat": {
         "skill_id": "joi.companion.chat",
         "category": "companion",
