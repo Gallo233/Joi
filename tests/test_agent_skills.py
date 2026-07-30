@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import sys
@@ -48,6 +49,12 @@ class AgentSkillServiceTests(unittest.TestCase):
             scripts.mkdir()
             (scripts / f"run{script_suffix}").write_text("print('ok')\n", encoding="utf-8")
         return skill
+
+    def install_inspected(self, source: Path, **kwargs: object) -> dict:
+        """Install the way the shell does: inspect, then install that digest."""
+
+        inspection = self.service.inspect(str(source))["inspection"]
+        return self.service.install(str(source), expected_digest=inspection["digest"], **kwargs)
 
     def test_inspect_install_hash_change_and_clean_uninstall(self) -> None:
         source = self.make_skill()
@@ -98,7 +105,7 @@ class AgentSkillServiceTests(unittest.TestCase):
 
     def test_code_skill_requires_non_observe_session_and_explicit_approval(self) -> None:
         source = self.make_skill(".py")
-        installed = self.service.install(str(source), scope="project", scope_id=DEFAULT_PROJECT_ID)["skill"]
+        installed = self.install_inspected(source, scope="project", scope_id=DEFAULT_PROJECT_ID)["skill"]
         observe = self.service.run(installed["id"], script="scripts/run.py", permission_profile="observe")
         self.assertEqual(observe["error"], "observe_session_cannot_run_scripts")
         review = self.service.run(installed["id"], script="scripts/run.py", permission_profile="collaborate")
@@ -109,6 +116,88 @@ class AgentSkillServiceTests(unittest.TestCase):
             self.assertTrue(executed["ok"], executed)
             self.assertEqual(executed["stdout"].strip(), "ok")
             self.assertTrue(executed["sandboxed"])
+
+    def test_install_refuses_a_source_nobody_inspected(self) -> None:
+        source = self.make_skill()
+        with self.assertRaises(AgentSkillError) as raised:
+            self.service.install(str(source), scope="project", scope_id=DEFAULT_PROJECT_ID)
+        self.assertEqual(raised.exception.code, "digest_required")
+
+    def test_source_edited_between_preview_and_install_is_refused(self) -> None:
+        source = self.make_skill()
+        inspection = self.service.inspect(str(source))["inspection"]
+        (source / "scripts").mkdir()
+        (source / "scripts" / "run.py").write_text("print('added after preview')\n", encoding="utf-8")
+        with self.assertRaises(AgentSkillError) as raised:
+            self.service.install(str(source), expected_digest=inspection["digest"])
+        self.assertEqual(raised.exception.code, "hash_changed")
+
+    def test_update_reviews_the_refetched_content_before_installing_it(self) -> None:
+        source = self.make_skill()
+        installed = self.install_inspected(source, scope="project", scope_id=DEFAULT_PROJECT_ID)["skill"]
+        (source / "SKILL.md").write_text(SKILL_MD + "\nA line the user has not seen.\n", encoding="utf-8")
+
+        review = self.service.update(installed["id"])
+        self.assertEqual(review["error"], "update_review_required")
+        self.assertTrue(review["changed"])
+        self.assertNotEqual(review["inspection"]["digest"], installed["digest"])
+        self.assertEqual(self.service.store.skill_installation(installed["id"])["digest"], installed["digest"])
+
+        applied = self.service.update(installed["id"], expected_digest=review["inspection"]["digest"])
+        self.assertTrue(applied["ok"])
+        self.assertEqual(applied["skill"]["digest"], review["inspection"]["digest"])
+
+    def test_provenance_records_what_joi_observed_not_what_the_package_claims(self) -> None:
+        source = self.make_skill()
+        installed = self.install_inspected(source, scope="project", scope_id=DEFAULT_PROJECT_ID)["skill"]
+        provenance = installed["provenance"]
+        self.assertEqual(provenance["source_kind"], "directory")
+        self.assertEqual(provenance["trust"], "local")
+        self.assertEqual(provenance["signature"], "absent")
+        self.assertEqual(provenance["digest"], installed["digest"])
+        self.assertFalse(provenance["auto_update"])
+
+    def test_zip_provenance_pins_the_archive_that_was_read(self) -> None:
+        skill = self.make_skill()
+        archive = self.root / "packaged.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.write(skill / "SKILL.md", "packaged/SKILL.md")
+        installed = self.install_inspected(archive, scope="project", scope_id=DEFAULT_PROJECT_ID)["skill"]
+        self.assertEqual(installed["provenance"]["source_kind"], "zip")
+        self.assertTrue(installed["provenance"]["resolved_ref"].startswith("sha256:"))
+
+    def test_a_signature_joi_cannot_check_blocks_the_install(self) -> None:
+        source = self.make_skill()
+        signature_dir = source / ".well-known"
+        signature_dir.mkdir()
+        (signature_dir / "joi-skill-signature.json").write_text(
+            json.dumps({"algorithm": "ed25519", "publisher": "nobody.example", "signature": "AAAA"}),
+            encoding="utf-8",
+        )
+        with self.assertRaises(AgentSkillError) as raised:
+            self.service.inspect(str(source))
+        self.assertEqual(raised.exception.code, "signature_unverifiable")
+
+    def test_a_malformed_signature_is_not_treated_as_an_unsigned_package(self) -> None:
+        source = self.make_skill()
+        signature_dir = source / ".well-known"
+        signature_dir.mkdir()
+        (signature_dir / "joi-skill-signature.json").write_text("not json at all", encoding="utf-8")
+        with self.assertRaises(AgentSkillError) as raised:
+            self.service.inspect(str(source))
+        self.assertEqual(raised.exception.code, "signature_invalid")
+
+    def test_declared_dependencies_are_shown_for_review_and_never_installed(self) -> None:
+        source = self.make_skill(".py")
+        (source / "SKILL.md").write_text(
+            SKILL_MD.replace("license: MIT", "license: MIT\ndependencies:\n  - requests>=2\n"),
+            encoding="utf-8",
+        )
+        installed = self.install_inspected(source, scope="project", scope_id=DEFAULT_PROJECT_ID)["skill"]
+        self.assertEqual(installed["manifest"]["dependencies"], ["requests>=2"])
+        review = self.service.run(installed["id"], script="scripts/run.py", permission_profile="collaborate")["review"]
+        self.assertEqual(review["declared_dependencies"], ["requests>=2"])
+        self.assertEqual(review["dependency_installation"], "never")
 
     def test_draft_only_becomes_skill_after_approval(self) -> None:
         draft = self.store.create_skill_draft(

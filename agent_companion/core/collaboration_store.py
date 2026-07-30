@@ -239,6 +239,7 @@ class CollaborationStore:
                     root_path TEXT NOT NULL,
                     digest TEXT NOT NULL,
                     manifest_json TEXT NOT NULL,
+                    provenance_json TEXT NOT NULL DEFAULT '{}',
                     enabled INTEGER NOT NULL DEFAULT 1,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
@@ -279,6 +280,7 @@ class CollaborationStore:
             "permission_grants": (("launch_id", "TEXT NOT NULL DEFAULT ''"), ("status_reason", "TEXT NOT NULL DEFAULT ''")),
             "events": (("public_phase", "TEXT NOT NULL DEFAULT ''"),),
             "capability_sessions": (("pause_reason", "TEXT NOT NULL DEFAULT ''"),),
+            "skill_installations": (("provenance_json", "TEXT NOT NULL DEFAULT '{}'"),),
         }
         with self._lock, self._connection:
             for table, columns in added.items():
@@ -810,11 +812,12 @@ class CollaborationStore:
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT INTO skill_installations(
-                    id,name,version,scope,scope_id,source,root_path,digest,manifest_json,enabled,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                    id,name,version,scope,scope_id,source,root_path,digest,manifest_json,provenance_json,enabled,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(name,scope,scope_id) DO UPDATE SET
                     version=excluded.version,source=excluded.source,root_path=excluded.root_path,digest=excluded.digest,
-                    manifest_json=excluded.manifest_json,enabled=excluded.enabled,updated_at=excluded.updated_at""",
+                    manifest_json=excluded.manifest_json,provenance_json=excluded.provenance_json,
+                    enabled=excluded.enabled,updated_at=excluded.updated_at""",
                 (
                     installation_id,
                     payload["name"],
@@ -825,6 +828,7 @@ class CollaborationStore:
                     payload["root_path"],
                     payload["digest"],
                     _json(payload.get("manifest") or {}),
+                    _json(payload.get("provenance") or {}),
                     int(payload.get("enabled", True)),
                     now,
                     now,
@@ -1021,7 +1025,7 @@ class CollaborationStore:
 
     @staticmethod
     def _skill_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        return {"id": row["id"], "name": row["name"], "version": row["version"], "scope": row["scope"], "scope_id": row["scope_id"], "source": row["source"], "root_path": row["root_path"], "digest": row["digest"], "manifest": _object(row["manifest_json"]), "enabled": bool(row["enabled"]), "created_at": row["created_at"], "updated_at": row["updated_at"]}
+        return {"id": row["id"], "name": row["name"], "version": row["version"], "scope": row["scope"], "scope_id": row["scope_id"], "source": row["source"], "root_path": row["root_path"], "digest": row["digest"], "manifest": _object(row["manifest_json"]), "provenance": _object(row["provenance_json"]), "enabled": bool(row["enabled"]), "created_at": row["created_at"], "updated_at": row["updated_at"]}
 
 
 def _normalize_budget(value: dict[str, Any] | None) -> dict[str, Any]:

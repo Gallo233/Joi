@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass
 import hashlib
 import json
@@ -30,12 +32,54 @@ MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PACKAGE_BYTES = 100 * 1024 * 1024
 MAX_SKILL_MD_BYTES = 512 * 1024
 
+# A detached signature cannot be part of what it signs, so this one path is
+# read separately and excluded from the content digest.
+SIGNATURE_PATH = ".well-known/joi-skill-signature.json"
+MAX_SIGNATURE_BYTES = 16 * 1024
+
+# Sources Joi fetched itself over the network can change under us between one
+# look and the next; a path the user picked in Finder cannot.
+NETWORK_SOURCE_KINDS = frozenset({"git"})
+
 
 class AgentSkillError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+@dataclass(frozen=True)
+class SkillProvenance:
+    """Where a Skill came from, as observed rather than as claimed.
+
+    Every field here is something Joi measured while fetching the package: the
+    kind of source it read, the exact revision it read, and the digest of the
+    bytes it got. The package's own metadata cannot influence any of it, so a
+    package cannot describe itself as more trustworthy than it is.
+    """
+
+    source_kind: str
+    source_ref: str
+    resolved_ref: str
+    digest: str
+    inspected_at: float
+    trust: str
+    signature: str
+    publisher: str
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "source_kind": self.source_kind,
+            "source_ref": self.source_ref,
+            "resolved_ref": self.resolved_ref,
+            "digest": self.digest,
+            "inspected_at": round(float(self.inspected_at), 3),
+            "trust": self.trust,
+            "signature": self.signature,
+            "publisher": self.publisher,
+            "auto_update": False,
+        }
 
 
 @dataclass(frozen=True)
@@ -56,6 +100,7 @@ class SkillInspection:
     permissions: dict[str, list[str]]
     dependencies: tuple[str, ...]
     warnings: tuple[str, ...]
+    provenance: SkillProvenance
 
     def payload(self, *, include_instructions: bool = False) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -76,6 +121,7 @@ class SkillInspection:
             "warnings": list(self.warnings),
             "code_bearing": bool(self.scripts),
             "implicit_invocation": False if self.scripts else True,
+            "provenance": self.provenance.payload(),
         }
         if include_instructions:
             result["instructions"] = self.instructions
@@ -96,6 +142,7 @@ class AgentSkillService:
         self.install_root.mkdir(parents=True, exist_ok=True)
         self.run_root = (store.data_home / "skill_runs").resolve()
         self.run_root.mkdir(parents=True, exist_ok=True)
+        self.publisher_store = (store.data_home / "skill_publishers.json").resolve()
 
     def inspect(self, source: str) -> dict[str, Any]:
         source = str(source or "").strip()
@@ -103,8 +150,14 @@ class AgentSkillService:
             raise AgentSkillError("source_required", "请选择 Skill 目录、ZIP 或 Git 仓库。")
         temporary: tempfile.TemporaryDirectory[str] | None = None
         try:
-            root, source_kind, temporary = self._materialize_source(source)
-            inspection = inspect_skill_root(root, source=source, source_kind=source_kind)
+            root, source_kind, resolved_ref, temporary = self._materialize_source(source)
+            inspection = inspect_skill_root(
+                root,
+                source=source,
+                source_kind=source_kind,
+                resolved_ref=resolved_ref,
+                publishers=self._publishers(),
+            )
             return {"ok": True, "inspection": inspection.payload(include_instructions=True)}
         finally:
             if temporary is not None:
@@ -113,11 +166,20 @@ class AgentSkillService:
     def install(self, source: str, *, scope: str = "global", scope_id: str = "", expected_digest: str = "") -> dict[str, Any]:
         scope = _valid_scope(scope)
         source = str(source or "").strip()
+        expected_digest = str(expected_digest or "").strip()
+        if not expected_digest:
+            raise AgentSkillError("digest_required", "安装前必须先检查 Skill，并按检查结果的哈希安装。")
         temporary: tempfile.TemporaryDirectory[str] | None = None
         try:
-            root, source_kind, temporary = self._materialize_source(source)
-            inspection = inspect_skill_root(root, source=source, source_kind=source_kind)
-            if expected_digest and expected_digest != inspection.digest:
+            root, source_kind, resolved_ref, temporary = self._materialize_source(source)
+            inspection = inspect_skill_root(
+                root,
+                source=source,
+                source_kind=source_kind,
+                resolved_ref=resolved_ref,
+                publishers=self._publishers(),
+            )
+            if expected_digest != inspection.digest:
                 raise AgentSkillError("hash_changed", "Skill 内容已在预览后发生变化，请重新检查。")
             destination = self._destination(scope, scope_id, inspection.name)
             staging = destination.parent / f".{destination.name}.install-{uuid.uuid4().hex[:8]}"
@@ -125,7 +187,13 @@ class AgentSkillService:
             if staging.exists():
                 shutil.rmtree(staging)
             _safe_copy_tree(root, staging)
-            installed = inspect_skill_root(staging, source=source, source_kind=source_kind)
+            installed = inspect_skill_root(
+                staging,
+                source=source,
+                source_kind=source_kind,
+                resolved_ref=resolved_ref,
+                publishers=self._publishers(),
+            )
             if installed.digest != inspection.digest:
                 shutil.rmtree(staging, ignore_errors=True)
                 raise AgentSkillError("copy_verification_failed", "Skill 安装副本校验失败。")
@@ -145,6 +213,7 @@ class AgentSkillService:
                     "root_path": str(destination),
                     "digest": installed.digest,
                     "manifest": manifest,
+                    "provenance": inspection.provenance.payload(),
                     "enabled": True,
                 }
             )
@@ -163,7 +232,13 @@ class AgentSkillService:
             return {"ok": False, "error": "skill_not_found"}
         root = self._installed_root(row)
         try:
-            current = inspect_skill_root(root, source=row["source"], source_kind="installed")
+            current = inspect_skill_root(
+                root,
+                source=row["source"],
+                source_kind="installed",
+                resolved_ref=str((row.get("provenance") or {}).get("resolved_ref") or ""),
+                publishers=self._publishers(),
+            )
         except AgentSkillError as exc:
             return {"ok": False, "error": exc.code, "message": exc.message, "skill": row}
         unchanged = current.digest == row["digest"]
@@ -178,9 +253,29 @@ class AgentSkillService:
         return self.store.set_skill_enabled(installation_id, enabled)
 
     def update(self, installation_id: str, *, expected_digest: str = "") -> dict[str, Any]:
+        """Re-fetch a Skill's source, but only install what the user just saw.
+
+        An update re-reads whatever the source serves *now*, which for a Git
+        remote is content nobody has looked at yet. Without a digest this
+        returns the fresh inspection as a review instead of installing it, so
+        approving an update is approving specific bytes rather than a URL.
+        """
+
         row = self.store.skill_installation(installation_id)
         if not row:
             return {"ok": False, "error": "skill_not_found"}
+        if not str(expected_digest or "").strip():
+            preview = self.inspect(row["source"])
+            inspection = preview.get("inspection") or {}
+            return {
+                "ok": False,
+                "error": "update_review_required",
+                "message": "更新会重新读取来源内容，请先确认这次读到的版本。",
+                "skill": row,
+                "installed_digest": row["digest"],
+                "changed": bool(inspection.get("digest") and inspection["digest"] != row["digest"]),
+                "inspection": inspection,
+            }
         return self.install(
             row["source"],
             scope=row["scope"],
@@ -227,7 +322,11 @@ class AgentSkillService:
             root.mkdir()
             frontmatter = yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False).strip()
             (root / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n\n{body}\n", encoding="utf-8")
-            installed = self.install(str(root), scope=scope, scope_id=scope_id)
+            # A draft is text Joi and the user wrote together and the user has
+            # already reviewed, so the digest is taken from the bytes just
+            # written rather than asking them to approve their own words twice.
+            drafted = inspect_skill_root(root, source=str(root), source_kind="directory", publishers=self._publishers())
+            installed = self.install(str(root), scope=scope, scope_id=scope_id, expected_digest=drafted.digest)
         if installed.get("ok"):
             self.store.update_skill_draft(draft_id, "installed")
         return installed
@@ -250,7 +349,13 @@ class AgentSkillService:
         if not validation.get("ok"):
             return validation
         root = self._installed_root(row)
-        inspection = inspect_skill_root(root, source=row["source"], source_kind="installed")
+        inspection = inspect_skill_root(
+            root,
+            source=row["source"],
+            source_kind="installed",
+            resolved_ref=str((row.get("provenance") or {}).get("resolved_ref") or ""),
+            publishers=self._publishers(),
+        )
         if not script:
             return {
                 "ok": True,
@@ -276,6 +381,11 @@ class AgentSkillService:
                     "permissions": inspection.permissions,
                     "timeout_seconds": max(1, min(int(timeout_seconds), 900)),
                     "network": "disabled",
+                    "provenance": (row.get("provenance") or {}),
+                    # Declared, never resolved: Joi does not install anything a
+                    # Skill asks for, so a missing dependency fails the run.
+                    "declared_dependencies": list(inspection.dependencies),
+                    "dependency_installation": "never",
                 },
             }
         script_path = (root / clean_script).resolve()
@@ -339,17 +449,28 @@ class AgentSkillService:
             result["record_id"] = recorded["run_id"]
         return result
 
-    def _materialize_source(self, source: str) -> tuple[Path, str, tempfile.TemporaryDirectory[str] | None]:
+    def _materialize_source(self, source: str) -> tuple[Path, str, str, tempfile.TemporaryDirectory[str] | None]:
+        """Fetch a source and report the exact revision that was fetched.
+
+        The third element is the resolved reference: a commit SHA for Git and
+        an archive hash for a ZIP. It is what makes "the same source" mean the
+        same bytes later, since a branch name or a file path does not.
+        """
+
         path = Path(source).expanduser()
         if path.exists():
             if path.is_dir():
-                return _find_skill_root(path.resolve()), "directory", None
+                return _find_skill_root(path.resolve()), "directory", "", None
             if path.is_file() and path.suffix.casefold() == ".zip":
+                archive = path.resolve()
                 temporary = tempfile.TemporaryDirectory(prefix="joi-skill-")
-                extracted = Path(temporary.name)
+                # Resolved, because on macOS the temp root reaches us through
+                # the /var -> /private/var symlink and every later containment
+                # check compares against a resolved path.
+                extracted = Path(temporary.name).resolve()
                 try:
-                    _safe_extract_zip(path.resolve(), extracted)
-                    return _find_skill_root(extracted), "zip", temporary
+                    _safe_extract_zip(archive, extracted)
+                    return _find_skill_root(extracted), "zip", _file_digest(archive), temporary
                 except Exception:
                     temporary.cleanup()
                     raise
@@ -361,14 +482,15 @@ class AgentSkillService:
         if not git:
             raise AgentSkillError("git_unavailable", "本机未安装 Git。")
         temporary = tempfile.TemporaryDirectory(prefix="joi-skill-git-")
-        destination = Path(temporary.name) / "repo"
+        destination = Path(temporary.name).resolve() / "repo"
+        git_env = {"PATH": os.environ.get("PATH", ""), "GIT_TERMINAL_PROMPT": "0"}
         try:
             completed = subprocess.run(
                 [git, "clone", "--depth", "1", "--no-recurse-submodules", source, str(destination)],
                 capture_output=True,
                 text=True,
                 timeout=60,
-                env={"PATH": os.environ.get("PATH", ""), "GIT_TERMINAL_PROMPT": "0"},
+                env=git_env,
             )
         except subprocess.TimeoutExpired as exc:
             temporary.cleanup()
@@ -376,8 +498,25 @@ class AgentSkillService:
         if completed.returncode != 0:
             temporary.cleanup()
             raise AgentSkillError("git_clone_failed", "Git 仓库无法读取。")
+        resolved_ref = _git_head(git, destination, git_env)
         shutil.rmtree(destination / ".git", ignore_errors=True)
-        return _find_skill_root(destination), "git", temporary
+        return _find_skill_root(destination), "git", resolved_ref, temporary
+
+    def _publishers(self) -> dict[str, str]:
+        """Public keys Joi will accept a Skill signature from.
+
+        Empty by default. An empty trust store does not make signatures
+        optional -- it makes a signed package unverifiable, which is refused.
+        """
+
+        try:
+            raw = json.loads(self.publisher_store.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        entries = raw.get("publishers") if isinstance(raw, dict) else None
+        if not isinstance(entries, dict):
+            return {}
+        return {str(key)[:120]: str(value)[:512] for key, value in entries.items() if str(key).strip() and str(value).strip()}
 
     def _destination(self, scope: str, scope_id: str, name: str) -> Path:
         safe_scope_id = _component(_scope_id(scope, scope_id) or "all")
@@ -391,7 +530,14 @@ class AgentSkillService:
         return root
 
 
-def inspect_skill_root(root: Path, *, source: str, source_kind: str) -> SkillInspection:
+def inspect_skill_root(
+    root: Path,
+    *,
+    source: str,
+    source_kind: str,
+    resolved_ref: str = "",
+    publishers: dict[str, str] | None = None,
+) -> SkillInspection:
     root = root.resolve()
     if not root.is_dir():
         raise AgentSkillError("skill_root_not_found", "Skill 根目录不存在。")
@@ -420,6 +566,18 @@ def inspect_skill_root(root: Path, *, source: str, source_kind: str) -> SkillIns
     if not license_name:
         warnings.append("未声明许可证。")
     permissions = _permissions(metadata)
+    dependencies = _strings(metadata.get("dependencies"), 100)
+    if dependencies:
+        warnings.append("声明了外部依赖：Joi 不会安装它们，缺失时脚本会直接失败。")
+    digest = _digest(root, files)
+    signature_state, publisher = _verify_signature(root, digest, publishers or {})
+    if signature_state in {"unverifiable", "invalid"}:
+        raise AgentSkillError(
+            "signature_" + ("unverifiable" if signature_state == "unverifiable" else "invalid"),
+            "这个 Skill 带了签名，但本机无法确认签名有效，已停止安装。",
+        )
+    if source_kind in NETWORK_SOURCE_KINDS and signature_state != "verified":
+        warnings.append("来自网络来源且未签名：更新时会重新读取内容，需要再次确认。")
     return SkillInspection(
         source=source,
         source_kind=source_kind,
@@ -429,15 +587,107 @@ def inspect_skill_root(root: Path, *, source: str, source_kind: str) -> SkillIns
         version=str(metadata.get("version") or "0.0.0")[:64],
         author=str(metadata.get("author") or "")[:200],
         license=license_name[:120],
-        digest=_digest(root, files),
+        digest=digest,
         instructions=instructions.strip(),
         scripts=scripts,
         references=tuple(path for path in files if path.startswith("references/")),
         assets=tuple(path for path in files if path.startswith("assets/")),
         permissions=permissions,
-        dependencies=_strings(metadata.get("dependencies"), 100),
+        dependencies=dependencies,
         warnings=tuple(warnings),
+        provenance=SkillProvenance(
+            source_kind=source_kind,
+            source_ref=_safe_source_ref(source),
+            resolved_ref=str(resolved_ref or "")[:120],
+            digest=digest,
+            inspected_at=time.time(),
+            trust=_trust_tier(source_kind, signature_state),
+            signature=signature_state,
+            publisher=publisher,
+        ),
     )
+
+
+def _trust_tier(source_kind: str, signature_state: str) -> str:
+    if signature_state == "verified":
+        return "signed"
+    return "remote_unsigned" if source_kind in NETWORK_SOURCE_KINDS else "local"
+
+
+def _verify_signature(root: Path, digest: str, publishers: dict[str, str]) -> tuple[str, str]:
+    """Check a detached signature over the content digest.
+
+    Returns one of ``absent``, ``verified``, ``unverifiable`` or ``invalid``.
+    A signature Joi cannot check is never treated as no signature: an attacker
+    who can add a file could otherwise downgrade a signed package to an
+    unsigned one just by making the signature unreadable.
+    """
+
+    signature_file = root / SIGNATURE_PATH
+    if not signature_file.is_file() or signature_file.is_symlink():
+        return "absent", ""
+    if signature_file.stat().st_size > MAX_SIGNATURE_BYTES:
+        return "invalid", ""
+    try:
+        payload = json.loads(signature_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "invalid", ""
+    if not isinstance(payload, dict) or str(payload.get("algorithm") or "") != "ed25519":
+        return "invalid", ""
+    publisher = str(payload.get("publisher") or "")[:120]
+    signature = str(payload.get("signature") or "")
+    if not publisher or not signature:
+        return "invalid", ""
+    public_key = publishers.get(publisher, "")
+    if not public_key:
+        return "unverifiable", publisher
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        return "unverifiable", publisher
+    try:
+        key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key, validate=True))
+        key.verify(base64.b64decode(signature, validate=True), digest.encode("utf-8"))
+    except InvalidSignature:
+        return "invalid", publisher
+    except (ValueError, TypeError, binascii.Error):
+        return "invalid", publisher
+    return "verified", publisher
+
+
+def _safe_source_ref(source: str) -> str:
+    """Strip anything credential-shaped out of a source before it is stored."""
+
+    text = str(source or "").strip()
+    parsed = urlparse(text)
+    if parsed.scheme in {"https", "ssh"} and parsed.netloc:
+        host = parsed.netloc.rsplit("@", 1)[-1]
+        return f"{parsed.scheme}://{host}{parsed.path}"[:300]
+    return text[:300]
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _git_head(git: str, repository: Path, env: dict[str, str]) -> str:
+    try:
+        completed = subprocess.run(
+            [git, "-C", str(repository), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    head = completed.stdout.strip() if completed.returncode == 0 else ""
+    return head[:64] if re.fullmatch(r"[0-9a-f]{7,64}", head) else ""
 
 
 def _frontmatter(raw: str) -> tuple[dict[str, Any], str]:
@@ -489,6 +739,9 @@ def _scan_package(root: Path) -> list[str]:
         total += size
         if total > MAX_PACKAGE_BYTES:
             raise AgentSkillError("package_too_large", "Skill 包总体积超过限制。")
+        if relative == SIGNATURE_PATH:
+            # Signed content cannot include its own signature.
+            continue
         files.append(relative)
         if len(files) > MAX_FILES:
             raise AgentSkillError("too_many_files", "Skill 包文件数量超过限制。")

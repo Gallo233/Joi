@@ -3385,8 +3385,43 @@ async function toggleAgentSkill(skill: AgentSkillInstallation) {
 async function updateAgentSkill(skill: AgentSkillInstallation) {
   agentSkillBusy.value = true
   try {
-    const result = await client.agentSkillUpdate(skill.id) as { ok?: boolean; error?: string; message?: string }
-    agentSkillNotice.value = result.ok ? `${skill.name} 已更新并完成哈希校验。` : result.message || result.error || '更新失败'
+    // An update re-reads the source, so the first call only reports what was
+    // read. Nothing is installed until the user confirms that exact digest.
+    const review = await client.agentSkillUpdate(skill.id) as {
+      ok?: boolean
+      error?: string
+      message?: string
+      changed?: boolean
+      inspection?: AgentSkillInspection
+    }
+    if (review.ok) {
+      agentSkillNotice.value = `${skill.name} 已更新。`
+      await refreshSkills()
+      return
+    }
+    if (review.error !== 'update_review_required' || !review.inspection?.digest) {
+      agentSkillNotice.value = review.message || review.error || '更新失败'
+      return
+    }
+    if (!review.changed) {
+      agentSkillNotice.value = `${skill.name} 来源内容没有变化，已保持当前版本。`
+      return
+    }
+    const inspection = review.inspection
+    const confirmed = window.confirm(
+      [
+        `${skill.name} 的来源有新内容。`,
+        `版本 ${inspection.version}`,
+        inspection.code_bearing ? '包含脚本，运行前仍需单独审核。' : '不包含脚本。',
+        '确认后才会安装这次读到的内容。',
+      ].join('\n'),
+    )
+    if (!confirmed) {
+      agentSkillNotice.value = '已取消更新，仍在使用当前版本。'
+      return
+    }
+    const applied = await client.agentSkillUpdate(skill.id, inspection.digest) as { ok?: boolean; error?: string; message?: string }
+    agentSkillNotice.value = applied.ok ? `${skill.name} 已更新到确认过的版本。` : applied.message || applied.error || '更新失败'
     await refreshSkills()
   } finally {
     agentSkillBusy.value = false

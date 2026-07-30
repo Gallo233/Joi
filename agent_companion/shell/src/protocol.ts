@@ -432,6 +432,21 @@ export interface NativeSkillManifest {
   skills?: NativeSkill[]
 }
 
+// What Joi observed while fetching a Skill, as opposed to what the package
+// says about itself. `trust` is derived from the source and the signature; a
+// package cannot raise its own tier.
+export interface AgentSkillProvenance {
+  source_kind: string
+  source_ref: string
+  resolved_ref: string
+  digest: string
+  inspected_at: number
+  trust: 'local' | 'remote_unsigned' | 'signed' | string
+  signature: 'absent' | 'verified' | 'unverifiable' | 'invalid' | string
+  publisher: string
+  auto_update: boolean
+}
+
 export interface AgentSkillInspection {
   source: string
   source_kind: string
@@ -450,6 +465,7 @@ export interface AgentSkillInspection {
   code_bearing?: boolean
   implicit_invocation?: boolean
   instructions?: string
+  provenance?: AgentSkillProvenance
 }
 
 export interface AgentSkillInstallation {
@@ -462,6 +478,7 @@ export interface AgentSkillInstallation {
   root_path: string
   digest: string
   manifest?: AgentSkillInspection
+  provenance?: AgentSkillProvenance
   enabled: boolean
   created_at: number
   updated_at: number
