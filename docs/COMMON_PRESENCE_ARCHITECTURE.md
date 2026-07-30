@@ -113,6 +113,10 @@
 
 降级是明确状态而非静默失败：路由未配置返回 `unavailable`（不是错误，是用户还没配）。`degradation_notice()` 会说清替代方案的**性质差异**——Accessibility 和 OCR 确实在观察屏幕，但那不是视觉模型的理解；规则引导不计入 `ai_conversation_success`。
 
+`provider_client.py` 是**唯一**构建 provider client 的地方。provider 偏好哪种 wire format（OpenAI 的 `responses` vs `chat.completions`）也收在这里决定，业务代码不再出现供应商判断。已迁入：`tools/chat.py`（主对话）、`llm_planner.py`、`expression.py`、`watch.py`（陪看问答，manifest 声明截图来源）、`watch_commentary.py`。
+
+`byok.py` 与 `speech_input.py` 有意保留直连：前者按设计就要探测指定端点，后者用的是音频转写 API 而非 completions。`tests/test_provider_client.py` 里有一条守卫扫描 `core/` 全部模块，除这三个白名单文件外出现 `chat.completions.create` 或自建 client 就失败——避免绕过预算的写法悄悄回来。
+
 ## 记忆作用域
 
 `memories` 现有 `project_id` / `thread_id` / `retention_class` 三列（通过 additive `alter table` 迁移，旧行默认 `long_term`，升级后照旧全局可召回，不会突然消失）。

@@ -10,6 +10,7 @@ from typing import Any
 
 from agent_companion.core.character import CharacterHarness
 from agent_companion.core.config import load_workspace_config
+from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.voice import normalize_emotion, safe_voice_line, sprite_for_emotion
 
 
@@ -111,14 +112,6 @@ class WatchCommentaryPlanner:
         if config is None or config.llm.use_mock or not (config.llm.is_expression_configured or config.llm.is_configured):
             return None
         try:
-            from openai import OpenAI
-
-            from agent_companion.core.config import ModelRouter
-
-            router = ModelRouter(config.llm)
-            endpoint = router.resolve("voice_style")
-            if self._client is None or self._client.base_url != endpoint.base_url:
-                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             character = config.primary_character if config.characters else None
             character_name = character.name if character else self.character.name
             persona = character.setting if character else self.character.persona
@@ -131,8 +124,11 @@ class WatchCommentaryPlanner:
                 "spoiler_level": spoiler_level,
                 "voice_lang": voice_lang,
             }
-            response = self._client.chat.completions.create(
-                model=endpoint.model,
+            outcome = chat_completion(
+                config.llm,
+                "voice_style",
+                temperature=min(max(config.llm.temperature, 0.2), 0.85),
+                response_format={"type": "json_object"},
                 messages=[
                     {
                         "role": "system",
@@ -149,10 +145,11 @@ class WatchCommentaryPlanner:
                     },
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
-                temperature=min(max(config.llm.temperature, 0.2), 0.85),
-                response_format={"type": "json_object"},
             )
-            parsed = json.loads(response.choices[0].message.content or "{}")
+            if not outcome.ok:
+                # Commentary is optional; staying quiet is the right degradation.
+                return None
+            parsed = json.loads(str(outcome.value or "{}"))
             if not isinstance(parsed, dict):
                 return None
             reply = str(parsed.get("reply") or "").strip()

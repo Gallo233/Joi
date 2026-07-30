@@ -200,5 +200,33 @@ class ChatToolGoesThroughTheLayerTests(unittest.TestCase):
         self.assertNotIn("category_not_allowed", result.display_card.summary)
 
 
+class OnlyOnePlaceBuildsAClientTests(unittest.TestCase):
+    """Every completion goes through provider_client, so budgets cannot be bypassed."""
+
+    # byok probes a specific endpoint by design, and speech_input uses the audio
+    # transcription API rather than completions; neither is a routed call.
+    ALLOWED = {"provider_client.py", "byok.py", "speech_input.py"}
+
+    def _core_files(self):
+        root = Path(__file__).resolve().parents[1] / "agent_companion" / "core"
+        return [path for path in root.rglob("*.py") if "__pycache__" not in path.parts]
+
+    def test_no_module_creates_a_completion_directly(self) -> None:
+        offenders = [
+            path.name
+            for path in self._core_files()
+            if "chat.completions.create" in path.read_text(encoding="utf-8") and path.name not in self.ALLOWED
+        ]
+        self.assertEqual(offenders, [], "these modules bypass the budgeted provider path")
+
+    def test_no_module_constructs_its_own_client(self) -> None:
+        offenders = [
+            path.name
+            for path in self._core_files()
+            if "from openai import OpenAI" in path.read_text(encoding="utf-8") and path.name not in self.ALLOWED
+        ]
+        self.assertEqual(offenders, [], "these modules build their own provider client")
+
+
 if __name__ == "__main__":
     unittest.main()
