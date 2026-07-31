@@ -225,6 +225,16 @@ ZIP 路径穿越、符号链接、未知脚本和安装后哈希变化会被拒�
 
 已知平台缺口：脚本沙箱依赖 macOS Seatbelt，非 darwin 平台上 `skill.run` 返回 `sandbox_runner_unavailable`，脚本型 Skill 不可执行。
 
+Core 不加载任何随程序一起发布之外的代码：没有插件目录、没有按路径 import 的模块。`tests/test_core_code_boundary.py` 扫描 `agent_companion/core` 的 AST，出现从路径加载模块或对源码求值的调用即失败；按固定名字探测可选依赖仍然允许。第三方扩展只走 Agent Skill 与沙箱 runner。
+
+工具注册契约由 `integration_contract.py` 汇总：工具归属哪个 Skill、对外部产生什么 effect、需要何种确认，原本分散在三张以工具名为键的表里且互不校验。契约把三者 join 起来，`tests/test_integration_contract.py` 断言没有分歧、运行时注册的每个工具都有契约、没有工具落到 `joi.unknown`，并逐个验证关闭某个 Skill 确实拦截它拥有的全部工具。低风险但有外部 effect 的工具必须在 `CONSENT_AT_MODE_ENTRY` 中显式登记（目前只有 `agent_cli.run`，其同意发生在用户选择接管模式时），且任何 planner 都不能生成它。
+
+## Character package
+
+角色包只描述角色。导入会拒绝携带 API Key、密码、访问令牌，以及聊天记录、记忆、亲密度、权限授权等属于用户而非角色的字段（`USER_STATE_FIELDS`）；非空即拒绝并指出字段名，而不是静默丢弃。可执行文件后缀、符号链接、目录穿越和超限文件同样拒绝。
+
+`manifest.source` 是作者自述，只用于查找更新；`manifest.provenance` 由 Joi 在导入时实测写入（包格式、文件名、归档 SHA-256、导入时间），包内自带的 `provenance` 会被规范化覆盖，无法伪造。导出时该字段被清空——它描述的是这台机器如何拿到角色，不是角色本身。记忆、亲密度与对话本就存放在 `characters/runtime/` 而非包目录内，因此导出不会带上它们。
+
 ## Scene Session
 
 陪看默认为“安静共看”。Scene Session 比较画面、字幕、转写与章节变化，只在模式和事件显著度允许时评论。支持解说、翻译、分析、无障碍描述、剧透等级与语音打断。

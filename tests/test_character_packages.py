@@ -141,6 +141,92 @@ class CharacterPackageManagerTests(unittest.TestCase):
             self.manager.import_package(archive_path)
         self.assertEqual(executable_error.exception.code, "executable_content_blocked")
 
+    def test_rejects_a_package_carrying_someone_elses_history_or_grants(self) -> None:
+        """A character is portable; a user's history and decisions are not."""
+
+        for field, value in (
+            ("chat_history", [{"role": "user", "text": "上次我们聊到哪了"}]),
+            ("memories", ["用户住在上海"]),
+            ("permission_grants", {"computer_use": "granted"}),
+            ("approved_skills", ["joi.computer_use"]),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(CharacterPackageError) as error:
+                    self.manager.create({"identity": {"name": "带状态"}, field: value})
+                self.assertEqual(error.exception.code, "package_user_state_blocked")
+                self.assertEqual(error.exception.details.get("field"), field)
+
+    def test_a_nested_permission_grant_is_found_too(self) -> None:
+        with self.assertRaises(CharacterPackageError) as error:
+            self.manager.create(
+                {"identity": {"name": "嵌套"}, "capabilities": {"granted_permissions": ["files.delete"]}}
+            )
+        self.assertEqual(error.exception.code, "package_user_state_blocked")
+
+    def test_empty_user_state_fields_are_allowed_and_stay_empty(self) -> None:
+        created = self.manager.create(
+            {
+                "identity": {"name": "空字段"},
+                "capabilities": {"requested_skills": ["joi.computer_use"], "approved_skills": []},
+            }
+        )
+        detail = self.manager.detail(created["character"]["id"])["character"]["manifest"]
+        self.assertEqual(detail["capabilities"]["approved_skills"], [])
+        self.assertEqual(detail["capabilities"]["requested_skills"], ["joi.computer_use"])
+
+    def test_provenance_records_the_archive_joi_read_not_the_one_it_claims(self) -> None:
+        package_root = self.workspace / "claimed-source"
+        package_root.mkdir()
+        (package_root / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": "joi.character.v1",
+                    "id": "claimed",
+                    "identity": {"name": "自称官方"},
+                    "source": {"type": "official", "url": "https://characters.example/official"},
+                    "provenance": {"format": "signed_official", "archive_sha256": "f" * 64},
+                }
+            ),
+            encoding="utf-8",
+        )
+        archive_path = self.workspace / "claimed.joi-character"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.write(package_root / "manifest.json", "manifest.json")
+
+        self.manager.import_package(archive_path)
+        provenance = self.manager.detail("claimed")["character"]["manifest"]["provenance"]
+        self.assertEqual(provenance["format"], "joi_character_archive")
+        self.assertEqual(provenance["file_name"], "claimed.joi-character")
+        self.assertNotEqual(provenance["archive_sha256"], "f" * 64)
+        self.assertTrue(provenance["imported_at"] > 0)
+        # What the author claimed is kept, but kept separate.
+        source = self.manager.detail("claimed")["character"]["manifest"]["source"]
+        self.assertEqual(source["type"], "official")
+
+    def test_export_carries_the_character_but_not_this_machines_import_record(self) -> None:
+        package_root = self.workspace / "roundtrip"
+        package_root.mkdir()
+        (package_root / "manifest.json").write_text(
+            json.dumps({"schema": "joi.character.v1", "id": "roundtrip", "identity": {"name": "往返"}}),
+            encoding="utf-8",
+        )
+        archive_path = self.workspace / "roundtrip.joi-character"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.write(package_root / "manifest.json", "manifest.json")
+        self.manager.import_package(archive_path)
+        self.assertTrue(self.manager.detail("roundtrip")["character"]["manifest"]["provenance"]["file_name"])
+
+        exported = self.manager.export_package("roundtrip", self.workspace / "exports")
+        with zipfile.ZipFile(exported["path"]) as archive:
+            names = archive.namelist()
+            shared = json.loads(archive.read("manifest.json"))
+        self.assertEqual(shared["identity"]["name"], "往返")
+        self.assertEqual(shared["provenance"]["file_name"], "")
+        self.assertEqual(shared["provenance"]["archive_sha256"], "")
+        self.assertEqual(shared["provenance"]["imported_at"], 0)
+        for name in names:
+            self.assertNotIn("memory", name.casefold())
+
     def test_live2d_assets_are_reported_before_install(self) -> None:
         package_root = self.workspace / "broken-live2d"
         package_root.mkdir()

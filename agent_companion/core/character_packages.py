@@ -31,6 +31,34 @@ MAX_UNPACKED_BYTES = 512 * 1024 * 1024
 MAX_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_FILES = 2_000
 
+SECRET_FIELD_TOKENS = ("api_key", "apikey", "access_token", "secret", "password")
+
+# Fields that describe a user rather than a character. `post_history_
+# instructions` and `example_dialogue` are deliberately absent: both are
+# authored Character Card V2 content, not a record of anyone's conversation.
+USER_STATE_FIELDS = frozenset(
+    {
+        "approved_skills",
+        "access_grants",
+        "affinity",
+        "capability_grants",
+        "chat_history",
+        "chat_log",
+        "conversation_history",
+        "conversations",
+        "granted_permissions",
+        "memories",
+        "memory_records",
+        "memory_vault",
+        "message_history",
+        "messages",
+        "permission_grants",
+        "user_memories",
+        "user_notes",
+        "user_profile",
+    }
+)
+
 EXECUTABLE_SUFFIXES = {
     ".app",
     ".bat",
@@ -331,11 +359,13 @@ class CharacterPackageManager:
                 manifest = self._from_character_card(raw, source_name=path.name)
             else:
                 manifest = self._normalize_manifest(raw)
+            manifest["provenance"] = self._observed_provenance(path, package_format="character_card_json" if self._is_character_card(raw) else "character_json")
             location = self._install_manifest(manifest, None, replace=False)
             return self._import_result(manifest, location, warnings=[])
         if suffix == ".png":
             card = self._character_card_from_png(path)
             manifest = self._from_character_card(card, source_name=path.name)
+            manifest["provenance"] = self._observed_provenance(path, package_format="character_card_png")
             location = self._install_manifest(manifest, None, replace=False, extra_assets={"appearance.portrait": path})
             return self._import_result(manifest, location, warnings=[])
         raise CharacterPackageError("unsupported_character_format", "仅支持 .joi-character、ZIP、Character Card V2 PNG/JSON。")
@@ -384,6 +414,15 @@ class CharacterPackageManager:
         raise CharacterPackageError("unsupported_character_format", "仅支持 .joi-character、ZIP、Character Card V2 PNG/JSON。")
 
     def export_package(self, character_id: str, destination: str | Path) -> dict[str, Any]:
+        """Write a shareable package: the character, and nothing about the user.
+
+        The installed manifest carries provenance Joi observed on *this*
+        machine -- a file name and an import time. That describes how this user
+        got the character, not the character, so the exported copy is rewritten
+        without it. Memory, affinity and chat live outside the package
+        directory already, so copying the tree cannot pick them up.
+        """
+
         manifest, location = self._load(character_id)
         destination_path = Path(destination).expanduser().resolve()
         if destination_path.suffix.casefold() == ".joi-character":
@@ -392,10 +431,17 @@ class CharacterPackageManager:
         else:
             destination_path.mkdir(parents=True, exist_ok=True)
             output = destination_path / f"{manifest['id']}-{manifest['version']}.joi-character"
+        shareable = copy.deepcopy(manifest)
+        shareable["provenance"] = _clean_provenance(None)
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(location.root.rglob("*")):
-                if path.is_file():
-                    archive.write(path, path.relative_to(location.root).as_posix())
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(location.root).as_posix()
+                if relative == "manifest.json":
+                    archive.writestr(relative, json.dumps(shareable, ensure_ascii=False, indent=2, sort_keys=True))
+                    continue
+                archive.write(path, relative)
         return {"ok": True, "path": str(output), "character_id": manifest["id"]}
 
     def check_updates(self, character_id: str) -> dict[str, Any]:
@@ -495,6 +541,7 @@ class CharacterPackageManager:
             manifest = self._normalize_manifest(self._read_json(manifest_path, fallback={}))
             if expected_id and manifest["id"] != expected_id:
                 raise CharacterPackageError("character_update_id_mismatch", "更新包角色 ID 与当前角色不一致。")
+            manifest["provenance"] = self._observed_provenance(path, package_format="joi_character_archive")
             source_root = manifest_path.parent
             self._scan_package_tree(source_root)
             location = self._install_manifest(manifest, source_root, replace=replace)
@@ -715,10 +762,15 @@ class CharacterPackageManager:
                 "notes": _clean_text((raw.get("creator") or {}).get("notes") if isinstance(raw.get("creator"), dict) else raw.get("creator_notes"), 4_000),
             },
             "source": {
+                # Author-declared. Kept because it is how updates are found,
+                # but never treated as evidence of where the bytes came from.
                 "type": _clean_text(source_raw.get("type") or "local", 40),
                 "url": _clean_url(source_raw.get("url")),
                 "update_url": _clean_url(source_raw.get("update_url")),
             },
+            # Observed by Joi at import. Preserved across normalization so a
+            # reinstall does not quietly relabel where a character came from.
+            "provenance": _clean_provenance(raw.get("provenance")),
             "security": {
                 "license": _clean_text(security_raw.get("license") or "Unknown", 160),
                 "compatibility": _clean_text(security_raw.get("compatibility") or f">={JOI_CHARACTER_VERSION}", 80),
@@ -997,6 +1049,7 @@ class CharacterPackageManager:
             "built_in": bool((manifest.get("security") or {}).get("built_in")),
             "requested_skills": list((manifest.get("capabilities") or {}).get("requested_skills") or []),
             "package_hash": str((manifest.get("security") or {}).get("package_hash") or ""),
+            "provenance": copy.deepcopy(manifest.get("provenance") or {}),
             "has_update_source": bool((manifest.get("source") or {}).get("update_url")),
             "greeting": str(identity.get("greeting") or ""),
             "tone": str(identity.get("tone") or ""),
@@ -1150,16 +1203,51 @@ class CharacterPackageManager:
         self._atomic_json(root / "manifest.json", manifest)
 
     def _reject_secrets(self, raw: Any, path: str = "") -> None:
+        """Refuse a package carrying anything that belongs to a person.
+
+        A character package is a portable description of a character. Secrets,
+        someone's conversation history, their memory vault and their permission
+        decisions are all properties of a user and a machine, not of a
+        character, so a package offering them is either mistaken or trying to
+        arrive pre-authorised (TDD §11.2). Both are refused by name rather than
+        stripped, so the user finds out an import tried it.
+        """
+
         if isinstance(raw, dict):
             for key, value in raw.items():
                 next_path = f"{path}.{key}" if path else str(key)
                 lowered = str(key).casefold().replace("-", "_")
-                if any(token in lowered for token in ("api_key", "apikey", "access_token", "secret", "password")) and str(value or "").strip():
+                if any(token in lowered for token in SECRET_FIELD_TOKENS) and str(value or "").strip():
                     raise CharacterPackageError("package_secret_blocked", "角色包不能携带 API Key、密码或访问令牌。", details={"field": next_path})
+                if lowered in USER_STATE_FIELDS and _has_content(value):
+                    raise CharacterPackageError(
+                        "package_user_state_blocked",
+                        "角色包不能携带聊天记录、记忆或权限授权。",
+                        details={"field": next_path},
+                    )
                 self._reject_secrets(value, next_path)
         elif isinstance(raw, list):
             for index, value in enumerate(raw):
                 self._reject_secrets(value, f"{path}[{index}]")
+
+    def _observed_provenance(self, source: Path | None, *, package_format: str) -> dict[str, Any]:
+        """What Joi saw when it read this package, not what the package says.
+
+        `source.url` below is whatever the author typed into their own
+        manifest. These fields are measured at import instead, so a package
+        cannot describe itself as having come from somewhere it did not. Only
+        the file's name is kept -- a full path would say more about this
+        machine than about the character.
+        """
+
+        if source is None:
+            return {"format": package_format, "file_name": "", "archive_sha256": "", "imported_at": round(time.time(), 3)}
+        return {
+            "format": package_format,
+            "file_name": source.name[:120],
+            "archive_sha256": _sha256_file(source) if source.is_file() else "",
+            "imported_at": round(time.time(), 3),
+        }
 
     @staticmethod
     def _import_result(manifest: dict[str, Any], location: CharacterPackageLocation, *, warnings: list[str]) -> dict[str, Any]:
@@ -1209,11 +1297,16 @@ class CharacterPackageManager:
             "security": {
                 "executable_content": False,
                 "secret_content": False,
+                "user_state_content": False,
                 "license": license_name,
                 "requested_skills": requested,
                 "compatibility": str((manifest.get("security") or {}).get("compatibility") or ""),
                 "installable": bool(asset_report.get("installable")),
                 "asset_report": asset_report,
+            },
+            "provenance": {
+                **self._observed_provenance(source if source.is_file() else None, package_format="preview"),
+                "declared_source": copy.deepcopy(manifest.get("source") or {}),
             },
         }
 
@@ -1315,6 +1408,31 @@ def _clean_version(value: Any) -> str:
 def _clean_url(value: Any) -> str:
     text = _clean_text(value, 500)
     return text if text.startswith(("https://", "http://")) else ""
+
+
+def _clean_provenance(value: Any) -> dict[str, Any]:
+    """Keep only the shape Joi writes, so a package cannot forge this block."""
+
+    raw = value if isinstance(value, dict) else {}
+    imported_at = _safe_float(raw.get("imported_at"), 0.0, 0.0, 4_102_444_800.0)
+    return {
+        "format": _clean_text(raw.get("format"), 40),
+        "file_name": _clean_text(raw.get("file_name"), 120),
+        "archive_sha256": _clean_text(raw.get("archive_sha256"), 64) if _is_sha256(raw.get("archive_sha256")) else "",
+        "imported_at": round(imported_at, 3),
+    }
+
+
+def _is_sha256(value: Any) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{64}", str(value or "")))
+
+
+def _has_content(value: Any) -> bool:
+    """Whether a field carries anything, for containers as well as scalars."""
+
+    if isinstance(value, (dict, list, tuple, set)):
+        return bool(value)
+    return bool(str(value or "").strip())
 
 
 def _safe_color(value: Any, fallback: str) -> str:

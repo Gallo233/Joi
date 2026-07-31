@@ -665,7 +665,17 @@ export interface CharacterSummary {
   creator?: { name?: string; notes?: string }
   requested_skills?: string[]
   package_hash?: string
+  provenance?: CharacterProvenance
   has_update_source?: boolean
+}
+
+// Measured by Joi while reading the package, unlike `source` below, which is
+// whatever the author wrote in their own manifest.
+export interface CharacterProvenance {
+  format?: string
+  file_name?: string
+  archive_sha256?: string
+  imported_at?: number
 }
 
 export interface CharacterManifest {
@@ -714,6 +724,7 @@ export interface CharacterManifest {
   capabilities?: { requested_skills?: string[]; approved_skills?: string[] }
   creator?: { name?: string; notes?: string }
   source?: { type?: string; url?: string; update_url?: string }
+  provenance?: CharacterProvenance
   security?: { license?: string; compatibility?: string; built_in?: boolean; package_hash?: string }
   extensions?: Record<string, unknown>
 }
