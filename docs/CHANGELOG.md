@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Bound Skill install and update to a digest the user actually reviewed. `skill.install` refuses without one, and `skill.update` returns the re-fetched content as a review rather than installing whatever a Git remote serves at that moment.
+- Recorded observed Skill provenance on every installation: source kind, resolved Git commit or archive hash, content digest, inspection time and trust tier, with credentials stripped from source URLs.
+- Refused Skills whose detached signature cannot be verified, instead of treating an unreadable signature as an unsigned package.
+- Showed declared Skill dependencies in the run review and never resolved them, so a script with a missing dependency fails rather than triggering an install.
+- Replaced the Skill runner's broad Seatbelt profile with a least-privilege one built from each Skill's manifest: reads limited to the interpreter runtime, the Skill's own files and declared directories; writes limited to that run's output directory; no `process*`, `file-read*` or `mach-lookup`. The runner refuses to execute when no minimal profile can be built.
+- Removed the plugin loader that executed arbitrary Python files inside Core, and added an AST guard that fails if a module-from-path or source-evaluation path returns.
+- Joined the tool registration tables into one contract, with tests that the live registry matches it and that disabling a Skill blocks every tool it owns.
+- Refused character packages carrying chat history, memories, affinity or permission grants, and recorded package provenance Joi observed at import rather than what the package claimed. Exported packages no longer carry the importing machine's record.
+- Fixed ZIP-sourced Skill installs failing on macOS with a spurious path-traversal error caused by the unresolved `/var` symlink.
 - Added local semantic character control through `character.perform`, with deterministic Chinese/English motion routing, low-risk policy typing, interruptible VRM full-body procedural motion blending, Live2D Motion/parameter fallback, static-sprite fallback, and reduced-motion support.
 - Added an original built-in procedural 3D Joi renderer for the default character when its Live2D package has no authored body motions, preserving the same semantic motion, interruption, gaze, speech, emotion, and reduced-motion contracts.
 - Prevented repeated macOS Keychain authorization prompts by caching successful secret reads and session-level access denial, with explicit invalidation after BYOK save or delete.

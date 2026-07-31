@@ -1121,6 +1121,17 @@ cd agent_companion/shell && npm run tauri -- build --target aarch64-apple-darwin
 
 退出条件：恶意 fixtures 被拒；代码 Skill 不进入 Core；角色包不携带用户历史/权限。
 
+**当前**（2026-07-31）：三条退出条件已有代码与测试佐证。
+
+- 来源策略与签名：install/update 必须携带检查过的 digest（`digest_required`），update 无 digest 时只返回重新读取的预览；provenance 由 Joi 实测记录（source kind、Git commit / 归档哈希、digest、检查时间、trust tier），URL 凭据剥离；带签名但无法校验一律拒绝（`signature_unverifiable` / `signature_invalid`），不降级为未签名。
+- Seatbelt 回归：`sandbox_plan()` 按 manifest 生成最小配置，`FORBIDDEN_SANDBOX_RULES` 守住 `(allow process*)` / `(allow file-read*)` / `(allow mach-lookup)`；`tests/test_skill_sandbox.py` 用真实 `sandbox-exec` 验证越权读取、越权写入、spawn 与网络全部失败。无法生成最小配置时拒绝执行。
+- 依赖/网络声明：依赖只在审核界面展示，`dependency_installation: never`；网络默认关闭。
+- 统一注册契约：`integration_contract.py` 汇总 skill / effect / risk 三张表，`tests/test_integration_contract.py` 断言无分歧、无 `joi.unknown`、关闭 Skill 即拦截其全部工具。
+- 代码 Skill 不进入 Core：插件加载器与 `agent_companion/plugins/` 已删除，`tests/test_core_code_boundary.py` 以 AST 守住按路径加载模块与源码求值。
+- 角色包：拒绝携带聊天记录、记忆、亲密度与权限授权；provenance 由导入实测写入且导出时清空。
+
+**门禁**（尚未满足）：签名/审核/撤回/版本治理仍不完整，PRD-SKL-010 的公共 Skill 目录仍不得开放；ed25519 校验依赖可选后端，缺失时签名包一律拒绝而非放行。
+
 ### Phase 5 — 发布候选
 
 - 性能/可访问性/安全/干净机矩阵；
