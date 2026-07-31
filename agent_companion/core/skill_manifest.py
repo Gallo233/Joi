@@ -12,6 +12,11 @@ from agent_companion.core.speech_input import AsrRuntimeState
 
 
 SKILL_MANIFEST_VERSION = "joi.skill_manifest.v1"
+
+# What a tool resolves to when nothing claims it. A tool landing here is a
+# registration bug, not a category: its Skill's on/off switch cannot reach it.
+UNKNOWN_SKILL_ID = "joi.unknown"
+
 KNOWN_SKILL_IDS: tuple[str, ...] = (
     "joi.companion.chat",
     "joi.agent_cli",
@@ -84,27 +89,42 @@ def build_native_skill_manifest(
         skill_id = normalize_skill_id(key)
         if skill_id:
             normalized_skill_settings[skill_id] = bool(value)
-    skills = [
-        _companion_chat_skill(),
-        _agent_cli_skill(),
-        _codex_skill(),
-        _browser_skill(),
-        _computer_use_skill(),
-        _watch_skill(),
-        _memory_skill(memory_status),
-        _voice_input_skill(asr_state),
-        _voice_output_skill(tts_status),
-        _ok_ww_skill(),
-        _runtime_config_skill(),
-        _local_files_skill(),
-        _mcp_skill(),
-    ]
+    skills = _all_skill_manifests(asr_state=asr_state, tts_status=tts_status, memory_status=memory_status)
     return {
         "version": SKILL_MANIFEST_VERSION,
         "safe_for_display": True,
         "workspace_bound": True,
         "skills": [_apply_skill_setting(skill, normalized_skill_settings).to_agent_state() for skill in skills],
     }
+
+
+def _all_skill_manifests(
+    *,
+    asr_state: AsrRuntimeState | None = None,
+    tts_status: dict[str, Any] | None = None,
+    memory_status: dict[str, Any] | None = None,
+) -> list[NativeSkillManifest]:
+    """Every native Skill, in manifest order.
+
+    Runtime state only changes availability fields, never which tools a Skill
+    declares, so callers that just need the registration shape can omit it.
+    """
+
+    return [
+        _companion_chat_skill(),
+        _agent_cli_skill(),
+        _codex_skill(),
+        _browser_skill(),
+        _computer_use_skill(),
+        _watch_skill(),
+        _memory_skill(memory_status or {}),
+        _voice_input_skill(asr_state),
+        _voice_output_skill(tts_status or {}),
+        _ok_ww_skill(),
+        _runtime_config_skill(),
+        _local_files_skill(),
+        _mcp_skill(),
+    ]
 
 
 def _companion_chat_skill() -> NativeSkillManifest:
@@ -378,7 +398,7 @@ def _mcp_skill() -> NativeSkillManifest:
 
 
 def skill_id_for_tool(tool_name: str) -> str:
-    return _skill_binding(tool_name).get("skill_id", "joi.unknown")
+    return _skill_binding(tool_name).get("skill_id", UNKNOWN_SKILL_ID)
 
 
 def normalize_skill_id(value: str) -> str:
@@ -389,7 +409,7 @@ def normalize_skill_id(value: str) -> str:
 def skill_boundary_for_tool(tool_name: str) -> dict[str, Any]:
     binding = _skill_binding(tool_name)
     return {
-        "skill_id": binding.get("skill_id", "joi.unknown"),
+        "skill_id": binding.get("skill_id", UNKNOWN_SKILL_ID),
         "skill_category": binding.get("category", "unknown"),
         "skill_permission_level": binding.get("permission_level", "medium"),
         "skill_state_policy": binding.get("state_policy", "ephemeral"),
@@ -447,8 +467,27 @@ def _skill_binding(tool_name: str) -> dict[str, str]:
     return _TOOL_SKILL_BINDINGS.get(tool, _UNKNOWN_SKILL_BINDING)
 
 
+def tool_skill_bindings() -> dict[str, dict[str, str]]:
+    """Which Skill owns each tool, for policy and audit purposes.
+
+    A tool may be surfaced by more than one Skill -- `observe.screen` appears
+    under both Watch Together and Computer Use -- but exactly one owns it.
+    """
+
+    return {name: dict(binding) for name, binding in _TOOL_SKILL_BINDINGS.items()}
+
+
+def declared_skill_tools() -> dict[str, set[str]]:
+    """The tools each native Skill declares, independent of runtime state."""
+
+    declared: dict[str, set[str]] = {}
+    for skill in _all_skill_manifests():
+        declared.setdefault(skill.id, set()).update(skill.tools)
+    return declared
+
+
 _UNKNOWN_SKILL_BINDING = {
-    "skill_id": "joi.unknown",
+    "skill_id": UNKNOWN_SKILL_ID,
     "category": "unknown",
     "permission_level": "medium",
     "state_policy": "ephemeral",
