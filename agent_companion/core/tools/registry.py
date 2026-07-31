@@ -1,14 +1,13 @@
-"""Tool Registry with plugin discovery support.
+"""Registry of the tool adapters Core will run.
 
-Extends the base registry with:
-- Plugin auto-discovery from configured directories
-- Runtime tool listing with metadata
-- MCP tool adapter support (Phase A2)
+Membership is decided in source, by ``build_tool_registry``. There is no
+discovery step and nothing here loads code from disk: a third-party extension
+reaches Joi as an Agent Skill, which runs in the out-of-host sandboxed runner
+and never imports into this process (TDD §11.1, ADR-007).
 """
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult
@@ -21,12 +20,9 @@ logger = logging.getLogger(__name__)
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolAdapter] = {}
-        self._plugin_sources: dict[str, str] = {}  # tool_name -> plugin_name
 
-    def register(self, tool: ToolAdapter, plugin_name: str = "") -> None:
+    def register(self, tool: ToolAdapter) -> None:
         self._tools[tool.name] = tool
-        if plugin_name:
-            self._plugin_sources[tool.name] = plugin_name
 
     def run(self, request: ToolRequest) -> ToolResult:
         tool = self._tools.get(request.name)
@@ -49,53 +45,4 @@ class ToolRegistry:
         return [{"name": name, "adapter": type(tool).__name__} for name, tool in sorted(self._tools.items())]
 
     def detailed_schemas(self) -> list[dict[str, Any]]:
-        """Return detailed tool info including plugin source."""
-        result = []
-        for name, tool in sorted(self._tools.items()):
-            entry: dict[str, Any] = {
-                "name": name,
-                "adapter": type(tool).__name__,
-            }
-            source = self._plugin_sources.get(name)
-            if source:
-                entry["plugin"] = source
-            result.append(entry)
-        return result
-
-    def load_plugins(self, workspace: Path | None = None) -> int:
-        """Discover and register plugins from standard directories.
-
-        Returns the number of tools registered from plugins.
-        """
-        from agent_companion.core.plugin_protocol import discover_plugins
-
-        plugin_dirs = []
-        if workspace:
-            plugin_dirs.append(workspace / "agent_companion" / "plugins")
-        plugin_dirs.append(Path(__file__).parent.parent / "plugins")
-
-        plugins = discover_plugins(plugin_dirs=plugin_dirs, workspace=workspace)
-        count = 0
-        for plugin in plugins:
-            if plugin.requires and not self._check_requirements(plugin.requires):
-                logger.warning("Plugin %s missing requirements: %s", plugin.name, plugin.requires)
-                continue
-            kwargs = {}
-            if workspace:
-                kwargs["workspace"] = workspace
-            for tool in plugin.instantiate_tools(**kwargs):
-                self.register(tool, plugin_name=plugin.name)
-                count += 1
-                logger.info("Loaded plugin tool: %s (from %s)", tool.name, plugin.name)
-        return count
-
-    @staticmethod
-    def _check_requirements(requires: list[str]) -> bool:
-        """Check if all required packages are importable."""
-        import importlib
-        for pkg in requires:
-            try:
-                importlib.import_module(pkg)
-            except ImportError:
-                return False
-        return True
+        return [{"name": name, "adapter": type(tool).__name__} for name, tool in sorted(self._tools.items())]
