@@ -41,12 +41,54 @@ MAX_SIGNATURE_BYTES = 16 * 1024
 # look and the next; a path the user picked in Finder cannot.
 NETWORK_SOURCE_KINDS = frozenset({"git"})
 
+# Granting a subpath of any of these would hand out most of the disk, so a
+# declared directory that resolves to one is dropped instead of honoured.
+_FILESYSTEM_ROOTS = frozenset(
+    {
+        Path("/"),
+        Path("/usr"),
+        Path("/etc"),
+        Path("/private"),
+        Path("/private/etc"),
+        Path("/var"),
+        Path("/private/var"),
+        Path("/System"),
+        Path("/Library"),
+        Path("/Users"),
+        Path("/Volumes"),
+        Path("/opt"),
+        Path("/bin"),
+        Path("/sbin"),
+        Path.home(),
+    }
+)
+
+# Seatbelt rules a release profile may never contain: each one hands the script
+# most of the machine and defeats the point of the runner (TDD §11.1).
+FORBIDDEN_SANDBOX_RULES = (
+    "(allow process*)",
+    "(allow file-read*)",
+    "(allow mach-lookup)",
+    "(allow default)",
+)
+
 
 class AgentSkillError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+@dataclass(frozen=True)
+class SandboxPlan:
+    """One script run's isolation, resolved before anything is executed."""
+
+    command: list[str]
+    profile: str
+    readable: tuple[str, ...]
+    writable: tuple[str, ...]
+    network: bool
 
 
 @dataclass(frozen=True)
@@ -395,15 +437,28 @@ class AgentSkillService:
             return {"ok": False, "error": "project_root_not_found"}
         run_id = f"run-{uuid.uuid4().hex[:12]}"
         run_dir = self.run_root / run_id
-        command = _sandbox_command(script_path, project, root, run_dir, arguments or [])
-        if not command:
+        plan = sandbox_plan(
+            script_path,
+            skill_root=root,
+            project=project,
+            output_dir=run_dir,
+            permissions=inspection.permissions,
+            arguments=arguments or [],
+        )
+        if plan is None:
             return {"ok": False, "error": "sandbox_runner_unavailable"}
         run_dir.mkdir(parents=True, exist_ok=False)
         env = {"PATH": os.environ.get("PATH", ""), "LANG": os.environ.get("LANG", "en_US.UTF-8"), "HOME": str(run_dir)}
+        sandbox_state = {
+            "sandboxed": True,
+            "network": "disabled",
+            "readable": list(plan.readable),
+            "writable": list(plan.writable),
+        }
         started = time.time()
         try:
             completed = subprocess.run(
-                command,
+                plan.command,
                 cwd=str(project),
                 env=env,
                 input="",
@@ -418,8 +473,7 @@ class AgentSkillService:
                 "stdout": completed.stdout[-20_000:],
                 "stderr": completed.stderr[-20_000:],
                 "duration_ms": round((time.time() - started) * 1000, 1),
-                "sandboxed": True,
-                "network": "disabled",
+                **sandbox_state,
             }
         except subprocess.TimeoutExpired as exc:
             result = {
@@ -429,8 +483,7 @@ class AgentSkillService:
                 "stdout": str(exc.stdout or "")[-20_000:],
                 "stderr": str(exc.stderr or "")[-20_000:],
                 "duration_ms": round((time.time() - started) * 1000, 1),
-                "sandboxed": True,
-                "network": "disabled",
+                **sandbox_state,
             }
         recorded = self.store.record_skill_run(
             row["id"],
@@ -817,26 +870,166 @@ def _safe_copy_tree(source: Path, destination: Path) -> None:
             shutil.copy2(path, target, follow_symlinks=False)
 
 
-def _sandbox_command(script: Path, project: Path, skill_root: Path, run_home: Path, arguments: Iterable[object]) -> list[str]:
+def sandbox_plan(
+    script: Path,
+    *,
+    skill_root: Path,
+    project: Path,
+    output_dir: Path,
+    permissions: dict[str, list[str]] | None = None,
+    arguments: Iterable[object] = (),
+) -> SandboxPlan | None:
+    """Build the least-privilege Seatbelt profile for one script run.
+
+    Reads are enumerated: the interpreter's own runtime, the Skill's files, and
+    whatever directories the Skill declared. Writes go only to this run's
+    output directory -- inputs are read-only and the workspace is not writable
+    just because the script runs there (TDD §11.1). Returns ``None`` when no
+    minimal profile can be built, which is a refusal to run, never a fallback
+    to running unsandboxed.
+    """
+
     sandbox_exec = Path("/usr/bin/sandbox-exec")
-    if not sandbox_exec.is_file() or sys.platform != "darwin":
-        return []
-    suffix = script.suffix.casefold()
-    interpreter = {".py": sys.executable, ".js": shutil.which("node"), ".mjs": shutil.which("node"), ".sh": shutil.which("bash")}.get(suffix)
-    if not interpreter:
-        return []
+    if sys.platform != "darwin" or not sandbox_exec.is_file():
+        return None
+    interpreter = _interpreter_for(script)
+    if interpreter is None:
+        return None
+
+    readable = _runtime_read_paths(interpreter)
+    readable.append(skill_root)
+    readable.extend(_declared_directories(permissions or {}, project=project, skill_root=skill_root))
+    writable = [output_dir]
+
+    read_rules = " ".join(f'(subpath "{_seatbelt_escape(str(path))}")' for path in _unique_paths(readable))
+    write_rules = " ".join(f'(subpath "{_seatbelt_escape(str(path))}")' for path in _unique_paths(writable))
+    exec_rules = " ".join(f'(literal "{_seatbelt_escape(str(path))}")' for path in _unique_paths(_exec_paths(interpreter)))
+    if not read_rules or not write_rules or not exec_rules:
+        return None
+
+    profile = "".join(
+        [
+            "(version 1)",
+            "(deny default)",
+            # Only the interpreter Joi chose, and the binary it resolves to.
+            # A script cannot exec anything else, including a shell.
+            f"(allow process-exec {exec_rules}{_framework_exec_rule(interpreter)})",
+            # Reading a path requires stat on each parent; metadata leaks a
+            # name's existence, never its contents.
+            "(allow file-read-metadata)",
+            # An interpreter reads a handful of these before main() runs.
+            "(allow sysctl-read)",
+            f"(allow file-read* (literal \"/\") (literal \"/dev/urandom\") (literal \"/dev/null\") {read_rules})",
+            f"(allow file-write-data (literal \"/dev/null\"))",
+            f"(allow file-write* {write_rules})",
+            "(deny network*)",
+        ]
+    )
     safe_args = [str(value)[:2_000] for value in arguments][:64]
-    writable = (project, run_home, Path("/tmp"), Path("/private/tmp"), Path("/dev"))
-    write_rules = " ".join(f'(subpath "{_seatbelt_escape(str(path))}")' for path in writable)
-    profile = f"(version 1)(deny default)(allow process*)(allow sysctl-read)(allow mach-lookup)(allow file-read*)(allow file-write* {write_rules})(deny network*)"
-    return [
-        str(sandbox_exec),
-        "-p",
-        profile,
-        interpreter,
-        str(script),
-        *safe_args,
-    ]
+    return SandboxPlan(
+        command=[str(sandbox_exec), "-p", profile, str(interpreter), str(script), *safe_args],
+        profile=profile,
+        readable=tuple(str(path) for path in _unique_paths(readable)),
+        writable=tuple(str(path) for path in _unique_paths(writable)),
+        network=False,
+    )
+
+
+def _interpreter_for(script: Path) -> Path | None:
+    """Resolve the interpreter for a script suffix, or nothing.
+
+    ``sys.executable`` is only a Python interpreter when Joi is running from
+    source. In a packaged build it is the Core binary itself, and handing it a
+    script would start a second Joi rather than run the Skill, so that case
+    falls back to a real ``python3`` and refuses when there is none.
+    """
+
+    suffix = script.suffix.casefold()
+    if suffix == ".py":
+        if getattr(sys, "frozen", False):
+            found = shutil.which("python3")
+            return Path(found).resolve() if found else None
+        return Path(sys.executable).resolve() if sys.executable else None
+    found = {".js": "node", ".mjs": "node", ".sh": "bash"}.get(suffix)
+    if not found:
+        return None
+    located = shutil.which(found)
+    return Path(located).resolve() if located else None
+
+
+def _runtime_read_paths(interpreter: Path) -> list[Path]:
+    """The smallest set of paths an interpreter needs to reach ``main()``."""
+
+    paths = [Path("/usr/lib"), Path("/usr/share"), Path("/System/Library")]
+    framework = _framework_root(interpreter)
+    if framework is not None:
+        paths.append(framework)
+        return paths
+    paths.append(interpreter)
+    install_root = interpreter.parent.parent
+    if interpreter.parent.name in {"bin", "sbin"} and install_root not in _FILESYSTEM_ROOTS:
+        paths.append(install_root)
+    return paths
+
+
+def _exec_paths(interpreter: Path) -> list[Path]:
+    return [interpreter]
+
+
+def _framework_exec_rule(interpreter: Path) -> str:
+    """macOS framework interpreters re-exec themselves through a helper app."""
+
+    framework = _framework_root(interpreter)
+    if framework is None:
+        return ""
+    return f' (subpath "{_seatbelt_escape(str(framework))}")'
+
+
+def _framework_root(interpreter: Path) -> Path | None:
+    for parent in interpreter.parents:
+        if parent.name.endswith(".framework"):
+            return parent
+    return None
+
+
+def _declared_directories(permissions: dict[str, list[str]], *, project: Path, skill_root: Path) -> list[Path]:
+    """Turn declared directory names into read grants, dropping the rest.
+
+    A Skill asks for directories in its manifest; anything it did not declare
+    is simply not in the profile. Unresolvable or escaping entries are dropped
+    rather than widened.
+    """
+
+    resolved: list[Path] = []
+    for entry in permissions.get("directories", []):
+        text = str(entry or "").strip()
+        if not text:
+            continue
+        if text in {"project", "workspace"}:
+            resolved.append(project)
+            continue
+        if text in {"skill", "self"}:
+            resolved.append(skill_root)
+            continue
+        try:
+            candidate = Path(text).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if candidate.is_dir() and candidate not in _FILESYSTEM_ROOTS:
+            resolved.append(candidate)
+    return resolved
+
+
+def _unique_paths(paths: Iterable[Path]) -> list[Path]:
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
 
 
 def _seatbelt_escape(value: str) -> str:

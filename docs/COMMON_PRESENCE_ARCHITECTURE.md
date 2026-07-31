@@ -217,7 +217,9 @@ Joi 原生 macOS 驱动始终可用。可选 CUA 驱动使用 `cua-driver` 的�
 
 `AgentSkillService` 支持本地目录、ZIP 和 Git 来源，识别 `SKILL.md`、`scripts/`、`references/` 与 `assets/`。安装预览展示来源、版本、许可证、哈希、依赖、脚本和权限。全局、角色、项目作用域按“项目 > 角色 > 全局”解析。
 
-ZIP 路径穿越、符号链接、未知脚本和安装后哈希变化会被拒绝。代码型 Skill 默认禁用隐式运行，并且只有非观察会话加显式首次确认才能执行。脚本从不导入 Joi 主进程；macOS 使用独立进程和 Seatbelt 配置，默认禁止网络，仅允许声明的项目与运行目录写入。
+安装与更新都必须携带检查结果中的 `expected_digest`：`skill.install` 缺少哈希直接拒绝，`skill.update` 在没有哈希时只返回重新读取到的预览，用户确认该哈希后才写入。每次安装记录 Joi 实际观察到的来源信息（来源类型、解析出的 Git commit 或 ZIP 哈希、内容哈希、检查时间、信任层级），包本身无法影响这些字段，URL 中的凭据在存储前被剥离。`.well-known/joi-skill-signature.json` 的分离签名不计入它所覆盖的哈希，并按发布者信任库校验；无法校验或格式损坏的签名会拒绝安装，而不是当作未签名。声明的依赖只用于展示，Joi 从不安装它们。
+
+ZIP 路径穿越、符号链接、未知脚本和安装后哈希变化会被拒绝。代码型 Skill 默认禁用隐式运行，并且只有非观察会话加显式首次确认才能执行。脚本从不导入 Joi 主进程；macOS 使用独立进程和按 manifest 生成的最小 Seatbelt 配置：默认 `deny default`，只允许 exec 选定的解释器，读取范围限于解释器运行时、Skill 自身文件和 manifest 声明的目录，写入范围只有该次运行的输出目录，网络关闭。`(allow process*)`、`(allow file-read*)`、`(allow mach-lookup)` 等宽泛规则由 `FORBIDDEN_SANDBOX_RULES` 回归测试守住；无法生成最小配置时 `skill.run` 拒绝执行，不会退回非沙箱路径。
 
 成功操作只能生成 Skill 草稿，审核输入、步骤与权限后才可以安装。草稿在设置页"待审阅草稿"面板列出，展示步骤后由用户选择作用域安装或丢弃；未审核的草稿不会安装，也不会运行。
 
