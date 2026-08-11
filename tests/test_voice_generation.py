@@ -115,7 +115,7 @@ class StaleAudioIsDroppedTests(unittest.TestCase):
         bridge.app = self.app
 
         class Tts:
-            def synthesize(inner, text, sprite, emotion):
+            def synthesize(inner, text, sprite, emotion, delivery=None):
                 if synth_hook is not None:
                     synth_hook()
                 return {"voice_audio_path": "/tmp/voice.wav"}
@@ -123,6 +123,26 @@ class StaleAudioIsDroppedTests(unittest.TestCase):
         bridge.tts = Tts()
         bridge._broadcast = self._record  # type: ignore[method-assign]
         bridge._voice_audio_data_url = lambda path: ""  # type: ignore[assignment]
+        return bridge
+
+    def _stream_bridge(self, chunks: list[dict], chunk_hook=None):
+        """The streaming path must apply the same stale-turn policy per chunk."""
+        from agent_companion.core.server import JsonRpcBridge
+
+        bridge = JsonRpcBridge.__new__(JsonRpcBridge)
+        bridge.app = self.app
+
+        class Tts:
+            supports_streaming = True
+
+            def synthesize_stream(inner, text, emotion, delivery=None):
+                for index, chunk in enumerate(chunks):
+                    if chunk_hook is not None:
+                        chunk_hook(index)
+                    yield chunk
+
+        bridge.tts = Tts()
+        bridge._broadcast = self._record  # type: ignore[method-assign]
         return bridge
 
     async def _record(self, message: str) -> None:
@@ -163,6 +183,59 @@ class StaleAudioIsDroppedTests(unittest.TestCase):
         bridge = self._bridge(synth_hook=lambda: self.app.voice_generations.retire("thread-a", "cancelled"))
         asyncio.run(bridge._synthesize_voice(self._event(generation)))
         self.assertEqual(self.broadcast, [])
+
+    def test_streaming_audio_is_forwarded_chunk_by_chunk(self) -> None:
+        generation = self.app.begin_voice_generation()
+        chunks = [
+            {"voice_audio_pcm16_base64": "AQI=", "voice_audio_sequence": 0},
+            {"voice_audio_final": True, "voice_audio_sequence": 1},
+        ]
+        asyncio.run(self._stream_bridge(chunks)._synthesize_voice(self._event(generation)))
+        self.assertEqual(len(self.broadcast), 2)
+        self.assertIn('"voice_audio_sequence": 0', self.broadcast[0])
+        self.assertIn('"voice_audio_final": true', self.broadcast[1])
+
+    def test_streaming_stops_before_a_chunk_from_a_superseded_turn(self) -> None:
+        generation = self.app.begin_voice_generation()
+        chunks = [
+            {"voice_audio_pcm16_base64": "AQI=", "voice_audio_sequence": 0},
+            {"voice_audio_pcm16_base64": "AwQ=", "voice_audio_sequence": 1},
+        ]
+
+        def supersede_after_first(index: int) -> None:
+            if index == 1:
+                self.app.begin_voice_generation()
+
+        bridge = self._stream_bridge(chunks, supersede_after_first)
+        asyncio.run(bridge._synthesize_voice(self._event(generation)))
+        self.assertEqual(len(self.broadcast), 1)
+
+
+class SpeakableEventPolicyTests(unittest.TestCase):
+    def test_progress_and_generic_task_events_never_trigger_tts(self) -> None:
+        from agent_companion.core.server import SPEAKABLE_EVENTS
+
+        for event_type in (
+            EventType.RUNTIME_STARTED,
+            EventType.TOOL_STARTED,
+            EventType.TASK_COMPLETED,
+            EventType.TASK_FAILED,
+        ):
+            with self.subTest(event_type=event_type.value):
+                self.assertNotIn(event_type, SPEAKABLE_EVENTS)
+
+    def test_only_user_relevant_terminal_or_approval_events_can_speak(self) -> None:
+        from agent_companion.core.server import SPEAKABLE_EVENTS
+
+        for event_type in (
+            EventType.APPROVAL_REQUIRED,
+            EventType.RUNTIME_FINAL,
+            EventType.RUNTIME_ERROR,
+            EventType.TOOL_COMPLETED,
+            EventType.TOOL_FAILED,
+        ):
+            with self.subTest(event_type=event_type.value):
+                self.assertIn(event_type, SPEAKABLE_EVENTS)
 
 
 if __name__ == "__main__":

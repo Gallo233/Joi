@@ -418,8 +418,33 @@ export class CoreClient {
     return this.send('character.export', { character_id: characterId, destination }, { timeoutMs: 120000, timeoutMessage: '角色包导出耗时较久，请稍后再试。' })
   }
 
-  characterActivate(characterId: string) {
-    return this.send('character.activate', { character_id: characterId }, { timeoutMs: 60000, timeoutMessage: '角色切换耗时较久，请稍后再试。' })
+  /**
+   * Switch character. Each character keeps its own conversation, so this moves
+   * to that character's thread; pass `inheritConversation` to hand the current
+   * one over instead.
+   */
+  characterActivate(characterId: string, inheritConversation = false) {
+    return this.send(
+      'character.activate',
+      { character_id: characterId, inherit_conversation: inheritConversation },
+      { timeoutMs: 60000, timeoutMessage: '角色切换耗时较久，请稍后再试。' },
+    )
+  }
+
+  /**
+   * Switch the character's selected voice/localized persona language.
+   *
+   * Its persona, greeting and the description its voice is generated from all
+   * change together, so this reloads the character the same way activating one
+   * does -- and retires any line still being spoken in the old language. The
+   * display reply remains bound to the current user message's language.
+   */
+  characterSetLocale(characterId: string, locale: string) {
+    return this.send(
+      'character.set_locale',
+      { character_id: characterId, locale },
+      { timeoutMs: 60000, timeoutMessage: '语言切换耗时较久，请稍后再试。' },
+    )
   }
 
   characterDuplicate(characterId: string, name = '') {

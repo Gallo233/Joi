@@ -27,6 +27,14 @@ export interface VoiceLine {
   text: string
   emotion?: string
   sprite?: string
+  delivery?: {
+    intensity?: number
+    pace?: 'slow' | 'measured' | 'steady' | 'quick' | string
+    energy?: 'soft' | 'balanced' | 'bright' | 'firm' | string
+    pause?: 'light' | 'natural' | 'reflective' | 'deliberate' | 'short' | 'gentle' | string
+    emphasis?: 'light' | 'warm' | 'keywords' | 'urgent' | 'caring' | string
+    relation?: 'close' | 'supportive' | 'professional' | 'protective' | string
+  }
 }
 
 export interface ComputerUseAuditArtifact {
@@ -207,7 +215,13 @@ export interface VoiceAudioPayload {
   voice_audio_path?: string
   voice_audio_rel?: string
   voice_audio_data_url?: string
+  voice_audio_pcm16_base64?: string
+  voice_audio_sample_rate?: number
+  voice_audio_sequence?: number
+  voice_audio_final?: boolean
   voice_audio_error?: string
+  voice_audio_ttfb_ms?: number
+  voice_audio_total_ms?: number
 }
 
 export interface ArtifactReadResult {
@@ -662,6 +676,10 @@ export interface CharacterSummary {
   license?: string
   greeting?: string
   tone?: string
+  /** Language this character currently speaks; its persona and voice follow it. */
+  locale?: string
+  /** Every language it can speak, its own first. */
+  available_locales?: string[]
   creator?: { name?: string; notes?: string }
   requested_skills?: string[]
   package_hash?: string
@@ -716,6 +734,13 @@ export interface CharacterManifest {
     reference_audio?: string
     prompt_text?: string
     emotion_map?: Record<string, unknown>
+    /** Natural-language description of the voice, for synthesisers that build one from words. */
+    design?: string
+    /** Fine-tuned GPT-SoVITS weights, package-relative. Zero-shot needs neither. */
+    gpt_model?: string
+    sovits_model?: string
+    /** What she says while performing each motion, in this locale. */
+    motion_lines?: Record<string, string>
   }
   knowledge?: {
     lorebook?: { name?: string; description?: string; entries?: Array<Record<string, unknown>> }
@@ -802,8 +827,14 @@ export interface CharacterRuntime extends CharacterSummary {
     duration_ms?: number
     loop?: boolean
     intensity?: number
+    /** Asset URL of an authored `.vrma` clip for this motion, when shipped. */
+    animation_url?: string
   }>
   lip_sync?: { parameter?: string }
+  /** Language this character is currently speaking. */
+  locale?: string
+  /** Every language it could speak, its own first. Sent so a picker needs no second call. */
+  available_locales?: string[]
   sprites?: Array<{
     id: string
     label?: string
@@ -836,9 +867,15 @@ export interface CoreReadyPayload {
     enabled?: boolean
     configured?: boolean
     provider?: string
+    model?: string
+    streaming?: boolean
+    timeout_seconds?: number
+    last_ttfb_ms?: number
+    last_total_ms?: number
     volume?: number
     speed_factor?: number
-    fallback_to_system?: boolean
+    /** Always false: Joi never substitutes an OS announcer for a character. */
+    system_fallback?: false
     last_error?: string
   }
   runtime?: {
@@ -875,7 +912,14 @@ export interface CoreReadyPayload {
       enabled?: boolean
       volume?: number
       speed_factor?: number
-      fallback_to_system?: boolean
+      gpt_sovits_streaming_mode?: number
+      /** Which voice service, and what to ask it for. */
+      provider?: string
+      model?: string
+      voice?: string
+      base_url?: string
+      timeout_seconds?: number
+      optimize_text?: boolean
     }
     ocr?: {
       timeout_seconds?: number
@@ -883,6 +927,8 @@ export interface CoreReadyPayload {
     llm?: {
       temperature?: number
       use_mock?: boolean
+      provider?: string
+      model?: string
     }
     computer_use?: {
       post_action_settle_ms?: number

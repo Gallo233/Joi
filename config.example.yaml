@@ -26,10 +26,37 @@ tts:
   provider: gpt-sovits
   server_url: http://127.0.0.1:9880/
   gpt_sovits_work_path: ""
+  # Which Python runs GPT-SoVITS. Leave empty on Windows, whose bundle ships
+  # its own; on macOS and Linux, leave empty if the install has a virtualenv
+  # inside it (.venv/, venv/, runtime/), and otherwise point at the
+  # interpreter of the environment you installed GPT-SoVITS into. Joi's own
+  # Python cannot run it. Leaving this unset is also fine if you start
+  # api_v2.py yourself -- Joi uses a server that is already running.
+  gpt_sovits_python: ""
+  # Official api_v2 streaming mode: 2 balances quality and first-audio speed;
+  # 3 is faster but lower quality and should be chosen only after listening.
+  gpt_sovits_streaming_mode: 2
+  # Fix the seed and narrow sampling only after intelligibility testing for
+  # the installed voice. -1 preserves the provider's random default.
+  gpt_sovits_seed: -1
+  gpt_sovits_top_k: 15
+  gpt_sovits_top_p: 1.0
+  gpt_sovits_temperature: 1.0
+  gpt_sovits_repetition_penalty: 1.35
   text_lang: zh
   prompt_lang: zh
   speed_factor: 1.2
-  fallback_to_system: false
+  # A hosted /v1/audio/speech endpoint, used when provider is
+  # `openai_compatible`. This is the quick way to exercise the whole voice
+  # path -- barge-in, lip sync, emotion -- before installing GPT-SoVITS, but
+  # it sends every spoken line to that provider. Put api_key in secrets.yaml
+  # rather than here. Works with OpenAI, 硅基流动, Fish Audio and most proxies.
+  base_url: ""
+  api_key: ""
+  model: ""
+  voice: ""
+  audio_format: wav
+  timeout_seconds: 60
 
 asr:
   enabled: false

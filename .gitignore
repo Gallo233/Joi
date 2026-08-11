@@ -40,3 +40,7 @@ agent_companion/shell/src-tauri/binaries/joi-core-*
 # against anything else. The procedure that regenerates them is tracked; the
 # captures are not.
 agent_companion/shell/tests/baseline/*.digest.txt
+
+# Config backups. `config.yaml` is ignored because it holds real credentials;
+# a copy of it with a suffix holds the same credentials.
+config.yaml.bak-*

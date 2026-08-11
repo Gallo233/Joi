@@ -13,6 +13,15 @@ from typing import Any, Callable
 
 from agent_companion.core.codex_events import sanitized_codex_text
 from agent_companion.core.codex_support import codex_executable, permission_fingerprint
+from agent_companion.core.config import load_workspace_config
+from agent_companion.core.language_policy import (
+    display_language_policy,
+    language_mismatch_fallback,
+    obvious_language_mismatch,
+    reply_language_instruction,
+)
+from agent_companion.core.model_call import CallBudget
+from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.schemas import AgentEvent, DisplayCard, EventType
 from agent_companion.core.voice import safe_voice_line
 
@@ -217,13 +226,19 @@ class CodexRuntimeSession:
                 return {"ok": False, "submitted": True, "pending_approval": True}
             final_text = _safe_joi_text(_read_text(final_path), "我处理完了。")
             if returncode == 0:
+                final_text, language_repaired, display_language = self._ensure_display_language(user_text, final_text)
                 self.emit(
                     AgentEvent(
                         EventType.RUNTIME_FINAL,
                         task_id,
                         DisplayCard("Joi", final_text, status="success"),
                         safe_voice_line(_voice_summary(final_text), sprite="5"),
-                        {"runtime_event": "runtime_final", "ok": True},
+                        {
+                            "runtime_event": "runtime_final",
+                            "ok": True,
+                            "display_language": display_language,
+                            "display_language_repaired": language_repaired,
+                        },
                     )
                 )
                 self._record_memory_candidate(task_id, user_text, final_text)
@@ -246,6 +261,47 @@ class CodexRuntimeSession:
 
     def has_pending_for_task(self, task_id: str) -> bool:
         return any(row.task_id == task_id for row in self._pending.values())
+
+    def _ensure_display_language(self, user_text: str, final_text: str) -> tuple[str, bool, str]:
+        """Fail closed when Codex lets the localized persona choose display text."""
+
+        policy = display_language_policy(user_text)
+        if not obvious_language_mismatch(user_text, final_text):
+            return final_text, False, policy.code
+        config = load_workspace_config(self.workspace)
+        if config is not None and config.llm.is_configured:
+            system_prompt = (
+                "你只修复最终屏幕回复的语言，不回答新问题。"
+                f"把 reply 改写为用户本轮输入所用的同一种自然语言（提示：{policy.label}），"
+                "保持原意、事实边界和角色语气，不添加完成状态或新信息。"
+                "角色的配音语言与这里无关。只输出 JSON：{\"reply\":\"修复后的屏幕回复\"}。"
+            )
+            repair_input = json.dumps(
+                {"user_message": user_text, "reply": final_text},
+                ensure_ascii=False,
+            )
+            try:
+                outcome = chat_completion(
+                    config.llm,
+                    "fast",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": repair_input},
+                    ],
+                    budget=CallBudget(timeout_ms=8_000, max_fallbacks=0, allow_categories=("text",)),
+                    temperature=0.2,
+                    response_format={"type": "json_object"},
+                    instructions=system_prompt,
+                    user_input=repair_input,
+                )
+                payload = json.loads(str(outcome.value or "{}")) if outcome.ok else {}
+                repaired = str(payload.get("reply") or "").strip() if isinstance(payload, dict) else ""
+                if repaired and not obvious_language_mismatch(user_text, repaired):
+                    return _safe_joi_text(repaired, final_text), True, policy.code
+            except Exception:
+                pass
+        fallback = language_mismatch_fallback(policy)
+        return (fallback or final_text), bool(fallback), policy.code
 
     def _run_process(
         self,
@@ -369,6 +425,7 @@ class CodexRuntimeSession:
             return user_text
         sections = [
             "你是 Joi 的主执行内核，但用户只应感知到 Joi 这个角色。",
+            reply_language_instruction(user_text),
             "不要把自己描述成 Codex，也不要把普通请求说成写代码任务。",
             "Joi 桌面壳负责显示、语音、设置、记忆和陪看状态；你负责理解用户目标并持续推进。",
             "最终回复先给结果，默认控制在 2 至 5 个短句；只有确实需要时才列出不超过 4 项。不要重复用户请求，也不要逐条复述内部执行日志。",
@@ -398,6 +455,11 @@ class CodexRuntimeSession:
         if background.get("active") or background.get("recent_context"):
             sections.append("Joi 当前状态：\n" + _compact_json(background, 1600))
         sections.append("用户请求：\n" + user_text)
+        # Repeat after the localized persona and memory: those may legitimately
+        # be Japanese while a Chinese user message still requires Chinese
+        # display text.  The selected voice language is handled later by the
+        # expression/TTS channel and never changes this final answer contract.
+        sections.append("最终显示回复语言（最高优先级）：\n" + reply_language_instruction(user_text))
         return "\n\n".join(sections)
 
     def _record_memory_candidate(self, task_id: str, user_text: str, final_text: str) -> None:

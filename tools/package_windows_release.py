@@ -65,7 +65,7 @@ TOOLS_FILES = [
     "tools/windows_setup_wizard.py",
 ]
 RELEASE_EXE = "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
-RELEASE_SIDECAR = "agent_companion/shell/src-tauri/target/release/joi-core.exe"
+RELEASE_CORE_RUNTIME = "agent_companion/shell/src-tauri/target/release/joi-core-runtime"
 FORBIDDEN_NAMES = {"config.yaml", "secrets.yaml", ".env"}
 FORBIDDEN_SUFFIXES = (".local.yaml", ".pyc", ".log")
 FORBIDDEN_PARTS = {".git", ".venv", "__pycache__", "data", "dist", "logs", "node_modules", "gen", "target"}
@@ -106,13 +106,13 @@ def build_windows_release_package(
     for relative in ROOT_DIRS + SHELL_DIRS:
         _add_tree(root, relative, entries, errors)
     release_exe = root / RELEASE_EXE
-    release_sidecar = _release_sidecar_source(root)
+    release_runtime = _release_runtime_source(root)
     if release_exe.is_file():
         _append_entry(root, release_exe, entries, errors, allow_release_exe=True)
     elif require_exe:
         errors.append("release_exe_missing")
-    if release_sidecar.is_file():
-        entries.append((release_sidecar, RELEASE_SIDECAR))
+    if _runtime_is_complete(release_runtime):
+        _add_runtime_tree(root, release_runtime, entries, errors)
     elif require_exe:
         errors.append("release_sidecar_missing")
 
@@ -132,7 +132,7 @@ def build_windows_release_package(
         "package_root": package_root,
         "entry_count": len(deduped) + 1,
         "includes_release_exe": release_exe.is_file(),
-        "includes_core_sidecar": release_sidecar.is_file(),
+        "includes_core_sidecar": _runtime_is_complete(release_runtime),
         "forbidden_hits": forbidden_hits,
     }
     if not errors and not dry_run:
@@ -184,7 +184,7 @@ def build_release_privacy_report() -> dict[str, Any]:
         "forbidden_suffixes": list(FORBIDDEN_SUFFIXES),
         "forbidden_parts": sorted(FORBIDDEN_PARTS),
         "release_exe_exception": RELEASE_EXE,
-        "release_sidecar_exception": RELEASE_SIDECAR,
+        "release_sidecar_exception": RELEASE_CORE_RUNTIME,
     }
 
 
@@ -242,12 +242,43 @@ def _add_file(root: Path, relative: str, entries: list[tuple[Path, str]], errors
     _append_entry(root, path, entries, errors)
 
 
-def _release_sidecar_source(root: Path) -> Path:
-    bundled = root / RELEASE_SIDECAR
-    if bundled.is_file():
+def _release_runtime_source(root: Path) -> Path:
+    bundled = root / RELEASE_CORE_RUNTIME
+    if _runtime_is_complete(bundled):
         return bundled
-    candidates = sorted((root / "agent_companion" / "shell" / "src-tauri" / "binaries").glob("joi-core-*.exe"))
-    return candidates[0] if len(candidates) == 1 else bundled
+    return (
+        root
+        / "agent_companion"
+        / "shell"
+        / "src-tauri"
+        / "binaries"
+        / "joi-core-runtime"
+    )
+
+
+def _runtime_is_complete(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and (path / "joi-core.exe").is_file()
+        and (path / "_internal").is_dir()
+    )
+
+
+def _add_runtime_tree(
+    root: Path,
+    source: Path,
+    entries: list[tuple[Path, str]],
+    errors: list[str],
+) -> None:
+    try:
+        source.resolve().relative_to(root)
+    except ValueError:
+        errors.append("path_outside_workspace")
+        return
+    for child in source.rglob("*"):
+        if child.is_file():
+            relative = child.relative_to(source).as_posix()
+            entries.append((child, f"{RELEASE_CORE_RUNTIME}/{relative}"))
 
 
 def _add_tree(root: Path, relative: str, entries: list[tuple[Path, str]], errors: list[str]) -> None:
@@ -287,7 +318,7 @@ def _is_forbidden(relative: str) -> bool:
 def _forbidden_hits(entries: list[str]) -> list[str]:
     hits: list[str] = []
     for entry in entries:
-        if entry in {RELEASE_EXE, RELEASE_SIDECAR}:
+        if entry == RELEASE_EXE or entry.startswith(f"{RELEASE_CORE_RUNTIME}/"):
             continue
         if _is_forbidden(entry):
             hits.append(entry)

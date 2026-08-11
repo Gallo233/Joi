@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from agent_companion.core.skill_manifest import skill_id_for_tool
+
 
 # The only expressions the runtime emits, matching expression.py's vocabulary.
 EMOTIONS = ("neutral", "happy", "thinking", "alert", "worried", "serious")
@@ -50,6 +52,10 @@ _CONDITION_EMOTION = {
 
 # Phases where speaking is either pointless or actively unwanted.
 _SILENT_CONDITIONS = frozenset({"idle"})
+
+# Talking has no external effect to misreport, so a reply may carry any tone
+# the character knows how to wear.
+CONVERSATION_EMOTIONS: tuple[str, ...] = ("neutral", "happy", "thinking", "alert", "worried", "serious")
 
 
 @dataclass(frozen=True)
@@ -126,6 +132,7 @@ def resolve_expression(
     permission_missing: bool = False,
     taken_over: bool = False,
     verified: bool = True,
+    conversational: bool = False,
 ) -> ExpressionIntent:
     """Map real state onto an expression, and say how much the model may vary it."""
     condition = resolve_condition(
@@ -136,6 +143,22 @@ def resolve_expression(
         taken_over=taken_over,
         verified=verified,
     )
+    if condition == "done" and conversational:
+        # A reply is not a task result. The reason a finished task may only
+        # look happy or neutral is that the character must not celebrate work
+        # it cannot show it did -- but a conversation makes no such claim, so
+        # there is nothing to guard and the tone should follow what was said.
+        # Answering "that sounds hard" with a beaming smile is the bug.
+        #
+        # The risk conditions above still win: this only relaxes success.
+        return ExpressionIntent(
+            emotion="neutral",
+            condition="conversation",
+            may_speak=True,
+            allowed_emotions=CONVERSATION_EMOTIONS,
+            locked=False,
+            reason="conversation_turn",
+        )
     if condition == "done":
         return ExpressionIntent(
             emotion="happy",
@@ -193,6 +216,10 @@ def expression_state_from_event(state: dict[str, Any] | None, session: dict[str,
         "permission_missing": bool(state.get("permission_required") or state.get("permission_missing")),
         "taken_over": str(session.get("pause_reason") or "") == "taken_over",
         "verified": _is_verified(state, verification),
+        # Which tool produced the event decides whether this was a turn of
+        # conversation or a piece of work, and the registration contract
+        # already records that -- no second table of tool names here.
+        "conversational": skill_id_for_tool(str(state.get("tool") or "")) == "joi.companion.chat",
     }
 
 

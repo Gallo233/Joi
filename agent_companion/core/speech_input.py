@@ -96,6 +96,127 @@ class OpenAICompatibleAsrProvider:
             return AsrResult("", 0.0, "openai_compatible", "asr_failed")
 
 
+MIMO_ASR_BASE_URL = "https://api.xiaomimimo.com/v1"
+MIMO_ASR_MODEL = "mimo-v2.5-asr"
+# MiMo reads the audio out of a chat turn, and the whole clip travels base64 in
+# the request body. 10 MB is the documented ceiling for the encoded form.
+MIMO_MAX_ENCODED_BYTES = 10 * 1024 * 1024
+# The only two containers it documents. The shell records WAV for exactly this
+# reason -- a webm or mp4 blob is refused, and refused after upload.
+MIMO_AUDIO_TYPES = {
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+}
+
+
+class MimoAsrProvider:
+    """Transcription through MiMo, which shapes it as a chat completion.
+
+    The audio is a content part inside a user turn rather than an uploaded
+    file, so this cannot reuse the OpenAI-compatible transcription client even
+    though both speak to an OpenAI-shaped endpoint.
+    """
+
+    def __init__(self, config: AsrConfig) -> None:
+        self.config = config
+
+    def transcribe(self, audio: bytes, mime_type: str = "") -> AsrResult:
+        import base64
+        import json
+        import urllib.error
+        import urllib.request
+
+        if not audio:
+            return AsrResult("", 0.0, "mimo", "empty_audio")
+        container = MIMO_AUDIO_TYPES.get((mime_type or "").split(";", 1)[0].strip().casefold())
+        if not container:
+            # Named distinctly from a generic failure: the recording is fine,
+            # it is simply in a container this service will not read, and the
+            # fix is in how it was captured rather than in the network.
+            return AsrResult("", 0.0, "mimo", "audio_format_unsupported")
+        encoded = base64.b64encode(audio).decode("ascii")
+        if len(encoded) > MIMO_MAX_ENCODED_BYTES:
+            return AsrResult("", 0.0, "mimo", "audio_too_large")
+
+        language = _mimo_language(self.config.language)
+        payload = {
+            "model": (self.config.model or MIMO_ASR_MODEL).strip(),
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": f"data:{'audio/wav' if container == 'wav' else 'audio/mpeg'};base64,{encoded}"},
+                        }
+                    ],
+                }
+            ],
+            "asr_options": {"language": language},
+            "stream": False,
+        }
+        base_url = (self.config.base_url or MIMO_ASR_BASE_URL).strip().rstrip("/")
+        request = urllib.request.Request(
+            f"{base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"api-key": self.config.api_key.strip(), "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=max(1, self.config.timeout_seconds)) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return AsrResult("", 0.0, "mimo", _mimo_http_error(exc.code))
+        except Exception as exc:
+            if "timeout" in type(exc).__name__.casefold():
+                return AsrResult("", 0.0, "mimo", "asr_timeout")
+            return AsrResult("", 0.0, "mimo", "asr_failed")
+        try:
+            transcript = str(body["choices"][0]["message"]["content"] or "").strip()
+        except (KeyError, IndexError, TypeError):
+            # A 200 carrying no transcript is a real outcome -- silence, or a
+            # refusal -- and must not surface as a crash.
+            return AsrResult("", 0.0, "mimo", "empty_transcript")
+        if not transcript:
+            return AsrResult("", 0.0, "mimo", "empty_transcript")
+        return AsrResult(transcript, 0.0, "mimo")
+
+
+def _mimo_language(configured: str) -> str:
+    """The nearest language this recogniser will accept.
+
+    It takes only `zh`, `en` and `auto`, and answers 400 to anything else --
+    so a character configured for Japanese would fail every request rather
+    than transcribe badly. `auto` is the honest fallback: it is what the
+    service offers for everything it does not name.
+
+    It is not a substitute for support. Japanese audio comes back through
+    `auto` as approximate Chinese, so voice input for a Japanese-speaking
+    character is not usable on this provider -- that is a property of MiMo,
+    not something this mapping can fix.
+    """
+
+    text = (configured or "").strip().casefold().replace("_", "-").split("-")[0]
+    if text in {"zh", "en"}:
+        return text
+    return "auto"
+
+
+def _mimo_http_error(status: int) -> str:
+    if status in (401, 403):
+        return "asr_auth_failed"
+    # The account, not the request: worth its own code because topping up is
+    # the only fix and no amount of retrying helps.
+    if status == 402:
+        return "asr_insufficient_balance"
+    if status == 429:
+        return "asr_rate_limited"
+    return "asr_failed"
+
+
 def build_asr_provider(workspace: Path, *, allow_mock: bool = False) -> tuple[SpeechInputProvider, AsrRuntimeState]:
     config_path = workspace / "config.yaml"
     if not config_path.is_file():
@@ -132,6 +253,8 @@ def build_asr_provider(workspace: Path, *, allow_mock: bool = False) -> tuple[Sp
         )
     if provider in {"openai_compatible", "openai"} and asr.is_configured:
         return OpenAICompatibleAsrProvider(asr), state
+    if provider in {"mimo", "xiaomi_mimo"} and asr.is_configured:
+        return MimoAsrProvider(asr), state
     return UnavailableAsrProvider("asr_unconfigured"), state
 
 

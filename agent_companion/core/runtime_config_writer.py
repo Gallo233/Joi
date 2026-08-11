@@ -66,7 +66,24 @@ _ALLOWED_FIELDS: dict[tuple[str, str], _FieldSpec] = {
     ("tts", "text_lang"): _FieldSpec("TTS text language", "tts_text_lang", "language", lambda value: _validate_language(value)),
     ("tts", "prompt_lang"): _FieldSpec("TTS prompt language", "tts_prompt_lang", "language", lambda value: _validate_language(value)),
     ("tts", "speed_factor"): _FieldSpec("TTS speed", "tts_speed", "number", lambda value: _validate_float_range(value, 0.5, 2.0)),
+    ("tts", "gpt_sovits_streaming_mode"): _FieldSpec("GPT-SoVITS streaming quality", "tts_local_streaming_mode", "integer", lambda value: _validate_int_range(value, 1, 3)),
+    # Writable again. Keeping the system voice from ever speaking is the job of
+    # this being `false`, not of the field being unreachable: making it
+    # unwritable left the checkbox in the settings panel unable to do anything,
+    # and silently broke four separate contract assertions that say a user can
+    # set it.
     ("tts", "fallback_to_system"): _FieldSpec("TTS system fallback", "tts_system_fallback", "boolean", lambda value: _validate_bool(value)),
+    # A hosted voice needs the same three answers a hosted text model does --
+    # where, which model, and which voice -- and without them the panel could
+    # switch the provider to one it had no way to finish configuring.
+    ("tts", "base_url"): _FieldSpec("TTS endpoint", "tts_endpoint", "endpoint", lambda value: _validate_endpoint(value)),
+    ("tts", "model"): _FieldSpec("TTS model", "tts_model", "model", lambda value: _validate_model(value)),
+    # Preset voice names are the provider's own words, and some are Chinese
+    # ("冰糖"), so this is validated as a model name rather than an identifier.
+    ("tts", "voice"): _FieldSpec("TTS voice", "tts_voice", "model", lambda value: _validate_model(value)),
+    ("tts", "audio_format"): _FieldSpec("TTS audio format", "tts_audio_format", "identifier", lambda value: _validate_identifier(value)),
+    ("tts", "optimize_text"): _FieldSpec("TTS text rewriting", "tts_optimize_text", "boolean", lambda value: _validate_bool(value)),
+    ("tts", "timeout_seconds"): _FieldSpec("TTS timeout", "tts_timeout", "seconds", lambda value: _validate_int_range(value, 1, 600)),
     ("ocr", "timeout_seconds"): _FieldSpec("OCR timeout", "ocr_timeout", "seconds", lambda value: _validate_int_range(value, 1, 120)),
     ("computer_use", "post_action_settle_ms"): _FieldSpec("Computer Use settle delay", "computer_settle_delay", "milliseconds", lambda value: _validate_int_range(value, 0, 10_000)),
     ("llm", "provider"): _FieldSpec("Text provider", "llm_provider", "identifier", lambda value: _validate_identifier(value)),

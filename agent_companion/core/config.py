@@ -72,6 +72,25 @@ class SpriteConfig:
 
 
 @dataclass(frozen=True)
+class VoiceEmotionConfig:
+    """How the character sounds in one mood, over its normal speaking voice.
+
+    Every field is optional and falls back to the base voice. A package that
+    supplies only a reference clip still gets its own timbre for that mood;
+    one that supplies only a pitch still gets a differently delivered line
+    from a voice that cannot change timbre at all.
+    """
+
+    refer_audio_path: str = ""
+    prompt_text: str = ""
+    speech_speed: float | None = None
+    # -1 lowest, 1 highest, relative to the voice's normal pitch.
+    pitch: float | None = None
+    # How to read the line, in words, for a hosted model that takes direction.
+    instructions: str = ""
+
+
+@dataclass(frozen=True)
 class VoiceProfileConfig:
     id: str
     label: str
@@ -83,6 +102,10 @@ class VoiceProfileConfig:
     prompt_text: str = ""
     speech_speed: float | None = None
     speech_volume: float | None = None
+    emotion_map: dict[str, VoiceEmotionConfig] = field(default_factory=dict)
+    # A sentence describing how this character sounds, for a synthesiser that
+    # builds a voice from a description rather than from a recording.
+    design: str = ""
 
 
 @dataclass(frozen=True)
@@ -101,6 +124,38 @@ class CharacterConfig:
     active_voice_profile: str = ""
     voice_profiles: list[VoiceProfileConfig] = field(default_factory=list)
     sprites: list[SpriteConfig] = field(default_factory=list)
+    # What the character says while performing each semantic motion. Empty
+    # falls back to Joi's shared table, which is a default mascot's voice
+    # rather than this character's.
+    motion_lines: dict[str, str] = field(default_factory=dict)
+    # The same lines in every language the package wrote them in, so the reply
+    # can follow the language of the user's message. Which language she
+    # *speaks* is a separate setting and does not decide this.
+    motion_lines_by_locale: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def motion_line(self, motion: str, reply_language: str = "") -> str:
+        """Her line for a motion, in the language the user just wrote in.
+
+        Falls back to her active locale, then to any language she does have it
+        in, and finally to nothing so the caller can use the shared table. A
+        line in the wrong language is worse than a generic one in the right
+        language: the first reads as the app malfunctioning, the second merely
+        as the character being brief.
+        """
+
+        wanted = str(reply_language or "").strip().casefold().split("-")[0]
+        tables = self.motion_lines_by_locale or {}
+        if not wanted:
+            return str(self.motion_lines.get(motion) or "").strip()
+        for locale in (wanted, *[key for key in tables if key.split("-")[0] == wanted]):
+            line = str((tables.get(locale) or {}).get(motion) or "").strip()
+            if line:
+                return line
+        # No line in the user's language. Deliberately *not* falling back to
+        # the language she is voiced in -- that is precisely the coupling this
+        # exists to break, and it is what made a Chinese "跳个舞" answer in
+        # Japanese. The caller's shared table is the neutral answer.
+        return ""
 
     @property
     def active_voice(self) -> VoiceProfileConfig | None:
@@ -145,6 +200,24 @@ class CharacterConfig:
         profile = self.active_voice
         value = profile.speech_volume if profile and profile.speech_volume is not None else self.speech_volume
         return float(value or fallback)
+
+    def voice_design(self) -> str:
+        profile = self.active_voice
+        return profile.design if profile and profile.design else ""
+
+    def voice_emotion(self, emotion: str) -> VoiceEmotionConfig | None:
+        """What this character declared for one mood, or nothing.
+
+        Nothing is the ordinary answer: a package that never wrote an
+        `emotion_map` speaks every line in its base voice, exactly as before.
+        """
+
+        from agent_companion.core.voice import normalize_emotion
+
+        profile = self.active_voice
+        if not profile or not profile.emotion_map:
+            return None
+        return profile.emotion_map.get(normalize_emotion(emotion))
 
 
 @dataclass(frozen=True)
@@ -305,10 +378,51 @@ class TtsConfig:
     volume: float = 0.85
     server_url: str = "http://127.0.0.1:9880/"
     gpt_sovits_work_path: str = ""
+    # Which Python runs GPT-SoVITS. The Windows bundle ships its own and needs
+    # no answer here; a macOS or Linux install is whatever environment the user
+    # built it in, and Joi's own interpreter is not it.
+    gpt_sovits_python: str = ""
+    # Official API v2: 2 balances quality/latency; 3 is faster but rougher.
+    # Joi never selects 3 implicitly because that changes the character voice.
+    gpt_sovits_streaming_mode: int = 2
+    # Sampling is explicit so a character does not pronounce the same line
+    # differently after every restart. -1 retains GPT-SoVITS' random default.
+    gpt_sovits_seed: int = -1
+    gpt_sovits_top_k: int = 15
+    gpt_sovits_top_p: float = 1.0
+    gpt_sovits_temperature: float = 1.0
+    gpt_sovits_repetition_penalty: float = 1.35
     text_lang: str = "zh"
     prompt_lang: str = "zh"
     speed_factor: float = 1.2
+    # Deprecated compatibility field. The bridge intentionally ignores it:
+    # Joi never substitutes an operating-system announcer for a character.
     fallback_to_system: bool = False
+    # A hosted `/v1/audio/speech` endpoint, for exercising the voice path
+    # before GPT-SoVITS exists. Lines spoken this way leave the machine.
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    voice: str = ""
+    audio_format: str = "wav"
+    timeout_seconds: int = 60
+    # MiMo can rewrite a line before reading it -- punctuation and numbers,
+    # but measurably more than that. Joi decides what the character says, so
+    # this is off unless the user turns it on.
+    optimize_text: bool = False
+
+    @property
+    def is_cloud_configured(self) -> bool:
+        key = self.api_key.strip()
+        return bool(
+            self.base_url.strip()
+            and self.model.strip()
+            and key
+            # An unexpanded `${VAR}` or `%VAR%` is a placeholder the user never
+            # filled in, not a key.
+            and not key.startswith("${")
+            and not key.startswith("%")
+        )
 
 
 @dataclass(frozen=True)
@@ -436,10 +550,26 @@ def load_app_config(path: Path) -> AppConfig:
             volume=float(tts_raw.get("volume", 0.85)),
             server_url=str(tts_raw.get("server_url", "http://127.0.0.1:9880/")),
             gpt_sovits_work_path=str(tts_raw.get("gpt_sovits_work_path", "")),
+            gpt_sovits_python=str(tts_raw.get("gpt_sovits_python", "") or ""),
+            gpt_sovits_streaming_mode=max(1, min(3, int(tts_raw.get("gpt_sovits_streaming_mode", 2) or 2))),
+            gpt_sovits_seed=max(-1, min(2**32 - 1, int(tts_raw.get("gpt_sovits_seed", -1)))),
+            gpt_sovits_top_k=max(1, min(100, int(tts_raw.get("gpt_sovits_top_k", 15) or 15))),
+            gpt_sovits_top_p=max(0.05, min(1.0, float(tts_raw.get("gpt_sovits_top_p", 1.0) or 1.0))),
+            gpt_sovits_temperature=max(0.1, min(2.0, float(tts_raw.get("gpt_sovits_temperature", 1.0) or 1.0))),
+            gpt_sovits_repetition_penalty=max(
+                0.5, min(2.0, float(tts_raw.get("gpt_sovits_repetition_penalty", 1.35) or 1.35))
+            ),
             text_lang=str(tts_raw.get("text_lang", "zh") or "zh"),
             prompt_lang=str(tts_raw.get("prompt_lang", "zh") or "zh"),
             speed_factor=float(tts_raw.get("speed_factor", 1.2)),
             fallback_to_system=bool(tts_raw.get("fallback_to_system", False)),
+            base_url=str(tts_raw.get("base_url", "") or ""),
+            api_key=str(tts_raw.get("api_key", "") or ""),
+            model=str(tts_raw.get("model", "") or ""),
+            voice=str(tts_raw.get("voice", "") or ""),
+            audio_format=str(tts_raw.get("audio_format", "wav") or "wav"),
+            timeout_seconds=int(tts_raw.get("timeout_seconds", 60) or 60),
+            optimize_text=bool(tts_raw.get("optimize_text", False)),
         ),
         asr=AsrConfig(
             enabled=bool(asr_raw.get("enabled", False)),
@@ -533,6 +663,32 @@ def _parse_model_routes(llm_raw: dict[str, Any]) -> dict[str, ModelRouteConfig]:
     return routes
 
 
+def _parse_emotion_map(value: Any) -> dict[str, VoiceEmotionConfig]:
+    if not isinstance(value, dict):
+        return {}
+    rows: dict[str, VoiceEmotionConfig] = {}
+    for emotion, entry in value.items():
+        if not isinstance(entry, dict):
+            continue
+        rows[str(emotion)] = VoiceEmotionConfig(
+            refer_audio_path=str(entry.get("refer_audio_path", "") or ""),
+            prompt_text=str(entry.get("prompt_text", "") or ""),
+            speech_speed=_optional_number(entry.get("speech_speed")),
+            pitch=_optional_number(entry.get("pitch")),
+            instructions=str(entry.get("instructions", "") or ""),
+        )
+    return rows
+
+
+def _optional_number(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_character(row: dict[str, Any]) -> CharacterConfig:
     voice_profiles = [
         VoiceProfileConfig(
@@ -546,6 +702,8 @@ def _parse_character(row: dict[str, Any]) -> CharacterConfig:
             prompt_text=str(profile.get("prompt_text", "") or ""),
             speech_speed=float(profile["speech_speed"]) if profile.get("speech_speed") is not None else None,
             speech_volume=float(profile["speech_volume"]) if profile.get("speech_volume") is not None else None,
+            emotion_map=_parse_emotion_map(profile.get("emotion_map")),
+            design=str(profile.get("design", "") or ""),
         )
         for index, profile in enumerate(row.get("voice_profiles") or [])
         if isinstance(profile, dict)
@@ -576,6 +734,16 @@ def _parse_character(row: dict[str, Any]) -> CharacterConfig:
         active_voice_profile=str(row.get("active_voice_profile", "") or ""),
         voice_profiles=voice_profiles,
         sprites=sprites,
+        motion_lines={
+            str(motion): str(line)
+            for motion, line in (row.get("motion_lines") or {}).items()
+            if isinstance(row.get("motion_lines"), dict) and str(line or "").strip()
+        },
+        motion_lines_by_locale={
+            str(locale): {str(motion): str(line) for motion, line in (lines or {}).items() if str(line or "").strip()}
+            for locale, lines in (row.get("motion_lines_by_locale") or {}).items()
+            if isinstance(lines, dict)
+        },
     )
 
 

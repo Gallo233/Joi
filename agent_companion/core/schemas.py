@@ -44,6 +44,11 @@ class VoiceLine:
     text: str
     emotion: str = "neutral"
     sprite: str = "1"
+    # A bounded performance plan for TTS.  This is deliberately separate from
+    # display text and contains no free-form model prompt: providers receive a
+    # deterministic projection of these values plus the character package's
+    # authored direction.
+    delivery: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

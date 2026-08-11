@@ -50,7 +50,7 @@ def build_tool_registry(
     registry = ToolRegistry()
     post_action_settle_ms = config.computer_use.post_action_settle_ms if config else 200
     registry.register(CompanionChatTool(workspace))
-    registry.register(CharacterPerformTool())
+    registry.register(CharacterPerformTool(config.primary_character if config and config.characters else None))
     registry.register(AgentCliRunTool(workspace))
     registry.register(CodexTool(workspace))
     registry.register(BrowserTool(workspace, "browser.search"))

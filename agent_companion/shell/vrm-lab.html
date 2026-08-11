@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>Character lab</title>
+    <script src="/vendor/live2d/live2dcubismcore.min.js"></script>
+    <style>
+      body { margin: 0; background: #eef2f8; font: 13px/1.5 -apple-system, sans-serif; }
+      .row { display: flex; gap: 10px; padding: 10px; }
+      .cell { flex: 1; min-width: 0; }
+      .cell h2 { margin: 0 0 5px; font-size: 12px; font-weight: 600; color: #43506b; }
+      .stage { position: relative; height: 84vh; border: 1px solid #d4dcea; border-radius: 10px; overflow: hidden; background: linear-gradient(180deg, #f7fafd 0%, #e8eef7 100%); }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <div class="cell"><h2>VRM procedural (no clip)</h2><div class="stage" id="stage-procedural"></div></div>
+      <div class="cell"><h2>VRM idle.vrma</h2><div class="stage" id="stage-idle"></div></div>
+      <div class="cell"><h2>VRM official peace</h2><div class="stage" id="stage-peace"></div></div>
+      <div class="cell"><h2>Live2D bust</h2><div class="stage" id="stage-wave"></div></div>
+    </div>
+    <script type="module" src="/src/vrm/lab.ts"></script>
+  </body>
+</html>

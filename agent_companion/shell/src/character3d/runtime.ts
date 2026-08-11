@@ -8,6 +8,7 @@ import {
 } from '../characterMotion'
 import type { Live2DEmotion, Live2DRuntimeMapping } from '../live2d/runtime'
 import type { VrmController } from '../vrm/runtime'
+import { mouthSignal, voiceDrivenMouthLevel } from '../voiceLipSync'
 
 type RigBoneName =
   | 'torso'
@@ -127,7 +128,6 @@ export async function mountProceduralCharacter3D(
   let compact = false
   let emotion: Live2DEmotion = 'neutral'
   let previousFrame = performance.now()
-  let talkUntil = 0
   let nextBlinkAt = previousFrame + 1700 + Math.random() * 2400
   let blinkUntil = 0
   let pointerX = 0
@@ -223,7 +223,8 @@ export async function mountProceduralCharacter3D(
 
     const activeName = activeMotion?.motion.name || 'idle'
     rig.pointerFinger.visible = activeName === 'finger_gun' && !reducedMotion
-    applyFace(rig, emotion, now, talkUntil, blinkUntil, pointerX, pointerY)
+    const mouthLevel = voiceDrivenMouthLevel(mouthSignal(now), 0.06, 0.94)
+    applyFace(rig, emotion, mouthLevel, now, blinkUntil, pointerX, pointerY)
     animateEffects(rig, activeName, now, reducedMotion)
   }
 
@@ -258,10 +259,6 @@ export async function mountProceduralCharacter3D(
     },
     setEmotion(value) {
       emotion = value
-    },
-    speak(text) {
-      const value = text.trim()
-      talkUntil = value ? performance.now() + clamp(value.length * 82, 900, 6500) : 0
     },
     playMotion(request: CharacterMotionRequest) {
       const now = performance.now()
@@ -552,8 +549,8 @@ function toon(color: number, emissiveIntensity = 0) {
 function applyFace(
   rig: CharacterRig,
   emotion: Live2DEmotion,
+  voiceMouthLevel: number,
   now: number,
-  talkUntil: number,
   blinkUntil: number,
   pointerX: number,
   pointerY: number,
@@ -572,8 +569,13 @@ function applyFace(
   rig.leftPupil.position.set(-0.2 + pupilX, 0.02 + pupilY, 0.576)
   rig.rightPupil.position.set(0.2 + pupilX, 0.02 + pupilY, 0.576)
 
-  const speaking = now < talkUntil
-  const mouthOpen = speaking ? 0.5 + Math.abs(Math.sin(now / 78)) * 0.9 : happy ? 0.68 : worried ? 0.38 : 0.45
+  const mouthOpen = voiceMouthLevel > 0
+    ? 0.5 + voiceMouthLevel * 0.9
+    : happy
+      ? 0.68
+      : worried
+        ? 0.38
+        : 0.45
   rig.mouth.scale.set(1.15 + (happy ? 0.28 : 0), 0.36 * mouthOpen, 0.3)
   rig.mouth.position.y = worried ? -0.17 : -0.2
   rig.mouth.rotation.z = worried ? Math.PI : 0

@@ -100,6 +100,48 @@ class ExpressionResolutionTests(unittest.TestCase):
         self.assertTrue(resolve_expression("acting").may_speak)
 
 
+class ConversationToneTests(unittest.TestCase):
+    """A reply carries its own tone; a finished task does not get to pick one.
+
+    Guarding success is about not letting the character celebrate work it
+    cannot show it did. A conversation makes no such claim, so applying the
+    same guard just made every reply look identical.
+    """
+
+    def test_a_reply_may_carry_any_tone_the_character_knows(self) -> None:
+        intent = resolve_expression("done", conversational=True)
+        for emotion in EMOTIONS:
+            with self.subTest(emotion=emotion):
+                self.assertEqual(intent.clamp(emotion), emotion)
+
+    def test_a_finished_task_still_may_not_look_worried_or_alert(self) -> None:
+        intent = resolve_expression("done", conversational=False)
+        self.assertEqual(intent.clamp("worried"), "happy")
+        self.assertEqual(intent.clamp("thinking"), "happy")
+        self.assertEqual(intent.clamp("neutral"), "neutral")
+
+    def test_a_risk_state_still_overrides_a_conversation(self) -> None:
+        """Talking while waiting on the user does not relax anything."""
+
+        for phase, session_state, expected in (
+            ("done", "waiting_approval", "serious"),
+            ("failed", "", "worried"),
+        ):
+            with self.subTest(phase=phase):
+                intent = resolve_expression(phase, session_state=session_state, conversational=True)
+                self.assertTrue(intent.locked)
+                self.assertEqual(intent.clamp("happy"), expected)
+
+    def test_a_chat_event_is_recognised_as_conversation(self) -> None:
+        self.assertTrue(expression_state_from_event({"tool": "companion.chat"})["conversational"])
+        self.assertTrue(expression_state_from_event({"tool": "character.perform"})["conversational"])
+
+    def test_work_is_not_mistaken_for_conversation(self) -> None:
+        for tool in ("codex.run", "computer.click", "observe.screen", "runtime.update_config", ""):
+            with self.subTest(tool=tool):
+                self.assertFalse(expression_state_from_event({"tool": tool})["conversational"])
+
+
 class EventStateExtractionTests(unittest.TestCase):
     def test_a_desktop_action_without_an_after_observation_is_unverified(self) -> None:
         state = {"public_phase": "done", "computer_use": {"before_title": "Safari"}}

@@ -1,3 +1,15 @@
+import { blendTowardMood, emotionSettled, emotionWeight } from '../characterExpression'
+import { mouthSignal, voiceDrivenMouthLevel } from '../voiceLipSync'
+import { mouthShape, type Viseme } from '../voiceVisemes'
+
+/** Cubism's conventional per-vowel parameters, for models rigged with them. */
+const VOWEL_PARAMETERS: readonly (readonly [Viseme, string])[] = [
+  ['aa', 'ParamA'],
+  ['ih', 'ParamI'],
+  ['ou', 'ParamU'],
+  ['ee', 'ParamE'],
+  ['oh', 'ParamO'],
+]
 import {
   motionEnvelope,
   motionExpired,
@@ -8,6 +20,11 @@ import {
 } from '../characterMotion'
 
 export type Live2DEmotion = 'happy' | 'thinking' | 'alert' | 'worried' | 'serious' | 'neutral'
+
+// How much of a Live2D model's height the bust framing tries to fill the stage
+// with. Live2D artwork is authored head-at-the-top, so the top of the canvas is
+// roughly the top of the hair.
+const BUST_MODEL_FRACTION = 0.58
 
 interface PointLike {
   set?: (x: number, y?: number) => void
@@ -165,7 +182,6 @@ export interface Live2DController {
   resize: () => void
   setCompact: (compact: boolean) => void
   setEmotion: (emotion: Live2DEmotion) => void
-  speak: (text: string) => void
   playMotion: (request: CharacterMotionRequest) => void
   destroy: () => void
 }
@@ -181,6 +197,12 @@ export interface Live2DRuntimeMapping {
   expressions?: Live2DExpressionMapping[]
   motions?: CharacterMotionMapping[]
   lipSync?: { parameter?: string }
+  /**
+   * Semantic motion name -> `.vrma` URL, for VRM characters whose package
+   * ships authored clips. Live2D ignores this; its motions come from the
+   * model's own motion groups.
+   */
+  animations?: Record<string, string>
 }
 
 export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, mapping: Live2DRuntimeMapping = {}): Promise<Live2DController> {
@@ -236,8 +258,9 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
   let destroyed = false
   let previousFrame = performance.now()
   let emotion: Live2DEmotion = 'neutral'
+  let emotionStartedAt = 0
+  let mappedExpressionActive = false
   let compact = false
-  let talkUntil = 0
   let activeMotion: ResolvedCharacterMotion | null = null
   let activeMotionStartedAt = 0
   let nextBlinkAt = previousFrame + 1800 + Math.random() * 2600
@@ -271,11 +294,29 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
       modelWidth = Math.abs(bounds.width || 1)
       modelHeight = Math.abs(bounds.height || 1)
     }
-    baseScale = compact
-      ? Math.min((width * 0.96) / Math.max(1, modelWidth), (height * 0.98) / Math.max(1, modelHeight))
-      : Math.min((width * 0.78) / Math.max(1, modelWidth), (height * 2.2) / Math.max(1, modelHeight))
+    // The model is anchored at its centre, so framing has to be expressed
+    // against its top edge. The bust used to scale the artwork to 2.2x the
+    // stage and centre it at 0.71 of the height, which puts the top of the
+    // model a third of a screen above the frame -- the head was always cut.
+    const safeWidth = Math.max(1, modelWidth)
+    const safeHeight = Math.max(1, modelHeight)
+    const topMargin = height * 0.03
+    // Full body has to fit sideways. A bust does not: the head is centred, so
+    // letting the arms run past the edge is what makes it a close shot rather
+    // than the whole figure again. The allowance still stops a very wide
+    // artwork on a very narrow stage from filling the frame with a shoulder.
+    const widthLimit = (width * (compact ? 0.96 : 1.9)) / safeWidth
+    if (compact) {
+      baseScale = Math.min(widthLimit, (height * 0.96) / safeHeight)
+      baseY = height * 0.5
+    } else {
+      // Fill the stage with the upper part of the artwork, where Live2D
+      // models put the head. Whatever the scale works out to, the top edge
+      // lands on the margin, so the head cannot leave the frame.
+      baseScale = Math.min(widthLimit, (height - topMargin) / (safeHeight * BUST_MODEL_FRACTION))
+      baseY = topMargin + (safeHeight * baseScale) * 0.5
+    }
     baseX = width * 0.5
-    baseY = compact ? height * 0.51 : height * 0.71
     model.scale?.set?.(baseScale)
     model.position?.set?.(baseX, baseY)
   }
@@ -299,8 +340,10 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
     if (index >= 0 && Number.isFinite(value)) coreModel.setParameterValueByIndex?.(index, value, 1)
   }
 
-  const expressionPose = () => {
-    switch (emotion) {
+  const RESTING_POSE = { eye: 1, eyeSmile: 0, brow: 0, mouthForm: 0.18, cheek: 0.04, tilt: 0 }
+
+  const moodPose = (value: Live2DEmotion) => {
+    switch (value) {
       case 'happy':
         return { eye: 0.88, eyeSmile: 0.42, brow: 0.12, mouthForm: 0.58, cheek: 0.25, tilt: -2 }
       case 'thinking':
@@ -312,16 +355,63 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
       case 'serious':
         return { eye: 0.9, eyeSmile: 0, brow: -0.08, mouthForm: -0.08, cheek: 0, tilt: 0 }
       default:
-        return { eye: 1, eyeSmile: 0, brow: 0, mouthForm: 0.18, cheek: 0.04, tilt: 0 }
+        return RESTING_POSE
     }
+  }
+
+  /**
+   * The mood, released back toward the resting face on the shared envelope.
+   *
+   * These parameters are what makes a mood readable on models whose package
+   * declares no expression files at all, so decaying here is what actually
+   * settles the face — the `.exp3` below is an extra the package may provide.
+   */
+  const expressionPose = (now: number) => {
+    const mood = moodPose(emotion)
+    if (mood === RESTING_POSE) return RESTING_POSE
+    const weight = emotionWeight(emotionStartedAt, now)
+    if (weight >= 1) return mood
+    return {
+      eye: blendTowardMood(RESTING_POSE.eye, mood.eye, weight),
+      eyeSmile: blendTowardMood(RESTING_POSE.eyeSmile, mood.eyeSmile, weight),
+      brow: blendTowardMood(RESTING_POSE.brow, mood.brow, weight),
+      mouthForm: blendTowardMood(RESTING_POSE.mouthForm, mood.mouthForm, weight),
+      cheek: blendTowardMood(RESTING_POSE.cheek, mood.cheek, weight),
+      tilt: blendTowardMood(RESTING_POSE.tilt, mood.tilt, weight),
+    }
+  }
+
+  /** Apply the package's expression file for a mood, when it declares one. */
+  const applyMappedExpression = (value: Live2DEmotion) => {
+    const entry = (mapping.expressions || []).find(
+      (row) => String(row.emotion || '').toLocaleLowerCase() === value,
+    )
+    if (entry?.expression_id) void model?.expression?.(String(entry.expression_id))
+    return Boolean(entry?.expression_id)
   }
 
   const applyParameters = (now: number) => {
     const coreModel = model.internalModel?.coreModel
     if (!coreModel) return
-    const pose = expressionPose()
+    // Once the mood has released, hand the package's expression file back to
+    // its neutral entry so the two layers settle together rather than the
+    // parameters relaxing under a still-smiling expression file.
+    if (mappedExpressionActive && emotionSettled(emotionStartedAt, now)) {
+      mappedExpressionActive = false
+      applyMappedExpression('neutral')
+    }
+    const pose = expressionPose(now)
     const blink = now < blinkUntil ? 0 : 1
-    const mouth = now < talkUntil ? 0.2 + Math.abs(Math.sin(now / 78)) * 0.58 : 0
+    // Only the voice that is actually playing drives the mouth. Text arrival,
+    // failed synthesis and silence do not create a second lip-sync interval.
+    const voice = mouthSignal(now)
+    const opening = voiceDrivenMouthLevel(voice, 0.1, 0.72)
+    // Cubism says "how far open" and "how wide or round" in two numbers, so
+    // the vowel has to be collapsed onto both. Close vowels barely part the
+    // lips, which is why the shape scales the opening rather than only
+    // colouring it: 衣 and 乌 opening as far as 啊 is the flaw this fixes.
+    const shape = mouthShape(voice.visemes)
+    const mouth = opening * shape.open
     if (activeMotion && motionExpired(activeMotion, activeMotionStartedAt, now)) activeMotion = null
     const motionWeight = activeMotion && !reducedMotion
       ? motionEnvelope(activeMotion, activeMotionStartedAt, now) * activeMotion.intensity
@@ -350,7 +440,21 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
     setParameter(coreModel, 'ParamHairSide', hair * 0.8)
     setParameter(coreModel, 'ParamHairBack', hair * 0.55)
     setParameter(coreModel, mouthParameter, mouth)
-    setParameter(coreModel, 'ParamMouthForm', now < talkUntil ? Math.max(0.3, pose.mouthForm) : pose.mouthForm)
+    // A model rigged with per-vowel parameters says the shape far better than
+    // form-plus-opening can. `setParameter` is a no-op on a parameter the
+    // model does not declare, so this costs nothing on rigs without them and
+    // is simply the better path on rigs with them.
+    for (const [viseme, parameter] of VOWEL_PARAMETERS) {
+      setParameter(coreModel, parameter, opening * voice.visemes[viseme])
+    }
+    // While a voice is playing the vowel owns the mouth's width; the mood only
+    // gets it back once the audio stops, so a smile does not hold the lips
+    // spread through a rounded 乌.
+    setParameter(
+      coreModel,
+      'ParamMouthForm',
+      voice.live ? shape.form : pose.mouthForm,
+    )
     setParameter(coreModel, 'ParamCheek', pose.cheek)
     coreModel.update?.()
   }
@@ -412,18 +516,17 @@ export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, m
     setEmotion(value) {
       const changed = emotion !== value
       emotion = value
+      // Restart the envelope even when the mood repeats, so a second reaction
+      // of the same kind still reads instead of continuing to fade.
+      emotionStartedAt = performance.now()
       if (changed) {
+        mappedExpressionActive = applyMappedExpression(value) && value !== 'neutral'
         const entry = (mapping.expressions || []).find((row) => String(row.emotion || '').toLocaleLowerCase() === value)
-        if (entry?.expression_id) void model?.expression?.(String(entry.expression_id))
         if (entry?.motion_group) {
           const index = Number(entry.motion_index || 0)
           void model?.motion?.(String(entry.motion_group), Number.isFinite(index) ? index : 0)
         }
       }
-    },
-    speak(text) {
-      const duration = clamp(text.trim().length * 85, 900, 6500)
-      talkUntil = text.trim() ? performance.now() + duration : 0
     },
     playMotion(request) {
       activeMotion = resolveCharacterMotion(request, mapping.motions || [])

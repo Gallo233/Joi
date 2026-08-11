@@ -88,6 +88,14 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
         _expect("vue-tsc --noEmit" in frontend_build and "vite build" in frontend_build, add, "frontend_build_script", "Frontend build script type-checks and builds Vite.", "Keep npm run build wired to vue-tsc plus Vite build.")
         _expect(scripts.get("tauri") == "tauri", add, "tauri_script", "Tauri CLI script is present.", "Expose Tauri through npm run tauri for local and CI reuse.")
         _expect(bool(scripts.get("core:bundle")), add, "core_sidecar_script", "Standalone Joi Core build script is present.", "Restore the PyInstaller sidecar build script.")
+        dev_command = str(scripts.get("dev") or "")
+        _expect(
+            "core:bundle" not in dev_command and "vite" in dev_command,
+            add,
+            "fast_debug_start",
+            "Debug startup skips the packaged Core build and starts Vite directly.",
+            "Keep PyInstaller Core assembly in build:release; Debug runs the source Core.",
+        )
         release_build = str(scripts.get("build:release") or "")
         _expect("core:bundle" in release_build and "assets:verify" in release_build, add, "release_build_gate", "Release build requires the Core sidecar and pinned assets.", "Require both the Core sidecar and release asset verification before Tauri packaging.")
     if tauri:
@@ -186,8 +194,14 @@ def _check_tauri_config(tauri: dict[str, Any], add: Any) -> None:
     _expect(main_window.get("decorations") is True and main_window.get("titleBarStyle") == "Overlay", add, "native_window_chrome", "Main shell uses native window controls with an overlay title bar.", "Keep native decorations and the overlay title bar for correct macOS traffic lights.")
     _expect(int(main_window.get("width", 0) or 0) >= 1000 and int(main_window.get("height", 0) or 0) >= 700, add, "window_size", "Default desktop window size is release-ready.", "Keep the default shell window large enough for chat and stage panes.")
     bundle = tauri.get("bundle") if isinstance(tauri.get("bundle"), dict) else {}
-    external = bundle.get("externalBin") if isinstance(bundle.get("externalBin"), list) else []
-    _expect("binaries/joi-core" in external, add, "core_sidecar_bundle", "Tauri bundles the standalone Joi Core sidecar.", "Add binaries/joi-core to bundle.externalBin.")
+    resources = bundle.get("resources") if isinstance(bundle.get("resources"), dict) else {}
+    _expect(
+        resources.get("binaries/joi-core-runtime/") == "joi-core-runtime/",
+        add,
+        "core_sidecar_bundle",
+        "Tauri bundles the fast-start Joi Core runtime directory.",
+        "Map binaries/joi-core-runtime/ to joi-core-runtime/ in bundle.resources.",
+    )
 
 
 def _check_capabilities(capabilities: dict[str, Any], add: Any) -> None:

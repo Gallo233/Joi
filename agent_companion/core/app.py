@@ -142,7 +142,10 @@ class AgentCompanionApp:
             plan = self._rewrite_plan_for_desktop_context(plan)
         return self._start_plan(
             plan,
-            emit_plan=plan.intent != "companion_chat",
+            # Narrating a plan is for work the user is waiting on. Talking and
+            # moving are the character doing something itself, and announcing
+            # "识别为：角色动作" before a wave describes a person as a pipeline.
+            emit_plan=plan.intent not in {"companion_chat", "character_motion"},
             record_memory=True,
         )
 
@@ -511,7 +514,10 @@ class AgentCompanionApp:
             if decision.requires_approval:
                 self._request_step_approval(plan, index, step, decision.risk)
                 return
-            intent = ActionIntent.from_request(step)
+            # Scoped to the run: a retry or resume inside this run is the same
+            # attempt and must not act twice, while the same request made again
+            # later is a new attempt the user is entitled to.
+            intent = ActionIntent.from_request(step, scope=run_id)
             step_id = self.run_journal.record_step(run_id, index, intent)
             # An approval is spent here, not when the user clicked: the gap
             # between the two is exactly where a plan can be edited.
@@ -548,13 +554,50 @@ class AgentCompanionApp:
                 break
         self._finish_plan(plan, final_ok, approved_step)
 
+    # Why a step stopped, in the user's terms. These arrive through one code
+    # path but are not one situation: a capability that is switched off, an
+    # approval that no longer applies, and a safety interlock that thinks this
+    # exact action is already underway ask completely different things of the
+    # user. Reporting all three as "capability disabled" sends them to a
+    # settings screen where nothing is wrong.
+    _BLOCK_MESSAGES: dict[str, tuple[str, str, str]] = {
+        "effect_already_completed": (
+            "动作没有重复执行",
+            "{label}刚刚已经做过一次，这次没有重复执行。",
+            "这个动作刚才已经做过了。",
+        ),
+        "effect_needs_reconciliation": (
+            "上一次动作没有回执",
+            "上一次{label}没有报告结果，需要你确认屏幕上的实际情况后再继续。",
+            "上一次动作没有回执，我先停下了。",
+        ),
+        "effect_lease_held": (
+            "同一个动作正在进行",
+            "{label}正在执行中，我没有再发一次。",
+            "这个动作正在进行，我没有重复发。",
+        ),
+    }
+
+    def _block_card(self, step: ToolRequest, reason: str) -> tuple[DisplayCard, str]:
+        label = self._tool_label(step.name)
+        if reason.startswith("approval_"):
+            return (
+                DisplayCard("需要重新确认", f"这次{label}的确认已经失效，请重新发起。", status="failed"),
+                "这次确认已经失效，请再说一次。",
+            )
+        title, summary, spoken = self._BLOCK_MESSAGES.get(
+            reason, ("能力已关闭", "{label} 当前不可用。", "这个能力现在是关闭的。")
+        )
+        return DisplayCard(title, summary.format(label=label), status="failed"), spoken
+
     def _emit_policy_block(self, plan: AgentPlan, step: ToolRequest, risk: RiskLevel, reason: str) -> None:
+        card, spoken = self._block_card(step, reason)
         self._emit(
             AgentEvent(
                 EventType.TOOL_FAILED,
                 plan.task_id,
-                DisplayCard("能力已关闭", f"{self._tool_label(step.name)} 当前不可用。", status="failed"),
-                safe_voice_line("这个能力现在是关闭的。", sprite="4"),
+                card,
+                safe_voice_line(spoken, sprite="4"),
                 annotate_agent_state_with_skill(
                     {
                         "tool": step.name,
@@ -611,7 +654,10 @@ class AgentCompanionApp:
                 AgentEvent(
                     EventType.TOOL_STARTED,
                     plan.task_id,
-                    DisplayCard("角色动作", "Joi 正在准备动作。"),
+                    # Transient and unspoken, but it still renders in the
+                    # character's own bubble under her name -- so it describes
+                    # the app's state without putting words in her mouth.
+                    DisplayCard("角色动作", "正在准备动作。"),
                     safe_voice_line("", fallback=""),
                     annotate_agent_state_with_skill(
                         {
@@ -1104,7 +1150,9 @@ class AgentCompanionApp:
         that only exists in this process.
         """
         run_id = self._plan_runs.get(plan.task_id, "")
-        intent = ActionIntent.from_request(request_override or step)
+        # Same scope as execution, so the approval and the effect it authorises
+        # describe one attempt rather than two different keys.
+        intent = ActionIntent.from_request(request_override or step, scope=run_id)
         step_id = self.run_journal.record_step(run_id, index, intent)
         challenge_id = self.run_journal.open_challenge(
             run_id,

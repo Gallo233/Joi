@@ -2247,6 +2247,7 @@ characters:
                     "private": True,
                     "version": "0.1.0",
                     "scripts": {
+                        "dev": "npm run live2d:sync -- --optional && vite --host 127.0.0.1",
                         "build": "vue-tsc --noEmit && vite build",
                         "build:release": "npm run core:bundle && npm run assets:verify && vite build",
                         "core:bundle": "node scripts/build-core-sidecar.mjs",
@@ -2273,7 +2274,7 @@ edition = "2021"
                     "identifier": "com.gallo233.joi",
                     "build": {"beforeBuildCommand": "npm run build:release", "frontendDist": "../dist"},
                     "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": True, "titleBarStyle": "Overlay"}]},
-                    "bundle": {"externalBin": ["binaries/joi-core"]},
+                    "bundle": {"resources": {"binaries/joi-core-runtime/": "joi-core-runtime/"}},
                 }
             ),
             encoding="utf-8",
@@ -2392,6 +2393,7 @@ edition = "2021"
                             "private": True,
                             "version": "0.1.0",
                             "scripts": {
+                                "dev": "npm run live2d:sync -- --optional && vite --host 127.0.0.1",
                                 "build": "vue-tsc --noEmit && vite build",
                                 "build:release": "npm run core:bundle && npm run assets:verify && vite build",
                                 "core:bundle": "node scripts/build-core-sidecar.mjs",
@@ -2420,7 +2422,7 @@ edition = "2021"
                             "identifier": "com.gallo233.joi",
                             "build": {"beforeBuildCommand": "npm run build:release", "frontendDist": "../dist"},
                             "app": {"windows": [{"label": "main", "title": "Joi", "width": 1120, "height": 760, "transparent": True, "decorations": True, "titleBarStyle": "Overlay"}]},
-                            "bundle": {"externalBin": ["binaries/joi-core"]},
+                            "bundle": {"resources": {"binaries/joi-core-runtime/": "joi-core-runtime/"}},
                         }
                     ),
                     encoding="utf-8",
@@ -2475,8 +2477,10 @@ edition = "2021"
         release_exe = release_root / "agent_companion/shell/src-tauri/target/release/joi-shell.exe"
         release_exe.parent.mkdir(parents=True, exist_ok=True)
         release_exe.write_bytes(b"fake exe")
-        release_sidecar = release_exe.with_name("joi-core.exe")
-        release_sidecar.write_bytes(b"fake sidecar")
+        release_runtime = release_exe.with_name("joi-core-runtime")
+        (release_runtime / "_internal").mkdir(parents=True)
+        (release_runtime / "joi-core.exe").write_bytes(b"fake sidecar launcher")
+        (release_runtime / "_internal" / "python311.dll").write_bytes(b"fake runtime")
         for forbidden in (
             "config.yaml",
             "secrets.yaml",
@@ -2526,14 +2530,17 @@ characters:
             names = archive.namelist()
         names_text = "\n".join(names)
         assert_true(any(name.endswith("agent_companion/shell/src-tauri/target/release/joi-shell.exe") for name in names), "Release zip should include the built shell exe")
-        assert_true(any(name.endswith("agent_companion/shell/src-tauri/target/release/joi-core.exe") for name in names), "Release zip should include the standalone Core sidecar")
+        assert_true(any(name.endswith("agent_companion/shell/src-tauri/target/release/joi-core-runtime/joi-core.exe") for name in names), "Release zip should include the fast-start Core runtime launcher")
+        assert_true(any(name.endswith("agent_companion/shell/src-tauri/target/release/joi-core-runtime/_internal/python311.dll") for name in names), "Release zip should include the Core runtime support files")
         assert_true(any(name.endswith("tools/windows_handoff_report.py") for name in names), "Release zip should include the Windows handoff report")
         assert_true("RELEASE_MANIFEST.json" in names_text, "Release zip should include a safe manifest")
         assert_true(not any(fragment in names_text for fragment in ["config.yaml", "secrets.yaml", ".env", "node_modules", "logs/", "data/", "__pycache__", "private.pdb", "target/debug"]), "Release zip leaked local config, runtime data, dependency folders, or debug artifacts")
-        release_sidecar.unlink()
+        shutil.rmtree(release_runtime)
         missing_sidecar_report = build_windows_release_package(release_root, output_dir=release_root / "out2", require_exe=True)
-        assert_true(missing_sidecar_report["status"] == "fail" and "release_sidecar_missing" in missing_sidecar_report["errors"], "Release packager should require the standalone Core sidecar")
-        release_sidecar.write_bytes(b"fake sidecar")
+        assert_true(missing_sidecar_report["status"] == "fail" and "release_sidecar_missing" in missing_sidecar_report["errors"], "Release packager should require the complete Core runtime directory")
+        (release_runtime / "_internal").mkdir(parents=True)
+        (release_runtime / "joi-core.exe").write_bytes(b"fake sidecar launcher")
+        (release_runtime / "_internal" / "python311.dll").write_bytes(b"fake runtime")
         release_exe.unlink()
         missing_exe_report = build_windows_release_package(release_root, output_dir=release_root / "out3", require_exe=True)
         assert_true(missing_exe_report["status"] == "fail" and "release_exe_missing" in missing_exe_report["errors"], "Release packager should require the release shell by default")
@@ -4360,16 +4367,42 @@ llm:
     voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
     assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
     assert_true("event_created_at" in voice_runtime_source, "voice runtime key should include event identity")
-    app_vue_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
+    # The shell used to be one 6000-line component, so reading App.vue was the
+    # same as reading the shell. Self-contained domains (BYOK, memory, watch
+    # loop, background context, skills) now live in composables/, and the
+    # project sheet in components/layout/, with the behaviour unchanged. These
+    # assertions are about what the shell does, not about which file it does it
+    # in, so they read the parts App.vue was split into as well. The negative
+    # assertions below get stricter for free: a local path leaking into a
+    # composable is now caught too.
+    shell_src = workspace / "agent_companion" / "shell" / "src"
+    app_vue_source = "\n".join(
+        [(shell_src / "App.vue").read_text(encoding="utf-8")]
+        + [path.read_text(encoding="utf-8") for path in sorted(shell_src.glob("composables/*.ts"))]
+        + [path.read_text(encoding="utf-8") for path in sorted(shell_src.glob("components/layout/*.vue"))]
+    )
     assert_true("beginNewVoiceIntent()" in app_vue_source and "voiceEventEpochs.get" in app_vue_source, "Shell should bump and compare voice epochs")
     assert_true("event_created_at: event.created_at" in app_vue_source, "Shell should key voice audio by event timestamp")
     assert_true("isPlayableVoiceEvent" in app_vue_source and "voice_audio_data_url" in app_vue_source, "Shell should register playable tool-start voice events and prefer inline voice audio")
-    assert_true("lastTtsError.value = error instanceof Error" in app_vue_source, "Shell should surface audio playback failures instead of swallowing them")
+    # The rule is that a refused playback is reported, not that it is reported
+    # by one particular expression. A webview blocking autoplay raises
+    # NotAllowedError, which used to have no label and so rendered as nothing
+    # at all -- silent character, silent reason -- so the check now covers the
+    # named case as well as the general one.
+    assert_true(
+        "lastTtsError.value = name === 'NotAllowedError'" in app_vue_source and "audio_play_failed" in app_vue_source,
+        "Shell should surface audio playback failures instead of swallowing them",
+    )
     assert_true("runtimeStatusRows" in app_vue_source and "provider-card" in app_vue_source and "运行设置" in app_vue_source, "Shell developer mode should expose runtime provider settings/status view")
     assert_true("providerMeta" in app_vue_source and "providerErrorLabel" in app_vue_source, "Shell runtime status view should render sanitized provider details")
     assert_true("tesseract_missing" in app_vue_source and "tesseract_unavailable" in app_vue_source, "Shell runtime status view should label Tesseract runtime probe failures")
     assert_true("runtimeDraft" in app_vue_source and "previewRuntimeSettings" in app_vue_source and "applyRuntimeSettings" in app_vue_source, "Shell developer panel should include runtime settings dry-run/apply controls")
-    assert_true("runtime_settings" in app_vue_source and "runtimePreview" in app_vue_source and "提交审批" in app_vue_source, "Shell runtime settings UI should refresh from safe ready payload and require approval apply")
+    # The apply gate is checked by its condition, not by its label. This
+    # previously matched "提交审批" on a second runtime pane that sat inside a
+    # `v-if="false"` block -- so the assertion passed on markup no user could
+    # reach, while the live pane went unchecked. The live control is disabled
+    # until a dry-run has actually succeeded and reported a change.
+    assert_true("runtime_settings" in app_vue_source and "runtimePreview" in app_vue_source and "!runtimePreview?.ok || !runtimePreview?.changed" in app_vue_source, "Shell runtime settings UI should refresh from safe ready payload and gate apply behind a successful dry-run")
     assert_true("server_url" not in app_vue_source and "refer_audio_path" not in app_vue_source and "gpt_sovits_work_path" not in app_vue_source, "Shell runtime settings UI must not expose local media paths")
     assert_true('type="password"' in app_vue_source and 'autocomplete="new-password"' in app_vue_source and "byokApiKey.value = ''" in app_vue_source, "BYOK should accept a masked key and clear it after save")
     assert_true("密钥不会写入项目文件" in app_vue_source and "系统密钥库" in app_vue_source, "BYOK should explain its secret-storage boundary")
@@ -4622,7 +4655,9 @@ llm:
     tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
     assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
-    shell_source = (workspace / "agent_companion" / "shell" / "src" / "App.vue").read_text(encoding="utf-8")
+    # Same reason as `app_vue_source` above: the shell's behaviour is spread
+    # across App.vue and the modules split out of it.
+    shell_source = app_vue_source
     character_source = (workspace / "agent_companion" / "shell" / "src" / "components" / "JoiCharacter.vue").read_text(encoding="utf-8")
     shell_style_source = (workspace / "agent_companion" / "shell" / "src" / "styles.css").read_text(encoding="utf-8")
     assert_true("activeExpressionEmotion" in shell_source and "expression_sync" in shell_source and "emotion-${activeExpressionEmotion}" in shell_source, "Shell should bind expression sync to character emotion class")
@@ -4643,7 +4678,10 @@ llm:
     assert_true("watchVisionInterval" in shell_source and "refreshWatchVision" in shell_source and "vision_interval_ticks" in shell_source, "Shell should expose visual summary cadence and manual refresh controls")
     assert_true("memoryStatus" in shell_source and "memoryEnabled" in shell_source and "memoryProfile" in shell_source and "saveMemoryCandidate" in shell_source and "clearMemory" in shell_source and "memory-authorize-bubble" in shell_source and "记忆舱" in shell_source, "Shell should expose P5 memory profile, candidate controls, and stage authorization bubble")
     assert_true("backgroundStatus" in shell_source and "background-context-panel" in shell_source and "configureBackgroundScope" in shell_source and "clearBackgroundContext" in shell_source and "syncBackgroundFromEvent" in shell_source, "Shell developer panel should expose constrained background context inspection and controls")
-    assert_true("settingsTabs" in shell_source and "settings-tabbar" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
+    # `settings-tabbar` was a second, hidden navigation inside a `v-if="false"`
+    # block; the visible one is the grouped sidebar. Checking the dead copy
+    # meant the real navigation was never asserted on at all.
+    assert_true("settingsTabs" in shell_source and "settings-nav-row" in shell_source and "activeSettingsTab" in shell_source, "Shell should carry Mac-style settings navigation without Mac-only RPC assumptions")
     assert_true("settings-shell" in shell_source and "execution-segment" in shell_source and "agentCliList" in shell_source and "testAgentCli" in shell_source and "syncAgentCliTakeover" in shell_source and "agentCliRuntime" in shell_source, "Shell settings should expose Open Design execution-mode CLI scanning, testing, and takeover sync")
     assert_true("skill-manifest-section" in shell_source and "nativeSkills" in shell_source and "refreshSkills" in shell_source and "skillName" in shell_source and "setSkillEnabled" in shell_source and "skillEnabled" in shell_source and "skillToggleDisabled" in shell_source, "Shell should expose P8 native skill manifest status and event skill ids")
     assert_true(
@@ -4661,11 +4699,19 @@ llm:
     assert_true("rewrite_plan_for_desktop_context" in desktop_context_source and "record_desktop_context" in desktop_context_source and "DesktopContext" in desktop_context_source, "Desktop context planning should live outside the app orchestrator")
     assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source and "reload_runtime_policy" in app_source and "skill_settings_payload" in app_source and "block_reason" in app_source, "App execution boundary should attach native skill metadata and enforce disabled skills")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
-    assert_true("settings-tabbar" in shell_style_source and "memory-command-panel" in shell_style_source and "memory-profile-panel" in shell_style_source and "memory-vault-sections" in shell_style_source, "Shell styles should include Mac-inspired settings tabs and memory cabin surfaces")
+    # These four classes had rules but no markup: `settings-tabbar` belonged to
+    # a navigation hidden behind `v-if="false"`, and the three memory panels
+    # were left behind by an earlier redesign. Asserting that dead CSS exists
+    # pins the stylesheet to surfaces the app stopped rendering, so this now
+    # names the ones actually on screen.
+    assert_true("settings-nav-row" in shell_style_source and "memory-library" in shell_style_source and "memory-record" in shell_style_source and "memory-authorize-bubble" in shell_style_source, "Shell styles should include Mac-inspired settings navigation and memory cabin surfaces")
     assert_true("settings-sidebar" in shell_style_source and "agent-cli-card" in shell_style_source and "settings-config-card" in shell_style_source, "Shell styles should include Open Design settings sidebar and CLI cards")
     assert_true("skill-grid" in shell_style_source and "skill-card" in shell_style_source and "skill-actions" in shell_style_source, "Shell styles should include native skill manifest cards")
     assert_true("watch-session-strip" in shell_style_source and "watch-session-dot" in shell_style_source and "watch-session-controls" in shell_style_source, "Shell styles should include realtime watch loop status strip")
-    assert_true("background-status-grid" in shell_style_source and "background-scope-form" in shell_style_source and "background-row" in shell_style_source, "Shell styles should include background context settings and summary rows")
+    # `background-scope-form` and `background-row` were styled but never
+    # rendered -- leftovers from the same hidden block. The panel and its status
+    # cards are what the Developer tab actually draws.
+    assert_true("background-status-grid" in shell_style_source and "background-context-panel" in shell_style_source and "background-status-card" in shell_style_source, "Shell styles should include background context settings and summary rows")
     doctor_source = (workspace / "tools" / "joi_doctor.py").read_text(encoding="utf-8")
     demo_check_source = (workspace / "tools" / "mvp_demo_check.py").read_text(encoding="utf-8")
     setup_wizard_source = (workspace / "tools" / "windows_setup_wizard.py").read_text(encoding="utf-8")
@@ -4681,7 +4727,7 @@ llm:
     assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
     assert_true("build_mvp_demo_check_report" in demo_check_source and "watch_together" in demo_check_source and "coding_task" in demo_check_source and "game_skill" in demo_check_source and "privacy_boundary" in demo_check_source, "P10 MVP demo check should expose safe watch/coding/game demo scripts")
     assert_true("build_windows_setup_plan" in setup_wizard_source and "windows_setup_exit_code" in setup_wizard_source and "config.example.yaml" in setup_wizard_source and "config.yaml" in setup_wizard_source and "safe_for_display" in setup_wizard_source, "P10 setup wizard should create local config safely without secrets")
-    assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source and "RELEASE_SIDECAR" in release_packager_source and "tools/mvp_demo_check.py" in release_packager_source and "tools/provider_preflight.py" in release_packager_source and "tools/windows_handoff_report.py" in release_packager_source and "tools/windows_release_check.py" in release_packager_source and "tools/windows_setup_wizard.py" in release_packager_source, "P10 release packager should create a safe portable Windows zip with its Core sidecar and release/handoff tooling")
+    assert_true("build_windows_release_package" in release_packager_source and "build_release_privacy_report" in release_packager_source and "LOCAL_ONLY_SAMPLE_PATHS" in release_packager_source and "FORBIDDEN_NAMES" in release_packager_source and "RELEASE_MANIFEST.json" in release_packager_source and "RELEASE_CORE_RUNTIME" in release_packager_source and "tools/mvp_demo_check.py" in release_packager_source and "tools/provider_preflight.py" in release_packager_source and "tools/windows_handoff_report.py" in release_packager_source and "tools/windows_release_check.py" in release_packager_source and "tools/windows_setup_wizard.py" in release_packager_source, "P10 release packager should create a safe portable Windows zip with its Core runtime and release/handoff tooling")
     assert_true("build_packaging_smoke_report" in packaging_smoke_source and "version_alignment" in packaging_smoke_source and "window_permissions" in packaging_smoke_source and "release_privacy_policy" in packaging_smoke_source and "mvp_demo_check" in packaging_smoke_source and "provider_preflight" in packaging_smoke_source and "windows_handoff_report" in packaging_smoke_source and "windows_release_check" in packaging_smoke_source and "windows_setup_wizard" in packaging_smoke_source and "setup_launcher" in packaging_smoke_source, "P10 packaging smoke should validate release metadata, Tauri permissions, release privacy policy, MVP demo check, provider preflight, handoff report, setup wizard, and release readiness tooling")
     assert_true("build_provider_preflight_report" in provider_preflight_source and "build_runtime_status" in provider_preflight_source and "REQUIRED_DEMO_PROVIDERS" in provider_preflight_source and "probe_system_audio_readiness" in provider_preflight_source and "safe_for_display" in provider_preflight_source, "P10 provider preflight should expose sanitized offline provider and system-audio readiness")
     assert_true("build_windows_handoff_report" in handoff_report_source and "build_windows_release_check_report" in handoff_report_source and "safe_for_display" in handoff_report_source and "handoff_ready" in handoff_report_source and "start_joi.bat -Setup" in handoff_report_source, "P10 handoff report should expose safe cross-machine release readiness")

@@ -46,6 +46,7 @@ struct CoreRuntime {
     connection: Mutex<CoreConnectionInfo>,
     ready_file: Mutex<Option<PathBuf>>,
     data_home: Mutex<Option<PathBuf>>,
+    sidecar: Mutex<Option<PathBuf>>,
     lifecycle: Mutex<()>,
 }
 
@@ -94,6 +95,8 @@ fn main() {
                         .unwrap_or_else(|_| workspace_dir().join("data").join("agent_companion"))
                 });
             std::fs::create_dir_all(&data_home)?;
+            *state.sidecar.lock().expect("core sidecar mutex poisoned") =
+                installed_sidecar(app.path().resource_dir().ok().as_deref());
             *state
                 .data_home
                 .lock()
@@ -184,6 +187,7 @@ fn start_core(state: &CoreRuntime, data_home: &Path) -> Result<(), String> {
     let stdout = open_log(&logs_dir.join("joi-core.out.log"))?;
     let stderr = open_log(&logs_dir.join("joi-core.err.log"))?;
     let mut command = core_command(
+        state,
         data_home,
         port,
         &token,
@@ -383,6 +387,7 @@ fn pick_attachments(kind: String) -> Result<Vec<String>, String> {
 }
 
 fn core_command(
+    state: &CoreRuntime,
     data_home: &Path,
     port: u16,
     token: &str,
@@ -391,7 +396,27 @@ fn core_command(
     stdout: File,
     stderr: File,
 ) -> Result<Command, String> {
-    if let Some(sidecar) = installed_sidecar() {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("JOI_CORE_BIN").is_none()
+        && std::env::var_os("JOI_USE_PACKAGED_CORE").is_none()
+    {
+        return source_core_command(
+            data_home,
+            port,
+            token,
+            instance_id,
+            ready_file,
+            stdout,
+            stderr,
+        );
+    }
+
+    let sidecar = state
+        .sidecar
+        .lock()
+        .expect("core sidecar mutex poisoned")
+        .clone();
+    if let Some(sidecar) = sidecar {
         let mut command = Command::new(sidecar);
         command.args(core_args(data_home, port, instance_id, ready_file));
         command.env("JOI_CORE_SESSION_TOKEN", token);
@@ -401,16 +426,15 @@ fn core_command(
 
     #[cfg(debug_assertions)]
     {
-        let workspace = workspace_dir();
-        let python = python_bin(&workspace);
-        let mut command = Command::new(python);
-        command.args(["-m", "agent_companion.core.main"]);
-        command.args(core_args(&workspace, port, instance_id, ready_file));
-        command.env("JOI_CORE_SESSION_TOKEN", token);
-        command.current_dir(&workspace);
-        command.env("PYTHONPATH", workspace.to_string_lossy().to_string());
-        configure_core_process(&mut command, data_home, stdout, stderr);
-        return Ok(command);
+        source_core_command(
+            data_home,
+            port,
+            token,
+            instance_id,
+            ready_file,
+            stdout,
+            stderr,
+        )
     }
 
     #[cfg(not(debug_assertions))]
@@ -418,6 +442,29 @@ fn core_command(
         let _ = (data_home, stdout, stderr);
         Err("joi_core_sidecar_missing: reinstall Joi from an official release".to_string())
     }
+}
+
+#[cfg(debug_assertions)]
+fn source_core_command(
+    data_home: &Path,
+    port: u16,
+    token: &str,
+    instance_id: &str,
+    ready_file: &Path,
+    stdout: File,
+    stderr: File,
+) -> Result<Command, String> {
+    let workspace = workspace_dir();
+    let python = python_bin(&workspace);
+    let mut command = Command::new(python);
+    command.args(["-m", "agent_companion.core.sidecar_entry"]);
+    command.args(core_args(data_home, port, instance_id, ready_file));
+    command.env("JOI_CORE_SESSION_TOKEN", token);
+    command.env("JOI_CORE_SEED_ROOT", &workspace);
+    command.current_dir(&workspace);
+    command.env("PYTHONPATH", workspace.to_string_lossy().to_string());
+    configure_core_process(&mut command, data_home, stdout, stderr);
+    Ok(command)
 }
 
 fn core_args(workspace: &Path, port: u16, instance_id: &str, ready_file: &Path) -> Vec<String> {
@@ -453,7 +500,7 @@ fn configure_core_process(command: &mut Command, data_home: &Path, stdout: File,
         .stderr(Stdio::from(stderr));
 }
 
-fn installed_sidecar() -> Option<PathBuf> {
+fn installed_sidecar(resource_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("JOI_CORE_BIN").map(PathBuf::from) {
         if path.is_file() {
             return Some(path);
@@ -464,10 +511,25 @@ fn installed_sidecar() -> Option<PathBuf> {
     } else {
         "joi-core"
     };
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(name)))
-        .filter(|path| path.is_file())
+    let mut candidates = Vec::new();
+    if let Some(resource_dir) = resource_dir {
+        candidates.push(resource_dir.join("joi-core-runtime").join(name));
+        candidates.push(
+            resource_dir
+                .join("binaries")
+                .join("joi-core-runtime")
+                .join(name),
+        );
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            candidates.push(parent.join("joi-core-runtime").join(name));
+            // Compatibility with Joi builds that still place a onefile Core
+            // beside the shell executable.
+            candidates.push(parent.join(name));
+        }
+    }
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 #[cfg(debug_assertions)]

@@ -19,7 +19,10 @@ SEED_PATHS: tuple[str, ...] = (
 
 
 def bundled_root() -> Path | None:
-    root = getattr(sys, "_MEIPASS", "")
+    # Debug shells run the current Python source but still use the same writable
+    # application workspace as an installed build. Tauri supplies the source
+    # root only as a seed location for missing immutable built-ins.
+    root = os.environ.get("JOI_CORE_SEED_ROOT") or getattr(sys, "_MEIPASS", "")
     return Path(root).resolve() if root else None
 
 

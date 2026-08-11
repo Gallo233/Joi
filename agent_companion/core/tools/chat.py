@@ -9,11 +9,20 @@ from typing import Any
 
 from agent_companion.core.config import load_workspace_config
 from agent_companion.core.character_packages import CharacterPackageManager
+from agent_companion.core.language_policy import (
+    DisplayLanguagePolicy,
+    display_language_policy,
+    language_mismatch_fallback,
+    obvious_language_mismatch,
+    obvious_voice_language_mismatch,
+    voice_language_label,
+)
 from agent_companion.core.memory_candidates import chat_memory_candidate
+from agent_companion.core.model_call import CallBudget
 from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
-from agent_companion.core.voice import normalize_emotion, safe_voice_line, sprite_for_emotion
+from agent_companion.core.voice import normalize_emotion, normalize_voice_delivery, safe_voice_line, sprite_for_emotion
 
 
 class CompanionChatTool(ToolAdapter):
@@ -29,10 +38,18 @@ class CompanionChatTool(ToolAdapter):
         text = str(request.arguments.get("text") or "").strip()
         memory_context = _memory_context(request.arguments.get("memory_context"))
         chat = self._reply(text, memory_context)
-        voice_line = safe_voice_line(chat.voice_text or chat.reply, emotion=chat.emotion, sprite=chat.sprite)
+        voice_line = safe_voice_line(
+            chat.voice_text or chat.reply,
+            emotion=chat.emotion,
+            sprite=chat.sprite,
+            delivery=chat.delivery,
+        )
         agent_state: dict[str, Any] = {
             "tool": self.name,
             "reply": chat.reply,
+            "display_language": chat.display_language,
+            "voice_language": chat.voice_language,
+            "display_language_repaired": chat.language_repaired,
             "memory_context": memory_context,
             "expression_sync": {
                 "emotion": voice_line.emotion,
@@ -58,7 +75,8 @@ class CompanionChatTool(ToolAdapter):
         )
 
     def _reply(self, text: str, memory_context: list[dict[str, str]] | None = None) -> "ChatReply":
-        fallback = "我在。你可以直接告诉我要看、要玩，还是要写代码。"
+        display_policy = display_language_policy(text)
+        fallback = _fallback_chat_reply(display_policy)
         fallback_emotion = _fallback_chat_emotion(text)
         config = self._config
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
@@ -90,6 +108,7 @@ class CompanionChatTool(ToolAdapter):
         try:
             character = config.primary_character
             voice_lang = character.voice_text_lang(config.tts.text_lang)
+            spoken_language = voice_language_label(voice_lang)
             sprite_catalog = _sprite_catalog(character)
             memory_prompt = _memory_prompt(memory_context or [])
             lore_rows = self._characters.lore_context(text)
@@ -104,10 +123,26 @@ class CompanionChatTool(ToolAdapter):
                 "回复要像轻松的桌面陪伴对话：先直接回应用户，默认用 2 至 4 个短句。"
                 "只有确实存在三个以上并列事项时才使用列表，避免复述用户原话、执行日志和无关背景。"
                 "能一句说清就不要扩写；必须补充信息时最多问一个问题。\n"
-                "只输出 JSON：{\"reply\":\"给屏幕显示的中文回复\",\"voice_text\":\"<emo: happy>适合配音朗读的短句\",\"emotion\":\"neutral|happy|thinking|alert|worried|serious\",\"sprite\":\"1\"}。"
-                "emotion 必须贴合回复语气；sprite 必须从可用立绘 id 中选择最贴近 emotion 的一个。"
+                "本轮输出有两个语言互相独立的通道，不能混用：\n"
+                f"1. {display_policy.prompt_instruction}\n"
+                f"2. voice_text 是配音专用文本，必须使用用户选择的 {spoken_language}；"
+                "它要忠实转述 reply 的意思，可以为自然朗读而缩短，但不能增加 reply 没有的信息。\n"
+                "只输出 JSON：{\"reply\":\"按用户本轮输入语言显示的回复\",\"voice_text\":\"按所选配音语言朗读的短句\","
+                "\"emotion\":\"neutral|happy|thinking|alert|worried|serious\",\"sprite\":\"1\","
+                "\"delivery\":{\"intensity\":0.6,\"pace\":\"measured\",\"energy\":\"soft\","
+                "\"pause\":\"reflective\",\"emphasis\":\"keywords\",\"relation\":\"close\"}}。"
+                "emotion 必须贴合这句话真正的表达意图，不要习惯性选 neutral：庆祝、鼓励或轻松回应用 happy；"
+                "共情、关切或遗憾用 worried；推敲、解释思路用 thinking；提醒注意用 alert；"
+                "明确边界或郑重说明用 serious；只有普通问候和无明显态度的事实才用 neutral。"
+                "delivery 描述怎么说而不是说什么：intensity 为 0.15 至 0.9；pace 只能是 slow/measured/steady/quick；"
+                "energy 只能是 soft/balanced/bright/firm；pause 只能是 light/natural/reflective/deliberate/short/gentle；"
+                "emphasis 只能是 light/warm/keywords/urgent/caring；relation 只能是 close/supportive/professional/protective。"
+                "delivery 要与 emotion 和句意一致，日常对话不要把 intensity 写满。"
+                "sprite 必须从可用立绘 id 中选择最贴近 emotion 的一个。"
                 f"可用立绘：{sprite_catalog}。\n"
-                f"voice_text 使用 {voice_lang}，可在开头带 <emo: ...>，不要包含 JSON、路径、命令、密钥 token 或日志。"
+                f"再次确认：reply 跟随用户输入语言；voice_text 才使用 {spoken_language}（{voice_lang}）。"
+                "voice_text 写成一到两个适合自然说出的短句，保留有表演意义的逗号、破折号或省略号；"
+                "不要写列表、标题、括号舞台动作或任何标签；不要包含 JSON、路径、命令、密钥 token 或日志。"
             )
             started = time.perf_counter()
             outcome = chat_completion(
@@ -118,6 +153,7 @@ class CompanionChatTool(ToolAdapter):
                     {"role": "user", "content": text or "你好"},
                 ],
                 temperature=config.llm.temperature,
+                response_format={"type": "json_object"},
                 instructions=system_prompt,
                 user_input=text or "你好",
             )
@@ -133,10 +169,45 @@ class CompanionChatTool(ToolAdapter):
                 payload = {"reply": content}
             reply = str(payload.get("reply") or content or fallback).strip()
             voice_text = str(payload.get("voice_text") or reply).strip()
+            language_repaired = False
+            display_mismatch = obvious_language_mismatch(text, reply)
+            voice_mismatch = obvious_voice_language_mismatch(voice_lang, voice_text)
+            if display_mismatch or voice_mismatch:
+                repaired = self._repair_language_channels(
+                    text,
+                    reply,
+                    voice_text,
+                    display_policy,
+                    spoken_language,
+                )
+                repaired_reply = str(repaired.get("reply") or "").strip()
+                repaired_voice = str(repaired.get("voice_text") or "").strip()
+                if display_mismatch and repaired_reply and not obvious_language_mismatch(text, repaired_reply):
+                    reply = repaired_reply
+                    language_repaired = True
+                elif display_mismatch:
+                    in_language_failure = language_mismatch_fallback(display_policy)
+                    if in_language_failure:
+                        reply = in_language_failure
+                        language_repaired = True
+                if voice_mismatch and repaired_voice and not obvious_voice_language_mismatch(voice_lang, repaired_voice):
+                    voice_text = repaired_voice
+                    language_repaired = True
             emotion = normalize_emotion(str(payload.get("emotion") or "") or _fallback_chat_emotion(f"{text} {reply} {voice_text}"))
+            delivery = normalize_voice_delivery(payload.get("delivery"), emotion)
             sprite = _valid_character_sprite(character, str(payload.get("sprite") or ""), emotion)
             usage = outcome.endpoint.to_agent_state(latency_ms=latency_ms) if outcome.endpoint is not None else {"latency_ms": max(0, int(latency_ms))}
-            return ChatReply(reply[:600], voice_text[:180], emotion, sprite, usage)
+            return ChatReply(
+                reply[:600],
+                voice_text[:180],
+                emotion,
+                sprite,
+                usage,
+                delivery=delivery,
+                display_language=display_policy.code,
+                voice_language=str(voice_lang or ""),
+                language_repaired=language_repaired,
+            )
         except Exception as exc:
             memory_reply = _fallback_memory_reply(text, memory_context or [])
             if memory_reply:
@@ -146,6 +217,57 @@ class CompanionChatTool(ToolAdapter):
             message = _chat_error_message(error)
             sprite = _sprite_for_character_emotion(config.primary_character if config else None, "worried")
             return ChatReply(message, message, "worried", sprite, error=error)
+
+    def _repair_language_channels(
+        self,
+        user_text: str,
+        reply: str,
+        voice_text: str,
+        policy: DisplayLanguagePolicy,
+        spoken_language: str,
+    ) -> dict[str, str]:
+        """Correct a clear channel mix-up, with a short exceptional-path call."""
+
+        system_prompt = (
+            "你只修复显示与配音两个语言通道，不回答新问题。"
+            f"reply 必须使用用户本轮输入的同一种自然语言（提示：{policy.label}）；"
+            f"voice_text 必须用用户选择的配音语言 {spoken_language} 忠实转述 reply。"
+            "保持原意和角色语气，不添加信息。"
+            "只输出 JSON：{\"reply\":\"修复后的屏幕回复\",\"voice_text\":\"修复后的配音短句\"}。"
+        )
+        repair_input = json.dumps(
+            {"user_message": user_text, "reply": reply, "voice_text": voice_text},
+            ensure_ascii=False,
+        )
+        try:
+            outcome = chat_completion(
+                self._config.llm,
+                "fast",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": repair_input},
+                ],
+                budget=CallBudget(timeout_ms=8_000, max_fallbacks=0, allow_categories=("text",)),
+                temperature=0.2,
+                response_format={"type": "json_object"},
+                instructions=system_prompt,
+                user_input=repair_input,
+            )
+        except Exception:
+            return {}
+        if not outcome.ok:
+            return {}
+        content = str(outcome.value or "").strip()
+        try:
+            payload = json.loads(content or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            "reply": str(payload.get("reply") or "").strip(),
+            "voice_text": str(payload.get("voice_text") or "").strip(),
+        }
 
     def _load_config(self) -> Any | None:
         return load_workspace_config(self.workspace)
@@ -159,6 +281,10 @@ class ChatReply:
     sprite: str
     model_usage: dict[str, Any] | None = None
     error: str = ""
+    delivery: dict[str, Any] | None = None
+    display_language: str = ""
+    voice_language: str = ""
+    language_repaired: bool = False
 
 
 class ChatProviderError(RuntimeError):
@@ -229,6 +355,15 @@ def _chat_error_message(error: str) -> str:
         "model_request_failed": "BYOK 请求没有成功，请到设置里运行连接测试。",
     }
     return messages.get(error, messages["model_request_failed"])
+
+
+def _fallback_chat_reply(policy: DisplayLanguagePolicy) -> str:
+    return {
+        "zh": "我在。你可以直接告诉我要看、要玩，还是要写代码。",
+        "ja": "ここにいます。見たいもの、遊びたいこと、作りたいものをそのまま教えてください。",
+        "ko": "여기 있어요. 보고 싶은 것, 하고 싶은 것, 만들고 싶은 것을 바로 말해 주세요.",
+        "en": "I'm here. Tell me what you'd like to watch, play, or build.",
+    }.get(policy.code, "I'm here. Tell me what you'd like to do.")
 
 
 def _sprite_catalog(character: Any) -> str:

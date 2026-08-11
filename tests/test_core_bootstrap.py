@@ -1,16 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 from agent_companion.core.server import JsonRpcBridge, _websocket_session_token
-from agent_companion.core.sidecar_entry import seed_installed_workspace
+from agent_companion.core.sidecar_entry import bundled_root, seed_installed_workspace
 
 
 class CoreBootstrapTests(unittest.TestCase):
+    def test_source_seed_root_can_be_supplied_for_debug_shells(self) -> None:
+        with tempfile.TemporaryDirectory() as source_directory:
+            previous = os.environ.get("JOI_CORE_SEED_ROOT")
+            os.environ["JOI_CORE_SEED_ROOT"] = source_directory
+            try:
+                self.assertEqual(bundled_root(), Path(source_directory).resolve())
+            finally:
+                if previous is None:
+                    os.environ.pop("JOI_CORE_SEED_ROOT", None)
+                else:
+                    os.environ["JOI_CORE_SEED_ROOT"] = previous
+
     def test_seed_installed_workspace_copies_builtins_without_overwriting_user_data(self) -> None:
         with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as target_directory:
             source = Path(source_directory)

@@ -6,6 +6,21 @@ export interface VoiceAudioIdentity {
 }
 
 const VOICE_KEY_SEPARATOR = '\u001f'
+const PLAYABLE_VOICE_EVENT_TYPES = new Set([
+  'approval_required',
+  'runtime_final',
+  'runtime_error',
+  'tool_completed',
+  'tool_failed',
+])
+
+/**
+ * Keep internal lifecycle narration out of the speaker even if an older core
+ * or a replayed event happens to contain synthesized audio.
+ */
+export function isPlayableVoiceEventType(eventType: string | undefined) {
+  return Boolean(eventType && PLAYABLE_VOICE_EVENT_TYPES.has(eventType))
+}
 
 export function voiceAudioKey(payload: VoiceAudioIdentity) {
   return [

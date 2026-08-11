@@ -12,13 +12,21 @@ const props = defineProps<{
   fallbackImageSrc: string
   characterName: string
   emotion: Live2DEmotion
-  speech: string
   motion?: CharacterMotionRequest
   compact: boolean
+  zoom?: number
   accessoryStyle: Record<string, string>
   accessories: { hat: boolean; glasses: boolean; ears: boolean }
   runtimeMapping?: Live2DRuntimeMapping
 }>()
+
+/** A VRM zooms by moving its camera, so the stage must not also scale it. */
+const rendersOwnZoom = computed(() => props.modelType === 'vrm')
+
+function applyZoom() {
+  const zoomable = controller as VrmController | null
+  if (rendersOwnZoom.value && zoomable?.setZoom) zoomable.setZoom(props.zoom ?? 1)
+}
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 const live2dState = ref<'loading' | 'ready' | 'error'>('loading')
@@ -61,8 +69,8 @@ async function mountModel() {
     }
     controller = nextController
     controller.setCompact(props.compact)
+    applyZoom()
     controller.setEmotion(props.emotion)
-    controller.speak(props.speech)
     playCharacterMotion(props.motion)
     live2dState.value = 'ready'
   } catch (error) {
@@ -96,8 +104,8 @@ function playCharacterMotion(motion?: CharacterMotionRequest) {
 
 watch(() => [props.modelUrl, props.modelType], () => void mountModel())
 watch(() => props.compact, (compact) => controller?.setCompact(compact))
+watch(() => props.zoom, () => applyZoom())
 watch(() => props.emotion, (emotion) => controller?.setEmotion(emotion))
-watch(() => props.speech, (speech) => controller?.speak(speech))
 watch(() => props.motion, (motion) => playCharacterMotion(motion), { deep: true })
 watch(() => props.fallbackImageSrc, () => (fallbackFailed.value = false))
 

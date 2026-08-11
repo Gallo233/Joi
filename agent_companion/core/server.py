@@ -8,6 +8,7 @@ import http.server
 import json
 import mimetypes
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -57,18 +58,23 @@ from agent_companion.core.watch_loop import WatchLoopController, WatchLoopOption
 
 SPEAKABLE_EVENTS = {
     EventType.APPROVAL_REQUIRED,
-    EventType.RUNTIME_STARTED,
     EventType.RUNTIME_FINAL,
     EventType.RUNTIME_ERROR,
-    EventType.TOOL_STARTED,
     EventType.TOOL_COMPLETED,
     EventType.TOOL_FAILED,
-    EventType.TASK_COMPLETED,
-    EventType.TASK_FAILED,
 }
 
 JOI_CORE_PRODUCT = "joi-core"
 JOI_CORE_PROTOCOL_VERSION = 1
+
+
+def _next_voice_audio_payload(stream: Any) -> dict[str, Any] | None:
+    """`next()` wrapper whose StopIteration is safe to cross a Future."""
+
+    try:
+        return next(stream)
+    except StopIteration:
+        return None
 
 
 class JsonRpcBridge:
@@ -161,21 +167,55 @@ class JsonRpcBridge:
                 print(f"Joi Core listening on ws://{self.host}:{self.port}")
                 self._write_ready_file()
                 pump = asyncio.create_task(self._event_pump())
+                # A selected local voice loads weights in the background so
+                # the first conversation turn does not pay the cold-start
+                # cost. MiMo and disabled TTS return immediately here.
+                self.tts.start_warmup()
+                # Python's default SIGTERM handler stops the process outright,
+                # so the cleanup below never runs and the local voice service
+                # is left holding its weights. Turning the signal into an
+                # ordinary wake-up is what makes "closing Joi closes it" true
+                # however Joi was closed.
+                stopping = self._install_stop_signals()
                 try:
                     if self.parent_pid > 1:
-                        await self._wait_for_parent_exit()
+                        await self._wait_for_parent_exit(stopping)
                     else:
-                        await asyncio.Future()
+                        await stopping.wait()
                 finally:
                     self.watch_loop.stop(emit=False)
                     pump.cancel()
-                    self.tts.shutdown()
+                    # Joi is closing, so the local voice service closes with
+                    # it: it was started for this session and would otherwise
+                    # hold its weights in memory until the next reboot.
+                    self.tts.stop_local_service()
         finally:
             self._stop_character_asset_server()
             self._remove_ready_file()
 
-    async def _wait_for_parent_exit(self) -> None:
+    def _install_stop_signals(self) -> asyncio.Event:
+        """Make a termination signal a normal shutdown rather than a stop.
+
+        Only SIGTERM and SIGINT, and only when the loop can take handlers --
+        on a platform or thread that cannot, the event simply never fires and
+        behaviour is what it was before.
+        """
+
+        stopping = asyncio.Event()
+        for name in ("SIGTERM", "SIGINT"):
+            handler = getattr(signal, name, None)
+            if handler is None:
+                continue
+            try:
+                self.loop.add_signal_handler(handler, stopping.set)
+            except (NotImplementedError, RuntimeError, ValueError):
+                continue
+        return stopping
+
+    async def _wait_for_parent_exit(self, stopping: asyncio.Event | None = None) -> None:
         while _process_is_alive(self.parent_pid):
+            if stopping is not None and stopping.is_set():
+                return
             await asyncio.sleep(1.0)
 
     def _on_event(self, event: AgentEvent) -> None:
@@ -362,6 +402,7 @@ class JsonRpcBridge:
         router.register("character.import", self.character_import_command, run_in_thread=True, broadcast_ready=True)
         router.register("character.export", self.character_export_command, run_in_thread=True)
         router.register("character.activate", self.character_activate_command, run_in_thread=True, broadcast_ready=True)
+        router.register("character.set_locale", self.character_set_locale_command, run_in_thread=True, broadcast_ready=True)
         router.register("character.duplicate", self.character_duplicate_command, run_in_thread=True, broadcast_ready=True)
         router.register("character.uninstall", self.character_uninstall_command, run_in_thread=True, broadcast_ready=True)
         router.register("character.check_updates", self.character_check_updates_command, run_in_thread=True)
@@ -732,12 +773,71 @@ class JsonRpcBridge:
             self._reload_active_character()
             # A different character must not finish the previous one's sentence.
             self.app.voice_generations.retire_for_character_change(character_id)
-            self.collaboration.update_thread(self.collaboration.context()["thread_id"], character_id=character_id)
+            result["thread"] = self._switch_to_character_thread(character_id, inherit=bool((params or {}).get("inherit_conversation")))
             result["memory"] = self.app.memory.status()
             result["ready"] = self._ready_payload()
             return result
 
         return self._character_preview_result(self._character_command(activate))
+
+    def character_set_locale_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        character_id = str((params or {}).get("character_id") or "")
+        locale = str((params or {}).get("locale") or "")
+
+        def switch() -> dict[str, Any]:
+            result = self.app.character_packages.set_locale(character_id, locale)
+            # The persona, the greeting and the voice description all change
+            # with the language, and every one of them is read at reload.
+            self._reload_active_character()
+            # A line already being spoken is in the language the user just
+            # switched away from, so it is retired the same way a character
+            # change retires it.
+            self.app.voice_generations.retire_for_character_change(result["character_id"])
+            result["ready"] = self._ready_payload()
+            return result
+
+        return self._character_preview_result(self._character_command(switch))
+
+    def _switch_to_character_thread(self, character_id: str, *, inherit: bool = False) -> dict[str, Any]:
+        """Move the conversation to the one belonging to this character.
+
+        Switching used to relabel the current thread with the new character's
+        id, which left every previous turn in place: the new character
+        inherited the last one's conversation, and answered as if it had been
+        there for it. The shell cleared its event list, so it looked separate
+        while the model was still reading the old transcript.
+
+        Each character gets its own thread instead. Inheriting is possible but
+        has to be asked for, and copies nothing -- it keeps the caller on the
+        current thread and moves its ownership, which is the old behaviour made
+        explicit.
+        """
+
+        context = self.collaboration.context()
+        project_id = context.get("project_id") or DEFAULT_PROJECT_ID
+        current_thread_id = context.get("thread_id") or ""
+
+        if inherit:
+            if current_thread_id:
+                self.collaboration.update_thread(current_thread_id, character_id=character_id)
+            return {"thread_id": current_thread_id, "inherited": True}
+
+        existing = [
+            thread
+            for thread in self.collaboration.list_threads(project_id)
+            if str(thread.get("character_id") or "") == character_id
+        ]
+        if existing:
+            # Most recently used, so returning to a character resumes where
+            # that character left off rather than starting over every time.
+            target = max(existing, key=lambda thread: float(thread.get("updated_at") or 0))
+            self.collaboration.activate_thread(str(target["id"]))
+            return {"thread_id": str(target["id"]), "inherited": False, "created": False}
+
+        # create_thread activates what it creates.
+        created = self.collaboration.create_thread(project_id, character_id=character_id)
+        thread = created.get("thread") if isinstance(created.get("thread"), dict) else {}
+        return {"thread_id": str(thread.get("id") or ""), "inherited": False, "created": True}
 
     def character_duplicate_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -836,6 +936,26 @@ class JsonRpcBridge:
         self._attach_character_image(character, "portrait_path", "portrait_url", "portrait_data_url")
         return result
 
+    def _attach_character_animations(self, payload: dict[str, Any]) -> None:
+        """Publish authored `.vrma` clips as asset URLs and drop their paths.
+
+        The shell renders motion, so it needs somewhere to fetch a clip from,
+        but a local filesystem path is not something a safe UI payload carries.
+        """
+
+        rows = payload.get("motion_mappings")
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            path = Path(str(row.pop("animation_path", "") or ""))
+            if not str(path) or path == Path("."):
+                continue
+            url = self._character_asset_url(path)
+            if url:
+                row["animation_url"] = url
+
     def _attach_character_image(
         self,
         payload: dict[str, Any],
@@ -889,7 +1009,16 @@ class JsonRpcBridge:
             # Already superseded before synthesis even started.
             generations.drop(generation, thread_id, "superseded")
             return
-        audio = await asyncio.to_thread(self.tts.synthesize, event.voice_line.text, event.voice_line.sprite, event.voice_line.emotion)
+        if bool(getattr(self.tts, "supports_streaming", False)):
+            await self._stream_voice(event, generation, thread_id)
+            return
+        audio = await asyncio.to_thread(
+            self.tts.synthesize,
+            event.voice_line.text,
+            event.voice_line.sprite,
+            event.voice_line.emotion,
+            event.voice_line.delivery,
+        )
         if not audio:
             return
         if not audio.get("voice_audio_path") and not audio.get("voice_audio_error"):
@@ -916,6 +1045,50 @@ class JsonRpcBridge:
             payload["voice_audio_data_url"] = data_url
         message = json.dumps({"jsonrpc": "2.0", "method": "agent.voice_audio", "params": payload}, ensure_ascii=False)
         await self._broadcast(message)
+
+    async def _stream_voice(self, event: AgentEvent, generation: str, thread_id: str) -> None:
+        """Forward MiMo PCM chunks immediately instead of waiting for a WAV."""
+
+        stream = self.tts.synthesize_stream(
+            event.voice_line.text,
+            event.voice_line.emotion,
+            event.voice_line.delivery,
+        )
+        try:
+            while True:
+                audio = await asyncio.to_thread(_next_voice_audio_payload, stream)
+                if audio is None:
+                    return
+                if not self.app.voice_generations.is_current(generation, thread_id):
+                    self.app.voice_generations.drop(generation, thread_id, "superseded")
+                    return
+                payload = {
+                    "voice_generation": generation,
+                    "task_id": event.task_id,
+                    "event_type": event.type.value,
+                    "event_created_at": event.created_at,
+                    "event_tool": str(event.agent_state.get("tool") or ""),
+                    "watch_commentary": bool(event.agent_state.get("watch_commentary")),
+                    "voice_text": event.voice_line.text,
+                    "voice_emotion": event.voice_line.emotion,
+                    "voice_sprite": event.voice_line.sprite,
+                    **audio,
+                }
+                message = json.dumps(
+                    {"jsonrpc": "2.0", "method": "agent.voice_audio", "params": payload},
+                    ensure_ascii=False,
+                )
+                await self._broadcast(message)
+                if audio.get("voice_audio_final"):
+                    return
+        finally:
+            try:
+                stream.close()
+            except (RuntimeError, ValueError):
+                # A shutdown can cancel this coroutine while the worker is
+                # still inside `next()`. The response then closes with that
+                # worker; never turn shutdown into a second error.
+                pass
 
     def transcribe_and_submit(self, audio_base64: str, mime_type: str = "") -> dict[str, Any]:
         if _encoded_audio_exceeds_limit(audio_base64, self.asr_state.max_bytes):
@@ -1631,6 +1804,7 @@ class JsonRpcBridge:
         try:
             character_payload = self.app.character_packages.active_runtime_payload()
             character_payload["model_url"] = self._character_asset_url(Path(str(character_payload.get("model_path") or "")))
+            self._attach_character_animations(character_payload)
             self._attach_character_image(character_payload, "avatar_path", "avatar_url", "avatar_data_url")
             self._attach_character_image(character_payload, "portrait_path", "portrait_url", "portrait_data_url")
             self._attach_character_image(character_payload, "background_path", "background_url", "background_data_url")
@@ -1766,10 +1940,11 @@ class JsonRpcBridge:
             relative = path.resolve().relative_to(self.app.character_packages.packages_dir.resolve()).as_posix()
         except ValueError:
             return ""
-        asset_url = f"http://{self.host}:{self.asset_port}/characters/{urllib.parse.quote(relative, safe='/')}"
+        relative_url = urllib.parse.quote(relative, safe="/")
         if self.session_token:
-            asset_url = f"{asset_url}?token={urllib.parse.quote(self.session_token, safe='')}"
-        return asset_url
+            token = urllib.parse.quote(self.session_token, safe="")
+            return f"http://{self.host}:{self.asset_port}/characters/{token}/{relative_url}"
+        return f"http://{self.host}:{self.asset_port}/characters/{relative_url}"
 
     @staticmethod
     def _image_data_url(path: Path) -> str:
@@ -1847,13 +2022,19 @@ class _CharacterAssetRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def _prepare_character_path(self) -> bool:
         parsed = urllib.parse.urlsplit(self.path)
-        if not parsed.path.startswith("/characters/"):
+        prefix = "/characters/"
+        if not parsed.path.startswith(prefix):
             return False
+        encoded_relative = parsed.path[len(prefix) :]
         if self.session_token:
-            token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
-            if token != self.session_token:
+            encoded_token, separator, token_relative = encoded_relative.partition("/")
+            path_token = urllib.parse.unquote(encoded_token)
+            query_token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
+            if separator and path_token == self.session_token:
+                encoded_relative = token_relative
+            elif query_token != self.session_token:
                 return False
-        relative = urllib.parse.unquote(parsed.path[len("/characters/") :])
+        relative = urllib.parse.unquote(encoded_relative)
         parts = Path(relative).parts
         if not relative or ".." in parts or any(part.startswith(".") for part in parts):
             return False
@@ -2135,7 +2316,16 @@ def _safe_runtime_settings(config: Any) -> dict[str, Any]:
             "enabled": bool(config.tts.enabled),
             "volume": float(config.tts.volume),
             "speed_factor": float(config.tts.speed_factor),
-            "fallback_to_system": bool(config.tts.fallback_to_system),
+            "gpt_sovits_streaming_mode": max(1, min(3, int(config.tts.gpt_sovits_streaming_mode or 2))),
+            # Which voice service and what to ask it for. The key is
+            # deliberately absent: the panel must be able to show how the
+            # voice is set up without ever being handed the credential.
+            "provider": str(config.tts.provider or ""),
+            "model": str(config.tts.model or ""),
+            "voice": str(config.tts.voice or ""),
+            "base_url": str(config.tts.base_url or ""),
+            "timeout_seconds": max(1, int(config.tts.timeout_seconds or 1)),
+            "optimize_text": bool(config.tts.optimize_text),
         },
         "ocr": {
             "timeout_seconds": max(1, int(config.ocr.timeout_seconds or 1)),
@@ -2144,6 +2334,8 @@ def _safe_runtime_settings(config: Any) -> dict[str, Any]:
         "llm": {
             "temperature": float(config.llm.temperature),
             "use_mock": bool(config.llm.use_mock),
+            "provider": str(config.llm.provider or ""),
+            "model": str(config.llm.model or ""),
         },
         "computer_use": {
             "post_action_settle_ms": max(0, int(config.computer_use.post_action_settle_ms or 0)),

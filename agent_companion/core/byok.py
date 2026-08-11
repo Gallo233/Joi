@@ -291,7 +291,7 @@ def _default_config(workspace: Path) -> dict[str, Any]:
     return {
         "app": {"title": "Joi"},
         "llm": {},
-        "tts": {"enabled": False, "provider": "gpt-sovits", "fallback_to_system": False},
+        "tts": {"enabled": False, "provider": "gpt-sovits"},
         "asr": {"enabled": False, "provider": "openai_compatible"},
         "ocr": {"timeout_seconds": 5, "language": "chi_sim+eng+jpn"},
         "computer_use": {"post_action_settle_ms": 200},

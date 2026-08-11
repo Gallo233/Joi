@@ -78,6 +78,11 @@ def _tts_status(payload: dict[str, Any]) -> RuntimeProviderStatus:
     enabled = bool(payload.get("enabled"))
     configured = bool(payload.get("configured"))
     status = "ready" if configured else "off" if not enabled else "error"
+    notes = ["streaming" if payload.get("streaming") else "whole-line", "system fallback disabled"]
+    if payload.get("last_ttfb_ms") is not None:
+        notes.append(f"first audio {max(0, int(payload['last_ttfb_ms']))}ms")
+    if payload.get("last_total_ms") is not None:
+        notes.append(f"total {max(0, int(payload['last_total_ms']))}ms")
     return RuntimeProviderStatus(
         "tts",
         "TTS",
@@ -85,8 +90,11 @@ def _tts_status(payload: dict[str, Any]) -> RuntimeProviderStatus:
         enabled=enabled,
         configured=configured,
         provider=_safe_identifier(payload.get("provider")),
+        model=_safe_model(payload.get("model")),
         summary="已配置" if configured else "未启用" if not enabled else "未配置",
+        timeout_seconds=max(1, int(payload.get("timeout_seconds") or 1)),
         last_error=_safe_error(payload.get("last_error")),
+        notes=notes,
     )
 
 

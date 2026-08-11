@@ -36,7 +36,8 @@ def _sidecar_path(workspace: Path) -> Path:
         / "shell"
         / "src-tauri"
         / "binaries"
-        / f"joi-core-{_host_target()}{extension}"
+        / "joi-core-runtime"
+        / f"joi-core{extension}"
     )
 
 
@@ -71,7 +72,7 @@ async def _check_websocket(port: int, token: str, instance_id: str) -> None:
     if payload.get("product") != "joi-core" or payload.get("instance_id") != instance_id:
         raise RuntimeError("core_identity_mismatch")
     model_url = str((payload.get("character") or {}).get("model_url") or "")
-    if model_url and f"token={encoded}" not in model_url:
+    if model_url and f"/characters/{encoded}/" not in model_url:
         raise RuntimeError("character_asset_token_missing")
 
     try:
@@ -84,7 +85,7 @@ async def _check_websocket(port: int, token: str, instance_id: str) -> None:
         raise RuntimeError("invalid_token_accepted")
 
 
-def run_smoke(workspace: Path, binary: Path | None = None) -> None:
+def run_smoke(workspace: Path, binary: Path | None = None) -> float:
     sidecar = (binary or _sidecar_path(workspace)).resolve()
     if not sidecar.is_file():
         raise RuntimeError("sidecar_missing")
@@ -97,6 +98,7 @@ def run_smoke(workspace: Path, binary: Path | None = None) -> None:
         environment = dict(os.environ)
         environment["JOI_DATA_HOME"] = str(data_home)
         environment["JOI_CORE_SESSION_TOKEN"] = token
+        started_at = time.monotonic()
         process = subprocess.Popen(
             [
                 str(sidecar),
@@ -126,6 +128,7 @@ def run_smoke(workspace: Path, binary: Path | None = None) -> None:
                 time.sleep(0.1)
             if not ready_file.is_file():
                 raise RuntimeError("sidecar_ready_timeout")
+            startup_seconds = time.monotonic() - started_at
             ready = json.loads(ready_file.read_text(encoding="utf-8"))
             if ready.get("instance_id") != instance_id or ready.get("port") != port:
                 raise RuntimeError("ready_file_identity_mismatch")
@@ -141,6 +144,7 @@ def run_smoke(workspace: Path, binary: Path | None = None) -> None:
             else:
                 raise RuntimeError("readyz_missing_auth")
             asyncio.run(_check_websocket(port, token, instance_id))
+            return startup_seconds
         finally:
             process.terminate()
             try:
@@ -156,11 +160,14 @@ def main() -> int:
     parser.add_argument("--binary", default="")
     args = parser.parse_args()
     try:
-        run_smoke(Path(args.workspace).resolve(), Path(args.binary) if args.binary else None)
+        startup_seconds = run_smoke(
+            Path(args.workspace).resolve(),
+            Path(args.binary) if args.binary else None,
+        )
     except Exception as error:
         print(f"Joi Core sidecar smoke failed: {type(error).__name__}:{error}", file=sys.stderr)
         return 1
-    print("Joi Core sidecar smoke: OK")
+    print(f"Joi Core sidecar smoke: OK (ready in {startup_seconds:.3f}s)")
     return 0
 
 

@@ -25,7 +25,17 @@ class CharacterMotionTests(unittest.TestCase):
         plan = build_plan("来段舞")
         self.assertEqual(plan.intent, "character_motion")
         self.assertEqual(plan.steps[0].name, "character.perform")
-        self.assertEqual(plan.steps[0].arguments, {"motion": "dance"})
+        self.assertEqual(plan.steps[0].arguments["motion"], "dance")
+        # The step must stay local: it names a motion and the language to
+        # answer in, and nothing that could reach outside the app.
+        self.assertEqual(set(plan.steps[0].arguments) - {"motion", "reply_language"}, set())
+
+    def test_the_planner_records_the_language_the_user_wrote_in(self) -> None:
+        """The line shown on screen follows the message, not the voice: asking
+        in Chinese and being answered in Japanese is the bug this prevents."""
+
+        self.assertEqual(build_plan("来段舞").steps[0].arguments["reply_language"], "zh")
+        self.assertEqual(build_plan("踊って").steps[0].arguments["reply_language"], "ja")
 
     def test_motion_payload_is_bounded_and_interruptible(self) -> None:
         payload = character_motion_payload("dance", duration_ms=99_999, intensity=9, loop=True)

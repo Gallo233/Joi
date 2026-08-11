@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Decoupled chat display language from character voice locale: display replies now follow each user message while `voice_text` follows the selected character language, with bounded correction for obvious cross-script violations. Increased VRM audio-driven mouth amplitude without restoring text-driven or duplicate lip-sync.
+- Switched the active MiMo path from full-line voice design to preset-voice PCM streaming, added measured first-audio/total latency, and made the real runtime mode visible. Voice delivery now uses a bounded performance plan (intensity, pace, energy, pauses, emphasis and relationship tone); short character mood notes supplement rather than replace the full direction. GPT-SoVITS API v2 streaming mode 2 and background weight warmup are ready for characters with licensed reference audio. System-voice fallback remains prohibited.
 - Bound Skill install and update to a digest the user actually reviewed. `skill.install` refuses without one, and `skill.update` returns the re-fetched content as a review rather than installing whatever a Git remote serves at that moment.
 - Recorded observed Skill provenance on every installation: source kind, resolved Git commit or archive hash, content digest, inspection time and trust tier, with credentials stripped from source URLs.
 - Refused Skills whose detached signature cannot be verified, instead of treating an unreadable signature as an unsigned package.

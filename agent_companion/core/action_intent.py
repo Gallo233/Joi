@@ -201,7 +201,19 @@ class ActionIntent:
         }
 
     @classmethod
-    def from_request(cls, request: ToolRequest, extra_signals: Iterable[Any] = ()) -> "ActionIntent":
+    def from_request(cls, request: ToolRequest, extra_signals: Iterable[Any] = (), *, scope: str = "") -> "ActionIntent":
+        """Describe one action, and how to recognise a repeat of *this attempt*.
+
+        `scope` is what separates "the same attempt, retried" from "the same
+        thing, asked for again later". Keyed on tool and arguments alone, the
+        idempotency key made every future request for an action identical to
+        one that already succeeded collide with it -- so opening a site once
+        meant never opening it again, refused as though the capability had been
+        switched off. Passing the run makes a retry inside that run dedupe,
+        while tomorrow's identical request is a new attempt, which is what a
+        user asking twice actually means.
+        """
+
         tool = str(request.name or "").strip()
         typed = TOOL_EFFECTS.get(tool, UNKNOWN_EFFECT)
         effect, escalated_by = typed, ""
@@ -219,7 +231,7 @@ class ActionIntent:
             sensitivity="red_line" if effect in RED_LINE_EFFECTS else _EFFECT_SENSITIVITY.get(effect, "medium"),
             escalated_by=escalated_by,
             normalized_args_digest=digest,
-            idempotency_key=hashlib.sha256(f"{tool}\0{digest}".encode("utf-8")).hexdigest(),
+            idempotency_key=hashlib.sha256(f"{scope}\0{tool}\0{digest}".encode("utf-8")).hexdigest(),
             required_capabilities=_REQUIRED_CAPABILITIES.get(effect, ()),
         )
 

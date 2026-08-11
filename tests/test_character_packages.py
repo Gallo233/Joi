@@ -10,6 +10,7 @@ import zlib
 from pathlib import Path
 
 from agent_companion.core.character_packages import CharacterPackageError, CharacterPackageManager
+from agent_companion.core.schemas import AgentEvent, DisplayCard, EventType, VoiceLine
 from agent_companion.core.server import JsonRpcBridge
 
 
@@ -227,6 +228,58 @@ class CharacterPackageManagerTests(unittest.TestCase):
         for name in names:
             self.assertNotIn("memory", name.casefold())
 
+    def test_authored_vrma_clips_are_resolved_for_the_stage(self) -> None:
+        created = self.manager.create({"identity": {"name": "有动作"}, "security": {"license": "CC0"}})
+        character_id = created["character"]["id"]
+        self.manager.activate(character_id)
+        root = self.manager.packages_dir / character_id
+        motions = root / "assets" / "motions"
+        motions.mkdir(parents=True, exist_ok=True)
+        (motions / "idle.vrma").write_bytes(b"glTF-stub")
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        manifest["appearance"]["motions"] = [
+            {"motion": "idle", "animation": "assets/motions/idle.vrma"},
+            {"motion": "greet", "animation": "assets/motions/missing.vrma"},
+            {"motion": "talk"},
+        ]
+        (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        rows = {row["motion"]: row for row in self.manager.active_runtime_payload()["motion_mappings"]}
+        self.assertTrue(rows["idle"]["animation_path"].endswith("assets/motions/idle.vrma"))
+        # A clip the package names but does not ship leaves the motion on the
+        # procedural fallback rather than pointing at nothing.
+        self.assertNotIn("animation_path", rows["greet"])
+        self.assertNotIn("animation_path", rows["talk"])
+
+    def test_a_clip_outside_the_package_is_not_resolved(self) -> None:
+        created = self.manager.create({"identity": {"name": "越界动作"}, "security": {"license": "CC0"}})
+        character_id = created["character"]["id"]
+        self.manager.activate(character_id)
+        outside = self.workspace / "escape.vrma"
+        outside.write_bytes(b"glTF-stub")
+        root = self.manager.packages_dir / character_id
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        manifest["appearance"]["motions"] = [{"motion": "idle", "animation": "../../../escape.vrma"}]
+        (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        rows = self.manager.active_runtime_payload()["motion_mappings"]
+        self.assertNotIn("animation_path", rows[0])
+
+    def test_only_vrma_is_accepted_as_an_animation(self) -> None:
+        created = self.manager.create({"identity": {"name": "假动作"}, "security": {"license": "CC0"}})
+        character_id = created["character"]["id"]
+        self.manager.activate(character_id)
+        root = self.manager.packages_dir / character_id
+        motions = root / "assets" / "motions"
+        motions.mkdir(parents=True, exist_ok=True)
+        (motions / "idle.json").write_text("{}", encoding="utf-8")
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        manifest["appearance"]["motions"] = [{"motion": "idle", "animation": "assets/motions/idle.json"}]
+        (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        rows = self.manager.active_runtime_payload()["motion_mappings"]
+        self.assertNotIn("animation_path", rows[0])
+
     def test_live2d_assets_are_reported_before_install(self) -> None:
         package_root = self.workspace / "broken-live2d"
         package_root.mkdir()
@@ -319,6 +372,53 @@ class CharacterPackageManagerTests(unittest.TestCase):
         self.assertTrue(str(result["ready"]["character"]["portrait_url"]).startswith("http://"))
         self.assertEqual(result["ready"]["character"]["portrait_data_url"], "")
         self.assertNotIn(str(self.workspace), json.dumps(result, ensure_ascii=False))
+
+    def test_switching_character_does_not_hand_over_the_conversation(self) -> None:
+        """A new character starts its own thread, not the last one's.
+
+        Switching used to relabel the current thread with the new character's
+        id, leaving every previous turn in place for it to read. The shell
+        cleared its own event list, so it looked separate while the model was
+        still being handed the old transcript.
+        """
+
+        bridge = JsonRpcBridge(self.workspace)
+        first = bridge.app.character_packages.create({"identity": {"name": "角色甲"}})["character"]["id"]
+        second = bridge.app.character_packages.create({"identity": {"name": "角色乙"}})["character"]["id"]
+
+        bridge.character_activate_command({"character_id": first})
+        first_thread = bridge.collaboration.context()["thread_id"]
+        bridge.collaboration.record_event(
+            AgentEvent(
+                type=EventType.TOOL_COMPLETED,
+                task_id="task-1",
+                agent_state={"tool": "companion.chat", "reply": "只属于角色甲的话"},
+                display_card=DisplayCard("对话", "只属于角色甲的话"),
+                voice_line=VoiceLine("只属于角色甲的话"),
+            )
+        )
+
+        bridge.character_activate_command({"character_id": second})
+        second_thread = bridge.collaboration.context()["thread_id"]
+        self.assertNotEqual(second_thread, first_thread)
+        carried = json.dumps(bridge.collaboration.history(second_thread), ensure_ascii=False)
+        self.assertNotIn("只属于角色甲的话", carried)
+
+        # Returning resumes that character's own thread rather than a new one.
+        bridge.character_activate_command({"character_id": first})
+        self.assertEqual(bridge.collaboration.context()["thread_id"], first_thread)
+
+    def test_inheriting_the_conversation_is_possible_but_must_be_asked_for(self) -> None:
+        bridge = JsonRpcBridge(self.workspace)
+        first = bridge.app.character_packages.create({"identity": {"name": "承接甲"}})["character"]["id"]
+        second = bridge.app.character_packages.create({"identity": {"name": "承接乙"}})["character"]["id"]
+
+        bridge.character_activate_command({"character_id": first})
+        thread_id = bridge.collaboration.context()["thread_id"]
+
+        result = bridge.character_activate_command({"character_id": second, "inherit_conversation": True})
+        self.assertTrue(result["thread"]["inherited"])
+        self.assertEqual(bridge.collaboration.context()["thread_id"], thread_id)
 
     def test_existing_builtin_gains_dedicated_avatar(self) -> None:
         avatar_source = self.workspace / "agent_companion" / "web_widget" / "assets" / "joi-front-head.png"

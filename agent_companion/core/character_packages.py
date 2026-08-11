@@ -21,6 +21,7 @@ from typing import Any, Iterable
 import yaml
 
 from agent_companion.core.character import CharacterHarness
+from agent_companion.core.voice import EMOTION_ALIASES
 
 
 PACKAGE_SCHEMA = "joi.character.v1"
@@ -30,6 +31,15 @@ MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_UNPACKED_BYTES = 512 * 1024 * 1024
 MAX_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_FILES = 2_000
+
+# VRM Animation clips. Declarative bone/expression tracks retargeted onto the
+# humanoid rig -- data, not code, so they carry no execution risk.
+ANIMATION_SUFFIXES = {".vrma"}
+
+# Language tags a package may declare, as `zh`, `ja`, `zh-CN`, `zh-Hant`.
+LOCALE_PATTERN = re.compile(r"^[a-z]{2}(-[A-Za-z]{2,4})?$")
+DEFAULT_LOCALE = "zh"
+MAX_LOCALES = 16
 
 SECRET_FIELD_TOKENS = ("api_key", "apikey", "access_token", "secret", "password")
 
@@ -131,7 +141,9 @@ class CharacterPackageManager:
         manifest, location = self._load(character_id)
         return {
             "ok": True,
-            "character": self._public_manifest(manifest, location.root, include_content=True),
+            "character": self._public_manifest(
+                manifest, location.root, include_content=True, locale=self.active_locale(str(manifest["id"]))
+            ),
         }
 
     def active_id(self) -> str:
@@ -152,6 +164,11 @@ class CharacterPackageManager:
 
     def active_character_row(self) -> dict[str, Any]:
         manifest, location = self._load(self.active_id())
+        # Kept before localization: the overlay overwrites the base language's
+        # motion lines, so asking the localized copy which languages exist
+        # answers with only the one it was just narrowed to.
+        authored = manifest
+        manifest = self._localized(manifest)
         identity = manifest["identity"]
         voice = manifest.get("voice") or {}
         appearance = manifest.get("appearance") or {}
@@ -188,6 +205,8 @@ class CharacterPackageManager:
                 "sovits_model_path": str(self._resolve_asset(location.root, voice.get("sovits_model")) or ""),
                 "speech_speed": _safe_float(voice.get("speed"), 1.0, 0.5, 2.0),
                 "speech_volume": _safe_float(voice.get("volume"), 1.0, 0.0, 2.0),
+                "emotion_map": self._emotion_map_with_assets(voice.get("emotion_map"), location.root),
+                "design": str(voice.get("design") or ""),
             }
         )
         return {
@@ -195,6 +214,11 @@ class CharacterPackageManager:
             "color": str(appearance.get("accent_color") or "#5b7ff5"),
             "sprite_color": str(appearance.get("sprite_color") or "#224e66"),
             "setting": self._setting_text(manifest),
+            "motion_lines": dict(voice.get("motion_lines") or {}),
+            # Every language she has lines in, not only the one she is set to
+            # speak: what she *says on screen* follows the language the user
+            # wrote in, which is independent of the voice they picked.
+            "motion_lines_by_locale": self._motion_lines_by_locale(authored),
             "active_voice_profile": profiles[0]["id"],
             "prompt_lang": profiles[0]["prompt_lang"],
             "speech_speed": profiles[0]["speech_speed"],
@@ -204,7 +228,7 @@ class CharacterPackageManager:
         }
 
     def active_harness(self) -> CharacterHarness:
-        manifest = self.active_manifest()
+        manifest = self._localized(self.active_manifest())
         identity = manifest["identity"]
         voice = manifest.get("voice") or {}
         return CharacterHarness(
@@ -213,6 +237,7 @@ class CharacterPackageManager:
             persona=self._setting_text(manifest),
             tone=str(identity.get("tone") or ""),
             boundaries=[str(item) for item in identity.get("boundaries") or []],
+            locale=str(manifest.get("locale") or DEFAULT_LOCALE),
             voice={
                 "default_lang": str(voice.get("language") or "zh"),
                 "start": str(voice.get("start") or "我开始处理了。"),
@@ -224,19 +249,91 @@ class CharacterPackageManager:
 
     def active_runtime_payload(self) -> dict[str, Any]:
         manifest, location = self._load(self.active_id())
-        payload = self._public_manifest(manifest, location.root, include_content=False)
+        # `_public_manifest` reports both the language in use and the ones on
+        # offer, so a language picker needs no second round trip.
+        payload = self._public_manifest(
+            manifest, location.root, include_content=False, locale=self.active_locale(str(manifest["id"]))
+        )
+        manifest = self._localized(manifest)
         appearance = manifest.get("appearance") or {}
         payload["portrait_path"] = str(self._resolve_asset(location.root, appearance.get("portrait")) or "")
         payload["background_path"] = str(self._resolve_asset(location.root, appearance.get("background")) or "")
         payload["model_path"] = str(self._resolve_asset(location.root, appearance.get("model")) or "")
         payload["model_type"] = str(appearance.get("model_type") or "static")
         payload["expression_mappings"] = copy.deepcopy(appearance.get("expressions") or [])
-        payload["motion_mappings"] = copy.deepcopy(appearance.get("motions") or [])
+        payload["motion_mappings"] = self._motion_mappings_with_assets(manifest, location.root)
         payload["lip_sync"] = copy.deepcopy(appearance.get("lip_sync") or {})
         payload["sprites"] = self.active_character_row().get("sprites") or []
         payload["memory_namespace"] = self.memory_namespace(manifest)
         payload["runtime_state"] = self.runtime_state(str(manifest["id"]))
         return payload
+
+    def _motion_lines_by_locale(self, manifest: dict[str, Any]) -> dict[str, dict[str, str]]:
+        """Motion lines in every language the package declares them in.
+
+        Keyed by locale so the caller can answer in whichever language the user
+        wrote, rather than in whichever one the character is currently voiced
+        in. Reads the raw manifest, not a localized copy, because the point is
+        to see all of them at once.
+        """
+
+        rows: dict[str, dict[str, str]] = {}
+        base = _clean_locale(manifest.get("locale")) or DEFAULT_LOCALE
+        base_lines = dict(((manifest.get("voice") or {}).get("motion_lines")) or {})
+        if base_lines:
+            rows[base] = base_lines
+        for locale, overlay in (manifest.get("localizations") or {}).items():
+            lines = dict((((overlay or {}).get("voice")) or {}).get("motion_lines") or {})
+            if lines:
+                rows[str(locale)] = lines
+        return rows
+
+    def _emotion_map_with_assets(self, emotion_map: Any, root: Path) -> dict[str, Any]:
+        """Resolve each emotion's reference clip to an absolute path.
+
+        An emotion whose clip does not resolve inside the package keeps its
+        text and prosody: a missing file should cost the character its happy
+        *timbre*, not its happy delivery, and the base voice still speaks the
+        line. An entry left with nothing to say is dropped.
+        """
+
+        rows: dict[str, Any] = {}
+        for emotion, entry in (emotion_map or {}).items() if isinstance(emotion_map, dict) else ():
+            if not isinstance(entry, dict):
+                continue
+            resolved = self._resolve_asset(root, entry.get("reference_audio"))
+            row = {
+                "refer_audio_path": str(resolved) if resolved else "",
+                "prompt_text": str(entry.get("prompt_text") or ""),
+                "speech_speed": entry.get("speed"),
+                "pitch": entry.get("pitch"),
+                "instructions": str(entry.get("instructions") or ""),
+            }
+            if any(field not in ("", None) for field in row.values()):
+                rows[str(emotion)] = row
+        return rows
+
+    def _motion_mappings_with_assets(self, manifest: dict[str, Any], root: Path) -> list[dict[str, Any]]:
+        """Resolve each motion's authored animation file to an absolute path.
+
+        A VRM motion may name a `.vrma` clip inside the package. The clip is
+        the authored version of a semantic motion; a package without one still
+        works, because the shell falls back to procedural motion. Anything that
+        does not resolve inside the package is dropped rather than passed on.
+        """
+
+        rows: list[dict[str, Any]] = []
+        for entry in copy.deepcopy((manifest.get("appearance") or {}).get("motions") or []):
+            if not isinstance(entry, dict):
+                continue
+            declared = entry.get("animation")
+            entry.pop("animation_path", None)
+            if declared:
+                resolved = self._resolve_asset(root, declared)
+                if resolved and resolved.suffix.casefold() in ANIMATION_SUFFIXES:
+                    entry["animation_path"] = str(resolved)
+            rows.append(entry)
+        return rows
 
     def runtime_state(self, character_id: str) -> dict[str, Any]:
         safe_id = _safe_character_id(character_id)
@@ -256,7 +353,50 @@ class CharacterPackageManager:
         return {
             "mood": _clean_text(state.get("mood") or "neutral", 40),
             "affinity": _safe_float(state.get("affinity"), 0, 0, 100),
+            "locale": self.active_locale(safe_id),
         }
+
+    def active_locale(self, character_id: str = "") -> str:
+        """Which language this character is currently speaking.
+
+        Held in runtime state rather than in the manifest: it is a thing the
+        user switches, and writing it back into the package would rewrite the
+        author's file and invalidate its hashes to record a UI preference.
+        """
+
+        safe_id = _safe_character_id(character_id or self.active_id())
+        manifest, _ = self._load(safe_id)
+        allowed = available_locales(manifest)
+        path = self.runtime_dir / safe_id / "state.json"
+        state = self._read_json(path, fallback={})
+        chosen = _clean_locale((state or {}).get("locale")) if isinstance(state, dict) else ""
+        # A locale the package has since dropped -- an update that removed a
+        # translation -- falls back rather than leaving the character speaking
+        # a language it no longer has.
+        return chosen if chosen in allowed else allowed[0]
+
+    def set_locale(self, character_id: str, locale: str) -> dict[str, Any]:
+        safe_id = _safe_character_id(character_id or self.active_id())
+        manifest, _ = self._load(safe_id)
+        wanted = _clean_locale(locale)
+        allowed = available_locales(manifest)
+        if wanted not in allowed:
+            raise CharacterPackageError("locale_not_available", "这个角色没有提供该语言。")
+        path = self.runtime_dir / safe_id / "state.json"
+        state = self._read_json(path, fallback={})
+        if not isinstance(state, dict):
+            state = {}
+        state.update({"schema": "joi.character_runtime.v1", "character_id": safe_id, "locale": wanted, "updated_at": time.time()})
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_json(path, state)
+        # `ok` is what every caller checks to tell success from a returned
+        # error; without it a switch that fully worked is reported as failed.
+        return {"ok": True, "character_id": safe_id, "locale": wanted, "available_locales": allowed}
+
+    def _localized(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        """The manifest as the character currently speaks."""
+
+        return _apply_localization(manifest, self.active_locale(str(manifest.get("id") or "")))
 
     def memory_namespace(self, manifest: dict[str, Any] | None = None) -> str:
         manifest = manifest or self.active_manifest()
@@ -562,6 +702,12 @@ class CharacterPackageManager:
             ("appearance.background", appearance.get("background_path")),
             ("appearance.model", appearance.get("model_path")),
             ("voice.reference_audio", voice.get("reference_audio_path")),
+            # Trained GPT-SoVITS weights, so a user who fine-tuned a voice can
+            # bind it to the character rather than editing the manifest by
+            # hand. Zero-shot needs only the reference clip above; these are
+            # the step past it.
+            ("voice.gpt_model", voice.get("gpt_model_path")),
+            ("voice.sovits_model", voice.get("sovits_model_path")),
         ):
             if str(raw or "").strip():
                 extra_assets[key] = Path(str(raw)).expanduser().resolve()
@@ -656,6 +802,8 @@ class CharacterPackageManager:
                 "appearance.background": "background",
                 "appearance.model": "model",
                 "voice.reference_audio": "voice",
+                "voice.gpt_model": "voice",
+                "voice.sovits_model": "voice",
             }[dotted_key]
             destination = staging / "assets" / folder
             destination.mkdir(parents=True, exist_ok=True)
@@ -743,9 +891,18 @@ class CharacterPackageManager:
                 "volume": _safe_float(voice_raw.get("volume"), 1.0, 0.0, 2.0),
                 "reference_audio": _safe_relative_asset(voice_raw.get("reference_audio")),
                 "prompt_text": _clean_text(voice_raw.get("prompt_text"), 2_000),
+                # How the character sounds, in words. A synthesiser that builds
+                # a voice from a description needs no recording at all, which
+                # is the only way a package can carry a voice it has no rights
+                # to distribute a sample of.
+                "design": _clean_text(voice_raw.get("design"), 2_000),
                 "gpt_model": _safe_relative_asset(voice_raw.get("gpt_model")),
                 "sovits_model": _safe_relative_asset(voice_raw.get("sovits_model")),
-                "emotion_map": _clean_mapping(voice_raw.get("emotion_map"), 80),
+                "emotion_map": _clean_emotion_map(voice_raw.get("emotion_map")),
+                # What she says while performing each motion. Without these a
+                # character speaks Joi's default mascot lines, which is jarring
+                # for one written as quiet or as formal.
+                "motion_lines": _clean_motion_lines(voice_raw.get("motion_lines")),
             },
             "knowledge": {
                 "lorebook": _clean_lorebook(knowledge_raw.get("lorebook")),
@@ -778,6 +935,12 @@ class CharacterPackageManager:
                 "file_hashes": _clean_mapping(security_raw.get("file_hashes"), MAX_FILES),
                 "package_hash": _clean_text(security_raw.get("package_hash"), 128),
             },
+            # The language the sections above are written in. A package that
+            # never says gets the default rather than being treated as
+            # language-less, because every other locale is defined as an
+            # overlay onto this one.
+            "locale": _clean_locale(raw.get("locale")) or DEFAULT_LOCALE,
+            "localizations": _clean_localizations(raw.get("localizations")),
             "extensions": _clean_mapping(raw.get("extensions"), 200),
         }
         return manifest
@@ -1026,13 +1189,22 @@ class CharacterPackageManager:
         return self._normalize_manifest(raw)
 
     def _summary(self, manifest: dict[str, Any], root: Path, *, active_id: str) -> dict[str, Any]:
-        payload = self._public_manifest(manifest, root, include_content=False)
+        # Each character remembers its own language, so the library lists every
+        # one as it currently speaks rather than as its manifest was written.
+        payload = self._public_manifest(manifest, root, include_content=False, locale=self.active_locale(str(manifest["id"])))
         payload["active"] = manifest["id"] == active_id
         return payload
 
-    def _public_manifest(self, manifest: dict[str, Any], root: Path, *, include_content: bool) -> dict[str, Any]:
-        identity = manifest["identity"]
-        appearance = manifest.get("appearance") or {}
+    def _public_manifest(self, manifest: dict[str, Any], root: Path, *, include_content: bool, locale: str = "") -> dict[str, Any]:
+        # Shown as the character currently speaks, but `available_locales` is
+        # read from the manifest as authored: the overlay rewrites `locale` to
+        # the chosen one, so asking the localized copy what else it offers
+        # would report only the language it is already in.
+        active = _clean_locale(locale) or _clean_locale(manifest.get("locale")) or DEFAULT_LOCALE
+        choices = available_locales(manifest)
+        display = _apply_localization(manifest, active)
+        identity = display["identity"]
+        appearance = display.get("appearance") or {}
         portrait = self._resolve_asset(root, appearance.get("portrait"))
         avatar = self._resolve_asset(root, identity.get("avatar")) or portrait
         payload: dict[str, Any] = {
@@ -1053,6 +1225,8 @@ class CharacterPackageManager:
             "has_update_source": bool((manifest.get("source") or {}).get("update_url")),
             "greeting": str(identity.get("greeting") or ""),
             "tone": str(identity.get("tone") or ""),
+            "locale": active,
+            "available_locales": choices,
         }
         if include_content:
             payload["manifest"] = copy.deepcopy(manifest)
@@ -1367,6 +1541,173 @@ def _clean_mapping(value: Any, max_items: int) -> dict[str, Any]:
         elif isinstance(item, (str, int, float, bool)) or item is None:
             cleaned[safe_key] = _clean_text(item, 2_000) if isinstance(item, str) else item
     return cleaned
+
+
+def _clean_locale(value: Any) -> str:
+    """A language tag, or nothing if it is not one."""
+
+    text = str(value or "").strip().replace("_", "-")
+    return text if LOCALE_PATTERN.match(text) else ""
+
+
+def _clean_localizations(value: Any) -> dict[str, Any]:
+    """The same character, said in another language.
+
+    Only what changes between languages is overlaid: how the character speaks,
+    how its voice is described, and the package-local recordings that teach the
+    synthesiser that language. Everything else -- the model, the expressions,
+    the hashes, the security block -- is deliberately not overridable, because
+    a translation is a different wording of one character, not a second
+    character that happens to share an id.
+
+    A Japanese persona wants a Japanese voice description rather than a
+    translated Chinese one, which is why `voice.design` is per locale: the
+    synthesiser is being told about a Japanese speaker, and saying so in
+    Chinese describes someone reading Japanese with an accent.
+    """
+
+    if not isinstance(value, dict):
+        return {}
+    rows: dict[str, Any] = {}
+    for tag, entry in list(value.items())[:MAX_LOCALES]:
+        locale = _clean_locale(tag)
+        if not locale or not isinstance(entry, dict):
+            continue
+        identity_raw = entry.get("identity") if isinstance(entry.get("identity"), dict) else {}
+        voice_raw = entry.get("voice") if isinstance(entry.get("voice"), dict) else {}
+        identity = {
+            "name": _clean_text(identity_raw.get("name"), 80),
+            "persona": _clean_text(identity_raw.get("persona"), 12_000),
+            "personality": _clean_text(identity_raw.get("personality"), 6_000),
+            "scenario": _clean_text(identity_raw.get("scenario"), 6_000),
+            "tone": _clean_text(identity_raw.get("tone"), 1_000),
+            "boundaries": _clean_string_list(identity_raw.get("boundaries"), 40, 500),
+            "greeting": _clean_text(identity_raw.get("greeting"), 4_000),
+            "example_dialogue": _clean_text(identity_raw.get("example_dialogue"), 12_000),
+        }
+        voice = {
+            "language": _clean_text(voice_raw.get("language"), 20),
+            "prompt_language": _clean_text(voice_raw.get("prompt_language"), 20),
+            "design": _clean_text(voice_raw.get("design"), 2_000),
+            "label": _clean_text(voice_raw.get("label"), 80),
+            # A Chinese reference clip cannot teach the Japanese frontend the
+            # same phonemes. These remain package-relative and pass through the
+            # same path containment checks as the base voice; model weights are
+            # intentionally still shared and cannot be swapped by a locale.
+            "reference_audio": _safe_relative_asset(voice_raw.get("reference_audio")),
+            "prompt_text": _clean_text(voice_raw.get("prompt_text"), 2_000),
+            "speed": _optional_float(voice_raw.get("speed"), 0.5, 2.0),
+            "volume": _optional_float(voice_raw.get("volume"), 0.0, 2.0),
+            "emotion_map": _clean_emotion_map(voice_raw.get("emotion_map")),
+            # Per language, because these are lines she speaks: a Japanese
+            # persona greeting in Chinese is the same mismatch as the voice
+            # description being in the wrong language.
+            "motion_lines": _clean_motion_lines(voice_raw.get("motion_lines")),
+        }
+        identity = {key: item for key, item in identity.items() if item not in ("", [])}
+        voice = {key: item for key, item in voice.items() if item not in ("", None, {})}
+        if identity or voice:
+            rows[locale] = {"identity": identity, "voice": voice}
+    return rows
+
+
+def _apply_localization(manifest: dict[str, Any], locale: str) -> dict[str, Any]:
+    """A copy of the manifest as this character sounds in one language.
+
+    The base manifest is itself a locale -- whichever one the author wrote it
+    in -- so asking for that locale, or for one the package never declared,
+    returns the manifest unchanged rather than an empty character.
+    """
+
+    wanted = _clean_locale(locale)
+    overlay = (manifest.get("localizations") or {}).get(wanted)
+    if not wanted or not isinstance(overlay, dict):
+        return manifest
+    localized = copy.deepcopy(manifest)
+    for section in ("identity", "voice"):
+        values = overlay.get(section)
+        if isinstance(values, dict):
+            localized.setdefault(section, {}).update(values)
+    localized["locale"] = wanted
+    return localized
+
+
+def available_locales(manifest: dict[str, Any]) -> list[str]:
+    """Every language this character can speak, base language first."""
+
+    base = _clean_locale(manifest.get("locale")) or DEFAULT_LOCALE
+    others = sorted(tag for tag in (manifest.get("localizations") or {}) if tag != base)
+    return [base, *others]
+
+
+def _clean_emotion_map(value: Any) -> dict[str, Any]:
+    """Per-emotion voice settings, keyed by the emotion names Joi already uses.
+
+    The short form is `{"happy": "assets/voice/happy.wav"}`: handing GPT-SoVITS
+    a reference clip of the character sounding happy is how it is told to sound
+    happy, so a bare path is the common case and is read as one. The long form
+    spells out the clip's transcript and prosody alongside it.
+
+    Emotion names Joi does not recognise are dropped rather than folded into
+    neutral. `normalize_emotion` answers "neutral" for anything unknown, and
+    honouring that here would let one typo silently replace the character's
+    normal speaking voice.
+    """
+
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, Any] = {}
+    for key, item in list(value.items())[: len(EMOTION_ALIASES)]:
+        alias = str(key or "").strip().casefold().replace(" ", "_")
+        if alias not in EMOTION_ALIASES:
+            continue
+        entry = item if isinstance(item, dict) else {"reference_audio": item}
+        row = {
+            "reference_audio": _safe_relative_asset(entry.get("reference_audio")),
+            "prompt_text": _clean_text(entry.get("prompt_text"), 2_000),
+            "speed": _optional_float(entry.get("speed"), 0.5, 2.0),
+            # -1 lowest, 1 highest. A hint for voices that can be pitched at
+            # synthesis time rather than re-recorded, which is how the system
+            # voice gets any emotion at all.
+            "pitch": _optional_float(entry.get("pitch"), -1.0, 1.0),
+            # For a hosted model that can be told how to read a line, the
+            # author's own sentence about it beats any table Joi could write.
+            "instructions": _clean_text(entry.get("instructions"), 1_000),
+        }
+        if any(field not in ("", None) for field in row.values()):
+            cleaned[EMOTION_ALIASES[alias]] = row
+    return cleaned
+
+
+def _clean_motion_lines(value: Any) -> dict[str, str]:
+    """Per-motion lines, keyed by the motions Joi actually knows.
+
+    An unknown motion name is dropped rather than kept: it can never be played,
+    and keeping it would suggest the package covers a motion it does not.
+    """
+
+    from agent_companion.core.character_motion import MOTION_SPECS
+
+    if not isinstance(value, dict):
+        return {}
+    lines: dict[str, str] = {}
+    for motion, line in list(value.items())[: len(MOTION_SPECS)]:
+        name = str(motion or "").strip().casefold()
+        text = _clean_text(line, 140)
+        if name in MOTION_SPECS and text:
+            lines[name] = text
+    return lines
+
+
+def _optional_float(value: Any, minimum: float, maximum: float) -> float | None:
+    """A clamped number, or nothing when the author did not declare one."""
+
+    if value is None or value == "":
+        return None
+    try:
+        return min(maximum, max(minimum, float(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _clean_mapping_list(value: Any, max_items: int) -> list[dict[str, Any]]:

@@ -37,16 +37,17 @@ def build_sidecar(workspace: Path, *, target: str = "", if_missing: bool = False
             f"PyInstaller cannot cross-compile Joi Core: requested {target}, host is {host_target}"
         )
     extension = ".exe" if sys.platform == "win32" else ""
-    destination = (
+    runtime_dir = (
         workspace
         / "agent_companion"
         / "shell"
         / "src-tauri"
         / "binaries"
-        / f"joi-core-{target}{extension}"
+        / "joi-core-runtime"
     )
-    if if_missing and destination.is_file():
-        print(f"Joi Core sidecar already exists: {destination}")
+    destination = runtime_dir / f"joi-core{extension}"
+    if if_missing and destination.is_file() and (runtime_dir / "_internal").is_dir():
+        print(f"Joi Core runtime already exists: {runtime_dir}")
         return destination
 
     try:
@@ -70,7 +71,7 @@ def build_sidecar(workspace: Path, *, target: str = "", if_missing: bool = False
         "PyInstaller",
         "--noconfirm",
         "--clean",
-        "--onefile",
+        "--onedir",
         "--name",
         "joi-core",
         "--paths",
@@ -102,13 +103,25 @@ def build_sidecar(workspace: Path, *, target: str = "", if_missing: bool = False
     command.append(str(entry))
     subprocess.run(command, cwd=workspace, check=True)
 
-    built = dist_dir / f"joi-core{extension}"
-    if not built.is_file():
-        raise RuntimeError(f"PyInstaller completed without producing {built}")
-    shutil.copy2(built, destination)
+    built_runtime = dist_dir / "joi-core"
+    built = built_runtime / f"joi-core{extension}"
+    if not built.is_file() or not (built_runtime / "_internal").is_dir():
+        raise RuntimeError(f"PyInstaller completed without producing an onedir runtime at {built_runtime}")
+
+    staged_runtime = runtime_dir.with_name(f"{runtime_dir.name}.next")
+    if staged_runtime.exists():
+        shutil.rmtree(staged_runtime)
+    shutil.copytree(built_runtime, staged_runtime, symlinks=True)
+    if runtime_dir.exists():
+        shutil.rmtree(runtime_dir)
+    staged_runtime.replace(runtime_dir)
     destination.chmod(destination.stat().st_mode | 0o111)
     digest = hashlib.sha256(destination.read_bytes()).hexdigest()
-    print(f"Built {destination.name} ({destination.stat().st_size} bytes, sha256={digest})")
+    runtime_size = sum(path.stat().st_size for path in runtime_dir.rglob("*") if path.is_file())
+    print(
+        f"Built {runtime_dir.name} ({runtime_size} bytes onedir, "
+        f"launcher sha256={digest})"
+    )
     return destination
 
 

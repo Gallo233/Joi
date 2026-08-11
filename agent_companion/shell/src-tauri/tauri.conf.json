@@ -34,9 +34,9 @@
   },
   "bundle": {
     "active": true,
-    "externalBin": [
-      "binaries/joi-core"
-    ],
+    "resources": {
+      "binaries/joi-core-runtime/": "joi-core-runtime/"
+    },
     "icon": [
       "icons/icon.png",
       "icons/icon.icns",
