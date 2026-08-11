@@ -1,0 +1,29 @@
+/* ==========================================================================
+   Stylesheet entry point
+
+   The order below is a cascade *layer* order, not just a load order, and that
+   distinction is the point.
+
+   The legacy stylesheet reaches its current appearance through 117 selectors
+   that exist only to out-specify an earlier rule -- `.shell:not(.compact-active)
+   .chat-section`, `.settings-active .byok-field input` -- plus 24 `!important`
+   declarations. Adding anything on top of that by ordinary means requires
+   guessing a specificity that beats whatever is already there, which is how a
+   stylesheet ends up with 117 of those selectors in the first place.
+
+   Layers end the argument. A rule in a later layer beats a rule in an earlier
+   layer no matter how specific the earlier one is, so `button:active` in
+   `interaction` wins over `.some.deeply.nested.legacy.rule` without needing to
+   match its shape. New work states what it means at its natural specificity;
+   the legacy sheet keeps working untouched until its rules are replaced.
+
+   Component `<style scoped>` blocks stay unlayered, which puts them above all
+   of this -- the direction migration should travel.
+   ========================================================================== */
+
+@layer base, legacy, interaction;
+
+@import url('./tokens.css');
+@import url('./base.css') layer(base);
+@import url('../styles.css') layer(legacy);
+@import url('./interaction.css') layer(interaction);

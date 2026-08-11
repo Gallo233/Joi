@@ -87,6 +87,10 @@ interface CharacterDraft {
   voiceVolume: number
   referenceAudioPath: string
   voicePromptText: string
+  voicePromptLanguage: string
+  voiceDesign: string
+  gptModelPath: string
+  sovitsModelPath: string
   lorebook: string
   memoryNamespace: 'isolated' | 'shared' | 'disabled'
   requestedSkills: string
@@ -110,6 +114,9 @@ const selectedId = ref('')
 const selected = ref<CharacterDetail | null>(null)
 const loading = ref(false)
 const actionBusy = ref('')
+// Off by default: a character does not get the previous one's conversation
+// unless the user hands it over.
+const inheritConversation = ref(false)
 const libraryRoot = ref<HTMLElement | null>(null)
 const uninstallConfirmPanel = ref<HTMLElement | null>(null)
 const notice = ref('')
@@ -154,6 +161,10 @@ function emptyDraft(): CharacterDraft {
     expressions: [],
     voiceId: 'default',
     voiceLabel: '默认音色',
+    voicePromptLanguage: '',
+    voiceDesign: '',
+    gptModelPath: '',
+    sovitsModelPath: '',
     voiceLanguage: 'zh',
     voiceSpeed: 1,
     voiceVolume: 1,
@@ -301,6 +312,10 @@ function draftFromManifest(manifest: CharacterManifest): CharacterDraft {
     })),
     voiceId: voice.id || 'default',
     voiceLabel: voice.label || '默认音色',
+    voicePromptLanguage: voice.prompt_language || '',
+    voiceDesign: voice.design || '',
+    gptModelPath: voice.gpt_model || '',
+    sovitsModelPath: voice.sovits_model || '',
     voiceLanguage: voice.language || 'zh',
     voiceSpeed: Number(voice.speed || 1),
     voiceVolume: Number(voice.volume || 1),
@@ -313,7 +328,7 @@ function draftFromManifest(manifest: CharacterManifest): CharacterDraft {
   }
 }
 
-async function pickAsset(target: 'avatarPath' | 'portraitPath' | 'modelPath' | 'backgroundPath' | 'referenceAudioPath') {
+async function pickAsset(target: 'avatarPath' | 'portraitPath' | 'modelPath' | 'backgroundPath' | 'referenceAudioPath' | 'gptModelPath' | 'sovitsModelPath') {
   try {
     const paths = await invoke<string[]>('pick_attachments', { kind: 'file' })
     if (paths[0]) draft[target] = paths[0]
@@ -405,6 +420,10 @@ function buildPayload(): Record<string, unknown> {
       volume: draft.voiceVolume,
       reference_audio_path: draft.referenceAudioPath,
       prompt_text: draft.voicePromptText,
+      prompt_language: draft.voicePromptLanguage,
+      design: draft.voiceDesign,
+      gpt_model_path: draft.gptModelPath,
+      sovits_model_path: draft.sovitsModelPath,
     },
     knowledge: { lorebook: { entries: loreEntries }, memory_namespace: draft.memoryNamespace },
     capabilities: { requested_skills: draft.requestedSkills.split(',').map((row) => row.trim()).filter(Boolean), approved_skills: [] },
@@ -456,14 +475,48 @@ async function activateSelected() {
   actionBusy.value = 'activate'
   error.value = ''
   try {
-    const result = await props.client.characterActivate(selectedId.value) as CharacterMutationResult
+    const inherited = inheritConversation.value
+    const result = await props.client.characterActivate(selectedId.value, inherited) as CharacterMutationResult
     if (!result.ok) throw new Error(rpcMessage(result, '角色切换失败。'))
     activeId.value = selectedId.value
-    notice.value = `已切换到 ${selected.value?.name || '新角色'}，后续对话、声音和记忆空间已经同步。`
+    notice.value = inherited
+      ? `已切换到 ${selected.value?.name || '新角色'}，当前对话已交给它继续。`
+      : `已切换到 ${selected.value?.name || '新角色'}，它有自己独立的对话和记忆空间。`
+    inheritConversation.value = false
     emit('activated', selectedId.value, result.ready)
     await refresh(selectedId.value)
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : '角色切换失败。'
+  } finally {
+    actionBusy.value = ''
+  }
+}
+
+// Only worth showing for a character that actually has a second language --
+// a picker with one option is a control that cannot do anything.
+const localeChoices = computed(() => selectedSummary.value?.available_locales || [])
+const currentLocale = computed(() => selectedSummary.value?.locale || localeChoices.value[0] || '')
+
+const LOCALE_LABELS: Record<string, string> = { zh: '中文', ja: '日本語', en: 'English' }
+
+function localeLabel(locale: string) {
+  return LOCALE_LABELS[locale] || LOCALE_LABELS[locale.split('-')[0]] || locale
+}
+
+async function switchLocale(locale: string) {
+  if (!selectedId.value || locale === currentLocale.value) return
+  actionBusy.value = 'locale'
+  error.value = ''
+  try {
+    const result = await props.client.characterSetLocale(selectedId.value, locale) as CharacterMutationResult
+    if (!result.ok) throw new Error(rpcMessage(result, '语言切换失败。'))
+    // The persona, greeting and voice all changed, so the character has to be
+    // re-read rather than having a label swapped in place.
+    notice.value = `已切换到${localeLabel(locale)}配音；聊天文字仍跟随你本轮输入。`
+    if (selectedId.value === activeId.value) emit('activated', selectedId.value, result.ready)
+    await refresh(selectedId.value)
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : '语言切换失败。'
   } finally {
     actionBusy.value = ''
   }
@@ -677,6 +730,29 @@ onMounted(() => void refresh())
               </button>
               <button v-else type="button" class="active-button" disabled><Check :size="18" />当前正在使用</button>
             </div>
+            <label v-if="selectedSummary.id !== activeId" class="inherit-conversation">
+              <input type="checkbox" v-model="inheritConversation" :disabled="Boolean(actionBusy)" />
+              <span>把当前对话交给新角色</span>
+              <small>默认每个角色的对话和上下文相互独立。</small>
+            </label>
+            <div v-if="localeChoices.length > 1" class="character-locale">
+              <span class="character-locale-label">配音语言</span>
+              <div class="character-locale-options" role="group" aria-label="角色配音语言">
+                <button
+                  v-for="locale in localeChoices"
+                  :key="locale"
+                  type="button"
+                  :class="{ selected: locale === currentLocale }"
+                  :aria-pressed="locale === currentLocale"
+                  :disabled="Boolean(actionBusy)"
+                  @click="switchLocale(locale)"
+                >
+                  <LoaderCircle v-if="actionBusy === 'locale' && locale !== currentLocale" class="spin" :size="14" />
+                  {{ localeLabel(locale) }}
+                </button>
+              </div>
+              <small>人设、开场白和音色描述都会换成这个语言。</small>
+            </div>
             <div class="detail-tools">
               <button type="button" :disabled="!selected || Boolean(actionBusy)" @click="editSelected"><Pencil :size="16" />{{ selectedSummary.built_in ? '复制后编辑' : '编辑' }}</button>
               <button type="button" :disabled="Boolean(actionBusy)" @click="duplicateSelected()"><Copy :size="16" />复制</button>
@@ -823,7 +899,14 @@ onMounted(() => void refresh())
           <label><span>音量 {{ Math.round(Number(draft.voiceVolume) * 100) }}%</span><input v-model.number="draft.voiceVolume" type="range" min="0" max="2" step="0.1" /></label>
           <label class="asset-field span-2"><span>参考音频</span><div><input :value="draft.referenceAudioPath" readonly placeholder="WAV / MP3 / FLAC" /><button type="button" @click="pickAsset('referenceAudioPath')"><Volume2 :size="16" />选择</button></div></label>
           <label class="span-2"><span>参考音频文本</span><textarea v-model="draft.voicePromptText" rows="2" placeholder="参考音频中说的内容，用于零样本音色。"></textarea></label>
+          <label><span>参考音频语言</span><input v-model="draft.voicePromptLanguage" placeholder="留空则跟随上面的语言" /></label>
+          <label class="span-2"><span>音色描述</span><textarea v-model="draft.voiceDesign" rows="2" placeholder="用一两句话描述这个声音，供 MiMo voicedesign 生成音色；本地 GPT-SoVITS 不使用这一项。"></textarea></label>
+
+          <p class="editor-subhead span-2">GPT-SoVITS 微调模型（可选）</p>
+          <label class="asset-field span-2"><span>GPT 模型 .ckpt</span><div><input :value="draft.gptModelPath" readonly placeholder="留空则用服务当前加载的权重" /><button type="button" @click="pickAsset('gptModelPath')"><FileCheck2 :size="16" />选择</button></div></label>
+          <label class="asset-field span-2"><span>SoVITS 模型 .pth</span><div><input :value="draft.sovitsModelPath" readonly placeholder="留空则用服务当前加载的权重" /><button type="button" @click="pickAsset('sovitsModelPath')"><FileCheck2 :size="16" />选择</button></div></label>
         </div>
+        <div class="safe-inline"><Volume2 :size="17" /><span>只填参考音频即可零样本复刻音色；两个模型是自己微调过之后才需要，留空就用 GPT-SoVITS 服务当前已加载的权重。</span></div>
         <div class="safe-inline"><ShieldCheck :size="17" /><span>密钥由 Joi 的 BYOK/语音设置管理，导出角色包时不会带走。</span></div>
       </section>
 
@@ -864,130 +947,143 @@ button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .45; }
 
-.library-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.library-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-6); margin-bottom: 22px; }
 .library-navigation { min-height: 30px; display: flex; align-items: center; margin-bottom: 7px; }
-.library-return { min-height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid var(--line); border-radius: 10px; color: #60708b; background: rgba(255,255,255,.62); font-size: 11px; font-weight: 730; }
+.library-return { min-height: 30px; display: inline-flex; align-items: center; gap: var(--sp-2); padding: 0 var(--sp-2); border: 1px solid var(--line); border-radius: var(--radius-md); color: #60708b; background: rgba(255,255,255,.62); font-size: var(--text-xs); font-weight: 730; }
 .library-return:hover, .library-return:focus-visible { color: #365f9c; background: white; border-color: rgba(71,124,244,.28); }
 .library-header h1 { margin: 3px 0 5px; font-size: clamp(25px, 2.5vw, 34px); letter-spacing: -.04em; }
-.library-header p:not(.eyebrow) { margin: 0; color: var(--muted); font-size: 14px; }
-.eyebrow { margin: 0; color: #7990b8; font-size: 10px; font-weight: 800; letter-spacing: .18em; }
-.header-actions, .install-actions, .editor-footer { display: flex; gap: 10px; }
+.library-header p:not(.eyebrow) { margin: 0; color: var(--muted); font-size: var(--text-md); }
+.eyebrow { margin: 0; color: #5671a1; font-size: var(--text-xs); font-weight: 800; letter-spacing: .18em; }
+.header-actions, .install-actions, .editor-footer { display: flex; gap: var(--sp-3); }
 .header-actions { flex: 0 0 auto; }
 .header-actions button { white-space: nowrap; }
-.primary-action, .secondary-action, .active-button { min-height: 42px; border-radius: 14px; padding: 0 17px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 750; border: 1px solid transparent; }
+.primary-action, .secondary-action, .active-button { min-height: 42px; border-radius: var(--radius-lg); padding: 0 var(--sp-4); display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2); font-weight: 750; border: 1px solid transparent; }
 .primary-action { color: white; background: var(--blue); box-shadow: 0 9px 22px rgba(71, 124, 244, .2); }
 .secondary-action { color: #45536b; background: rgba(255,255,255,.72); border-color: var(--line); }
 .primary-action.wide, .active-button { width: 100%; }
-.active-button { color: #2d8a54; background: #edf8f1; border-color: #d7efdf; }
-.quiet-back { display: inline-flex; align-items: center; gap: 7px; border: 0; background: transparent; color: #60708b; padding: 0 0 8px; }
+.active-button { color: #2a804e; background: #edf8f1; border-color: #d7efdf; }
+.quiet-back { display: inline-flex; align-items: center; gap: var(--sp-2); border: 0; background: transparent; color: #60708b; padding: 0 0 var(--sp-2); }
 
-.library-notice { display: flex; gap: 9px; align-items: center; border-radius: 13px; padding: 11px 14px; margin: -8px 0 16px; font-size: 13px; }
+.library-notice { display: flex; gap: var(--sp-2); align-items: center; border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-4); margin: -8px 0 16px; font-size: var(--text-base); }
 .library-notice.success { color: #28784a; background: #eef8f2; }
 .library-notice.error { color: #a84545; background: #fff0ef; }
 
-.active-ribbon { display: grid; grid-template-columns: 52px 1fr auto; align-items: center; gap: 13px; padding: 12px 14px; background: rgba(245, 249, 255, .86); border: 1px solid rgba(119, 151, 206, .16); border-radius: 18px; margin-bottom: 15px; }
-.active-avatar { width: 52px; height: 52px; border-radius: 15px; overflow: hidden; display: grid; place-items: center; color: #6482b8; background: #e9f0fb; }
+.active-ribbon { display: grid; grid-template-columns: 52px 1fr auto; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); background: rgba(245, 249, 255, .86); border: 1px solid rgba(119, 151, 206, .16); border-radius: var(--radius-xl); margin-bottom: 15px; }
+.active-avatar { width: 52px; height: 52px; border-radius: var(--radius-lg); overflow: hidden; display: grid; place-items: center; color: #4f71ae; background: #e9f0fb; }
 .active-avatar img { width: 100%; height: 100%; object-fit: cover; object-position: top center; }
-.active-ribbon div:nth-child(2) { display: grid; gap: 2px; }
-.active-ribbon span { color: #7d8ba1; font-size: 11px; font-weight: 750; }
-.active-ribbon strong { font-size: 16px; }
-.active-ribbon small { color: #718098; }
-.active-ribbon > svg { color: #42b873; }
+.active-ribbon div:nth-child(2) { display: grid; gap: var(--sp-1); }
+.active-ribbon span { color: #64728a; font-size: var(--text-xs); font-weight: 750; }
+.active-ribbon strong { font-size: var(--text-lg); }
+.active-ribbon small { color: #647289; }
+.active-ribbon > svg { color: #2e7f4f; }
 
-.library-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-height: 490px; }
-.character-rail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.character-card { display: grid; grid-template-columns: 58px 1fr auto; align-items: center; gap: 12px; width: 100%; min-height: 72px; padding: 8px 11px 8px 8px; text-align: left; color: #344158; border: 1px solid transparent; border-radius: 18px; background: rgba(255,255,255,.38); transition: 180ms ease; }
+.library-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); min-height: 490px; }
+.character-rail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
+.character-card { display: grid; grid-template-columns: 58px 1fr auto; align-items: center; gap: var(--sp-3); width: 100%; min-height: 72px; padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-2); text-align: left; color: #344158; border: 1px solid transparent; border-radius: var(--radius-xl); background: rgba(255,255,255,.38); transition: 180ms ease; }
 .character-card:hover, .character-card:focus-visible { background: rgba(255,255,255,.8); border-color: var(--line); transform: translateY(-1px); }
 .character-card.selected { background: white; border-color: rgba(88, 126, 194, .22); box-shadow: 0 11px 28px rgba(59, 80, 116, .08); }
-.card-art { --character-accent: #5b7ff5; position: relative; width: 58px; height: 58px; border-radius: 16px; overflow: hidden; display: grid; place-items: center; color: var(--character-accent); font-weight: 850; font-size: 22px; background: color-mix(in srgb, var(--character-accent) 10%, white); }
+.card-art { --character-accent: #5b7ff5; position: relative; width: 58px; height: 58px; border-radius: var(--radius-lg); overflow: hidden; display: grid; place-items: center; color: var(--character-accent); font-weight: 850; font-size: var(--text-2xl); background: color-mix(in srgb, var(--character-accent) 10%, white); }
 .card-art img { width: 100%; height: 100%; object-fit: cover; object-position: top center; }
 .card-art i { position: absolute; right: 4px; bottom: 4px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; color: white; background: #42b873; box-shadow: 0 2px 7px rgba(23, 75, 45, .24); }
-.card-copy { display: grid; gap: 4px; min-width: 0; }
+.card-copy { display: grid; gap: var(--sp-1); min-width: 0; }
 .card-copy strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card-copy small { color: #8793a6; }
+.card-copy small { color: #657288; }
 .create-card { border-style: dashed; border-color: rgba(100, 126, 169, .2); }
-.create-card .card-art { background: transparent; border: 1px dashed rgba(100, 126, 169, .36); color: #8292ac; }
+.create-card .card-art { background: transparent; border: 1px dashed rgba(100, 126, 169, .36); color: #607291; }
 
-.character-detail { overflow: hidden; background: rgba(255,255,255,.76); border: 1px solid rgba(98, 122, 160, .14); border-radius: 24px; box-shadow: 0 18px 48px rgba(53, 72, 106, .08); }
-.detail-copy { padding: 20px; }
-.detail-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
-.detail-meta span { display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; border-radius: 999px; color: #5f6f87; background: #f2f5fa; font-size: 11px; font-weight: 750; }
-.detail-title { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
-.detail-title small { color: #94a0b2; font-weight: 700; }
-.detail-title h2 { margin: 2px 0 0; font-size: 24px; letter-spacing: -.03em; }
-.detail-title > span { display: inline-flex; align-items: center; gap: 5px; color: #2d8a54; background: #edf8f1; border-radius: 999px; padding: 6px 9px; font-size: 11px; font-weight: 800; }
-.detail-tone { min-height: 40px; color: #6f7d92; line-height: 1.55; font-size: 13px; }
-.detail-copy dl { display: grid; grid-template-columns: 1fr 1fr; margin: 16px 0; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
-.detail-copy dl div { padding: 10px 12px; display: grid; gap: 3px; border-bottom: 1px solid var(--line); }
+.character-detail { overflow: hidden; background: rgba(255,255,255,.76); border: 1px solid rgba(98, 122, 160, .14); border-radius: var(--radius-xl); box-shadow: 0 18px 48px rgba(53, 72, 106, .08); }
+.detail-copy { padding: var(--sp-5); }
+.detail-meta { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: 14px; }
+.detail-meta span { display: inline-flex; align-items: center; gap: var(--sp-1); padding: var(--sp-2) var(--sp-2); border-radius: var(--radius-pill); color: #5f6f87; background: #f2f5fa; font-size: var(--text-xs); font-weight: 750; }
+.detail-title { display: flex; justify-content: space-between; gap: var(--sp-4); align-items: flex-start; }
+.detail-title small { color: #63728a; font-weight: 700; }
+.detail-title h2 { margin: 2px 0 0; font-size: var(--text-2xl); letter-spacing: -.03em; }
+.detail-title > span { display: inline-flex; align-items: center; gap: var(--sp-1); color: #2a804e; background: #edf8f1; border-radius: var(--radius-pill); padding: var(--sp-2) var(--sp-2); font-size: var(--text-xs); font-weight: 800; }
+.detail-tone { min-height: 40px; color: #657285; line-height: 1.55; font-size: var(--text-base); }
+.detail-copy dl { display: grid; grid-template-columns: 1fr 1fr; margin: 16px 0; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
+.detail-copy dl div { padding: var(--sp-3) var(--sp-3); display: grid; gap: var(--sp-1); border-bottom: 1px solid var(--line); }
 .detail-copy dl div:nth-child(odd) { border-right: 1px solid var(--line); }
 .detail-copy dl div:nth-last-child(-n+2) { border-bottom: 0; }
-.detail-copy dt { color: #8b96a8; font-size: 10px; }
-.detail-copy dd { margin: 0; font-size: 12px; font-weight: 730; overflow: hidden; text-overflow: ellipsis; }
-.detail-tools { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 10px; }
-.detail-tools button { min-height: 38px; border: 1px solid var(--line); background: #fbfcfe; border-radius: 11px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; color: #56657d; font-size: 11px; }
+.detail-copy dt { color: #657286; font-size: var(--text-xs); }
+.detail-copy dd { margin: 0; font-size: var(--text-sm); font-weight: 730; overflow: hidden; text-overflow: ellipsis; }
+.inherit-conversation { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: var(--sp-1) var(--sp-2); margin-top: 10px; font-size: var(--text-sm); color: #56657d; cursor: pointer; }
+.inherit-conversation input { margin: 0; }
+.inherit-conversation small { grid-column: 2; font-size: var(--text-xs); color: #63728a; }
+.character-locale { display: grid; gap: var(--sp-2); margin-top: 10px; font-size: var(--text-sm); color: #56657d; }
+.character-locale-label { font-weight: 750; }
+.character-locale-options { display: flex; gap: var(--sp-2); }
+.character-locale-options button { min-height: 32px; padding: 0 var(--sp-3); display: inline-flex; align-items: center; gap: var(--sp-1); border: 1px solid var(--line); border-radius: var(--radius-md); background: #fbfcfe; color: #56657d; font-size: var(--text-sm); font-weight: 700; }
+.character-locale-options button.selected { border-color: color-mix(in srgb, var(--character-accent, #5b7ff5) 55%, var(--line)); background: color-mix(in srgb, var(--character-accent, #5b7ff5) 12%, white); color: #33415c; }
+.character-locale small { font-size: var(--text-xs); color: #63728a; }
+.detail-tools { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--sp-2); margin-top: 10px; }
+.detail-tools button { min-height: 38px; border: 1px solid var(--line); background: #fbfcfe; border-radius: var(--radius-md); display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-1); color: #56657d; font-size: var(--text-xs); }
 .detail-tools button.danger { color: #b74f4f; }
-.uninstall-confirmation { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 11px; align-items: start; margin-top: 10px; padding: 12px; border: 1px solid rgba(194, 79, 79, .18); border-radius: 14px; background: #fff8f7; }
-.uninstall-confirm-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; color: #b74f4f; background: #ffeceb; }
-.uninstall-confirmation strong { display: block; color: #8f3636; font-size: 12px; }
-.uninstall-confirmation p { margin: 3px 0 0; color: #816565; font-size: 11px; line-height: 1.5; }
-.uninstall-confirm-actions { grid-column: 2; display: flex; justify-content: flex-end; gap: 7px; }
-.uninstall-confirm-actions button { min-height: 32px; padding: 0 11px; border: 1px solid var(--line); border-radius: 10px; color: #66728a; background: white; font-size: 11px; font-weight: 750; }
-.uninstall-confirm-actions .danger-confirm { display: inline-flex; align-items: center; gap: 5px; color: white; border-color: #bd5353; background: #bd5353; }
+.uninstall-confirmation { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--sp-3) var(--sp-3); align-items: start; margin-top: 10px; padding: var(--sp-3); border: 1px solid rgba(194, 79, 79, .18); border-radius: var(--radius-lg); background: #fff8f7; }
+.uninstall-confirm-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: var(--radius-md); color: #b74f4f; background: #ffeceb; }
+.uninstall-confirmation strong { display: block; color: #8f3636; font-size: var(--text-sm); }
+.uninstall-confirmation p { margin: 3px 0 0; color: #816565; font-size: var(--text-xs); line-height: 1.5; }
+.uninstall-confirm-actions { grid-column: 2; display: flex; justify-content: flex-end; gap: var(--sp-2); }
+.uninstall-confirm-actions button { min-height: 32px; padding: 0 var(--sp-3); border: 1px solid var(--line); border-radius: var(--radius-md); color: #657189; background: white; font-size: var(--text-xs); font-weight: 750; }
+.uninstall-confirm-actions .danger-confirm { display: inline-flex; align-items: center; gap: var(--sp-1); color: white; border-color: #bd5353; background: #bd5353; }
 .uninstall-confirm-enter-active, .uninstall-confirm-leave-active { transition: opacity 160ms ease, transform 160ms ease; }
 .uninstall-confirm-enter-from, .uninstall-confirm-leave-to { opacity: 0; transform: translateY(-4px); }
-.detail-loading { min-height: 440px; display: grid; place-content: center; gap: 10px; color: #7b889e; }
+.detail-loading { min-height: 440px; display: grid; place-content: center; gap: var(--sp-3); color: #657289; }
 
-.install-preview { display: grid; gap: 16px; }
-.preview-character { display: grid; grid-template-columns: 190px 1fr; align-items: center; gap: 24px; padding: 20px; background: rgba(255,255,255,.7); border: 1px solid var(--line); border-radius: 24px; }
-.preview-art { --character-accent: #5b7ff5; height: 190px; border-radius: 20px; display: grid; place-items: center; overflow: hidden; color: var(--character-accent); background: color-mix(in srgb, var(--character-accent) 10%, white); }
+.install-preview { display: grid; gap: var(--sp-4); }
+.preview-character { display: grid; grid-template-columns: 190px 1fr; align-items: center; gap: var(--sp-6); padding: var(--sp-5); background: rgba(255,255,255,.7); border: 1px solid var(--line); border-radius: var(--radius-xl); }
+.preview-art { --character-accent: #5b7ff5; height: 190px; border-radius: var(--radius-xl); display: grid; place-items: center; overflow: hidden; color: var(--character-accent); background: color-mix(in srgb, var(--character-accent) 10%, white); }
 .preview-art img { width: 100%; height: 100%; object-fit: contain; object-position: center bottom; }
-.preview-kicker { color: #7690bc; font-size: 11px; font-weight: 800; letter-spacing: .1em; }
-.preview-character h2 { margin: 6px 0; font-size: 28px; }
-.preview-character p { color: #6f7d92; }
-.preview-meta { display: flex; flex-wrap: wrap; gap: 7px; }
-.preview-meta span { padding: 6px 9px; border-radius: 999px; color: #5b6a82; background: #f1f5fb; font-size: 11px; }
-.security-review { padding: 20px; background: white; border: 1px solid var(--line); border-radius: 24px; }
-.security-review > header { display: flex; align-items: flex-start; gap: 11px; }
-.security-review > header svg { color: #3fa76b; }
+.preview-kicker { color: #5171a6; font-size: var(--text-xs); font-weight: 800; letter-spacing: .1em; }
+.preview-character h2 { margin: 6px 0; font-size: var(--text-3xl); }
+.preview-character p { color: #657285; }
+.preview-meta { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.preview-meta span { padding: var(--sp-2) var(--sp-2); border-radius: var(--radius-pill); color: #5b6a82; background: #f1f5fb; font-size: var(--text-xs); }
+.security-review { padding: var(--sp-5); background: white; border: 1px solid var(--line); border-radius: var(--radius-xl); }
+.security-review > header { display: flex; align-items: flex-start; gap: var(--sp-3); }
+.security-review > header svg { color: #307e50; }
 .security-review h3 { margin: 0 0 4px; }
-.security-review header p { margin: 0; color: var(--muted); font-size: 12px; }
-.security-grid { display: grid; grid-template-columns: 1fr 1fr; margin: 18px 0; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
-.security-grid div { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 12px; border-bottom: 1px solid var(--line); }
+.security-review header p { margin: 0; color: var(--muted); font-size: var(--text-sm); }
+.security-grid { display: grid; grid-template-columns: 1fr 1fr; margin: 18px 0; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
+.security-grid div { display: grid; grid-template-columns: auto 1fr auto; gap: var(--sp-2); align-items: center; padding: var(--sp-3); border-bottom: 1px solid var(--line); }
 .security-grid div:nth-child(odd) { border-right: 1px solid var(--line); }
 .security-grid div:nth-last-child(-n+2) { border-bottom: 0; }
 .security-grid div:last-child:nth-child(odd) { grid-column: 1 / -1; border-right: 0; }
-.security-grid svg { color: #5d7eae; }
-.security-grid span { color: #758298; font-size: 12px; }
-.security-grid strong { font-size: 12px; }
-.security-warning { padding: 9px 11px; border-radius: 10px; color: #8a6331; background: #fff7e8; font-size: 12px; }
+.security-grid svg { color: #5272a3; }
+.security-grid span { color: #667288; font-size: var(--text-sm); }
+.security-grid strong { font-size: var(--text-sm); }
+.security-warning { padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-md); color: #8a6331; background: #fff7e8; font-size: var(--text-sm); }
 .security-warning.error { color: #a84545; background: #fff0ef; }
 .install-actions { justify-content: flex-end; margin-top: 18px; }
 
-.character-editor { display: grid; gap: 14px; padding-bottom: 90px; }
-.editor-section { padding: 20px; border-radius: 22px; background: rgba(255,255,255,.72); border: 1px solid var(--line); }
-.editor-section > header { display: grid; grid-template-columns: 36px 1fr; gap: 10px; margin-bottom: 18px; }
-.editor-section > header > span { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; color: #5577b1; background: #edf3fc; font-size: 11px; font-weight: 850; }
-.editor-section h2 { margin: 0; font-size: 18px; }
-.editor-section header p, .subsection-title p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
-.form-grid label { display: grid; gap: 7px; color: #5b687d; font-size: 12px; font-weight: 720; }
+.character-editor { display: grid; gap: var(--sp-4); padding-bottom: var(--sp-8); }
+.editor-section { padding: var(--sp-5); border-radius: var(--radius-xl); background: rgba(255,255,255,.72); border: 1px solid var(--line); }
+.editor-section > header { display: grid; grid-template-columns: 36px 1fr; gap: var(--sp-3); margin-bottom: 18px; }
+.editor-section > header > span { width: 32px; height: 32px; border-radius: var(--radius-md); display: grid; place-items: center; color: #4f71ab; background: #edf3fc; font-size: var(--text-xs); font-weight: 850; }
+.editor-section h2 { margin: 0; font-size: var(--text-xl); }
+.editor-section header p, .subsection-title p { margin: 4px 0 0; color: var(--muted); font-size: var(--text-sm); }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+.form-grid label { display: grid; gap: var(--sp-2); color: #5b687d; font-size: var(--text-sm); font-weight: 720; }
 .form-grid label.span-2 { grid-column: 1 / -1; }
-.form-grid input:not([type="range"]), .form-grid textarea, .form-grid select { width: 100%; box-sizing: border-box; color: var(--ink); background: rgba(248,250,253,.88); border: 1px solid rgba(94, 116, 151, .16); border-radius: 12px; padding: 10px 11px; outline: none; resize: vertical; }
+/* No `outline: none` here. Scoped styles are unlayered, which puts them above
+   the interaction layer, so suppressing the outline in this one component
+   would leave exactly these fields with no keyboard focus ring while every
+   other field in the app has one. */
+.form-grid input:not([type="range"]), .form-grid textarea, .form-grid select { width: 100%; box-sizing: border-box; color: var(--ink); background: rgba(248,250,253,.88); border: 1px solid rgba(94, 116, 151, .16); border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-3); resize: vertical; }
 .form-grid input:focus, .form-grid textarea:focus, .form-grid select:focus { border-color: rgba(71,124,244,.5); box-shadow: 0 0 0 3px rgba(71,124,244,.08); }
-.asset-field div, .color-field { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
-.asset-field button, .subsection-title button, .expression-row button { min-height: 39px; border: 1px solid var(--line); border-radius: 11px; color: #53627a; background: white; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; }
-.color-field input[type="color"] { width: 44px; height: 40px; padding: 3px; border: 1px solid var(--line); border-radius: 11px; }
+.asset-field div, .color-field { display: grid; grid-template-columns: 1fr auto; gap: var(--sp-2); }
+.asset-field button, .subsection-title button, .expression-row button { min-height: 39px; border: 1px solid var(--line); border-radius: var(--radius-md); color: #53627a; background: white; display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2); padding: 0 var(--sp-3); }
+.color-field input[type="color"] { width: 44px; height: 40px; padding: var(--sp-1); border: 1px solid var(--line); border-radius: var(--radius-md); }
 .color-field { grid-template-columns: auto 1fr; }
-.subsection-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin: 22px 0 10px; }
-.subsection-title h3 { margin: 0; font-size: 14px; }
-.expression-row { display: grid; grid-template-columns: 48px minmax(80px, 1fr) 92px auto minmax(90px, 1fr) minmax(76px, 1fr) 54px 38px; gap: 6px; margin-top: 7px; }
-.expression-row input, .expression-row select { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: #fafbfd; padding: 8px; }
-.expression-row button { white-space: nowrap; font-size: 11px; }
-.expression-row .icon-danger { color: #b75252; padding: 0; }
-.empty-subsection { color: #8a96a8; font-size: 12px; text-align: center; padding: 14px; border: 1px dashed var(--line); border-radius: 12px; }
-.safe-inline { display: flex; align-items: center; gap: 9px; color: #5d7393; background: #f2f6fc; border-radius: 12px; padding: 10px 12px; margin-top: 14px; font-size: 12px; }
-.safe-inline svg { color: #527cb9; flex: 0 0 auto; }
-.editor-footer { position: sticky; bottom: 8px; justify-content: flex-end; padding: 12px; border: 1px solid rgba(97, 120, 156, .15); border-radius: 18px; background: rgba(249,251,255,.9); backdrop-filter: blur(18px); box-shadow: 0 16px 35px rgba(48, 67, 101, .12); }
+.subsection-title { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-4); margin: 22px 0 10px; }
+.subsection-title h3 { margin: 0; font-size: var(--text-md); }
+.expression-row { display: grid; grid-template-columns: 48px minmax(80px, 1fr) 92px auto minmax(90px, 1fr) minmax(76px, 1fr) 54px 38px; gap: var(--sp-2); margin-top: 7px; }
+.expression-row input, .expression-row select { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fafbfd; padding: var(--sp-2); }
+.expression-row button { white-space: nowrap; font-size: var(--text-xs); }
+.expression-row .icon-danger { color: #b65151; padding: 0; }
+.empty-subsection { color: #647286; font-size: var(--text-sm); text-align: center; padding: var(--sp-4); border: 1px dashed var(--line); border-radius: var(--radius-md); }
+.safe-inline { display: flex; align-items: center; gap: var(--sp-2); color: #5c7292; background: #f2f6fc; border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-3); margin-top: 14px; font-size: var(--text-sm); }
+.safe-inline svg { color: #4772b0; flex: 0 0 auto; }
+.editor-footer { position: sticky; bottom: 8px; justify-content: flex-end; padding: var(--sp-3); border: 1px solid rgba(97, 120, 156, .15); border-radius: var(--radius-xl); background: rgba(249,251,255,.9); backdrop-filter: blur(18px); box-shadow: 0 16px 35px rgba(48, 67, 101, .12); }
 .spin { animation: spin .85s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

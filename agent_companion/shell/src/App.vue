@@ -7,10 +7,8 @@ import {
   ArrowUp,
   Archive,
   AppWindow,
-  Bell,
   Bot,
   Brain,
-  Cable,
   CheckCircle2,
   ChevronDown,
   Code2,
@@ -18,18 +16,17 @@ import {
   File as FileIcon,
   FileClock,
   FilePlus2,
-  FileText,
   Folder as FolderIcon,
   FolderPlus,
   Globe2,
   Gamepad2,
   Hand,
   Image as ImageIcon,
-  Info,
   KeyRound,
-  Languages,
   LoaderCircle,
   Maximize2,
+  PanelLeftClose,
+  PanelLeftOpen,
   Menu,
   MessageCircle,
   Mic,
@@ -41,7 +38,6 @@ import {
   Play,
   Pencil,
   Plus,
-  Plug,
   RefreshCw,
   RotateCcw,
   Search,
@@ -54,26 +50,48 @@ import {
   Trash2,
   Unplug,
   UserRound,
-  Volume2,
   WalletCards,
   Zap,
   X,
 } from 'lucide-vue-next'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from 'vue'
+// Headless primitives, used only where hand-rolling the behaviour is what
+// produced the bugs: focus trapping, Esc, outside-click, focus return, and
+// removing a closed overlay from the tab order.
+import { DialogRoot, DialogTrigger, TabsContent, TabsList, TabsRoot, TabsTrigger } from 'reka-ui'
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch, type Component } from 'vue'
 import { CoreClient, type CoreStatus } from './api'
 import JoiCharacter from './components/JoiCharacter.vue'
 import CharacterLibrary from './components/CharacterLibrary.vue'
+import ContextRail from './components/layout/ContextRail.vue'
+import ThinkingOrb from './components/ThinkingOrb.vue'
 import { normalizeCharacterMotion, type CharacterMotionRequest } from './characterMotion'
+import { assistantDisplayText, isAssistantPresentationEvent } from './conversationPresentation'
 import type { Live2DEmotion, Live2DRuntimeMapping } from './live2d/runtime'
-import type { ActionReceipt, AgentCliListResult, AgentCliModelOption, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, AgentSkillDraft, AgentSkillInspection, AgentSkillInstallation, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ByokConnectResult, ByokPreset, ByokStatus, ByokTestResult, CapabilitySession, CodexRuntimeStatus, CollaborationSnapshot, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, GameAdapterManifest, JoiMcpStatus, JoiProject, JoiThread, MemoryCandidate, MemoryCandidatePage, MemoryPage, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, PermissionProfile, ResourceBinding, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { ActionReceipt, AgentCliListResult, AgentCliModelOption, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, AgentSkillDraft, AgentSkillInspection, AgentSkillInstallation, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ByokConnectResult, ByokPreset, ByokStatus, ByokTestResult, CapabilitySession, CharacterSummary, CodexRuntimeStatus, CollaborationSnapshot, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, GameAdapterManifest, JoiMcpStatus, JoiProject, JoiThread, MemoryCandidate, MemoryCandidatePage, MemoryPage, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, PermissionProfile, ResourceBinding, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { settingsSubtitle, settingsTabs, settingsTitle, type SettingsTabId } from './settings'
-import { asrRpcTimeoutMs, nextVoiceEpoch, shouldPlayVoiceAudio, voiceAudioKey } from './voiceRuntime'
+import { asRecord, stringValue } from './composables/safeRecord'
+import { errorLabel, sourceLabel } from './composables/watchLabels'
+import { useByok } from './composables/useByok'
+import { usePersistentRef } from './composables/usePersistentRef'
+import { useWatchLoop } from './composables/useWatchLoop'
+import { useBackgroundContext } from './composables/useBackgroundContext'
+import { useAgentSkills } from './composables/useAgentSkills'
+import { useMemory } from './composables/useMemory'
+import { ProjectsContextKey, type AttachmentKind } from './shellContext'
+import {
+  asrRpcTimeoutMs,
+  isPlayableVoiceEventType,
+  nextVoiceEpoch,
+  shouldPlayVoiceAudio,
+  voiceAudioKey,
+} from './voiceRuntime'
+import { attachLipSync, detachLipSync, enqueuePcm16Chunk, unlockAudioPlayback } from './voiceLipSync'
+import { VoiceRecorder } from './voiceRecorder'
 
 const input = ref('')
 const status = ref<CoreStatus>('offline')
 const errorText = ref('')
 const coreRetrying = ref(false)
-type AttachmentKind = 'file' | 'folder'
 interface ComposerAttachment {
   kind: AttachmentKind
   name: string
@@ -113,6 +131,19 @@ const threadRows = ref<JoiThread[]>([])
 const resourceBindings = ref<ResourceBinding[]>([])
 const activeContext = ref<NonNullable<CollaborationSnapshot['active']>>({})
 const activeCapabilitySession = ref<CapabilitySession | null>(null)
+
+/**
+ * The session only while it can still be acted on.
+ *
+ * A finished run has nothing to pause, take over or cancel, but the old card
+ * kept showing all three -- which is how a completed "已结束" session went on
+ * occupying the top of the conversation.
+ */
+const liveCapabilitySession = computed(() => {
+  const session = activeCapabilitySession.value
+  if (!session) return null
+  return ['completed', 'failed', 'cancelled'].includes(session.state) ? null : session
+})
 const editingRailItem = ref<{ type: 'project' | 'thread'; id: string } | null>(null)
 const editingRailValue = ref('')
 const showArchivedContext = ref(false)
@@ -144,41 +175,34 @@ const activeCabin = ref<CabinId>('chat')
 const quickMenuOpen = ref(false)
 const characterMenuOpen = ref(false)
 const stageBackdropEnabled = ref(true)
-const characterFullBody = ref(false)
-const stageZoom = ref(1.1)
+// Imported VRM/Live2D characters should open in the stable full-body framing
+// used by the installed Joi experience. The control still lets the user opt
+// into a closer portrait crop when desired.
+const characterFullBody = ref(true)
+// 100% now frames the whole model with a margin, so the old 110% default --
+// which existed to compensate for the character sitting small in frame -- just
+// crops the feet.
+const stageZoom = ref(1)
+
+// The stage used to hold roughly 60% of the window whether or not there was a
+// character in it. With Core down, or a character package that ships no model
+// and no sprite, that was 60% of the window painted blank while the
+// conversation was squeezed into what was left.
+//
+// Collapsing is therefore two things: a choice the user can make and keep, and
+// a fallback the shell applies on its own when there is genuinely nothing to
+// draw. `stageCollapsed` is the choice; `stageHasCharacter` is the fact.
+const stageCollapsed = usePersistentRef('stageCollapsed', false)
 const artifactDialog = ref<HTMLDialogElement | null>(null)
-const memoryStatus = ref<MemoryStatus | null>(null)
 const activeSettingsTab = ref<SettingsTabId>('execution')
 const settingsSearch = ref('')
 const fallbackLive2DModelUrl = import.meta.env.VITE_JOI_LIVE2D_MODEL_URL || '/live2d/joi/joi.model3.json'
-const memoryQuery = ref('')
-const memoryRows = ref<MemoryRecord[]>([])
-const memoryPendingRows = ref<MemoryCandidate[]>([])
-const memoryView = ref<'saved' | 'pending'>('saved')
-const memoryTotal = ref(0)
-const memoryHasMore = ref(false)
-const memoryOffset = ref(0)
-const memorySearchLoading = ref(false)
-const memoryVault = ref<MemoryVault | null>(null)
-const editingMemoryId = ref<number | null>(null)
-const editingMemoryText = ref('')
-const editingMemoryKind = ref('note')
-const backgroundStatus = ref<BackgroundContextStatus | null>(null)
-const backgroundScopeType = ref<'window' | 'project' | 'game'>('window')
-const backgroundScopeLabel = ref('当前窗口')
-const backgroundLoading = ref(false)
 const skillManifest = ref<NativeSkillManifest | null>(null)
 const skillRefreshLoading = ref(false)
-const installedAgentSkills = ref<AgentSkillInstallation[]>([])
-const agentSkillSource = ref('')
-const agentSkillScope = ref<'global' | 'project' | 'character'>('project')
-const agentSkillInspection = ref<AgentSkillInspection | null>(null)
-const agentSkillBusy = ref(false)
-const agentSkillNotice = ref('')
 const gameAdapterRows = ref<GameAdapterManifest[]>([])
 const gameAdapterNotice = ref('')
-const agentSkillDrafts = ref<AgentSkillDraft[]>([])
 const executionMode = ref<'local_cli' | 'byok'>('local_cli')
+
 const selectedAgentCliId = ref('codex')
 const selectedAgentCliModel = ref('默认')
 const selectedAgentCliReasoning = ref('XHigh')
@@ -191,32 +215,17 @@ const joiMcpStatus = ref<JoiMcpStatus | null>(null)
 const joiMcpInstalling = ref(false)
 const agentCliSyncing = ref(false)
 const agentCliCoreUnsupported = ref(false)
-const byokStatus = ref<ByokStatus | null>(null)
-const byokDraft = ref(defaultByokDraft())
-const byokApiKey = ref('')
-const byokLoading = ref(false)
-const byokDiscovering = ref(false)
-const byokAdvancedOpen = ref(false)
-const byokResult = ref<ByokTestResult | null>(null)
-const byokNotice = ref('')
-const byokDirty = ref(false)
 let agentCliSyncTimer: number | null = null
 
-const fallbackByokPresets: ByokPreset[] = [
-  { id: 'openai', label: 'OpenAI', description: '官方 API · 默认选择高性价比模型', base_url: 'https://api.openai.com/v1', model: 'gpt-5.6-luna', requires_key: true, cost_hint: '适合日常高频对话' },
-  { id: 'openai_compatible', label: '兼容 API', description: '支持 OpenAI Chat Completions 的供应商', base_url: '', model: '', requires_key: true, cost_hint: '价格由供应商决定' },
-  { id: 'ollama', label: 'Ollama 本地', description: '使用本机模型 · 不消耗云端额度', base_url: 'http://127.0.0.1:11434/v1', model: '', requires_key: false, cost_hint: '无 API 调用费用' },
-]
 
-const byokPresets = computed(() => byokStatus.value?.presets?.length ? byokStatus.value.presets : fallbackByokPresets)
-const selectedByokPreset = computed(() => byokPresets.value.find((preset) => preset.id === byokDraft.value.provider) || byokPresets.value[0])
-const byokRequiresKey = computed(() => selectedByokPreset.value?.requires_key !== false)
-const byokSecretReady = computed(() => !byokRequiresKey.value || Boolean(byokApiKey.value.trim() || byokStatus.value?.secret?.stored))
-const byokCanConnect = computed(() => Boolean(connected.value && !byokLoading.value && !byokDiscovering.value && byokDraft.value.base_url.trim() && byokDraft.value.model.trim() && byokSecretReady.value))
-const byokKnownModels = computed(() => byokResult.value?.models || byokStatus.value?.last_test?.models || [])
 
 const stageZoomLabel = computed(() => `${Math.round(stageZoom.value * 100)}%`)
-const stageCharacterStyle = computed(() => ({ '--stage-character-scale': String(stageZoom.value) }))
+// A VRM zooms by moving its camera, which stays sharp and cannot push the feet
+// out of frame. Scaling the canvas in CSS would do both. Live2D and static
+// sprites are raster art, so scaling them is still the right tool.
+const stageCharacterStyle = computed(() => ({
+  '--stage-character-scale': String(characterDisplayModelType.value === 'vrm' ? 1 : stageZoom.value),
+}))
 const live2DModelUrl = computed(() => {
   const character = ready.value?.character
   if (!character) return ''
@@ -229,6 +238,13 @@ const live2DRuntimeMapping = computed<Live2DRuntimeMapping>(() => ({
   expressions: ready.value?.character?.expression_mappings || [],
   motions: ready.value?.character?.motion_mappings || [],
   lipSync: ready.value?.character?.lip_sync || {},
+  // Authored .vrma clips a VRM package shipped, keyed by the semantic motion
+  // they perform. Motions without one keep using the procedural pose.
+  animations: Object.fromEntries(
+    (ready.value?.character?.motion_mappings || [])
+      .filter((motion) => motion.animation_url && (motion.motion || motion.name))
+      .map((motion) => [String(motion.motion || motion.name), String(motion.animation_url)]),
+  ),
 }))
 const characterDisplayModelType = computed(() => {
   const character = ready.value?.character
@@ -257,21 +273,9 @@ const stageBackdropStyle = computed(() => {
 const settingsIconMap: Record<SettingsTabId, Component> = {
   execution: Settings2,
   runtime: Cpu,
-  instructions: FileText,
   memory: Brain,
-  media: Volume2,
   skills: Sparkles,
-  external_mcp: Cable,
-  connectors: Plug,
-  mcp_servers: Server,
-  language: Languages,
   appearance: Palette,
-  design_review: MessageCircle,
-  notifications: Bell,
-  pets: Bot,
-  design_system: Code2,
-  privacy: Shield,
-  about: Info,
   developer: Code2,
 }
 
@@ -302,6 +306,12 @@ function openCabin(cabin: CabinId) {
   activeCabin.value = cabin
   quickMenuOpen.value = false
   characterMenuOpen.value = false
+  // The project sheet belongs to Workspace and must not outlive the cabin it
+  // was opened from. Its trigger is already hidden in Settings, and the modal
+  // scrim makes the titlebar unclickable while it is open, so a person cannot
+  // normally get here -- but a sheet left open across a cabin change would sit
+  // on top of a navigation it has nothing to do with.
+  contextRailOpen.value = false
   if (cabin === 'inspector' && activeSettingsTab.value === 'execution') {
     void refreshAgentClis()
     void refreshByokStatus()
@@ -316,7 +326,7 @@ async function handleCharacterActivated(_characterId: string, readyPayload?: Cor
   memoryRows.value = []
   memoryPendingRows.value = []
   await nextTick()
-  await Promise.all([refreshConversationHistory(), refreshMemoryWorkspace()])
+  await Promise.all([refreshConversationHistory(), refreshMemoryWorkspace(), refreshCharacterIdentities()])
 }
 
 function cycleStageZoom() {
@@ -330,12 +340,6 @@ const compactTransitioning = ref(false)
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
 const miniSpeechActive = ref(false)
 const miniDashboardActive = ref(false)
-const watchTranscriptSource = ref<'system_audio' | 'ocr_subtitle' | 'auto'>('system_audio')
-const watchProactiveEnabled = ref(false)
-const watchCommentaryInterval = ref(30)
-const watchSceneMode = ref<'quiet' | 'commentary' | 'translate' | 'analysis' | 'accessibility'>('quiet')
-const watchSpoilerLevel = ref<'none' | 'current_scene' | 'full'>('none')
-const watchVisionInterval = ref(5)
 let miniSpeechTimer: number | null = null
 
 interface NormalWindowSnapshot {
@@ -578,9 +582,8 @@ const runtimePreviewLoading = ref(false)
 const runtimeApplyLoading = ref(false)
 const artifactDataUrls = ref<Record<string, string>>({})
 const artifactLoadFailed = ref<Record<string, boolean>>({})
-let mediaRecorder: MediaRecorder | null = null
-let mediaStream: MediaStream | null = null
-let audioChunks: Blob[] = []
+// Records WAV directly; see voiceRecorder.ts for why not MediaRecorder.
+const voiceRecorder = new VoiceRecorder()
 let voiceStopTimer: number | null = null
 let clockTimer: number | null = null
 let currentAudio: HTMLAudioElement | null = null
@@ -588,6 +591,9 @@ let voiceEpoch = 0
 const taskVoiceEpochs = new Map<string, number>()
 const voiceEventEpochs = new Map<string, number>()
 const playedVoiceAudioKeys = new Set<string>()
+const suppressedVoiceAudioKeys = new Set<string>()
+let streamingVoiceAudioKey = ''
+let streamingVoiceSequence = 0
 let mascotDragStart: { x: number; y: number } | null = null
 let mascotDragMoved = false
 let mascotClickTimer: number | null = null
@@ -614,6 +620,9 @@ const client = new CoreClient({
       return
     }
     ready.value = payload
+    // Names for every installed character, so a transcript that outlived a
+    // character switch still attributes each line to whoever said it.
+    void refreshCharacterIdentities()
     syncCollaborationSnapshot(payload.collaboration)
     if (isTransientRuntimeNotice(errorText.value)) errorText.value = ''
     memoryStatus.value = payload.memory || memoryStatus.value
@@ -637,6 +646,141 @@ const client = new CoreClient({
 })
 
 const connected = computed(() => status.value === 'online')
+
+// BYOK state and actions now live in composables/useByok.ts. Destructured back
+// under their original names so the settings template binds exactly as before.
+const {
+  byokStatus,
+  byokDraft,
+  byokApiKey,
+  byokLoading,
+  byokDiscovering,
+  byokAdvancedOpen,
+  byokResult,
+  byokNotice,
+  byokDirty,
+  byokPresets,
+  selectedByokPreset,
+  byokRequiresKey,
+  byokSecretReady,
+  byokCanConnect,
+  byokKnownModels,
+  syncByokStatus,
+  syncByokFromReady,
+  selectByokPreset,
+  markByokDirty,
+  byokStateLabel,
+  byokSecretLabel,
+  byokErrorLabel,
+  refreshByokStatus,
+  connectByok,
+  testByokConnection,
+  disconnectByok,
+} = useByok(client, connected)
+
+// Memory lives in composables/useMemory.ts. Destructured back under the same
+// names so every template binding resolves exactly as before.
+const {
+  memoryStatus,
+  pendingMemories,
+  recentMemories,
+  memoryQuery,
+  memoryRows,
+  memoryPendingRows,
+  memoryView,
+  memoryTotal,
+  memoryHasMore,
+  memoryOffset,
+  memorySearchLoading,
+  memoryVault,
+  editingMemoryId,
+  editingMemoryText,
+  editingMemoryKind,
+  memoryEnabled,
+  memoryProfile,
+  memoryProfileSections,
+  memorySavedCount,
+  memoryPendingCount,
+  memoryProfileCountText,
+  topPendingMemory,
+  memoryAuthorizeText,
+  memoryQueryText,
+  displayedMemoryRows,
+  displayedMemoryCandidates,
+  memorySearchEmptyText,
+  syncMemoryFromEvent,
+  memoryPriorityLabel,
+  refreshMemoryStatus,
+  refreshMemoryWorkspace,
+  loadMemoryPage,
+  searchMemory,
+  selectMemoryView,
+  beginMemoryEdit,
+  cancelMemoryEdit,
+  saveMemoryEdit,
+  memoryKindLabel,
+  memoryTime,
+  browseMemoryVault,
+  saveMemoryCandidate,
+  rejectMemoryCandidate,
+  toggleMemoryEnabled,
+  deleteMemory,
+  clearMemory,
+} = useMemory(client, errorText)
+
+// AgentSkills lives in composables/useAgentSkills.ts. Destructured back
+// under the same names so every template binding resolves as before.
+const {
+  agentSkillSource,
+  agentSkillInspection,
+  agentSkillBusy,
+  agentSkillNotice,
+  agentSkillScope,
+  agentSkillScopeId,
+  installedAgentSkills,
+  agentSkillDrafts,
+  agentSkillDraftSteps,
+  agentSkillScopeLabel,
+  chooseAgentSkillSource,
+  inspectAgentSkill,
+  installInspectedAgentSkill,
+  updateAgentSkill,
+  uninstallAgentSkill,
+  toggleAgentSkill,
+  approveAgentSkillDraft,
+  rejectAgentSkillDraft,
+} = useAgentSkills(client, ready, activeContext, refreshSkills)
+
+
+// BackgroundContext lives in composables/useBackgroundContext.ts. Destructured back
+// under the same names so every template binding resolves as before.
+const {
+  backgroundStatus,
+  backgroundEnabled,
+  backgroundScopeType,
+  backgroundLoading,
+  backgroundActive,
+  backgroundScopes,
+  backgroundRecentRows,
+  backgroundScopeMeta,
+  backgroundScopeLabel,
+  backgroundScopeTypeLabel,
+  backgroundStateText,
+  backgroundSummaryText,
+  backgroundRetentionLabel,
+  backgroundRetentionText,
+  backgroundEntryMeta,
+  backgroundEntryTime,
+  syncBackgroundFromEvent,
+  refreshBackgroundStatus,
+  toggleBackgroundEnabled,
+  configureBackgroundScope,
+  clearBackgroundContext,
+} = useBackgroundContext(client, errorText)
+
+
+
+
 const composerCanSubmit = computed(() => (
   connected.value
   && !composerSending.value
@@ -649,7 +793,7 @@ const connectionLabel = computed(() => {
 })
 const connectionPresenceLabel = computed(() => {
   if (status.value === 'online') return '在这里'
-  if (status.value === 'connecting') return '正在启动 · 首次约 20 秒'
+  if (status.value === 'connecting') return '正在启动 Joi'
   return '连接失败'
 })
 
@@ -674,9 +818,8 @@ async function connectToCore(restart = false) {
   }
   try {
     if (restart) await invoke<CoreConnectionInfo>('restart_core')
-    // The signed PyInstaller sidecar can take about 20 seconds to unpack on its
-    // first macOS launch. Keep this bounded, but do not turn a healthy cold
-    // start into a manual reconnect flow.
+    // Keep first-launch platform verification bounded. The packaged Core is an
+    // onedir runtime, so normal starts no longer repeat PyInstaller extraction.
     const deadline = Date.now() + 30000
     let connection: CoreConnectionInfo | null = null
     while (Date.now() < deadline && generation === coreConnectionGeneration) {
@@ -685,7 +828,7 @@ async function connectToCore(restart = false) {
         throw new Error(connection.error || 'Joi Core 无法启动')
       }
       if (connection.status === 'ready' || connection.status === 'external') break
-      await new Promise((resolve) => window.setTimeout(resolve, 250))
+      await new Promise((resolve) => window.setTimeout(resolve, 75))
     }
     if (generation !== coreConnectionGeneration) return
     if (!connection || !['ready', 'external'].includes(connection.status)) {
@@ -1062,95 +1205,24 @@ const latestWatchLoopStatus = computed<WatchLoopStatus | undefined>(() => {
   return ready.value?.watch_loop
 })
 
-const watchLoopStatus = computed<WatchLoopStatus>(() => latestWatchLoopStatus.value || ready.value?.watch_loop || {})
-const watchLoopActive = computed(() => Boolean(watchLoopStatus.value.active))
-const watchLoopTranscript = computed(() => {
-  const rows = Array.isArray(watchLoopStatus.value.rolling_transcript) && watchLoopStatus.value.rolling_transcript.length
-    ? watchLoopStatus.value.rolling_transcript
-    : Array.isArray(watchLoopStatus.value.last_transcript)
-      ? watchLoopStatus.value.last_transcript
-      : []
-  return rows.filter(Boolean).slice(0, 3).join(' / ')
-})
-const watchLoopMeta = computed(() => {
-  const status = watchLoopStatus.value
-  const pieces: string[] = []
-  const iterations = Number(status.iterations || 0)
-  if (iterations) pieces.push(`${iterations} 次采样`)
-  const windowSeconds = Number(status.transcript_window_seconds || 0)
-  if (windowSeconds) pieces.push(`最近 ${Math.max(1, Math.round(windowSeconds / 60))} 分钟`)
-  pieces.push(status.proactive_enabled === false ? '主动发言关闭' : '主动发言开启')
-  const visionInterval = Number(status.vision_interval_ticks ?? watchVisionInterval.value)
-  pieces.push(visionInterval <= 0 ? '视觉手动' : `视觉每 ${visionInterval} 轮`)
-  if (status.transcript_source) {
-    const configured = String(status.transcript_source)
-    const active = String(status.active_transcript_source || configured)
-    pieces.push(active && active !== configured ? `${sourceLabel(configured)}→${sourceLabel(active)}` : sourceLabel(configured))
-  }
-  if (status.transcript_status) pieces.push(String(status.transcript_status))
-  if (status.last_error) pieces.push(errorLabel(String(status.last_error)))
-  if (status.visual_status) pieces.push(`视觉 ${status.visual_status}`)
-  return pieces.join(' · ') || '等待采样'
-})
-const watchLoopSourceHealth = computed(() => {
-  const health = asRecord(watchLoopStatus.value.source_health)
-  return Object.entries(health)
-    .map(([source, raw]) => {
-      const row = asRecord(raw)
-      const count = Number(row.count || 0)
-      const status = stringValue(row.status)
-      const error = stringValue(row.error)
-      const capture = stringValue(row.capture)
-      const bytes = Number(row.audio_bytes || 0)
-      const parts = [`${sourceLabel(source)} ${count ? `${count} 段` : '诊断'}`]
-      if (status) parts.push(errorLabel(status))
-      if (capture) parts.push(`采集 ${capture}`)
-      if (bytes) parts.push(`${Math.round(bytes / 1024)}KB`)
-      if (error) parts.push(errorLabel(error))
-      return parts.join(' · ')
-    })
-    .slice(0, 3)
-})
-const pendingMemories = computed(() => (memoryStatus.value?.pending || []).filter((item) => item.status === 'pending'))
-const recentMemories = computed(() => memoryStatus.value?.recent || [])
-const memoryEnabled = computed(() => memoryStatus.value?.enabled !== false)
-const memoryProfile = computed(() => memoryStatus.value?.profile || null)
-const memoryProfileSections = computed(() =>
-  [
-    { key: 'preferences', label: '偏好', rows: memoryProfile.value?.preferences || [] },
-    { key: 'habits', label: '习惯', rows: memoryProfile.value?.habits || [] },
-    { key: 'relationship', label: '关系', rows: memoryProfile.value?.relationship || [] },
-    { key: 'recent_focus', label: '最近关注', rows: memoryProfile.value?.recent_focus || [] },
-  ],
-)
-const memorySavedCount = computed(() => Number(memoryStatus.value?.counts?.saved ?? memoryProfile.value?.counts?.saved ?? recentMemories.value.length))
-const memoryPendingCount = computed(() => Number(memoryStatus.value?.counts?.pending ?? memoryProfile.value?.counts?.pending ?? pendingMemories.value.length))
-const memoryProfileCountText = computed(() => {
-  return `${memorySavedCount.value} 条已保存 · ${memoryPendingCount.value} 条待确认`
-})
-const topPendingMemory = computed(() => pendingMemories.value[0] || null)
-const memoryAuthorizeText = computed(() => topPendingMemory.value?.text || '')
-const memoryQueryText = computed(() => memoryQuery.value.trim())
-const displayedMemoryRows = computed(() => memoryRows.value)
-const displayedMemoryCandidates = computed(() => memoryPendingRows.value)
-const memorySearchEmptyText = computed(() => (memoryQueryText.value ? '没有找到相关记忆' : 'Joi 还没有保存长期记忆'))
-const backgroundEnabled = computed(() => backgroundStatus.value?.enabled === true)
-const backgroundActive = computed(() => backgroundStatus.value?.active === true)
-const backgroundScopes = computed<BackgroundContextScope[]>(() => backgroundStatus.value?.approved_scopes || [])
-const backgroundRecentRows = computed<BackgroundContextEntry[]>(() => backgroundStatus.value?.recent_context || [])
-const backgroundStateText = computed(() => {
-  if (!backgroundStatus.value) return '未连接'
-  if (!backgroundEnabled.value) return '已关闭'
-  return backgroundActive.value ? '已批准' : '等待范围'
-})
-const backgroundSummaryText = computed(() => {
-  if (!backgroundStatus.value) return '等待核心状态'
-  if (!backgroundEnabled.value) return '后台上下文关闭'
-  const scope = backgroundStatus.value.active_scope
-  if (!scope) return '需要批准窗口、项目或游戏范围'
-  return `${backgroundScopeTypeLabel(scope.type)} · ${scope.label || '已批准范围'}`
-})
-const backgroundRetentionText = computed(() => backgroundRetentionLabel(backgroundStatus.value?.retention))
+// WatchLoop lives in composables/useWatchLoop.ts. Destructured back
+// under the same names so every template binding resolves as before.
+const {
+  watchCommentaryInterval,
+  watchProactiveEnabled,
+  watchSceneMode,
+  watchSpoilerLevel,
+  watchTranscriptSource,
+  watchVisionInterval,
+  watchLoopActive,
+  watchLoopMeta,
+  watchLoopSourceHealth,
+  watchLoopStatus,
+  watchLoopTranscript,
+  startWatchLoop,
+  stopWatchLoop,
+} = useWatchLoop(client, errorText, ready, latestWatchLoopStatus)
+
 
 watch(watchLoopStatus, (status) => {
   const source = stringValue(status.transcript_source)
@@ -1210,7 +1282,9 @@ const latestSpeech = computed(() => {
   const latest = [...events.value]
     .reverse()
     .find((event) => event.voice_line?.text && isSpeakableEvent(event))
-  return latest?.voice_line.text || ready.value?.character?.greeting || '我在。要看、要玩、要做点什么，都可以直接告诉我。'
+  return (latest ? hideRuntimeBrand(assistantDisplayText(latest)) : '')
+    || ready.value?.character?.greeting
+    || '我在。要看、要玩、要做点什么，都可以直接告诉我。'
 })
 
 const miniBubbleHasActions = computed(() => Boolean(isCompactMode.value && pendingApproval.value && approvalIdFor(pendingApproval.value)))
@@ -1353,6 +1427,50 @@ const accessoryFitStyle = computed(() => {
 const characterName = computed(() => ready.value?.character?.name || 'Joi')
 const characterGreeting = computed(() => ready.value?.character?.greeting || '我在。今天想一起做点什么？')
 
+/**
+ * Who said each line, by character id.
+ *
+ * A transcript outlives the character that produced it: switch characters and
+ * the previous one's replies are still on screen. Labelling every message with
+ * whoever happens to be active now makes one character appear to have said
+ * another's words -- and since each character has its own persona, the result
+ * reads as the new character introducing itself by the old one's name.
+ *
+ * Every event already carries its `character_id`; this is the missing half,
+ * the names to resolve them against. Seeded from the library so it also covers
+ * messages written before this app run.
+ */
+const characterIdentities = ref<Record<string, { name: string; avatar: string }>>({})
+
+async function refreshCharacterIdentities() {
+  if (!connected.value) return
+  try {
+    const result = await client.characterList() as { ok?: boolean; characters?: CharacterSummary[] }
+    if (!result.ok) return
+    const rows: Record<string, { name: string; avatar: string }> = {}
+    for (const row of result.characters || []) {
+      if (row.id) rows[row.id] = { name: row.name || '', avatar: row.avatar_data_url || row.avatar_url || '' }
+    }
+    characterIdentities.value = rows
+  } catch {
+    // Names are a display nicety; failing to load them falls back to the
+    // active character rather than blanking the transcript.
+  }
+}
+
+/** The name to show against one message, not the name of whoever is active. */
+function authorName(event?: AgentEvent) {
+  const id = event?.character_id || ''
+  return (id && characterIdentities.value[id]?.name) || characterName.value
+}
+
+/** The avatar to show against one message, for the same reason. */
+function authorAvatar(event?: AgentEvent) {
+  const id = event?.character_id || ''
+  if (id && id !== ready.value?.character?.id) return characterIdentities.value[id]?.avatar || ''
+  return characterAvatarSrc.value
+}
+
 const characterImageSrc = computed(() => {
   const sprites = ready.value?.character?.sprites || []
   const active = sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
@@ -1363,6 +1481,15 @@ const characterAvatarSrc = computed(() => (
   || ready.value?.character?.avatar_data_url
   || characterImageSrc.value
 ))
+
+// Nothing to draw: no Live2D/VRM model and no sprite. True when Core is down,
+// and true for a character package that ships neither.
+const stageHasCharacter = computed(() => Boolean(live2DModelUrl.value || characterImageSrc.value))
+
+// What the layout actually does. The user's choice wins when there is a
+// character; with nothing to draw, the stage collapses regardless, because a
+// blank half-window is not a view of anything.
+const stageIsCollapsed = computed(() => stageCollapsed.value || !stageHasCharacter.value)
 
 const currentMode = computed(() => {
   if (activeCabin.value === 'characters') return '角色库'
@@ -1519,18 +1646,15 @@ function buildConversationTurn(taskId: string, sourceRows: AgentEvent[]): Conver
   else if (decisive && ['runtime_final', 'tool_completed', 'task_completed'].includes(decisive.type)) status = 'completed'
   else if (decisive) status = 'running'
 
-  const assistant = [...rows].reverse().find((event) => (
-    event.type === 'runtime_final'
-    || event.type === 'tool_completed'
-    || event.type === 'tool_failed'
-    || isCompanionChat(event)
-  ))
+  const assistant = [...rows].reverse().find((event) => isAssistantPresentationEvent(event.type))
   const hasExecution = rows.some((event) => [
     'plan_created', 'runtime_started', 'runtime_delta', 'runtime_error', 'approval_required',
     'skill_started', 'skill_completed', 'tool_started', 'tool_failed', 'task_completed', 'task_failed',
-  ].includes(event.type) && !isCompanionChat(event))
+  ].includes(event.type) && !isCompanionChat(event) && !isCharacterMotion(event))
   const companionOnly = rows.every(isCompanionOnlyEvent)
-  const simpleCompanionReply = status === 'completed' && Boolean(assistant && isCompanionChat(assistant)) && !hasExecution
+  const simpleCompanionReply = status === 'completed'
+    && Boolean(assistant && (isCompanionChat(assistant) || isCharacterMotion(assistant)))
+    && !hasExecution
   return {
     taskId,
     user,
@@ -1589,6 +1713,28 @@ function turnProgressLabel(turn: ConversationTurn) {
   return label || `${characterName.value} 正在想`
 }
 
+/**
+ * Which orb to show for what is actually happening.
+ *
+ * Driven by the running tool rather than by a generic "busy", so the shape
+ * carries real information: a globe being scanned while Joi reads the screen,
+ * orbits while it acts on it. Anything unrecognised falls back to `working` --
+ * a wrong-but-plausible animation would be presentation inventing status,
+ * which is the one thing the trust surface must not do.
+ */
+function turnOrbState(turn: ConversationTurn) {
+  if (voiceState.value === 'recording') return 'listening'
+  const running = [...turn.rows].reverse().find((event) => event.agent_state?.ui_transient)
+  const tool = String(running?.agent_state?.tool || toolName(running || turn.rows[turn.rows.length - 1]) || '')
+  if (tool.startsWith('observe.') || tool.startsWith('watch.') || tool.startsWith('vision.')) return 'searching'
+  if (tool.startsWith('computer.')) return 'working'
+  if (tool.startsWith('browser.')) return 'connecting'
+  if (tool.startsWith('codex.') || tool.startsWith('agent_cli.')) return 'solving'
+  if (tool.startsWith('files.') || tool.startsWith('mcp.')) return 'connecting'
+  if (tool === 'companion.chat' || !tool) return 'breathing'
+  return 'working'
+}
+
 function turnStatusText(turn: ConversationTurn) {
   if (turn.staleApproval) return '应用已重新启动，请重试这条请求以重新确认'
   if (turn.status === 'completed' && turn.assistant) return '执行过程已收起'
@@ -1610,7 +1756,12 @@ function turnTimeLabel(turn: ConversationTurn) {
 }
 
 function isTurnExpanded(turn: ConversationTurn) {
-  return turn.status === 'waiting' || expandedTaskIds.value.has(turn.taskId)
+  // Failure opens itself. A turn that worked has nothing to read, so its steps
+  // stay folded and cost the conversation one line; a turn that did not is
+  // exactly when the steps are the answer, and making the user hunt for a
+  // disclosure triangle to find out why is the wrong default.
+  if (turn.status === 'waiting' || turn.status === 'failed') return true
+  return expandedTaskIds.value.has(turn.taskId)
 }
 
 function toggleTurnTrace(turn: ConversationTurn) {
@@ -1690,12 +1841,29 @@ function isCompanionChat(event: AgentEvent) {
   return toolName(event) === 'companion.chat' || (event.type === 'tool_completed' && event.display_card.title === '对话')
 }
 
+/**
+ * A character motion is the character expressing itself, not work being done.
+ * Reporting "收到请求 / 理解目标 / 使用能力" for a wave is describing a person
+ * as a pipeline, so these turns present like speech.
+ */
+function isCharacterMotion(event: AgentEvent) {
+  return toolName(event) === 'character.perform'
+}
+
 function isCompanionOnlyEvent(event: AgentEvent) {
-  return event.type === 'user_message' || event.type === 'audit_event' || isCompanionChat(event)
+  return event.type === 'user_message'
+    || event.type === 'audit_event'
+    || isCompanionChat(event)
+    || isCharacterMotion(event)
+}
+
+/** What the character shows for a turn; speech remains in the audio pipeline. */
+function assistantText(event: AgentEvent) {
+  return hideRuntimeBrand(assistantDisplayText(event))
 }
 
 function isTaskCardEvent(event: AgentEvent) {
-  if (event.type === 'user_message' || isCompanionChat(event)) return false
+  if (event.type === 'user_message' || isCompanionChat(event) || isCharacterMotion(event)) return false
   if (event.type === 'tool_started' && toolName(event) === 'codex.run') return true
   return ['approval_required', 'tool_completed', 'tool_failed', 'task_completed', 'task_failed'].includes(event.type)
 }
@@ -1706,8 +1874,7 @@ function isSpeakableEvent(event: AgentEvent) {
 }
 
 function isPlayableVoiceEvent(event: AgentEvent) {
-  if (event.type === 'user_message' || event.type === 'plan_created' || event.type === 'audit_event') return false
-  return isSafeVoiceText(event.voice_line?.text || '')
+  return isPlayableVoiceEventType(event.type) && isSafeVoiceText(event.voice_line?.text || '')
 }
 
 function isSafeVoiceText(text: string) {
@@ -2312,9 +2479,6 @@ function targetPreviewSummary(event: AgentEvent | undefined, artifact: string) {
     .join(' / ')
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
-}
 
 function numberTuple(value: unknown) {
   if (!Array.isArray(value) || value.length !== 4) return undefined
@@ -2322,38 +2486,8 @@ function numberTuple(value: unknown) {
   return numbers.every((item) => Number.isFinite(item)) ? numbers : undefined
 }
 
-function stringValue(value: unknown) {
-  return typeof value === 'string' ? value.trim() : ''
-}
 
-function sourceLabel(value: string) {
-  const labels: Record<string, string> = {
-    system_audio: '系统音频',
-    ocr_subtitle: '字幕/OCR',
-    auto: '自动',
-  }
-  return labels[value] || value
-}
 
-function errorLabel(value: string) {
-  const labels: Record<string, string> = {
-    system_audio_unavailable: '音频不可用',
-    system_audio_windows_only: '仅 Windows 音频',
-    system_audio_dependency_missing: '音频依赖缺失',
-    system_audio_device_missing: '无回环设备',
-    system_audio_capture_failed: '音频捕获失败',
-    asr_unconfigured: 'ASR 未配置',
-    asr_disabled: 'ASR 未启用',
-    asr_timeout: 'ASR 超时',
-    empty_transcript: '音频无文本',
-    ready: '就绪',
-    success: '成功',
-    failed: '失败',
-    unavailable: '不可用',
-    ok: '正常',
-  }
-  return labels[value] || value
-}
 
 function isTransientRuntimeNotice(value: string) {
   const text = String(value || '').trim().toLowerCase()
@@ -2473,23 +2607,6 @@ function sendChatStarter(text: string) {
   void submit()
 }
 
-function startWatchLoop() {
-  errorText.value = ''
-  void client.watchLoopStart({
-    query: '陪我看当前视频',
-    interval_seconds: 6,
-    sample_count: 3,
-    sample_interval_ms: 700,
-    transcript_source: watchTranscriptSource.value,
-    proactive_enabled: watchProactiveEnabled.value,
-    commentary_interval_seconds: watchCommentaryInterval.value,
-    mode: watchSceneMode.value,
-    spoiler_level: watchSpoilerLevel.value,
-    vision_interval_ticks: watchVisionInterval.value,
-  }).catch((error) => {
-    errorText.value = error instanceof Error ? error.message : '实时陪看启动失败'
-  })
-}
 
 function configureWatchLoop() {
   errorText.value = ''
@@ -2518,315 +2635,34 @@ function refreshWatchVision() {
   })
 }
 
-function stopWatchLoop() {
-  errorText.value = ''
-  void client.watchLoopStop().catch((error) => {
-    errorText.value = error instanceof Error ? error.message : '实时陪看停止失败'
-  })
-}
 
-function syncMemoryFromEvent(event: AgentEvent) {
-  const memory = asRecord(event.agent_state?.memory)
-  if ('recent' in memory || 'pending' in memory || 'vault_label' in memory) {
-    memoryStatus.value = memory as unknown as MemoryStatus
-  }
-}
 
-function syncBackgroundFromEvent(event: AgentEvent) {
-  const background = asRecord(event.agent_state?.background_context)
-  if ('safe_for_display' in background || 'recent_context' in background || 'recent_count' in background || 'scope_count' in background) {
-    backgroundStatus.value = background as unknown as BackgroundContextStatus
-  }
-}
 
-async function refreshBackgroundStatus() {
-  backgroundLoading.value = true
-  try {
-    const result = (await client.backgroundStatus()) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
-    if (result.background) backgroundStatus.value = result.background
-    if (!result.ok) errorText.value = result.error || '背景上下文读取失败'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '背景上下文读取失败'
-  } finally {
-    backgroundLoading.value = false
-  }
-}
 
-async function configureBackgroundScope() {
-  backgroundLoading.value = true
-  try {
-    const label = backgroundScopeLabel.value.trim() || backgroundScopeTypeLabel(backgroundScopeType.value)
-    const result = (await client.backgroundConfigure({
-      enabled: true,
-      scope_type: backgroundScopeType.value,
-      label,
-    })) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
-    if (result.background) backgroundStatus.value = result.background
-    if (!result.ok) errorText.value = result.error || '背景范围批准失败'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '背景范围批准失败'
-  } finally {
-    backgroundLoading.value = false
-  }
-}
 
-async function toggleBackgroundEnabled(event: Event) {
-  const enabled = Boolean((event.target as HTMLInputElement | null)?.checked)
-  backgroundLoading.value = true
-  try {
-    const result = (await client.backgroundConfigure({ enabled })) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
-    if (result.background) backgroundStatus.value = result.background
-    if (!result.ok) errorText.value = result.error || '背景上下文开关更新失败'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '背景上下文开关更新失败'
-  } finally {
-    backgroundLoading.value = false
-  }
-}
 
-async function clearBackgroundContext() {
-  if (!backgroundRecentRows.value.length) return
-  if (!window.confirm(`清空 ${backgroundRecentRows.value.length} 条背景摘要？批准范围会保留。`)) return
-  backgroundLoading.value = true
-  try {
-    const result = (await client.backgroundClear()) as { ok?: boolean; background?: BackgroundContextStatus; error?: string }
-    if (result.background) backgroundStatus.value = result.background
-    if (!result.ok) errorText.value = result.error || '背景摘要清空失败'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '背景摘要清空失败'
-  } finally {
-    backgroundLoading.value = false
-  }
-}
 
-function backgroundScopeTypeLabel(value?: string) {
-  const labels: Record<string, string> = {
-    window: '窗口',
-    project: '项目',
-    game: '游戏',
-  }
-  return labels[value || ''] || '范围'
-}
 
-function backgroundRetentionLabel(value?: string) {
-  const labels: Record<string, string> = {
-    summaries_only: '仅摘要',
-  }
-  return labels[value || ''] || value || '仅摘要'
-}
 
-function backgroundScopeMeta(scope: BackgroundContextScope) {
-  const pieces = [backgroundScopeTypeLabel(scope.type)]
-  if (scope.approved_at) pieces.push(new Date(scope.approved_at * 1000).toLocaleString([], { hour12: false }))
-  pieces.push(scope.enabled === false ? '关闭' : '启用')
-  return pieces.join(' · ')
-}
 
-function backgroundEntryTime(row: BackgroundContextEntry) {
-  if (!row.created_at) return '刚刚'
-  return new Date(row.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
 
-function backgroundEntryMeta(row: BackgroundContextEntry) {
-  const pieces = [backgroundScopeTypeLabel(row.scope_type)]
-  const source = stringValue(row.source)
-  if (source) pieces.push(source === 'watch_loop' ? '陪看' : source)
-  const transcript = stringValue(row.transcript_source)
-  if (transcript) pieces.push(sourceLabel(transcript))
-  const visual = stringValue(row.visual_status)
-  if (visual) pieces.push(`视觉 ${visual}`)
-  return pieces.join(' · ')
-}
 
-function memoryPriorityLabel(value?: string) {
-  if (value === 'high') return '高优先'
-  if (value === 'medium') return '中优先'
-  if (value === 'low') return '低优先'
-  return value || '普通'
-}
 
-async function refreshMemoryStatus() {
-  try {
-    const result = (await client.memoryStatus()) as { ok?: boolean; memory?: MemoryStatus }
-    if (result.memory) memoryStatus.value = result.memory
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆状态读取失败'
-  }
-}
 
-async function refreshMemoryWorkspace() {
-  await Promise.all([refreshMemoryStatus(), loadMemoryPage(true), browseMemoryVault()])
-}
 
-async function loadMemoryPage(reset = true) {
-  if (memorySearchLoading.value) return
-  memorySearchLoading.value = true
-  const offset = reset ? 0 : memoryOffset.value
-  try {
-    if (memoryView.value === 'pending') {
-      const result = (await client.memoryPending({ offset, limit: 12 })) as { ok?: boolean; page?: MemoryCandidatePage; error?: string }
-      const page = result.page
-      if (!result.ok || !page) {
-        errorText.value = result.error || '待确认记忆读取失败'
-        return
-      }
-      memoryPendingRows.value = reset ? page.items : [...memoryPendingRows.value, ...page.items]
-      memoryRows.value = []
-      memoryTotal.value = page.total
-      memoryOffset.value = page.offset + page.items.length
-      memoryHasMore.value = page.has_more
-      return
-    }
-    const result = (await client.memoryList({ query: memoryQueryText.value, offset, limit: 12, sort: 'recent' })) as { ok?: boolean; page?: MemoryPage; error?: string }
-    const page = result.page
-    if (!result.ok || !page) {
-      errorText.value = result.error || '记忆列表读取失败'
-      return
-    }
-    memoryRows.value = reset ? page.items : [...memoryRows.value, ...page.items]
-    memoryPendingRows.value = []
-    memoryTotal.value = page.total
-    memoryOffset.value = page.offset + page.items.length
-    memoryHasMore.value = page.has_more
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆列表读取失败'
-  } finally {
-    memorySearchLoading.value = false
-  }
-}
 
-async function searchMemory() {
-  memoryView.value = 'saved'
-  await loadMemoryPage(true)
-}
 
-async function selectMemoryView(view: 'saved' | 'pending') {
-  if (memoryView.value === view && (memoryRows.value.length || memoryPendingRows.value.length)) return
-  memoryView.value = view
-  editingMemoryId.value = null
-  await loadMemoryPage(true)
-}
 
-function beginMemoryEdit(memory: MemoryRecord) {
-  editingMemoryId.value = memory.id
-  editingMemoryText.value = memory.text || ''
-  editingMemoryKind.value = memory.kind || 'note'
-}
 
-function cancelMemoryEdit() {
-  editingMemoryId.value = null
-  editingMemoryText.value = ''
-}
 
-async function saveMemoryEdit(memoryId: number) {
-  const text = editingMemoryText.value.trim()
-  if (!text) return
-  try {
-    const result = (await client.memoryUpdate(memoryId, text, editingMemoryKind.value)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
-    if (result.memory) memoryStatus.value = result.memory
-    if (!result.ok) {
-      errorText.value = result.error === 'duplicate_memory' ? '已经存在相同记忆' : result.error || '记忆更新失败'
-      return
-    }
-    cancelMemoryEdit()
-    await loadMemoryPage(true)
-    void browseMemoryVault()
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆更新失败'
-  }
-}
 
-function memoryKindLabel(kind?: string) {
-  const value = (kind || 'note').toLocaleLowerCase()
-  if (value.startsWith('preference')) return '偏好'
-  if (value.startsWith('habit') || value.startsWith('routine')) return '习惯'
-  if (value.startsWith('relationship') || value.startsWith('identity') || value.startsWith('persona')) return '关系'
-  if (value.startsWith('project') || value.startsWith('focus') || value.startsWith('task')) return '关注'
-  return '笔记'
-}
 
-function memoryTime(timestamp?: number) {
-  if (!timestamp) return '刚刚'
-  const value = new Date(timestamp * 1000)
-  const today = new Date()
-  if (value.toDateString() === today.toDateString()) return value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  return value.toLocaleDateString([], { month: 'short', day: 'numeric' })
-}
 
-async function browseMemoryVault() {
-  try {
-    const result = (await client.memoryBrowseVault()) as { ok?: boolean; vault?: MemoryVault; memory?: MemoryStatus; error?: string }
-    if (result.memory) memoryStatus.value = result.memory
-    if (result.vault) memoryVault.value = result.vault
-    if (!result.ok) errorText.value = result.error || '记忆库读取失败'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆库读取失败'
-  }
-}
 
-async function saveMemoryCandidate(candidateId: number) {
-  try {
-    const result = (await client.memorySaveCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
-    if (result.memory) memoryStatus.value = result.memory
-    await loadMemoryPage(true)
-    void browseMemoryVault()
-    if (!result.ok) errorText.value = result.error || '记忆保存失败'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆保存失败'
-  }
-}
 
-async function rejectMemoryCandidate(candidateId: number) {
-  try {
-    const result = (await client.memoryRejectCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
-    if (result.memory) memoryStatus.value = result.memory
-    await loadMemoryPage(true)
-    if (!result.ok) errorText.value = result.error || '记忆已忽略'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆忽略失败'
-  }
-}
 
-async function toggleMemoryEnabled(event: Event) {
-  const enabled = Boolean((event.target as HTMLInputElement | null)?.checked)
-  try {
-    const result = (await client.memorySetEnabled(enabled)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
-    if (result.memory) memoryStatus.value = result.memory
-    if (!result.ok) errorText.value = result.error || '记忆开关更新失败'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆开关更新失败'
-  }
-}
 
-async function deleteMemory(memoryId: number) {
-  try {
-    const result = (await client.memoryDelete(memoryId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
-    if (result.memory) memoryStatus.value = result.memory
-    await loadMemoryPage(true)
-    void browseMemoryVault()
-    if (!result.ok) errorText.value = result.error || '记忆删除失败'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆删除失败'
-  }
-}
 
-async function clearMemory() {
-  const count = memorySavedCount.value + memoryPendingCount.value
-  if (!count) return
-  if (!window.confirm(`清空 ${count} 条记忆和待确认候选？此操作不会删除手动编辑区。`)) return
-  try {
-    const result = (await client.memoryClear()) as { ok?: boolean; memory?: MemoryStatus; error?: string }
-    if (result.memory) memoryStatus.value = result.memory
-    memoryRows.value = []
-    memoryPendingRows.value = []
-    memoryTotal.value = 0
-    memoryHasMore.value = false
-    void browseMemoryVault()
-    if (!result.ok) errorText.value = result.error || '记忆清空失败'
-  } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '记忆清空失败'
-  }
-}
 
 function resolveApproval(approved: boolean) {
   if (!pendingApproval.value) return
@@ -2881,27 +2717,100 @@ async function playAudioPath(path?: string, dataUrl?: string) {
     const url = source.startsWith('data:') ? source : convertFileSrc(source)
     audio = new Audio(url)
     currentAudio = audio
+    // The mouth reads this element's signal, so the analyser is attached
+    // before playback rather than after the first frame of speech is gone.
+    attachLipSync(audio)
     audio.onended = () => {
-      if (currentAudio === audio) currentAudio = null
+      if (currentAudio === audio) {
+        currentAudio = null
+        detachLipSync()
+      }
     }
     await audio.play()
   } catch (error) {
     if (audio && currentAudio === audio) currentAudio = null
-    lastTtsError.value = error instanceof Error ? error.name || 'audio_play_failed' : 'audio_play_failed'
+    // A webview refusing to start audio raises NotAllowedError, which had no
+    // label and so rendered as nothing at all -- the character was silent and
+    // the reason was too. Refusals now name themselves.
+    const name = error instanceof Error ? error.name : ''
+    lastTtsError.value = name === 'NotAllowedError' ? 'audio_blocked' : name || 'audio_play_failed'
   }
 }
 
 function playVoiceAudio(payload: VoiceAudioPayload) {
+  if (!isPlayableVoiceEventType(payload.event_type)) return
+  rememberVoiceLatency(payload)
   if (payload.voice_audio_error) {
     lastTtsError.value = ttsErrorLabel(payload.voice_audio_error)
   }
-  if (shouldSuppressProactiveVoice(payload)) return
   const audioKey = voiceAudioKey(payload)
+  const isStreaming = Boolean(payload.voice_audio_pcm16_base64 || payload.voice_audio_final)
+  const sequence = Math.max(0, Math.floor(Number(payload.voice_audio_sequence) || 0))
+  if (isStreaming && sequence === 0 && shouldSuppressProactiveVoice(payload)) {
+    suppressedVoiceAudioKeys.add(audioKey)
+  }
+  if (suppressedVoiceAudioKeys.has(audioKey)) {
+    if (payload.voice_audio_final) suppressedVoiceAudioKeys.delete(audioKey)
+    return
+  }
+  if (!isStreaming && shouldSuppressProactiveVoice(payload)) return
   const eventEpoch = voiceEventEpochs.get(audioKey)
   if (!shouldPlayVoiceAudio(eventEpoch, voiceEpoch)) return
   if (playedVoiceAudioKeys.has(audioKey)) return
+  if (isStreaming) {
+    playStreamingVoiceAudio(payload, audioKey, sequence)
+    return
+  }
   rememberPlayedVoiceAudioKey(audioKey)
   void playAudioPath(payload.voice_audio_path, payload.voice_audio_data_url)
+}
+
+function rememberVoiceLatency(payload: VoiceAudioPayload) {
+  const first = Number(payload.voice_audio_ttfb_ms)
+  const total = Number(payload.voice_audio_total_ms)
+  if (!Number.isFinite(first) && !Number.isFinite(total)) return
+  const snapshot = ready.value
+  if (!snapshot) return
+  const tts = {
+    ...(snapshot.tts || {}),
+    ...(Number.isFinite(first) ? { last_ttfb_ms: Math.max(0, Math.round(first)) } : {}),
+    ...(Number.isFinite(total) ? { last_total_ms: Math.max(0, Math.round(total)) } : {}),
+  }
+  const providers = (snapshot.runtime?.providers || []).map((row) => {
+    if (row.name !== 'tts') return row
+    const notes = (row.notes || []).filter((note) => !note.startsWith('first audio ') && !note.startsWith('total '))
+    if (Number.isFinite(first)) notes.push(`first audio ${Math.max(0, Math.round(first))}ms`)
+    if (Number.isFinite(total)) notes.push(`total ${Math.max(0, Math.round(total))}ms`)
+    return { ...row, notes }
+  })
+  ready.value = {
+    ...snapshot,
+    tts,
+    runtime: snapshot.runtime ? { ...snapshot.runtime, providers } : snapshot.runtime,
+  }
+}
+
+function playStreamingVoiceAudio(payload: VoiceAudioPayload, audioKey: string, sequence: number) {
+  if (sequence === 0) {
+    stopSpokenAudio()
+    streamingVoiceAudioKey = audioKey
+    streamingVoiceSequence = 0
+  }
+  if (streamingVoiceAudioKey !== audioKey || sequence !== streamingVoiceSequence) return
+  if (payload.voice_audio_pcm16_base64) {
+    const accepted = enqueuePcm16Chunk(
+      payload.voice_audio_pcm16_base64,
+      payload.voice_audio_sample_rate || 24000,
+      sequence === 0,
+    )
+    if (!accepted) lastTtsError.value = 'audio_play_failed'
+    streamingVoiceSequence += 1
+  }
+  if (payload.voice_audio_final) {
+    rememberPlayedVoiceAudioKey(audioKey)
+    streamingVoiceAudioKey = ''
+    streamingVoiceSequence = 0
+  }
 }
 
 function shouldSuppressProactiveVoice(payload: VoiceAudioPayload) {
@@ -3315,156 +3224,16 @@ async function refreshSkills() {
   }
 }
 
-async function chooseAgentSkillSource(kind: AttachmentKind) {
-  try {
-    const selected = await invoke<string[]>('pick_attachments', { kind })
-    const source = selected?.[0]
-    if (!source) return
-    agentSkillSource.value = source
-    agentSkillInspection.value = null
-    agentSkillNotice.value = ''
-    await inspectAgentSkill()
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error || '')
-    if (message && !/cancel/i.test(message)) agentSkillNotice.value = message
-  }
-}
 
-async function inspectAgentSkill() {
-  const source = agentSkillSource.value.trim()
-  if (!source || agentSkillBusy.value) return
-  agentSkillBusy.value = true
-  agentSkillNotice.value = ''
-  try {
-    const result = await client.agentSkillInspect(source) as { ok?: boolean; inspection?: AgentSkillInspection; error?: string; message?: string }
-    agentSkillInspection.value = result.inspection || null
-    agentSkillNotice.value = result.ok ? '检查完成。安装时会再次校验文件哈希。' : result.message || result.error || 'Skill 检查失败'
-  } catch (error) {
-    agentSkillInspection.value = null
-    agentSkillNotice.value = error instanceof Error ? error.message : 'Skill 检查失败'
-  } finally {
-    agentSkillBusy.value = false
-  }
-}
 
-function agentSkillScopeId() {
-  if (agentSkillScope.value === 'project') return activeContext.value.project_id || ''
-  if (agentSkillScope.value === 'character') return ready.value?.character?.id || ''
-  return ''
-}
 
-async function installInspectedAgentSkill() {
-  const inspection = agentSkillInspection.value
-  if (!inspection || agentSkillBusy.value) return
-  agentSkillBusy.value = true
-  try {
-    const result = await client.agentSkillInstall(
-      agentSkillSource.value.trim(),
-      agentSkillScope.value,
-      agentSkillScopeId(),
-      inspection.digest,
-    ) as { ok?: boolean; error?: string; message?: string }
-    agentSkillNotice.value = result.ok ? `${inspection.name} 已安装，脚本仍保持显式调用。` : result.message || result.error || 'Skill 安装失败'
-    if (result.ok) {
-      agentSkillSource.value = ''
-      agentSkillInspection.value = null
-      await refreshSkills()
-    }
-  } catch (error) {
-    agentSkillNotice.value = error instanceof Error ? error.message : 'Skill 安装失败'
-  } finally {
-    agentSkillBusy.value = false
-  }
-}
 
-async function toggleAgentSkill(skill: AgentSkillInstallation) {
-  await client.agentSkillEnable(skill.id, !skill.enabled)
-  await refreshSkills()
-}
 
-async function updateAgentSkill(skill: AgentSkillInstallation) {
-  agentSkillBusy.value = true
-  try {
-    // An update re-reads the source, so the first call only reports what was
-    // read. Nothing is installed until the user confirms that exact digest.
-    const review = await client.agentSkillUpdate(skill.id) as {
-      ok?: boolean
-      error?: string
-      message?: string
-      changed?: boolean
-      inspection?: AgentSkillInspection
-    }
-    if (review.ok) {
-      agentSkillNotice.value = `${skill.name} 已更新。`
-      await refreshSkills()
-      return
-    }
-    if (review.error !== 'update_review_required' || !review.inspection?.digest) {
-      agentSkillNotice.value = review.message || review.error || '更新失败'
-      return
-    }
-    if (!review.changed) {
-      agentSkillNotice.value = `${skill.name} 来源内容没有变化，已保持当前版本。`
-      return
-    }
-    const inspection = review.inspection
-    const confirmed = window.confirm(
-      [
-        `${skill.name} 的来源有新内容。`,
-        `版本 ${inspection.version}`,
-        inspection.code_bearing ? '包含脚本，运行前仍需单独审核。' : '不包含脚本。',
-        '确认后才会安装这次读到的内容。',
-      ].join('\n'),
-    )
-    if (!confirmed) {
-      agentSkillNotice.value = '已取消更新，仍在使用当前版本。'
-      return
-    }
-    const applied = await client.agentSkillUpdate(skill.id, inspection.digest) as { ok?: boolean; error?: string; message?: string }
-    agentSkillNotice.value = applied.ok ? `${skill.name} 已更新到确认过的版本。` : applied.message || applied.error || '更新失败'
-    await refreshSkills()
-  } finally {
-    agentSkillBusy.value = false
-  }
-}
 
-async function uninstallAgentSkill(skill: AgentSkillInstallation) {
-  if (!window.confirm(`卸载 ${skill.name}？运行记录会保留，安装文件和注册信息会清理。`)) return
-  const result = await client.agentSkillUninstall(skill.id, true) as { ok?: boolean; error?: string }
-  agentSkillNotice.value = result.ok ? `${skill.name} 已卸载，没有遗留安装文件。` : result.error || '卸载失败'
-  await refreshSkills()
-}
 
-function agentSkillScopeLabel(scope: string) {
-  return ({ global: '全局', project: '当前项目', character: '当前角色' } as Record<string, string>)[scope] || scope
-}
 
-function agentSkillDraftSteps(draft: AgentSkillDraft) {
-  const body = String(draft.payload?.instructions || draft.payload?.steps || '').trim()
-  return body ? body.split('\n').filter((line) => line.trim()).slice(0, 6) : []
-}
 
-async function approveAgentSkillDraft(draft: AgentSkillDraft) {
-  const steps = agentSkillDraftSteps(draft)
-  const review = `${draft.name}\n\n${steps.join('\n') || '（草稿没有记录步骤）'}\n\n安装为 ${agentSkillScopeLabel(agentSkillScope.value)} Skill？安装后仍不会隐式运行脚本。`
-  if (!window.confirm(review)) return
-  agentSkillBusy.value = true
-  try {
-    const result = await client.agentSkillDraftApprove(draft.id, agentSkillScope.value, agentSkillScopeId()) as { ok?: boolean; error?: string; message?: string }
-    agentSkillNotice.value = result.ok ? `${draft.name} 已从草稿安装。` : result.message || result.error || '草稿安装失败'
-    await refreshSkills()
-  } catch (error) {
-    agentSkillNotice.value = error instanceof Error ? error.message : '草稿安装失败'
-  } finally {
-    agentSkillBusy.value = false
-  }
-}
 
-async function rejectAgentSkillDraft(draft: AgentSkillDraft) {
-  const result = await client.agentSkillDraftReject(draft.id) as { ok?: boolean; error?: string }
-  agentSkillNotice.value = result.ok ? `${draft.name} 草稿已丢弃。` : result.error || '草稿丢弃失败'
-  await refreshSkills()
-}
 
 async function installGameAdapter(adapter: GameAdapterManifest) {
   const review = `${adapter.name} ${adapter.version}\n来源：${adapter.source}\n许可：${adapter.license}\n动作：${adapter.action_sets.join('、')}\n\n安装代码适配器？首次实际运行仍会经过能力会话权限。`
@@ -3492,150 +3261,16 @@ async function inspectGameAdapterRun(adapter: GameAdapterManifest) {
   gameAdapterNotice.value = result.ready ? `${adapter.name} 已准备好。` : result.detection_status?.setup_hint || result.error || `${adapter.name} 还需要配置。`
 }
 
-function defaultByokDraft() {
-  return {
-    provider: 'openai',
-    base_url: 'https://api.openai.com/v1',
-    model: 'gpt-5.6-luna',
-    temperature: 0.7,
-  }
-}
 
-function syncByokStatus(status: ByokStatus | null | undefined, force = false) {
-  if (!status) return
-  byokStatus.value = status
-  byokResult.value = status.last_test || byokResult.value
-  if (byokDirty.value && !force) return
-  byokDraft.value = {
-    provider: status.provider || 'openai',
-    base_url: status.base_url || 'https://api.openai.com/v1',
-    model: status.model || 'gpt-5.6-luna',
-    temperature: Number.isFinite(Number(status.temperature)) ? Number(status.temperature) : 0.7,
-  }
-}
 
-function syncByokFromReady(payload: CoreReadyPayload) {
-  syncByokStatus(payload.byok)
-}
 
-function selectByokPreset(preset: ByokPreset) {
-  const changingProvider = byokDraft.value.provider !== preset.id
-  byokDraft.value = {
-    ...byokDraft.value,
-    provider: preset.id,
-    base_url: preset.base_url || (changingProvider ? '' : byokDraft.value.base_url),
-    model: preset.model || (changingProvider ? '' : byokDraft.value.model),
-  }
-  byokApiKey.value = ''
-  byokResult.value = null
-  byokNotice.value = ''
-  byokDirty.value = true
-}
 
-function markByokDirty() {
-  byokDirty.value = true
-  byokNotice.value = ''
-  byokResult.value = null
-}
 
-function byokStateLabel() {
-  if (byokLoading.value) return '正在连接'
-  if (byokStatus.value?.configured) return '已连接'
-  if (byokStatus.value?.state === 'mock') return 'Mock 模式'
-  return '尚未连接'
-}
 
-function byokSecretLabel() {
-  if (!byokRequiresKey.value) return '本地模型无需 API Key'
-  const source = byokStatus.value?.secret?.source
-  if (source === 'system') return '已安全存入系统密钥库'
-  if (source === 'environment') return '正在使用环境变量'
-  if (source === 'legacy') return '正在使用现有本地配置'
-  if (source === 'not_required') return '本地模型无需密钥'
-  if (byokApiKey.value.trim()) return '新密钥将在保存时写入系统密钥库'
-  return '尚未保存密钥'
-}
 
-function byokErrorLabel(error = '') {
-  const labels: Record<string, string> = {
-    api_key_required: '请填写 API Key；已有密钥时可以留空继续使用。',
-    invalid_api_key: 'API Key 格式无效，请检查是否粘贴完整。',
-    secure_store_unavailable: '系统密钥库当前不可用，请重启 Joi 或检查依赖。',
-    secure_store_failed: '密钥没有写入系统密钥库，请再试一次。',
-    invalid_endpoint: '端点无效。云端接口需要 HTTPS，本地 Ollama 可使用 localhost。',
-    invalid_model: '请填写供应商实际提供的模型 ID。',
-    invalid_temperature: '温度必须在 0 到 2 之间。',
-    authentication_failed: '密钥验证失败，请检查 API Key 或供应商权限。',
-    endpoint_not_found: '接口地址不存在，请检查是否包含正确的 /v1 路径。',
-    endpoint_unreachable: '无法连接接口，请检查网络、代理或本地服务。',
-    connection_timeout: '连接测试超时，请检查接口是否可访问。',
-    rate_limited: '供应商正在限流或额度不足，请检查用量后重试。',
-    model_not_found: '接口可以连接，但没有找到这个模型 ID。',
-    model_unconfigured: '配置还不完整，请补齐模型和密钥。',
-    no_local_models: 'Ollama 已连接，但没有发现本地模型；请先拉取一个模型。',
-    unsupported_discovery: '当前供应商暂不支持自动检测模型。',
-    connection_test_failed: '接口测试失败；配置已保留，可以修改后重试。',
-    config_write_failed: 'Joi 无法保存本地配置。',
-    config_invalid: '现有 config.yaml 无法读取，请先修复配置格式。',
-  }
-  return labels[error] || (error ? '连接没有成功，请检查配置后重试。' : '')
-}
 
-async function refreshByokStatus() {
-  if (!connected.value) return
-  try {
-    const status = await client.byokStatus() as ByokStatus
-    syncByokStatus(status)
-  } catch (error) {
-    byokNotice.value = error instanceof Error ? error.message : '无法读取 BYOK 状态'
-  }
-}
 
-async function connectByok() {
-  if (!byokCanConnect.value) return
-  byokLoading.value = true
-  byokNotice.value = ''
-  try {
-    const payload: Record<string, unknown> = {
-      provider: byokDraft.value.provider,
-      base_url: byokDraft.value.base_url.trim(),
-      model: byokDraft.value.model.trim(),
-      temperature: Number(byokDraft.value.temperature),
-    }
-    if (byokApiKey.value.trim()) payload.api_key = byokApiKey.value.trim()
-    const result = await client.byokConnect(payload) as ByokConnectResult
-    if (result.byok) syncByokStatus(result.byok, true)
-    byokResult.value = result.test || null
-    if (result.saved) {
-      byokApiKey.value = ''
-      byokDirty.value = false
-    }
-    byokNotice.value = result.ok
-      ? `连接成功${result.test?.latency_ms ? ` · ${result.test.latency_ms}ms` : ''}`
-      : `${result.saved ? '配置已保存，但测试失败。' : ''}${byokErrorLabel(result.error || result.test?.error || '')}`
-  } catch (error) {
-    byokNotice.value = error instanceof Error ? error.message : 'BYOK 连接失败'
-  } finally {
-    byokLoading.value = false
-  }
-}
 
-async function testByokConnection() {
-  byokLoading.value = true
-  byokNotice.value = ''
-  try {
-    const result = await client.byokTest() as ByokTestResult
-    byokResult.value = result
-    byokNotice.value = result.ok
-      ? `连接正常${result.latency_ms ? ` · ${result.latency_ms}ms` : ''}`
-      : byokErrorLabel(result.error || '')
-    await refreshByokStatus()
-  } catch (error) {
-    byokNotice.value = error instanceof Error ? error.message : 'BYOK 测试失败'
-  } finally {
-    byokLoading.value = false
-  }
-}
 
 async function detectLocalModels() {
   if (!connected.value || byokDraft.value.provider !== 'ollama' || byokDiscovering.value) return
@@ -3662,30 +3297,6 @@ async function detectLocalModels() {
   }
 }
 
-async function disconnectByok() {
-  byokLoading.value = true
-  byokNotice.value = ''
-  try {
-    const result = await client.byokDisconnect() as { ok?: boolean; error?: string; byok?: ByokStatus; secret_removed?: boolean; secret_source?: string }
-    if (result.byok) syncByokStatus(result.byok, true)
-    byokResult.value = null
-    byokApiKey.value = ''
-    byokDirty.value = false
-    if (result.ok) {
-      byokNotice.value = result.secret_source === 'environment'
-        ? 'BYOK 已断开；环境变量中的密钥由你继续管理。'
-        : result.secret_removed
-          ? 'BYOK 已断开，密钥已从系统密钥库移除。'
-          : 'BYOK 已断开。'
-    } else {
-      byokNotice.value = byokErrorLabel(result.error || '')
-    }
-  } catch (error) {
-    byokNotice.value = error instanceof Error ? error.message : 'BYOK 断开失败'
-  } finally {
-    byokLoading.value = false
-  }
-}
 
 function defaultRuntimeDraft() {
   return {
@@ -3696,9 +3307,17 @@ function defaultRuntimeDraft() {
     tts_enabled: false,
     tts_volume: 0.85,
     tts_speed_factor: 1.2,
-    tts_fallback_to_system: false,
+    tts_gpt_sovits_streaming_mode: 2,
+    tts_provider: '',
+    tts_model: '',
+    tts_voice: '',
+    tts_base_url: '',
+    tts_timeout_seconds: 120,
+    tts_optimize_text: false,
     ocr_timeout_seconds: 5,
     llm_temperature: 0.7,
+    llm_provider: '',
+    llm_model: '',
     llm_use_mock: true,
     computer_post_action_settle_ms: 200,
   }
@@ -3718,7 +3337,17 @@ function syncRuntimeDraft(payload: CoreReadyPayload) {
   draft.tts_enabled = Boolean(ttsSettings.enabled)
   draft.tts_volume = Math.max(0, Number(ttsSettings.volume ?? draft.tts_volume))
   draft.tts_speed_factor = Math.max(0.5, Number(ttsSettings.speed_factor ?? draft.tts_speed_factor))
-  draft.tts_fallback_to_system = Boolean(ttsSettings.fallback_to_system)
+  draft.tts_gpt_sovits_streaming_mode = Math.max(1, Math.min(3, Number(settings.tts?.gpt_sovits_streaming_mode ?? draft.tts_gpt_sovits_streaming_mode)))
+  // Read from the settings block rather than the status one: status reports
+  // whether the voice works, settings report how it is configured, and only
+  // the latter carries the endpoint and model.
+  const ttsConfig = settings.tts || {}
+  draft.tts_provider = String(ttsConfig.provider ?? tts.provider ?? draft.tts_provider)
+  draft.tts_model = String(ttsConfig.model ?? draft.tts_model)
+  draft.tts_voice = String(ttsConfig.voice ?? draft.tts_voice)
+  draft.tts_base_url = String(ttsConfig.base_url ?? draft.tts_base_url)
+  draft.tts_timeout_seconds = Math.max(1, Number(ttsConfig.timeout_seconds ?? draft.tts_timeout_seconds))
+  draft.tts_optimize_text = Boolean(ttsConfig.optimize_text)
   const ocr = settings.ocr || runtimeProvider(payload, 'ocr')
   draft.ocr_timeout_seconds = Math.max(1, Number(ocr?.timeout_seconds || draft.ocr_timeout_seconds))
   const computerUse = settings.computer_use || {}
@@ -3727,6 +3356,8 @@ function syncRuntimeDraft(payload: CoreReadyPayload) {
   const llmSettings = settings.llm || {}
   const fastModel = runtimeProvider(payload, 'fast')
   draft.llm_temperature = Math.max(0, Number(llmSettings.temperature ?? draft.llm_temperature))
+  draft.llm_provider = String(llmSettings.provider ?? draft.llm_provider)
+  draft.llm_model = String(llmSettings.model ?? draft.llm_model)
   draft.llm_use_mock = typeof llmSettings.use_mock === 'boolean' ? llmSettings.use_mock : fastModel?.state === 'mock'
   runtimeDraft.value = draft
 }
@@ -3738,6 +3369,16 @@ function runtimeProvider(payload: CoreReadyPayload, name: string) {
 function parseSettleMs(value?: string) {
   const match = String(value || '').match(/settle\s+(\d+)ms/i)
   return match ? Number(match[1]) : 0
+}
+
+/** Drop the blank entries, so an untouched box changes nothing. */
+function onlyFilled(values: Record<string, string>) {
+  const filled: Record<string, string> = {}
+  for (const [key, value] of Object.entries(values)) {
+    const text = String(value ?? '').trim()
+    if (text) filled[key] = text
+  }
+  return filled
 }
 
 function runtimeUpdatePayload() {
@@ -3753,7 +3394,18 @@ function runtimeUpdatePayload() {
       enabled: Boolean(draft.tts_enabled),
       volume: safeNumber(draft.tts_volume, 0.85),
       speed_factor: safeNumber(draft.tts_speed_factor, 1.2),
-      fallback_to_system: Boolean(draft.tts_fallback_to_system),
+      gpt_sovits_streaming_mode: safeInteger(draft.tts_gpt_sovits_streaming_mode, 2),
+      timeout_seconds: safeInteger(draft.tts_timeout_seconds, 1),
+      optimize_text: Boolean(draft.tts_optimize_text),
+      // Text fields are sent only when filled. An empty box means "leave it
+      // as it is" -- sending "" would erase a working endpoint or model for
+      // anyone who opened the panel without touching them.
+      ...onlyFilled({
+        provider: draft.tts_provider,
+        model: draft.tts_model,
+        voice: draft.tts_voice,
+        base_url: draft.tts_base_url,
+      }),
     },
     ocr: {
       timeout_seconds: safeInteger(draft.ocr_timeout_seconds, 1),
@@ -3761,6 +3413,7 @@ function runtimeUpdatePayload() {
     llm: {
       temperature: safeNumber(draft.llm_temperature, 0.7),
       use_mock: Boolean(draft.llm_use_mock),
+      ...onlyFilled({ provider: draft.llm_provider, model: draft.llm_model }),
     },
     computer_use: {
       post_action_settle_ms: safeInteger(draft.computer_post_action_settle_ms, 0),
@@ -3857,8 +3510,18 @@ function providerErrorLabel(error: string) {
     empty_audio: '音频为空',
     empty_transcript: '无转写文本',
     asr_failed: '识别失败',
+    asr_auth_failed: '识别密钥无效',
+    asr_insufficient_balance: '识别账户余额不足',
+    asr_rate_limited: '识别接口限流',
+    audio_format_unsupported: '录音格式不支持',
     tts_timeout: '合成超时',
     tts_service_unavailable: '服务未连接',
+    tts_not_installed: '未安装 GPT-SoVITS',
+    tts_service_unhealthy: '本地语音服务异常，请重启 GPT-SoVITS',
+    tts_auth_failed: '语音密钥无效',
+    tts_rate_limited: '语音接口限流',
+    audio_blocked: '系统阻止了自动播放，点一下窗口再试',
+    audio_play_failed: '音频播放失败',
     tts_config_error: 'TTS 配置有误',
     tts_failed: '合成失败',
     pillow_missing: '缺少 Pillow',
@@ -3894,6 +3557,12 @@ function ttsErrorLabel(error: string) {
   const labels: Record<string, string> = {
     tts_timeout: '合成超时',
     tts_service_unavailable: '服务未连接',
+    tts_not_installed: '未安装 GPT-SoVITS',
+    tts_service_unhealthy: '本地语音服务异常，请重启 GPT-SoVITS',
+    tts_auth_failed: '语音密钥无效',
+    tts_rate_limited: '语音接口限流',
+    audio_blocked: '系统阻止了自动播放，点一下窗口再试',
+    audio_play_failed: '音频播放失败',
     tts_config_error: '配置有误',
     tts_failed: '合成失败',
   }
@@ -3908,15 +3577,21 @@ function formatBytes(value: number) {
 }
 
 function stopSpokenAudio() {
-  if (!currentAudio) return
-  currentAudio.pause()
-  currentAudio.currentTime = 0
-  currentAudio = null
+  if (currentAudio) {
+    currentAudio.pause()
+    currentAudio.currentTime = 0
+    currentAudio = null
+  }
+  streamingVoiceAudioKey = ''
+  streamingVoiceSequence = 0
+  // Barge-in must close the mouth too, or the character keeps mouthing a line
+  // nobody can hear any more.
+  detachLipSync()
 }
 
 async function toggleVoiceInput() {
   if (voiceState.value === 'recording') {
-    stopVoiceRecording()
+    void stopVoiceRecording()
     return
   }
   if (voiceState.value !== 'idle' || !connected.value) return
@@ -3929,53 +3604,51 @@ async function startVoiceRecording() {
       errorText.value = 'ASR 未配置'
       return
     }
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+    if (!navigator.mediaDevices?.getUserMedia) {
       errorText.value = '当前 WebView 不支持麦克风录音'
       return
     }
     beginNewVoiceIntent()
     lastTranscript.value = ''
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    audioChunks = []
-    mediaRecorder = new MediaRecorder(mediaStream)
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) audioChunks.push(event.data)
-    }
-    mediaRecorder.onstop = () => {
-      const mimeType = mediaRecorder?.mimeType || 'audio/webm'
-      const blob = new Blob(audioChunks, { type: mimeType })
-      audioChunks = []
-      cleanupVoiceStream()
-      void transcribeVoiceBlob(blob, mimeType)
-    }
-    mediaRecorder.start()
-    voiceStopTimer = window.setTimeout(() => stopVoiceRecording(), voiceMaxSeconds.value * 1000)
+    // Recorded as WAV rather than through MediaRecorder: that gives webm in
+    // Chromium and mp4 in the packaged WKWebView, and the recogniser reads
+    // neither. Getting the container wrong fails only after upload.
+    await voiceRecorder.start()
+    voiceStopTimer = window.setTimeout(() => void stopVoiceRecording(), voiceMaxSeconds.value * 1000)
     voiceState.value = 'recording'
   } catch {
-    cleanupVoiceStream()
+    await cleanupVoiceStream()
     voiceState.value = 'idle'
     errorText.value = '麦克风启动失败'
   }
 }
 
-function stopVoiceRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    voiceState.value = 'transcribing'
-    mediaRecorder.stop()
+async function stopVoiceRecording() {
+  if (!voiceRecorder.active) {
+    await cleanupVoiceStream()
+    voiceState.value = 'idle'
     return
   }
-  cleanupVoiceStream()
-  voiceState.value = 'idle'
-}
-
-function cleanupVoiceStream() {
+  voiceState.value = 'transcribing'
   if (voiceStopTimer !== null) {
     window.clearTimeout(voiceStopTimer)
     voiceStopTimer = null
   }
-  mediaStream?.getTracks().forEach((track) => track.stop())
-  mediaStream = null
-  mediaRecorder = null
+  const recording = await voiceRecorder.stop()
+  if (!recording) {
+    voiceState.value = 'idle'
+    errorText.value = '我没有录到声音，请再说一次。'
+    return
+  }
+  await transcribeVoiceBlob(recording.blob, recording.mimeType)
+}
+
+async function cleanupVoiceStream() {
+  if (voiceStopTimer !== null) {
+    window.clearTimeout(voiceStopTimer)
+    voiceStopTimer = null
+  }
+  if (voiceRecorder.active) await voiceRecorder.stop()
 }
 
 async function transcribeVoiceBlob(blob: Blob, mimeType: string) {
@@ -4012,13 +3685,16 @@ onMounted(() => {
   void safeWindowCall(() => getCurrentWindow().setTitleBarStyle('overlay'))
   void setNativeWindowControlsVisible(true)
   void connectToCore()
-  void refreshAgentClis()
-  void refreshByokStatus()
   clockTimer = window.setInterval(() => {
     nowSeconds.value = Date.now() / 1000
   }, 5000)
   window.addEventListener('dragstart', preventNativeAssetDrag, true)
   window.addEventListener('selectstart', preventCompactSelection, true)
+  // The character's replies arrive over a socket, which is never a user
+  // gesture, and a packaged webview may refuse to start audio outside one.
+  // The first thing the user touches lifts that for the rest of the session.
+  window.addEventListener('pointerdown', unlockAudioPlayback, { once: true, capture: true })
+  window.addEventListener('keydown', unlockAudioPlayback, { once: true, capture: true })
 })
 onBeforeUnmount(() => {
   document.body.classList.remove('transparent-active')
@@ -4035,9 +3711,41 @@ onBeforeUnmount(() => {
     window.clearTimeout(agentCliSyncTimer)
     agentCliSyncTimer = null
   }
-  cleanupVoiceStream()
+  void cleanupVoiceStream()
   stopSpokenAudio()
   client.close()
+})
+
+// The sheet's markup lives in components/layout/ContextRail.vue; its state
+// stays here. See shellContext.ts for why the split runs this way round.
+provide(ProjectsContextKey, {
+  connected,
+  characterName,
+  activeProject,
+  activeThread,
+  activeContext,
+  visibleProjects,
+  visibleThreads,
+  resourceBindings,
+  contextSearch,
+  contextRailBusy,
+  showArchivedContext,
+  newProjectName,
+  editingRailItem,
+  editingRailValue,
+  switchProject,
+  activateThread,
+  createProjectFromRail,
+  createThreadFromRail,
+  archiveProjectFromRail,
+  archiveThreadFromRail,
+  deleteArchivedProject,
+  deleteArchivedThread,
+  beginRailRename,
+  saveRailRename,
+  bindProjectDirectory,
+  addTextResourceBinding,
+  removeResourceBinding,
 })
 </script>
 
@@ -4049,25 +3757,41 @@ onBeforeUnmount(() => {
       'mini-dashboard-active': isCompactMode && miniDashboardActive,
       'mini-speech-active': isCompactMode && miniSpeechActive,
       'settings-active': activeCabin === 'inspector',
+      'stage-collapsed': stageIsCollapsed && activeCabin !== 'inspector',
     }"
     @dragstart.capture="preventNativeAssetDrag"
     @drop.capture.prevent
   >
+    <!--
+      DialogRoot spans the titlebar and the sheet because DialogTrigger has to
+      be inside it. That is not a formality: the trigger is how Reka knows
+      where to put focus back when the sheet closes. Driving `open` from a
+      plain button instead left focus on <body> after Esc, which strands
+      keyboard users at the top of the document.
+
+      DialogRoot renders no element of its own, so the titlebar stays a direct
+      child of .shell and the layout is untouched.
+    -->
+    <DialogRoot v-model:open="contextRailOpen">
     <!-- Header Titlebar -->
     <header class="titlebar" data-tauri-drag-region @mousedown="startWindowDrag" @dblclick="handleTitlebarDoubleClick">
-      <button
-        v-if="!isCompactMode"
-        type="button"
-        class="context-rail-trigger"
-        :class="{ active: contextRailOpen }"
-        :aria-expanded="contextRailOpen"
-        aria-label="打开项目与对话"
+      <!--
+        Hidden in Settings. Settings is a full-window layer with a nav column of
+        its own, and opening the project sheet on top of it put two navigations
+        on screen at once, the sheet covering the settings categories entirely.
+        PRD 9.1 puts Projects inside Workspace; it is not a peer of Settings.
+      -->
+      <DialogTrigger
+        v-if="!isCompactMode && activeCabin !== 'inspector'"
+        as-child
         @mousedown.stop
-        @click.stop="contextRailOpen = !contextRailOpen; contextRailOpen && refreshCollaboration()"
+        @click.stop="!contextRailOpen && refreshCollaboration()"
       >
-        <Menu :size="17" :stroke-width="1.8" />
-        <span>{{ activeProject?.name || '项目' }}</span>
-      </button>
+        <button type="button" class="context-rail-trigger" :class="{ active: contextRailOpen }" aria-label="打开项目与对话">
+          <Menu :size="17" :stroke-width="1.8" />
+          <span>{{ activeProject?.name || '项目' }}</span>
+        </button>
+      </DialogTrigger>
       <button type="button" class="window-title" title="返回对话" @mousedown.stop @click.stop="openCabin('chat')">Joi</button>
 
       <div class="topbar-actions">
@@ -4097,137 +3821,21 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <button
-      v-if="contextRailOpen && !isCompactMode"
-      type="button"
-      class="context-rail-backdrop"
-      aria-label="关闭项目导航"
-      @click="contextRailOpen = false"
-    ></button>
-    <aside v-if="!isCompactMode" class="context-rail" :class="{ open: contextRailOpen }" aria-label="项目与对话导航">
-      <header class="context-rail-head">
-        <div>
-          <span>共同在场</span>
-          <strong>{{ activeProject?.name || '默认项目' }}</strong>
-          <small>{{ activeThread?.title || '原有对话' }}</small>
-        </div>
-        <button type="button" aria-label="关闭侧栏" @click="contextRailOpen = false"><X :size="17" /></button>
-      </header>
+    <!--
+      A real modal sheet, not a panel parked off-screen.
 
-      <label class="context-search">
-        <Search :size="15" />
-        <input v-model="contextSearch" type="search" placeholder="搜索对话" />
-      </label>
+      This used to be an <aside> that stayed mounted and slid out of view with
+      `translateX(-100%)`. Off-screen is not gone: the panel kept ten focusable
+      controls in the tab order, so tabbing from the titlebar walked into a
+      dialog nobody could see. It also had no Esc, no focus trap, no focus
+      return, and its backdrop was a full-window <button> that was itself a
+      phantom tab stop.
 
-      <div class="context-primary-actions">
-        <button type="button" @click="createThreadFromRail" :disabled="contextRailBusy">
-          <Plus :size="16" />
-          新对话
-        </button>
-      </div>
-
-      <div class="context-rail-scroll">
-        <section class="context-group">
-          <div class="context-group-title">
-            <span>项目</span>
-            <button type="button" :aria-pressed="showArchivedContext" @click="showArchivedContext = !showArchivedContext">
-              {{ showArchivedContext ? '隐藏归档' : '归档' }}
-            </button>
-          </div>
-          <div class="context-list">
-            <article
-              v-for="project in visibleProjects"
-              :key="project.id"
-              class="context-row project-row"
-              :class="{ active: project.id === activeContext.project_id, archived: project.archived }"
-            >
-              <button type="button" class="context-row-main" @click="switchProject(project.id)">
-                <FolderIcon :size="16" />
-                <span v-if="editingRailItem?.type !== 'project' || editingRailItem.id !== project.id">{{ project.name }}</span>
-              </button>
-              <form
-                v-if="editingRailItem?.type === 'project' && editingRailItem.id === project.id"
-                class="context-inline-edit"
-                @submit.prevent="saveRailRename"
-              >
-                <input v-model="editingRailValue" maxlength="80" autofocus />
-                <button type="submit"><CheckCircle2 :size="15" /></button>
-              </form>
-              <div class="context-row-actions">
-                <button type="button" title="重命名" @click="beginRailRename('project', project.id, project.name)"><Pencil :size="14" /></button>
-                <button type="button" :title="project.archived ? '恢复项目' : '归档项目'" @click="archiveProjectFromRail(project)"><Archive :size="14" /></button>
-                <button v-if="project.archived" type="button" title="永久删除" class="danger" @click="deleteArchivedProject(project)"><Trash2 :size="14" /></button>
-              </div>
-            </article>
-          </div>
-          <form class="context-new-project" @submit.prevent="createProjectFromRail">
-            <Plus :size="15" />
-            <input v-model="newProjectName" maxlength="80" placeholder="新项目名称" />
-            <button type="submit" :disabled="!newProjectName.trim() || contextRailBusy">创建</button>
-          </form>
-        </section>
-
-        <section class="context-group">
-          <div class="context-group-title">
-            <span>对话</span>
-            <small>{{ visibleThreads.length }}</small>
-          </div>
-          <div class="context-list thread-list">
-            <article
-              v-for="thread in visibleThreads"
-              :key="thread.id"
-              class="context-row thread-row"
-              :class="{ active: thread.id === activeContext.thread_id, archived: thread.archived }"
-            >
-              <button type="button" class="context-row-main" @click="activateThread(thread.id)">
-                <MessageCircle :size="15" />
-                <span v-if="editingRailItem?.type !== 'thread' || editingRailItem.id !== thread.id">{{ thread.title }}</span>
-              </button>
-              <form
-                v-if="editingRailItem?.type === 'thread' && editingRailItem.id === thread.id"
-                class="context-inline-edit"
-                @submit.prevent="saveRailRename"
-              >
-                <input v-model="editingRailValue" maxlength="100" autofocus />
-                <button type="submit"><CheckCircle2 :size="15" /></button>
-              </form>
-              <div class="context-row-actions">
-                <button type="button" title="重命名" @click="beginRailRename('thread', thread.id, thread.title)"><Pencil :size="14" /></button>
-                <button type="button" :title="thread.archived ? '恢复对话' : '归档对话'" @click="archiveThreadFromRail(thread)"><Archive :size="14" /></button>
-                <button v-if="thread.archived" type="button" title="永久删除" class="danger" @click="deleteArchivedThread(thread)"><Trash2 :size="14" /></button>
-              </div>
-            </article>
-            <p v-if="!visibleThreads.length" class="context-empty">没有匹配的对话。</p>
-          </div>
-        </section>
-
-        <section class="context-group context-bindings">
-          <div class="context-group-title"><span>项目资源</span><small>{{ resourceBindings.length }}</small></div>
-          <div class="binding-chips">
-            <span v-for="binding in resourceBindings" :key="binding.id">
-              <FolderIcon v-if="binding.kind === 'directory'" :size="13" />
-              <Globe2 v-else-if="binding.kind === 'domain'" :size="13" />
-              <Bot v-else-if="binding.kind === 'game'" :size="13" />
-              <FileIcon v-else :size="13" />
-              {{ binding.label }}
-              <button type="button" :aria-label="`移除 ${binding.label}`" @click="removeResourceBinding(binding.id)"><X :size="12" /></button>
-            </span>
-            <small v-if="!resourceBindings.length">Joi 只会在已绑定范围内协作。</small>
-          </div>
-          <div class="binding-actions">
-            <button type="button" @click="bindProjectDirectory"><FolderPlus :size="14" />文件夹</button>
-            <button type="button" @click="addTextResourceBinding('domain')"><Globe2 :size="14" />网站</button>
-            <button type="button" @click="addTextResourceBinding('application')"><AppWindow :size="14" />应用</button>
-            <button type="button" @click="addTextResourceBinding('game')"><Gamepad2 :size="14" />游戏</button>
-          </div>
-        </section>
-      </div>
-
-      <footer class="context-rail-foot">
-        <span :class="{ online: connected }"></span>
-        {{ connected ? `${characterName} 在这个对话里` : '正在重新连接 Joi' }}
-      </footer>
-    </aside>
+      DialogRoot supplies all of that, and unmounts the content when closed --
+      which is the actual fix. See tests/context-rail-modal.test.mjs.
+    -->
+      <ContextRail v-if="!isCompactMode" />
+    </DialogRoot>
 
     <section ref="workspaceRef" class="workspace" :class="`cabin-${activeCabin}`">
       <div class="topbar" v-if="activeCabin !== 'inspector'">
@@ -4251,6 +3859,45 @@ onBeforeUnmount(() => {
       </div>
 
       <p class="error" v-if="errorText && activeCabin !== 'inspector'">{{ errorText }}</p>
+
+      <!-- Capability session controls live in Workspace, not in the
+           conversation: PRD 9.1 puts "任务卡和能力会话控制" here and leaves
+           Conversation for dialogue and results. In the chat they took
+           permanent vertical space and stayed after the session had already
+           finished. Shown only while a session can still be acted on -- a
+           finished run needs no pause button, and that was most of the
+           clutter. -->
+      <section class="capability-session-strip" v-if="activeCabin === 'workspace' && liveCapabilitySession">
+        <div class="capability-session-main">
+          <span class="capability-session-dot" :class="`state-${liveCapabilitySession.state}`"></span>
+          <div>
+            <strong>{{ capabilityStateLabel }}</strong>
+            <span>{{ liveCapabilitySession.goal || '当前能力会话' }}</span>
+          </div>
+          <span class="capability-session-driver">{{ liveCapabilitySession.driver === 'cua' ? '后台 CUA' : 'Joi 原生' }}</span>
+        </div>
+        <div class="capability-session-controls">
+          <div class="capability-permissions" aria-label="能力权限">
+            <button
+              v-for="profile in (['observe', 'collaborate', 'delegate'] as PermissionProfile[])"
+              :key="profile"
+              type="button"
+              :class="{ active: liveCapabilitySession.permission_profile === profile }"
+              :aria-pressed="liveCapabilitySession.permission_profile === profile"
+              @click="changeCapabilityPermission(profile)"
+            >{{ permissionProfileLabel(profile) }}</button>
+          </div>
+          <div class="capability-session-actions">
+            <button type="button" @click="toggleCapabilityPause">
+              <Play v-if="liveCapabilitySession.state === 'paused'" :size="14" />
+              <Pause v-else :size="14" />
+              {{ liveCapabilitySession.state === 'paused' ? '继续' : '暂停' }}
+            </button>
+            <button type="button" v-if="liveCapabilitySession.state === 'running'" @click="takeOverCapability"><Hand :size="14" />我来接管</button>
+            <button type="button" class="danger" @click="cancelCapability"><X :size="14" />取消</button>
+          </div>
+        </div>
+      </section>
 
       <section class="watch-session-strip" :class="{ active: watchLoopActive }" v-if="activeCabin === 'workspace' && (watchLoopActive || watchLoopStatus.iterations)">
         <div class="watch-session-main">
@@ -4543,50 +4190,11 @@ onBeforeUnmount(() => {
           <AlertCircle :size="15" />
           <span>{{ errorText }}</span>
         </div>
-        <section v-if="activeCapabilitySession" class="capability-session-card" :class="`state-${activeCapabilitySession.state}`">
-          <header>
-            <span class="capability-session-icon"><MonitorPlay :size="16" /></span>
-            <div>
-              <strong>{{ capabilityStateLabel }}</strong>
-              <small>{{ activeCapabilitySession.goal || '当前能力会话' }}</small>
-            </div>
-            <span class="capability-driver">{{ activeCapabilitySession.driver === 'cua' ? '后台 CUA' : 'Joi 原生' }}</span>
-          </header>
-          <div class="capability-session-body">
-            <div class="capability-permissions" aria-label="能力权限">
-              <button
-                v-for="profile in (['observe', 'collaborate', 'delegate'] as PermissionProfile[])"
-                :key="profile"
-                type="button"
-                :class="{ active: activeCapabilitySession.permission_profile === profile }"
-                :aria-pressed="activeCapabilitySession.permission_profile === profile"
-                @click="changeCapabilityPermission(profile)"
-              >{{ permissionProfileLabel(profile) }}</button>
-            </div>
-            <div class="capability-controls">
-              <button type="button" @click="toggleCapabilityPause" v-if="!['completed', 'failed', 'cancelled'].includes(activeCapabilitySession.state)">
-                <Play v-if="activeCapabilitySession.state === 'paused'" :size="14" />
-                <Pause v-else :size="14" />
-                {{ activeCapabilitySession.state === 'paused' ? '继续' : '暂停' }}
-              </button>
-              <button type="button" @click="takeOverCapability" v-if="activeCapabilitySession.state === 'running'"><Hand :size="14" />我来接管</button>
-              <button type="button" class="danger" @click="cancelCapability" v-if="!['completed', 'failed', 'cancelled'].includes(activeCapabilitySession.state)"><X :size="14" />取消</button>
-            </div>
-          </div>
-          <details v-if="capabilityReceipts.length" class="capability-receipts">
-            <summary>
-              <ShieldCheck :size="14" />
-              {{ capabilityReceipts.length }} 个动作已记录
-              <span v-if="latestCapabilityReceipt">最近：{{ latestCapabilityReceipt.action }}</span>
-            </summary>
-            <ol>
-              <li v-for="receipt in capabilityReceipts.slice(-6).reverse()" :key="receipt.id">
-                <span>{{ receipt.step_index }}</span>
-                <div><strong>{{ receipt.action }}</strong><small>{{ receipt.after_summary || receipt.status }}</small></div>
-              </li>
-            </ol>
-          </details>
-        </section>
+        <!-- The capability-session card used to sit here. It took permanent
+             vertical space above the message list and stayed after a session
+             had already finished, so a completed run kept squeezing the chat.
+             Its pause / take-over / cancel controls need a home that does not
+             cost the conversation room -- see the chat redesign plan. -->
         <div
           ref="chatScrollArea"
           class="chat-scroll-area"
@@ -4595,8 +4203,10 @@ onBeforeUnmount(() => {
           @scroll.passive="onChatScroll"
         >
           <article v-for="turn in conversationTurns" :key="turn.taskId" class="conversation-turn">
-            <div class="message-row human">
-              <span class="chat-name">你</span>
+            <!-- No "你" label: a right-aligned bubble already says who wrote
+                 it, and repeating it on every turn is noise GPT and Claude
+                 both dropped. The timestamp moves to a tooltip. -->
+            <div class="message-row human" :title="turnTimeLabel(turn)">
               <div class="message-bubble">{{ turn.user.display_card.summary }}</div>
             </div>
 
@@ -4612,19 +4222,22 @@ onBeforeUnmount(() => {
               </span>
               <span class="thinking-copy">
                 <strong>{{ turnProgressLabel(turn) }}</strong>
-                <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                <ThinkingOrb :state="turnOrbState(turn)" :size="20" :label="turnProgressLabel(turn)" />
               </span>
-              <small>{{ turnTimeLabel(turn) }}</small>
             </div>
 
             <div class="message-row joi" v-if="turn.assistant">
               <span class="assistant-avatar" aria-hidden="true">
-                <img v-if="characterAvatarSrc" :src="characterAvatarSrc" alt="" />
+                <img v-if="authorAvatar(turn.assistant)" :src="authorAvatar(turn.assistant)" alt="" />
                 <Sparkles v-else :size="15" />
               </span>
               <div class="assistant-message">
-                <span class="chat-name">{{ characterName }}</span>
-                <div class="message-bubble">{{ hideRuntimeBrand(turn.assistant.display_card.summary) }}</div>
+                <!-- The character who said it, not the one active now: after a
+                     switch the old replies are still on screen, and naming
+                     them after the new character makes it look like the new
+                     one introduced itself by the old one's name. -->
+                <span class="chat-name">{{ authorName(turn.assistant) }}</span>
+                <div class="message-bubble">{{ assistantText(turn.assistant) }}</div>
               </div>
             </div>
 
@@ -4634,24 +4247,23 @@ onBeforeUnmount(() => {
               :class="`status-${turn.status}`"
               :aria-label="`任务状态：${turnStatusLabel(turn)}`"
             >
-              <div class="execution-rail-head">
-                <AlertCircle v-if="turn.status === 'waiting' || turn.status === 'failed'" class="execution-status-icon" :size="16" />
-                <CheckCircle2 v-else class="execution-status-icon" :size="16" />
-                <div>
-                  <strong>{{ turnStatusLabel(turn) }}</strong>
-                  <span>{{ turnTimeLabel(turn) }}</span>
-                </div>
-                <button
-                  v-if="turn.status === 'completed' || turn.status === 'failed'"
-                  type="button"
-                  class="execution-toggle"
-                  :aria-expanded="isTurnExpanded(turn)"
-                  :aria-label="isTurnExpanded(turn) ? '收起执行过程' : '展开执行过程'"
-                  @click="toggleTurnTrace(turn)"
-                >
-                  <ChevronDown :size="15" />
-                </button>
-              </div>
+              <!-- One line, not a card. A routine success used to occupy more
+                   height than the reply it belonged to; the timestamp moved to
+                   a tooltip because it is almost never what the user is after.
+                   Failure keeps its icon and colour, and opens itself. -->
+              <button
+                type="button"
+                class="execution-rail-head"
+                :aria-expanded="isTurnExpanded(turn)"
+                :title="turnTimeLabel(turn)"
+                @click="toggleTurnTrace(turn)"
+              >
+                <AlertCircle v-if="turn.status === 'waiting' || turn.status === 'failed'" class="execution-status-icon" :size="14" />
+                <CheckCircle2 v-else class="execution-status-icon" :size="14" />
+                <strong>{{ turnStatusLabel(turn) }}</strong>
+                <span class="execution-step-count" v-if="turn.steps.length">&nbsp;· {{ turn.steps.length }} 步</span>
+                <ChevronDown class="execution-chevron" :class="{ open: isTurnExpanded(turn) }" :size="14" />
+              </button>
               <p class="execution-current" v-if="isTurnExpanded(turn) || turn.status === 'waiting' || turn.status === 'failed'">{{ turnStatusText(turn) }}</p>
               <ol class="execution-steps" v-if="isTurnExpanded(turn)">
                 <li v-for="step in turn.steps" :key="step.key" :class="`step-${step.state}`">
@@ -4669,7 +4281,7 @@ onBeforeUnmount(() => {
                   <button type="button" class="secondary" @click="resolveApprovalFor(turn.approval, false)">停在这里</button>
                 </div>
               </div>
-              <button v-if="turn.status === 'failed'" type="button" class="execution-retry" :disabled="composerSending" @click="retryTurn(turn)">
+              <button v-if="turn.status === 'failed'" type="button" class="execution-retry" :disabled="composerSending" :aria-busy="composerSending" @click="retryTurn(turn)">
                 <RotateCcw :size="14" />
                 重试这条请求
               </button>
@@ -4725,11 +4337,11 @@ onBeforeUnmount(() => {
               <Paperclip :size="20" :stroke-width="1.75" />
             </button>
             <div class="luna-popover quick-popover" v-if="quickMenuOpen">
-              <button type="button" :disabled="attachmentPickerBusy" @click="addAttachments('file')">
+              <button type="button" :disabled="attachmentPickerBusy" :aria-busy="attachmentPickerBusy" @click="addAttachments('file')">
                 <FilePlus2 :size="18" :stroke-width="1.75" />
                 <span>{{ attachmentPickerBusy ? '正在打开选择器…' : '添加文件' }}</span>
               </button>
-              <button type="button" :disabled="attachmentPickerBusy" @click="addAttachments('folder')">
+              <button type="button" :disabled="attachmentPickerBusy" :aria-busy="attachmentPickerBusy" @click="addAttachments('folder')">
                 <FolderPlus :size="18" :stroke-width="1.75" />
                 <span>添加文件夹</span>
               </button>
@@ -4755,7 +4367,7 @@ onBeforeUnmount(() => {
           <input
             v-model="input"
             class="composer-text-input"
-            :disabled="!connected || composerSending"
+            :disabled="!connected || composerSending" :aria-busy="composerSending"
             placeholder="说点什么..."
           />
           <button
@@ -4793,7 +4405,7 @@ onBeforeUnmount(() => {
               <span aria-hidden="true"></span>
               <em>{{ memoryEnabled ? '记忆开启' : '记忆关闭' }}</em>
             </label>
-            <button type="button" class="memory-icon-button" :disabled="memorySearchLoading" title="刷新记忆" @click="refreshMemoryWorkspace">
+            <button type="button" class="memory-icon-button" :disabled="memorySearchLoading" :aria-busy="memorySearchLoading" title="刷新记忆" @click="refreshMemoryWorkspace">
               <RefreshCw :size="18" :class="{ spinning: memorySearchLoading }" />
             </button>
             <details class="memory-more-menu">
@@ -4827,7 +4439,7 @@ onBeforeUnmount(() => {
             <form v-if="memoryView === 'saved'" class="memory-search-inline" @submit.prevent="searchMemory">
               <Search :size="17" />
               <input v-model="memoryQuery" type="search" placeholder="搜索记忆" @search="searchMemory" />
-              <button type="submit" :disabled="memorySearchLoading" title="搜索">搜索</button>
+              <button type="submit" :disabled="memorySearchLoading" :aria-busy="memorySearchLoading" title="搜索">搜索</button>
             </form>
           </header>
 
@@ -4876,7 +4488,7 @@ onBeforeUnmount(() => {
             <p v-if="!displayedMemoryCandidates.length && !memorySearchLoading" class="memory-empty-state">没有待确认的记忆</p>
           </div>
 
-          <button v-if="memoryHasMore" type="button" class="memory-load-more" :disabled="memorySearchLoading" @click="loadMemoryPage(false)">
+          <button v-if="memoryHasMore" type="button" class="memory-load-more" :disabled="memorySearchLoading" :aria-busy="memorySearchLoading" @click="loadMemoryPage(false)">
             {{ memorySearchLoading ? '正在读取…' : `再加载 ${Math.min(12, memoryTotal - memoryOffset)} 条` }}
           </button>
 
@@ -4907,6 +4519,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="settings-nav-row"
                   :class="{ active: activeSettingsTab === tab.id }"
+                  :aria-current="activeSettingsTab === tab.id ? 'page' : undefined"
                   @click="activeSettingsTab = tab.id"
                 >
                   <component :is="settingsIcon(tab.id)" class="settings-nav-icon" :size="19" :stroke-width="1.75" />
@@ -4927,24 +4540,36 @@ onBeforeUnmount(() => {
                 <h1>{{ settingsTitle(activeSettingsTab) }}</h1>
                 <p>{{ settingsSubtitle(activeSettingsTab) }}</p>
               </div>
-              <button type="button" class="settings-close" title="返回对话" aria-label="返回对话" @click="openCabin('chat')">
-                <X :size="20" :stroke-width="1.75" />
-              </button>
+              <!--
+                No close button here. It sat about 90px directly below the
+                titlebar's "返回对话", top-right, doing the identical thing --
+                three controls with the same label were on screen at once.
+                What remains is two, in two regions: back at the top of the
+                settings nav, and the global toggle in the titlebar.
+              -->
             </header>
 
             <template v-if="activeSettingsTab === 'execution'">
-              <div class="execution-segment" role="tablist" aria-label="执行模式">
-                <button type="button" :class="{ active: executionMode === 'local_cli' }" @click="executionMode = 'local_cli'">本机 CLI</button>
-                <button type="button" :class="{ active: executionMode === 'byok' }" @click="executionMode = 'byok'">BYOK</button>
-              </div>
-
-              <div v-if="executionMode === 'local_cli'" class="settings-execution-pane">
+              <TabsRoot v-model="executionMode" class="execution-tabs">
+              <!--
+                Reka Tabs, not hand-written ARIA. This carried
+                `role="tablist"` while its two children were plain buttons
+                with no `role="tab"` and no `aria-selected` -- a tab list
+                that announces itself and then contains no tabs, which is
+                worse for a screen reader than no role at all. Arrow-key
+                movement and roving tabindex were missing too.
+              -->
+              <TabsList class="execution-segment" aria-label="执行模式">
+                <TabsTrigger value="local_cli">本机 CLI</TabsTrigger>
+                <TabsTrigger value="byok">BYOK</TabsTrigger>
+              </TabsList>
+              <TabsContent value="local_cli" class="settings-execution-pane">
                 <div class="settings-section-head">
                   <div>
                     <strong>你的 CLI（{{ displayedAgentClis.length }}）</strong>
                   <span>选择接管 Joi 请求的本机运行时。</span>
                   </div>
-                  <button type="button" class="settings-outline-button" :disabled="agentCliLoading || !connected" @click="refreshAgentClis">
+                  <button type="button" class="settings-outline-button" :disabled="agentCliLoading || !connected" :aria-busy="agentCliLoading" @click="refreshAgentClis">
                     {{ agentCliLoading ? '扫描中' : '重新扫描' }}
                   </button>
                 </div>
@@ -5002,14 +4627,14 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="agent-cli-status-line mcp-connect-line" v-if="selectedAgentCliId === 'codex'">
                     <span>{{ joiMcpStatus?.connected ? 'Joi 能力已连接到当前运行时' : '连接 Joi 的陪看、记忆和技能能力' }}</span>
-                    <button type="button" class="settings-outline-button" :disabled="!connected || joiMcpInstalling" @click="installJoiMcp">
+                    <button type="button" class="settings-outline-button" :disabled="!connected || joiMcpInstalling" :aria-busy="joiMcpInstalling" @click="installJoiMcp">
                       {{ joiMcpInstalling ? '连接中' : joiMcpStatus?.connected ? '重新连接' : '一键连接' }}
                     </button>
                   </div>
                 </div>
-              </div>
+              </TabsContent>
 
-              <div v-else class="settings-execution-pane">
+              <TabsContent value="byok" class="settings-execution-pane">
                 <section class="byok-connect-card" :class="{ connected: byokStatus?.configured }">
                   <header class="byok-connect-head">
                     <div class="byok-status-icon">
@@ -5021,7 +4646,7 @@ onBeforeUnmount(() => {
                       <span v-if="byokStatus?.configured">{{ selectedByokPreset?.label }} · {{ byokStatus?.model }}</span>
                       <span v-else>三步完成连接，密钥不会写入项目文件。</span>
                     </div>
-                    <button v-if="byokStatus?.configured" type="button" class="byok-subtle-action" :disabled="byokLoading" @click="testByokConnection">
+                    <button v-if="byokStatus?.configured" type="button" class="byok-subtle-action" :disabled="byokLoading" :aria-busy="byokLoading" @click="testByokConnection">
                       {{ byokLoading ? '测试中' : '重新测试' }}
                     </button>
                   </header>
@@ -5116,7 +4741,7 @@ onBeforeUnmount(() => {
                       <Zap :size="17" :stroke-width="1.9" />
                       {{ byokLoading ? '保存并测试中…' : byokStatus?.configured ? '保存并重新测试' : '保存并连接' }}
                     </button>
-                    <button v-if="byokStatus?.configured" type="button" class="byok-danger-action" :disabled="byokLoading" @click="disconnectByok">
+                    <button v-if="byokStatus?.configured" type="button" class="byok-danger-action" :disabled="byokLoading" :aria-busy="byokLoading" @click="disconnectByok">
                       <Unplug :size="16" :stroke-width="1.8" />断开
                     </button>
                   </div>
@@ -5133,7 +4758,8 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </details>
-              </div>
+              </TabsContent>
+              </TabsRoot>
             </template>
 
             <div class="settings-runtime-pane" v-else-if="activeSettingsTab === 'runtime'">
@@ -5151,11 +4777,10 @@ onBeforeUnmount(() => {
                   <label><span>音量</span><input v-model.number="runtimeDraft.tts_volume" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" /></label>
                   <label><span>语速</span><input v-model.number="runtimeDraft.tts_speed_factor" type="number" min="0.5" max="2" step="0.05" @input="markRuntimeDraftDirty" /></label>
                   <label><span>模型温度</span><input v-model.number="runtimeDraft.llm_temperature" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" /></label>
-                  <label><span>系统语音回退</span><input v-model="runtimeDraft.tts_fallback_to_system" type="checkbox" @change="markRuntimeDraftDirty" /></label>
                 </div>
                 <div class="runtime-actions">
-                  <button type="button" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">{{ runtimePreviewLoading ? '检查中' : '检查更改' }}</button>
-                  <button type="button" class="secondary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">{{ runtimeApplyLoading ? '提交中' : '应用' }}</button>
+                  <button type="button" :disabled="!connected || runtimePreviewLoading" :aria-busy="runtimePreviewLoading" @click="previewRuntimeSettings">{{ runtimePreviewLoading ? '检查中' : '检查更改' }}</button>
+                  <button type="button" class="secondary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" :aria-busy="runtimeApplyLoading" @click="applyRuntimeSettings">{{ runtimeApplyLoading ? '提交中' : '应用' }}</button>
                 </div>
                 <p class="runtime-preview-summary" v-if="runtimePreview">{{ runtimePreview.summary }}</p>
               </details>
@@ -5165,7 +4790,7 @@ onBeforeUnmount(() => {
               <div class="runtime-settings-head">
                 <div><strong>Skills</strong><span>可复用工作流；代码扩展必须作为 Adapter 安装。</span></div>
                 <div class="memory-head-actions">
-                  <button type="button" class="memory-link-button" :disabled="skillRefreshLoading" @click="refreshSkills">
+                  <button type="button" class="memory-link-button" :disabled="skillRefreshLoading" :aria-busy="skillRefreshLoading" @click="refreshSkills">
                     {{ skillRefreshLoading ? '刷新中' : '刷新' }}
                   </button>
                 </div>
@@ -5177,7 +4802,7 @@ onBeforeUnmount(() => {
                   <input v-model="agentSkillSource" spellcheck="false" placeholder="粘贴路径或 Git URL" @keydown.enter.prevent="inspectAgentSkill" />
                   <button type="button" @click="chooseAgentSkillSource('folder')"><FolderPlus :size="15" />目录</button>
                   <button type="button" @click="chooseAgentSkillSource('file')"><FilePlus2 :size="15" />ZIP</button>
-                  <button type="button" :disabled="!agentSkillSource.trim() || agentSkillBusy" @click="inspectAgentSkill">{{ agentSkillBusy ? '检查中' : '预览' }}</button>
+                  <button type="button" :disabled="!agentSkillSource.trim() || agentSkillBusy" :aria-busy="agentSkillBusy" @click="inspectAgentSkill">{{ agentSkillBusy ? '检查中' : '预览' }}</button>
                 </div>
                 <article v-if="agentSkillInspection" class="agent-skill-review">
                   <header>
@@ -5194,7 +4819,7 @@ onBeforeUnmount(() => {
                   <p v-for="warning in agentSkillInspection.warnings || []" :key="warning" class="agent-skill-warning">{{ warning }}</p>
                   <footer>
                     <label><span>可见范围</span><select v-model="agentSkillScope"><option value="project">当前项目</option><option value="character">当前角色</option><option value="global">全局</option></select></label>
-                    <button type="button" :disabled="agentSkillBusy" @click="installInspectedAgentSkill"><Plus :size="15" />审核后安装</button>
+                    <button type="button" :disabled="agentSkillBusy" :aria-busy="agentSkillBusy" @click="installInspectedAgentSkill"><Plus :size="15" />审核后安装</button>
                   </footer>
                 </article>
                 <p v-if="agentSkillNotice" class="agent-skill-notice">{{ agentSkillNotice }}</p>
@@ -5212,7 +4837,7 @@ onBeforeUnmount(() => {
                   </ol>
                   <p v-else class="memory-empty">这份草稿还没有记录可复用的步骤。</p>
                   <footer>
-                    <button type="button" :disabled="agentSkillBusy" @click="approveAgentSkillDraft(draft)"><Plus :size="15" />审核后安装</button>
+                    <button type="button" :disabled="agentSkillBusy" :aria-busy="agentSkillBusy" @click="approveAgentSkillDraft(draft)"><Plus :size="15" />审核后安装</button>
                     <button type="button" class="danger" @click="rejectAgentSkillDraft(draft)"><Trash2 :size="14" />丢弃</button>
                   </footer>
                 </article>
@@ -5225,7 +4850,7 @@ onBeforeUnmount(() => {
                     <div class="agent-skill-mark"><Sparkles :size="17" /></div>
                     <div><strong>{{ skill.name }}</strong><span>{{ agentSkillScopeLabel(skill.scope) }} · {{ skill.version }}<template v-if="skill.manifest?.code_bearing"> · 显式脚本</template></span></div>
                     <button type="button" @click="toggleAgentSkill(skill)">{{ skill.enabled ? '停用' : '启用' }}</button>
-                    <button type="button" :disabled="agentSkillBusy" @click="updateAgentSkill(skill)"><RefreshCw :size="14" /></button>
+                    <button type="button" :disabled="agentSkillBusy" :aria-busy="agentSkillBusy" @click="updateAgentSkill(skill)"><RefreshCw :size="14" /></button>
                     <button type="button" class="danger" @click="uninstallAgentSkill(skill)"><Trash2 :size="14" /></button>
                   </article>
                 </div>
@@ -5312,10 +4937,10 @@ onBeforeUnmount(() => {
                   <strong>背景上下文</strong>
                   <div class="memory-head-actions">
                     <label class="memory-enable-toggle">
-                      <input type="checkbox" :checked="backgroundEnabled" :disabled="backgroundLoading" @change="toggleBackgroundEnabled" />
+                      <input type="checkbox" :checked="backgroundEnabled" :disabled="backgroundLoading" :aria-busy="backgroundLoading" @change="toggleBackgroundEnabled" />
                       <span>{{ backgroundEnabled ? '已开启' : '已关闭' }}</span>
                     </label>
-                    <button type="button" class="memory-link-button" :disabled="backgroundLoading" @click="refreshBackgroundStatus">{{ backgroundLoading ? '同步中' : '刷新' }}</button>
+                    <button type="button" class="memory-link-button" :disabled="backgroundLoading" :aria-busy="backgroundLoading" @click="refreshBackgroundStatus">{{ backgroundLoading ? '同步中' : '刷新' }}</button>
                   </div>
                 </div>
                 <div class="background-status-grid">
@@ -5341,319 +4966,14 @@ onBeforeUnmount(() => {
               </div>
             </template>
 
-            <div class="settings-placeholder" v-else>
-              <strong>{{ settingsTitle(activeSettingsTab) }}</strong>
-              <span>{{ settingsSubtitle(activeSettingsTab) }}</span>
-            </div>
+            <!--
+              No "coming soon" fallback. The chain above now covers every tab
+              the navigation can reach, so this branch was unreachable -- it
+              only ever appeared for the twelve categories that were declared
+              but never routed to.
+            -->
           </section>
         </div>
-        <template v-if="false">
-        <nav class="settings-tabbar">
-          <button
-            v-for="tab in settingsTabs"
-            :key="tab.id"
-            type="button"
-            class="settings-tab"
-            :class="{ active: activeSettingsTab === tab.id }"
-            @click="activeSettingsTab = tab.id"
-          >
-            <span>{{ tab.icon }}</span>
-            {{ tab.label }}
-          </button>
-        </nav>
-
-        <!-- Closet Wardrobe -->
-        <div class="runtime-settings" v-if="activeSettingsTab === 'appearance'">
-          <div class="runtime-settings-head">
-            <strong>个性化装扮 (Cosplay Closet)</strong>
-            <span>点击进行穿戴</span>
-          </div>
-          <div class="closet-grid">
-            <button
-              type="button"
-              class="accessory-card"
-              :class="{ equipped: equippedAccessories.hat }"
-              @click="toggleAccessory('hat')"
-            >
-              🎓 巫师帽
-            </button>
-            <button
-              type="button"
-              class="accessory-card"
-              :class="{ equipped: equippedAccessories.glasses }"
-              @click="toggleAccessory('glasses')"
-            >
-              🕶️ 酷墨镜
-            </button>
-            <button
-              type="button"
-              class="accessory-card"
-              :class="{ equipped: equippedAccessories.ears }"
-              @click="toggleAccessory('ears')"
-            >
-              🐰 兔耳朵
-            </button>
-          </div>
-        </div>
-
-        <div class="runtime-settings memory-settings" v-if="activeSettingsTab === 'memory'">
-          <div class="runtime-settings-head">
-            <strong>记忆舱</strong>
-            <div class="memory-head-actions">
-              <label class="memory-enable-toggle">
-                <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
-                <span>{{ memoryEnabled ? '已开启' : '已关闭' }}</span>
-              </label>
-              <button type="button" class="memory-link-button" @click="refreshMemoryStatus">刷新</button>
-              <button type="button" class="memory-link-button danger" :disabled="!pendingMemories.length && !recentMemories.length" @click="clearMemory">清空</button>
-            </div>
-          </div>
-          <p class="memory-disabled-note" v-if="!memoryEnabled">长期记忆已关闭，新候选不会写入待确认队列。</p>
-          <div class="memory-vault-path" v-if="memoryStatus?.vault_label">本地记忆库 · {{ memoryStatus?.vault_label }}</div>
-          <div class="memory-profile-inline" v-if="memoryProfile">
-            <strong>记忆画像</strong>
-            <p>{{ memoryProfile?.summary || '等待更多长期记忆形成画像。' }}</p>
-          </div>
-          <div class="memory-list" v-if="pendingMemories.length">
-            <article v-for="candidate in pendingMemories" :key="candidate.id" class="memory-row pending">
-              <div>
-                <strong>{{ candidate.kind || 'note' }}</strong>
-                <p>{{ candidate.text }}</p>
-                <span>{{ candidate.source || 'candidate' }} · {{ memoryPriorityLabel(candidate.priority) }}</span>
-                <small class="memory-priority-note" v-if="candidate.priority_reason">{{ candidate.priority_reason }}</small>
-              </div>
-              <div class="memory-actions">
-                <button type="button" @click="saveMemoryCandidate(candidate.id)">记住</button>
-                <button type="button" class="secondary" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
-              </div>
-            </article>
-          </div>
-          <div class="memory-list" v-if="recentMemories.length">
-            <article v-for="memory in recentMemories" :key="memory.id" class="memory-row">
-              <div>
-                <strong>{{ memory.kind || 'note' }}</strong>
-                <p>{{ memory.text }}</p>
-                <span>{{ memory.source || 'manual' }}</span>
-              </div>
-              <button type="button" class="memory-delete" @click="deleteMemory(memory.id)">删除</button>
-            </article>
-          </div>
-          <p class="memory-empty" v-if="!pendingMemories.length && !recentMemories.length">暂无长期记忆</p>
-        </div>
-
-        <div class="runtime-settings skill-manifest-section" v-if="activeSettingsTab === 'skills'">
-          <div class="runtime-settings-head">
-            <strong>原生技能</strong>
-            <div class="memory-head-actions">
-              <span>{{ skillManifestVersion() }}</span>
-              <button type="button" class="memory-link-button" :disabled="skillRefreshLoading" @click="refreshSkills">
-                {{ skillRefreshLoading ? '刷新中' : '刷新' }}
-              </button>
-            </div>
-          </div>
-          <div class="skill-grid" v-if="nativeSkills().length">
-            <article
-              v-for="skill in nativeSkills()"
-              :key="skill.id"
-              class="skill-card"
-              :class="skill.local_capability || 'unavailable'"
-            >
-              <header>
-                <strong>{{ skill.label || skill.id }}</strong>
-                <span>{{ skillCapabilityLabel(skill.local_capability) }}</span>
-              </header>
-              <div class="provider-meta" v-if="skillMeta(skill).length">
-                <span v-for="item in skillMeta(skill)" :key="`${skill.id}-${item}`">{{ item }}</span>
-              </div>
-              <div class="skill-tool-list" v-if="skillTools(skill).length">
-                <code v-for="tool in skillTools(skill)" :key="`${skill.id}-${tool}`">{{ tool }}</code>
-              </div>
-              <div class="skill-actions">
-                <button type="button" :disabled="skillToggleDisabled(skill)" @click="setSkillEnabled(skill, !skillEnabled(skill))">
-                  {{ skillActionLabel(skill) }}
-                </button>
-              </div>
-            </article>
-          </div>
-          <p class="memory-empty" v-else>暂无技能清单</p>
-        </div>
-
-        <template v-if="activeSettingsTab === 'runtime'">
-          <div class="section-title">
-            <h2>运行设置</h2>
-            <span>{{ ready?.runtime?.read_only ? '只读' : '状态' }}</span>
-          </div>
-          <div class="provider-grid">
-            <div v-for="row in runtimeStatusRows()" :key="row.name" class="provider-card" :class="row.state">
-              <header>
-                <strong>{{ row.label || row.name }}</strong>
-                <span>{{ providerStateLabel(row.state) }}</span>
-              </header>
-              <p>{{ providerSummary(row) }}</p>
-              <div class="provider-meta" v-if="providerMeta(row).length">
-                <span v-for="item in providerMeta(row)" :key="item">{{ item }}</span>
-              </div>
-            </div>
-          </div>
-          <div class="runtime-settings">
-          <div class="runtime-settings-head">
-            <strong>安全设置</strong>
-            <span>非密钥字段</span>
-          </div>
-          <div class="runtime-controls">
-            <label>
-              <span>ASR</span>
-              <input v-model="runtimeDraft.asr_enabled" type="checkbox" @change="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>ASR 时长</span>
-              <input v-model.number="runtimeDraft.asr_max_seconds" type="number" min="1" max="600" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>ASR 体积</span>
-              <input v-model.number="runtimeDraft.asr_max_bytes" type="number" min="1024" step="1024" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>ASR 超时</span>
-              <input v-model.number="runtimeDraft.asr_timeout_seconds" type="number" min="1" max="300" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>TTS</span>
-              <input v-model="runtimeDraft.tts_enabled" type="checkbox" @change="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>音量</span>
-              <input v-model.number="runtimeDraft.tts_volume" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>语速</span>
-              <input v-model.number="runtimeDraft.tts_speed_factor" type="number" min="0.5" max="2" step="0.05" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>系统回退</span>
-              <input v-model="runtimeDraft.tts_fallback_to_system" type="checkbox" @change="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>OCR 超时</span>
-              <input v-model.number="runtimeDraft.ocr_timeout_seconds" type="number" min="1" max="120" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>温度</span>
-              <input v-model.number="runtimeDraft.llm_temperature" type="number" min="0" max="2" step="0.05" @input="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>Mock 模型</span>
-              <input v-model="runtimeDraft.llm_use_mock" type="checkbox" @change="markRuntimeDraftDirty" />
-            </label>
-            <label>
-              <span>操作等待</span>
-              <input v-model.number="runtimeDraft.computer_post_action_settle_ms" type="number" min="0" max="10000" step="25" @input="markRuntimeDraftDirty" />
-            </label>
-          </div>
-          <div class="runtime-actions">
-            <button type="button" :disabled="!connected || runtimePreviewLoading" @click="previewRuntimeSettings">
-              {{ runtimePreviewLoading ? '预览中' : '预览' }}
-            </button>
-            <button type="button" class="secondary" :disabled="!connected || runtimeApplyLoading || !runtimePreview?.ok || !runtimePreview?.changed" @click="applyRuntimeSettings">
-              {{ runtimeApplyLoading ? '提交中' : '提交审批' }}
-            </button>
-          </div>
-          <div class="runtime-preview" v-if="runtimePreview">
-            <p>{{ runtimePreview?.summary }}</p>
-            <div class="runtime-preview-list" v-if="runtimePreview?.changes?.length">
-              <span v-for="change in runtimePreview?.changes || []" :key="change.setting">
-                <strong>{{ change.label }}</strong>{{ runtimeChangeActionLabel(change.action) }} · {{ runtimeValueKindLabel(change.value_kind) }}
-              </span>
-            </div>
-            <div class="runtime-preview-list failed" v-if="runtimePreview?.errors?.length">
-              <span v-for="error in runtimePreview?.errors || []" :key="`${error.setting}-${error.code}`">
-                <strong>{{ error.setting }}</strong>{{ providerErrorLabel(error.code) || '无法应用' }}
-              </span>
-            </div>
-          </div>
-          </div>
-        </template>
-
-        <template v-if="activeSettingsTab === 'developer'">
-          <div class="runtime-settings background-context-panel">
-            <div class="runtime-settings-head">
-              <strong>背景上下文</strong>
-              <div class="memory-head-actions">
-                <label class="memory-enable-toggle">
-                  <input type="checkbox" :checked="backgroundEnabled" :disabled="backgroundLoading" @change="toggleBackgroundEnabled" />
-                  <span>{{ backgroundEnabled ? '已开启' : '已关闭' }}</span>
-                </label>
-                <button type="button" class="memory-link-button" :disabled="backgroundLoading" @click="refreshBackgroundStatus">
-                  {{ backgroundLoading ? '同步中' : '刷新' }}
-                </button>
-                <button type="button" class="memory-link-button danger" :disabled="backgroundLoading || !backgroundRecentRows.length" @click="clearBackgroundContext">清空</button>
-              </div>
-            </div>
-            <div class="background-status-grid">
-              <article class="background-status-card" :class="{ active: backgroundActive }">
-                <span>状态</span>
-                <strong>{{ backgroundStateText }}</strong>
-                <small>{{ backgroundSummaryText }}</small>
-              </article>
-              <article class="background-status-card">
-                <span>范围</span>
-                <strong>{{ backgroundStatus?.scope_count ?? backgroundScopes.length }}</strong>
-                <small>已批准</small>
-              </article>
-              <article class="background-status-card">
-                <span>摘要</span>
-                <strong>{{ backgroundStatus?.recent_count ?? backgroundRecentRows.length }}</strong>
-                <small>{{ backgroundRetentionText }}</small>
-              </article>
-              <article class="background-status-card">
-                <span>录制</span>
-                <strong>{{ backgroundStatus?.video_recording ? '开启' : '关闭' }}</strong>
-                <small>{{ backgroundStatus?.safe_for_display === false ? '不可展示' : '安全展示' }}</small>
-              </article>
-            </div>
-            <div class="background-scope-form">
-              <select v-model="backgroundScopeType" :disabled="backgroundLoading">
-                <option value="window">窗口</option>
-                <option value="project">项目</option>
-                <option value="game">游戏</option>
-              </select>
-              <input v-model="backgroundScopeLabel" :disabled="backgroundLoading" type="text" placeholder="批准范围名称" />
-              <button type="button" :disabled="!connected || backgroundLoading" @click="configureBackgroundScope">批准</button>
-            </div>
-            <div class="background-list" v-if="backgroundScopes.length">
-              <article v-for="scope in backgroundScopes" :key="scope.id || `${scope.type}-${scope.label}`" class="background-row">
-                <header>
-                  <strong>{{ scope.label || '已批准范围' }}</strong>
-                  <span>{{ backgroundScopeMeta(scope) }}</span>
-                </header>
-              </article>
-            </div>
-            <p class="memory-empty" v-else>暂无批准范围</p>
-            <div class="background-list recent" v-if="backgroundRecentRows.length">
-              <article v-for="row in backgroundRecentRows" :key="`${row.created_at}-${row.scope_id}`" class="background-row">
-                <header>
-                  <strong>{{ backgroundEntryTime(row) }}</strong>
-                  <span>{{ backgroundEntryMeta(row) }}</span>
-                </header>
-                <p>{{ trimText(row.summary || '', 140) }}</p>
-              </article>
-            </div>
-            <p class="memory-empty" v-else>暂无背景摘要</p>
-          </div>
-          <div class="section-title debug-title">
-            <h2>开发者事件</h2>
-            <span>{{ events.length }} 条</span>
-          </div>
-          <div class="debug-list">
-            <div v-for="event in events.slice(-18).reverse()" :key="`${event.task_id}-${event.created_at}`" class="debug-row">
-              <span>{{ eventTime(event) }}</span>
-              <strong>{{ event.type }}</strong>
-              <code>{{ skillName(event) || toolName(event) || intentName(event) || event.display_card.status }}</code>
-              <p>{{ event.display_card.summary }}</p>
-            </div>
-          </div>
-        </template>
-        </template>
       </section>
     </section>
 
@@ -5695,9 +5015,9 @@ onBeforeUnmount(() => {
           :fallback-image-src="characterImageSrc"
           :character-name="characterName"
           :emotion="activeExpressionEmotion"
-          :speech="latestSpeech"
           :motion="activeCharacterMotion"
           :compact="isCompactMode || characterFullBody"
+          :zoom="stageZoom"
           :accessory-style="accessoryFitStyle"
           :accessories="equippedAccessories"
         />
@@ -5717,7 +5037,58 @@ onBeforeUnmount(() => {
           <Maximize2 :size="18" :stroke-width="1.75" />
           <span>全身</span>
         </button>
+        <button type="button" @click="stageCollapsed = true" title="收起角色，让对话铺满窗口">
+          <PanelLeftClose :size="18" :stroke-width="1.75" />
+          <span>收起</span>
+        </button>
       </div>
+      <!--
+        The collapsed rail. Everything else on the stage is hidden by CSS; this
+        stays so the stage never becomes a strip with no way out of it, and so
+        the character is still present as a small avatar rather than gone.
+      -->
+      <div class="stage-rail" v-if="!isCompactMode && stageIsCollapsed">
+        <span class="stage-rail-avatar" aria-hidden="true">
+          <img v-if="characterAvatarSrc" :src="characterAvatarSrc" alt="" />
+          <Sparkles v-else :size="18" />
+        </span>
+        <button
+          type="button"
+          class="stage-rail-expand"
+          :disabled="!stageHasCharacter"
+          :title="stageHasCharacter ? '展开角色舞台' : '当前没有可显示的角色'"
+          @click="stageCollapsed = false"
+        >
+          <PanelLeftOpen :size="18" :stroke-width="1.75" />
+          <span class="sr-only">展开角色舞台</span>
+        </button>
+        <!--
+          A pending memory candidate is the user's decision to make (PRD 4.2),
+          so collapsing the stage must not be the reason they never see it. The
+          full prompt does not fit a 76px rail; this keeps the signal and the
+          route to it, and expands the stage on click so the actual card is
+          readable before anything is confirmed.
+        -->
+        <!--
+          A pending memory candidate is the user's decision to make (PRD 4.2),
+          so collapsing the stage must not be the reason they never see it. The
+          full prompt does not fit a 76px rail; this keeps the signal and the
+          route to it, and expands the stage on click so the actual card is
+          readable before anything is confirmed.
+        -->
+        <button
+          v-if="topPendingMemory"
+          type="button"
+          class="stage-rail-pending"
+          :title="`有待确认的记忆：${memoryAuthorizeText}`"
+          @click="stageCollapsed = false"
+        >
+          <Brain :size="16" :stroke-width="1.75" />
+          <span class="sr-only">有待确认的记忆，展开查看</span>
+        </button>
+        <span class="stage-rail-dot" :class="{ online: connected }" :title="connected ? '在线' : '离线'"></span>
+      </div>
+
       <div class="luna-stage-online" v-if="!isCompactMode">
         <span :class="{ online: connected }"></span>
         {{ connected ? '在线' : '离线' }}

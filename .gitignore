@@ -29,3 +29,14 @@ agent_companion/shell/src-tauri/binaries/joi-core-*
 /joi-*.png
 /design-qa.md
 /agent_companion/web_widget/design-qa.md
+
+# VRM development harness: local model and clip copies, never distributed.
+# Served only by the dev server (see shell vite.config.ts), never by public/.
+.vrm-lab-assets/
+
+# Refactor layout baselines. These fingerprint how a view renders on the machine
+# that captured them, including whatever conversation turns the local Core holds,
+# so they compare cleanly against a re-capture on the same machine and badly
+# against anything else. The procedure that regenerates them is tracked; the
+# captures are not.
+agent_companion/shell/tests/baseline/*.digest.txt

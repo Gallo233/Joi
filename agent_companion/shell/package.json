@@ -7,15 +7,19 @@
     "core:bundle": "node scripts/build-core-sidecar.mjs",
     "live2d:sync": "node scripts/sync-live2d-assets.mjs",
     "assets:verify": "node scripts/verify-release-assets.mjs",
-    "dev": "npm run core:bundle -- --if-missing && npm run live2d:sync -- --optional && vite --host 127.0.0.1",
+    "test:shell": "node --test --experimental-strip-types tests/*.test.mjs",
+    "test:vrm-pose": "node --test --experimental-strip-types tests/vrm-pose.test.mjs",
+    "dev": "npm run live2d:sync -- --optional && vite --host 127.0.0.1",
     "build": "npm run live2d:sync -- --optional && vue-tsc --noEmit && vite build",
     "build:release": "npm run core:bundle && npm run live2d:sync && npm run assets:verify && vue-tsc --noEmit && vite build",
     "tauri": "tauri"
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.5.5",
+    "@pixiv/three-vrm-animation": "^3.5.5",
     "@tauri-apps/api": "^2.0.0",
     "lucide-vue-next": "^0.577.0",
+    "reka-ui": "^2.10.1",
     "three": "^0.185.1",
     "vue": "^3.5.0"
   },
@@ -25,6 +29,7 @@
     "@vitejs/plugin-vue": "^5.2.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
+    "vue-component-type-helpers": "^3.3.9",
     "vue-tsc": "^2.2.0"
   }
 }

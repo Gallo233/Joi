@@ -1,0 +1,30 @@
+/* ==========================================================================
+   Element defaults
+
+   Sits in the lowest layer, so any explicit rule in the legacy sheet still
+   wins. This file only sets floors the stylesheet never stated, which is
+   exactly where the remaining unreadable text was hiding: a declaration can be
+   migrated onto a scale, but text that never had a declaration cannot.
+   ========================================================================== */
+
+/*
+ * `<small>` is the one that got away. The user agent renders it at roughly
+ * 0.83em, so inside an 11px parent it lands at 9.17px -- below the readable
+ * floor, with no `font-size` anywhere in the project to find and fix. The
+ * shell uses it for counts and captions in the context rail, which is where
+ * the smallest text in the app was measured.
+ *
+ * `em` rather than a fixed size so it still reads as secondary next to
+ * whatever it sits beside, just never below the floor.
+ */
+small {
+  font-size: max(var(--text-xs), 0.92em);
+}
+
+/*
+ * Same story for `sub` and `sup`, which the user agent shrinks even harder.
+ */
+sub,
+sup {
+  font-size: max(var(--text-xs), 0.75em);
+}
