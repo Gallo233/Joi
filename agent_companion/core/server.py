@@ -50,6 +50,9 @@ from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.scene_session import SceneSession
 from agent_companion.core.game_adapters import GameAdapterRegistry
 from agent_companion.core.minecraft_service import MinecraftGameService
+from agent_companion.core.minecraft_screen import MinecraftScreenCache
+from agent_companion.core.platform_factory import get_screen_observer
+from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.services import ArtifactService, BackgroundContextService, MemoryService
 from agent_companion.core.skill_manifest import build_native_skill_manifest
 from agent_companion.core.realtime_voice import (
@@ -118,7 +121,15 @@ class JsonRpcBridge:
         self.capability_orchestrator = ComputerUseOrchestrator(self.workspace, self.collaboration)
         self.agent_skills = AgentSkillService(self.workspace, self.collaboration)
         self.game_adapters = GameAdapterRegistry(self.workspace, self.collaboration.data_home)
-        self.minecraft = MinecraftGameService(self.collaboration, self.game_adapters)
+        self.minecraft = MinecraftGameService(
+            self.collaboration,
+            self.game_adapters,
+            screen_cache=MinecraftScreenCache(
+                get_screen_observer(self.workspace),
+                PytesseractOcrExtractor(),
+                summarizer=self.app._build_vision_summarizer(),
+            ),
+        )
         self.app.set_session_authorizer(self._session_policy_decision)
         self.app.bus.set_context_provider(self.collaboration.context)
         self.app.bus.subscribe(self._record_collaboration_event)

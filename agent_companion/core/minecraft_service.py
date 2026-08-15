@@ -12,11 +12,13 @@ from agent_companion.core.collaboration_store import CollaborationStore, RECOVER
 from agent_companion.core.game_adapters import GameAdapterRegistry
 from agent_companion.core.minecraft_contract import (
     MinecraftContractError,
+    SCREEN_ACTIONS,
     canonicalize_game_intent,
     canonicalize_minecraft_scope,
     check_intent_scope,
     estimated_world_changes,
 )
+from agent_companion.core.minecraft_screen import MinecraftScreenCache, sanitized_screen_text
 
 
 _EXTERNAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
@@ -25,9 +27,15 @@ _EXTERNAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 class MinecraftGameService:
     """Core-owned authority for Minecraft permissions, budgets and receipts."""
 
-    def __init__(self, collaboration: CollaborationStore, adapters: GameAdapterRegistry) -> None:
+    def __init__(
+        self,
+        collaboration: CollaborationStore,
+        adapters: GameAdapterRegistry,
+        screen_cache: MinecraftScreenCache | None = None,
+    ) -> None:
         self.collaboration = collaboration
         self.adapters = adapters
+        self.screen_cache = screen_cache
         self._lock = threading.RLock()
         self._runtime: dict[str, dict[str, Any]] = {}
         self._goals: dict[tuple[str, str], dict[str, Any]] = {}
@@ -169,7 +177,7 @@ class MinecraftGameService:
         if denial:
             return self._finish_goal(key, {"ok": False, "error": denial, "zero_actions": True})
         action = str(intent["action"])
-        risk = "low" if action in {"observe", "inventory"} else "medium"
+        risk = "low" if action in {"observe", "inventory", "observe_screen"} else "medium"
         gate = self.collaboration.action_allowed(session_id, f"game.minecraft.{action}", risk, effect_kind="")
         if not gate.get("allowed"):
             return self._finish_goal(
@@ -187,6 +195,8 @@ class MinecraftGameService:
             return self._finish_goal(key, {"ok": False, "error": reservation, "zero_actions": True, "session": _public_session(self.collaboration.session_payload(session_id))})
         if _cancelled(cancel_requested):
             return self._finish_goal(key, {"ok": False, "error": "goal_cancelled", "status": "cancelled", "zero_actions": True})
+        if action in SCREEN_ACTIONS:
+            return self._submit_screen_goal(key, session_id, goal_id, action)
         started_at = time.monotonic()
         if cancel_requested is None and on_registered is None and on_submitted is None:
             bridge_result = self.adapters.submit_minecraft_goal(session_id, goal_id, intent)
@@ -254,6 +264,51 @@ class MinecraftGameService:
             "recovery_required": bool(bridge_result.get("recovery_required")),
         }
         return self._finish_goal(key, result)
+
+    def _submit_screen_goal(self, key: tuple[str, str], session_id: str, goal_id: str, action: str) -> dict[str, Any]:
+        """Core-side read-only screen observation, same gate and receipt chain.
+
+        The bridge never sees this action. The screen text is the sanitized
+        cache projection only; the observation object (paths, geometry,
+        handles) stays inside Core.
+        """
+
+        started_at = time.monotonic()
+        if self.screen_cache is None:
+            screen = {"ok": False, "text": "", "error": "screen_observation_unavailable"}
+        else:
+            screen = self.screen_cache.refresh()
+        ok = bool(screen.get("ok")) and bool(screen.get("text"))
+        status = "completed" if ok else "failed"
+        receipt_result = self.collaboration.add_receipt(
+            session_id,
+            {
+                "action": f"minecraft.{action}",
+                "risk": "low",
+                "before_summary": "screen_observation",
+                "after_summary": "screen_observation",
+                "verification": {
+                    "verified": ok,
+                    "blocks_changed": 0,
+                    "effects_observed": 0,
+                    "after_state_present": ok,
+                },
+                "duration_ms": int((time.monotonic() - started_at) * 1000),
+                "status": status,
+            },
+        )
+        return self._finish_goal(
+            key,
+            {
+                "ok": ok,
+                "error": "" if ok else str(screen.get("error") or "screen_observation_failed"),
+                "status": status,
+                "summary": "screen_observed" if ok else "screen_observation_failed",
+                "observation": sanitized_screen_text(screen) if ok else "",
+                "receipt": receipt_result.get("receipt") if receipt_result.get("ok") else {},
+                "session": _public_session(self.collaboration.session_payload(session_id)),
+            },
+        )
 
     def pause(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
         return self._control(params, "pause")

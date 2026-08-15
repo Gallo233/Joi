@@ -1017,6 +1017,12 @@ def minecraft_proposal_tools() -> list[dict[str, Any]]:
             },
             ["items"],
         ),
+        tool(
+            "observe_screen",
+            "Read a sanitized summary of the game screen Joi can see right now, without changing anything.",
+            {},
+            [],
+        ),
     ]
 
 
@@ -1046,12 +1052,19 @@ def _safe_action_result(action: str, result: Mapping[str, Any]) -> dict[str, Any
     status = str(result.get("status") or "failed")
     if status not in {"completed", "partial", "unverified", "failed", "cancelled"}:
         status = "failed"
-    return {
+    safe: dict[str, Any] = {
         "action": action if action in {tool["function"]["name"][10:] for tool in minecraft_proposal_tools()} else "unknown",
         "status": status,
         "summary": "completed" if status == "completed" else "not_completed",
         "recovery_required": bool(result.get("recovery_required")),
     }
+    # Only the read-only screen action may carry observation text back to the
+    # provider, and only the bounded sanitized projection the cache produced.
+    if action == "observe_screen" and status == "completed":
+        observation = _bounded_text(result.get("observation"), 1_200)
+        if observation:
+            safe["observation"] = observation
+    return safe
 
 
 def _provider_url(config: RealtimeVoiceConfig) -> str:

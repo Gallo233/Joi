@@ -16,6 +16,7 @@ from agent_companion.core.minecraft_contract import (
     canonicalize_game_intent,
     canonicalize_minecraft_scope,
     check_intent_scope,
+    estimated_world_changes,
 )
 from agent_companion.core.minecraft_bridge import MinecraftBridgeClient
 from agent_companion.core.collaboration_store import CollaborationStore
@@ -109,6 +110,16 @@ class MinecraftContractTests(unittest.TestCase):
                 with self.assertRaises(MinecraftContractError) as raised:
                     canonicalize_game_intent({"final": True, "source": "text", "intent": intent})
                 self.assertEqual(raised.exception.code, code)
+
+    def test_observe_screen_is_a_strict_core_side_read_only_action(self) -> None:
+        intent = canonicalize_game_intent({"final": True, "source": "voice", "intent": {"action": "observe_screen"}})
+        self.assertEqual(intent, {"action": "observe_screen"})
+        with self.assertRaises(MinecraftContractError) as raised:
+            canonicalize_game_intent({"final": True, "source": "voice", "intent": {"action": "observe_screen", "question": "上面写了什么"}})
+        self.assertEqual(raised.exception.code, "unexpected_intent_field")
+        scope = canonicalize_minecraft_scope(SAFE_SCOPE)
+        self.assertEqual(check_intent_scope(intent, scope), "")
+        self.assertEqual(estimated_world_changes(intent), 0)
 
     def test_scope_requires_world_bounds_and_checks_every_mutating_intent(self) -> None:
         scope = canonicalize_minecraft_scope(SAFE_SCOPE)
@@ -238,6 +249,57 @@ class MinecraftCoreGateTests(unittest.TestCase):
                 **changes,
             }
         )
+
+    def _service_with_screen(self, screen_cache: object) -> MinecraftGameService:
+        service = MinecraftGameService(self.store, self.registry, screen_cache=screen_cache)  # type: ignore[arg-type]
+        scope = SAFE_SCOPE
+        budget = {"max_steps": 20, "max_seconds": 60, "max_failures": 2}
+        preview = service.start_session({"mode": "companion", "scope": scope, "budget": budget})
+        self.assertTrue(preview["requires_approval"], preview)
+        started = service.start_session(
+            {"mode": "companion", "scope": scope, "budget": budget, "confirmed_scope": True, "approval_id": preview["approval_id"]}
+        )
+        self.assertTrue(started["ok"], started)
+        self.service = service
+        return str(started["session"]["id"])
+
+    def test_observe_screen_runs_core_side_without_bridge_io_and_keeps_receipts(self) -> None:
+        class ScreenCache:
+            def refresh(self) -> dict[str, object]:
+                return {"ok": True, "text": "屏幕摘要：画面是一片橡树林。", "source": "screen", "error": ""}
+
+        session_id = self._service_with_screen(ScreenCache())
+        goal = self._submit(session_id, "goal-screen", {"action": "observe_screen"})
+        self.assertTrue(goal["ok"], goal)
+        self.assertEqual(goal["status"], "completed")
+        self.assertIn("橡树林", goal["observation"])
+        self.assertEqual(self.registry.submit_calls, 0)
+        receipts = self.store.list_receipts(session_id)
+        self.assertEqual(len(receipts), 1)
+        self.assertTrue(receipts[0]["verification"]["verified"])
+        self.assertEqual(self.service._runtime[session_id]["actions_reserved"], 1)
+
+    def test_observe_screen_failure_is_a_failed_receipt_without_bridge_io(self) -> None:
+        class BrokenScreenCache:
+            def refresh(self) -> dict[str, object]:
+                return {"ok": False, "text": "", "source": "screen", "error": "screen_observation_unavailable"}
+
+        session_id = self._service_with_screen(BrokenScreenCache())
+        goal = self._submit(session_id, "goal-screen-broken", {"action": "observe_screen"})
+        self.assertFalse(goal["ok"])
+        self.assertEqual(goal["status"], "failed")
+        self.assertEqual(goal["error"], "screen_observation_unavailable")
+        self.assertEqual(goal["observation"], "")
+        self.assertEqual(self.registry.submit_calls, 0)
+        self.assertEqual(self.store.list_receipts(session_id)[0]["status"], "failed")
+
+    def test_observe_screen_without_cache_fails_closed(self) -> None:
+        self.service = MinecraftGameService(self.store, self.registry)
+        session_id = self._start()
+        goal = self._submit(session_id, "goal-screen-nocache", {"action": "observe_screen"})
+        self.assertFalse(goal["ok"])
+        self.assertEqual(goal["error"], "screen_observation_unavailable")
+        self.assertEqual(self.registry.submit_calls, 0)
 
     def test_partial_scope_denial_and_permission_denial_send_zero_bridge_actions(self) -> None:
         session_id = self._start()

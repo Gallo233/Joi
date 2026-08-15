@@ -20,6 +20,9 @@ GAME_ACTIONS = frozenset(
         "deposit",
     }
 )
+# Core-executed read-only action: the bridge never sees it (the bridge cannot
+# see the screen). It shares the same canonicalize/gate/budget/receipt chain.
+SCREEN_ACTIONS = frozenset({"observe_screen"})
 MUTATING_ACTIONS = frozenset({"collect", "mine", "craft", "eat", "place_blueprint", "deposit"})
 DANGEROUS_BLOCKS = frozenset(
     {
@@ -80,12 +83,13 @@ def canonicalize_game_intent(payload: Mapping[str, Any] | None) -> dict[str, Any
     raw = _mapping(wrapper.get("intent"), "invalid_game_intent")
     _reject_code_fields(raw)
     action = str(raw.get("action") or "")
-    if action not in GAME_ACTIONS:
+    if action not in GAME_ACTIONS | SCREEN_ACTIONS:
         raise MinecraftContractError("unknown_game_action")
 
     builders = {
         "observe": _observe,
         "inventory": _inventory,
+        "observe_screen": _observe_screen,
         "follow_player": _follow,
         "come_to_player": _come,
         "collect": lambda value: _block_action(value, "collect"),
@@ -190,6 +194,11 @@ def _observe(raw: Mapping[str, Any]) -> dict[str, Any]:
         "dimension": _dimension(raw.get("dimension", "overworld")),
         "radius": _integer(raw.get("radius", 16), 1, 32, "invalid_observe_radius"),
     }
+
+
+def _observe_screen(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action"}, set(), "unexpected_intent_field")
+    return {"action": "observe_screen"}
 
 
 def _inventory(raw: Mapping[str, Any]) -> dict[str, Any]:

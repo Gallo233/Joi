@@ -291,7 +291,7 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         encoded = json.dumps(config)
         for forbidden in ("session_id", "goal_id", "approval", "confirmed_scope", "api_key", "sk-private"):
             self.assertNotIn(forbidden, encoded)
-        self.assertEqual(len(config["tools"]), 10)
+        self.assertEqual(len(config["tools"]), 11)  # 10 bridge primitives + observe_screen
         self.assertEqual(
             events[-1],
             {"session_id": "realtime-local-1", "type": "state", "state": "listening"},
@@ -388,6 +388,77 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         provider_payload = json.dumps(socket.sent, ensure_ascii=False)
         self.assertNotIn("receipt", provider_payload)
         self.assertNotIn("private-response", json.dumps(actions))
+        session.stop()
+
+    def test_observe_screen_result_text_reaches_the_provider_output(self) -> None:
+        actions: list[tuple[str, str, dict[str, object]]] = []
+        session, socket, _connector, _events = self._session(
+            actions=actions,
+            action_result={
+                "ok": True,
+                "status": "completed",
+                "summary": "screen_observed",
+                "observation": "屏幕摘要：画面是一片橡树林。",
+                "recovery_required": False,
+            },
+        )
+        self.assertTrue(session.start()["ok"])
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "screen-response"}})
+        _add_output_item(session, "screen-response", "screen-call-item", "function_call")
+        session.handle_provider_event_for_test(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": "screen-response",
+                "item_id": "screen-call-item",
+                "call_id": "screen-call",
+                "name": "minecraft_observe_screen",
+                "arguments": "{}",
+            }
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "screen-response", "status": "completed"}})
+        _wait_until(lambda: len(actions) == 1)
+        _wait_until(lambda: any(row.get("type") == "conversation.item.create" for row in socket.sent))
+        provider_payload = json.dumps(socket.sent, ensure_ascii=False)
+        self.assertIn("屏幕摘要：画面是一片橡树林。", provider_payload)
+        created = next(row for row in socket.sent if row.get("type") == "conversation.item.create")
+        output = json.loads(created["item"]["output"])
+        self.assertIn("observation", output)
+        self.assertEqual(output["observation"], "屏幕摘要：画面是一片橡树林。")
+        self.assertNotIn("receipt", output)
+        self.assertEqual(actions[0][2], {"final": True, "source": "voice", "intent": {"action": "observe_screen"}})
+        session.stop()
+
+    def test_observe_screen_failure_carries_no_observation_text(self) -> None:
+        actions: list[tuple[str, str, dict[str, object]]] = []
+        session, socket, _connector, _events = self._session(
+            actions=actions,
+            action_result={"ok": False, "status": "failed", "summary": "not_completed", "recovery_required": False},
+        )
+        self.assertTrue(session.start()["ok"])
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "screen-response"}})
+        _add_output_item(session, "screen-response", "screen-call-item", "function_call")
+        session.handle_provider_event_for_test(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": "screen-response",
+                "item_id": "screen-call-item",
+                "call_id": "screen-call",
+                "name": "minecraft_observe_screen",
+                "arguments": "{}",
+            }
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "screen-response", "status": "completed"}})
+        _wait_until(lambda: len(actions) == 1)
+        _wait_until(lambda: any(row.get("type") == "conversation.item.create" for row in socket.sent))
+        created = next(row for row in socket.sent if row.get("type") == "conversation.item.create")
+        output = json.loads(created["item"]["output"])
+        self.assertNotIn("observation", output)
         session.stop()
 
     def test_final_text_requires_the_registered_item_of_the_current_response(self) -> None:
