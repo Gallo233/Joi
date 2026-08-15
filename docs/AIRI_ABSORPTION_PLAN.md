@@ -1,13 +1,14 @@
 # AIRI 吸收计划：游戏内自主性、生态、语音架构与记忆
 
 > 状态：方案级设计评审（未实施）。依据 2026-08 debug/shell-refactor 工作树代码实审。
-> 关联文档：`docs/AIRI_COMPARISON.md`、`docs/MINECRAFT_REALTIME_P0_P2.md`、`docs/MINECRAFT_REALTIME_P3_P6.md`、`docs/REALTIME_VOICE_DEBUG.md`、`docs/VOICE_LATENCY_INVESTIGATION_2026-08-13.md`、`docs/KNOWN_ISSUES.md`。
+> 关联文档：`docs/AIRI_COMPARISON.md`（已过期，仅历史参考，不作现状证据）、`docs/MINECRAFT_REALTIME_P0_P2.md`、`docs/MINECRAFT_REALTIME_P3_P6.md`、`docs/REALTIME_VOICE_DEBUG.md`、`docs/VOICE_LATENCY_INVESTIGATION_2026-08-13.md`、`docs/KNOWN_ISSUES.md`。
+> 修订：2026-08-15 按 `docs/MINECRAFT_PLAN_REVIEW_2026-08-15.md` 修正 A1（instructions 是会话级）、A3（观察字段数 5 键 + 三处白名单）、A4（认知层数说法）。
 
 ## 0. 现状摘要（对照 AIRI）
 
 | 维度 | AIRI（moeru-ai/airi） | Joi 最新 debug | 差距定性 |
 |---|---|---|---|
-| 游戏能力 | 四层认知架构（感知→反射→意识→行动），战斗、自主采集/合成/建造，游戏内聊天下指令，MineflayerViewer 网页 POV，Debug Dashboard，MCP + Query DSL | 10 个严格 GameIntent 原语，无战斗/自由规划/游戏内聊天输入/POV 查看器 | 自主性弱，生态缺 |
+| 游戏能力 | 分层认知架构（Reflex/Conscious，另有材料描述为四层），战斗、自主采集/合成/建造，游戏内聊天下指令，MineflayerViewer 网页 POV，Debug Dashboard，MCP + Query DSL | 10 个严格 GameIntent 原语，无战斗/自由规划/游戏内聊天输入/POV 查看器 | 自主性弱，生态缺 |
 | 语音架构 | 链式 VAD(Silero)→ASR→LLM→TTS 四跳，语音在 stage UI | 单模型 speech-to-speech（Qwen Audio Realtime，server VAD，只收文本）+ 本地 GPT-SoVITS | Joi 时延架构占优；但 TTS 起播晚、未实测 |
 | 权限/安全 | 聊天即命令，无逐动作审批/预算/回执 | digest 审批、scope/预算、Core 权威回执、no-replay、owner-bound | Joi 显著更强（不可回退） |
 | 记忆 | 向量语义记忆持久化 | realtime 会话临时；checkpoint 停会话即删 | 无跨会话连续性 |
@@ -49,8 +50,9 @@
 
 ### A4. 观测质量提升（性价比最高）
 
-- 现状：`observe` 回执只有 dimension/health/food/inventory_slots 四个数，模型“意识”很弱。
-- 扩充为 sanitized 结构：附近实体类型与数量、时间/天气、可见关键方块类型计数。**仍不含坐标**，符合既有隐私契约（`_safe_observation` 的白名单机制可沿用扩展）。
+- 现状：`observe` 回执只有 dimension/health/food/inventory_slots/inventory_total 五个键，模型“意识”很弱。
+- 扩充为 sanitized 结构：附近实体类型与数量、时间/天气、可见关键方块类型计数。**仍不含坐标**，符合既有隐私契约。
+- 注意：`minecraft_bridge.py::_safe_observation` 是**精确集合匹配**（`set(value) != {...}`），不是子集判断。扩充观察字段必须同步改三处白名单——bridge 输出、`_safe_observation`、`_validate_event_payload` schema——漏改任一**不会报错，而是静默返回空观察**。
 
 ---
 
@@ -95,7 +97,7 @@
 ### M2. 世界级游戏记忆（跨会话，私有一分为二）
 
 - **Bot 私有记忆**（只 Core 可见、永不进 UI/语音/云端 instructions 原文）：上次断线位置区域、已建结构（名称+数量，无公开坐标）、最近 N 个 goal 结果。复用 `data/private/minecraft-checkpoints` 模式；`stop_minecraft_session` 目前会删 checkpoint，改为显式“清除存档”操作。
-- **可注入上下文**：每 turn 把 sanitized 摘要（世界名、维度、血量/饥饿、背包要点、最近成就）拼进 `_minecraft_instructions`，减少模型反复 `observe/inventory`。注意：进云端的 instructions 必须保持 sanitized（现有隐私契约）。
+- **可注入上下文**：世界名、维度、血量/饥饿、背包要点、最近成就等 sanitized 摘要按轮注入，减少模型反复 `observe/inventory`。注意：**instructions 是会话级的**——`session.update` 只在 `start()` 发一次（`realtime_voice.py:194`），每轮上下文只能走 `conversation.item.create`（该通道已用于回传工具结果）。只有「人设、安全准则、语言规则」这类整场不变的内容才留在 instructions。进云端的任何文本必须保持 sanitized（现有隐私契约）。
 - **用户偏好规则**：跨会话记住“别动我的基地”“只用橡木”，作为规则注入。这是 AIRI 没有、但陪玩场景最值钱的记忆。
 
 ### M3. 向量语义记忆：现在不引入
@@ -129,4 +131,5 @@ node --check agent_companion/adapters/minecraft-bridge/index.js
 - **不回退安全底线**：权限、审批、预算、回执、no-replay、owner-bound、隐私投影全部保持不变；自主性只能通过“可审批组合”获得。
 - **战斗/危险操作不进入计划编译器 v1**：需要 Trust & Safety 单独 gate，且 `DANGEROUS_BLOCKS`/风险分级体系要先扩展。
 - **时延结论依赖实测**：所有语音调优在 V2 数据出来前不承诺具体收益。
-- **非目标**：不复制 AIRI 的四层认知栈实现与 Query DSL；不引入向量数据库；不把游戏内 SVC 语音并入实时语音主链路。
+- **非目标**：不复制 AIRI 的分层认知栈实现与 Query DSL；不引入向量数据库；不把游戏内 SVC 语音并入实时语音主链路。
+- **桥接地基先行**：事件推送通道、`state.snapshot` 调用方、缓冲驱逐是切片开工的前置工程，见 `docs/MINECRAFT_CLOSED_LOOP_SLICE.md` §S1.0，必须单独验收后再进语音/自主性阶段。
