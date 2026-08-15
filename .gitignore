@@ -17,7 +17,7 @@ data/local_visual_eval/
 logs/
 /dist/
 --output-last-message
-agent_companion/shell/node_modules/
+agent_companion/shell/node_modules
 agent_companion/shell/dist/
 agent_companion/shell/public/live2d/joi/
 agent_companion/shell/public/vendor/live2d/
