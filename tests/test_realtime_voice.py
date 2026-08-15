@@ -235,6 +235,8 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         action_result: dict[str, object] | None = None,
         voice_locale: str = "",
         chat_locale: str = "",
+        on_transcripts: object = None,
+        world_memory_text: str = "",
     ) -> tuple[QwenRealtimeSession, _FakeSocket, _Connector, list[dict[str, object]]]:
         socket = socket or _ready_socket()
         emitted = events if events is not None else []
@@ -259,9 +261,11 @@ class QwenRealtimeSessionTests(unittest.TestCase):
             execute_action=execute,
             cancel_action=lambda session_id, goal_id: cancel_rows.append((session_id, goal_id)) or {"ok": True},
             control_action=lambda action, session_id, goal_id: control_rows.append((action, session_id, goal_id)) or {"ok": True},
+            on_transcripts=on_transcripts,  # type: ignore[arg-type]
             connector=connector,
             voice_locale=voice_locale,
             chat_locale=chat_locale,
+            world_memory_text=world_memory_text,
         )
         return session, socket, connector, emitted
 
@@ -552,6 +556,42 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         _wait_until(lambda: any(event.get("type") == "game_action" and event.get("status") == "rejected" for event in events))
         self.assertEqual(len(actions), 0)
         session.stop()
+
+    def test_transcript_pairs_reach_the_sink_once_on_stop(self) -> None:
+        delivered: list[list[tuple[str, str]]] = []
+        session, _socket, _connector, _events = self._session(on_transcripts=lambda _sid, pairs: delivered.append(pairs))
+        self.assertTrue(session.start()["ok"])
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "user-item"})
+        session.handle_provider_event_for_test(
+            {"type": "conversation.item.input_audio_transcription.completed", "item_id": "user-item", "transcript": "帮我把周围看看"}
+        )
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "text-response"}})
+        _add_output_item(session, "text-response", "text-item", "message")
+        session.handle_provider_event_for_test(
+            {"type": "response.text.done", "response_id": "text-response", "item_id": "text-item", "text": "好，我看看。"}
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "text-response", "status": "completed"}})
+        session.stop()
+        session.stop()
+        self.assertEqual(delivered, [[("帮我把周围看看", "好，我看看。")]])
+
+    def test_world_memory_reaches_minecraft_instructions(self) -> None:
+        socket = _ready_socket()
+        connector = _Connector(socket)
+        coordinator = RealtimeVoiceCoordinator(
+            _config(),
+            connector=connector,
+            world_memory=lambda session_id: "上次在世界维度 overworld，血量 16" if session_id == "session-mc-1" else "",
+        )
+        result = coordinator.start("owner-memory", lambda event: None, mode="minecraft", minecraft_session_id="session-mc-1")
+        self.assertTrue(result["ok"], result)
+        update = next(message for message in socket.sent if message.get("type") == "session.update")
+        instructions = str(update["session"]["instructions"])
+        self.assertIn("世界记忆（可参考", instructions)
+        self.assertIn("上次在世界维度 overworld", instructions)
+        coordinator.stop("owner-memory", str(result["session_id"]))
 
     def test_final_text_requires_the_registered_item_of_the_current_response(self) -> None:
         session, _socket, _connector, events = self._session()

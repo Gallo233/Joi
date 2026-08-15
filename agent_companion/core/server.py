@@ -131,7 +131,9 @@ class JsonRpcBridge:
                 PytesseractOcrExtractor(),
                 summarizer=self.app._build_vision_summarizer(),
             ),
+            plan_compiler=self._compile_plan_text,
         )
+        self.game_adapters.set_minecraft_event_forwarder(self._on_minecraft_bridge_event)
         self.autonomy_enabled = False
         self.autonomy_interval_seconds = 30.0
         self.autonomy = MinecraftAutonomyTicker(
@@ -174,6 +176,8 @@ class JsonRpcBridge:
                 voice_locale=self.tts.voice_language,
                 chat_locale=self.app.chat_language,
                 persona=self._realtime_persona_prompt,
+                world_memory=self.minecraft.world_memory,
+                transcript_sink=self._persist_realtime_transcripts,
             )
         else:
             self.realtime_voice = realtime_voice_coordinator
@@ -470,6 +474,11 @@ class JsonRpcBridge:
         router.register("game.adapter.minecraft.connection.configure", self.game_adapter_minecraft_connection_configure_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.minecraft.autonomy.configure", self.game_adapter_autonomy_configure_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.minecraft.autonomy.status", self.game_adapter_autonomy_status_command)
+        router.register("game.adapter.minecraft.snapshot", self.game_adapter_minecraft_snapshot_command)
+        router.register("game.adapter.minecraft.plan.preview", self.game_adapter_plan_preview_command, run_in_thread=True)
+        router.register("game.adapter.minecraft.plan.execute", self.game_adapter_plan_execute_command, run_in_thread=True)
+        router.register("game.adapter.minecraft.plan.status", self.game_adapter_plan_status_command)
+        router.register("game.adapter.minecraft.plan.cancel", self.game_adapter_plan_cancel_command, run_in_thread=True)
         router.register("game.adapter.pause", self.game_adapter_pause_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.resume", self.game_adapter_resume_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.session.start", self.game_adapter_session_start_command, run_in_thread=True, broadcast_ready=True)
@@ -742,6 +751,50 @@ class JsonRpcBridge:
         except Exception:
             return ""
 
+    def _on_minecraft_bridge_event(self, session_id: str, event: dict[str, Any]) -> None:
+        """Route whitelisted chat lines from the bridge reader thread.
+
+        handle_chat spawns its own worker for compile + submit, so this
+        callback never blocks the event pump.
+        """
+
+        if str(event.get("type") or "") != "chat.observed":
+            return
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        self.minecraft.handle_chat(
+            session_id,
+            str(payload.get("player") or ""),
+            str(payload.get("text") or ""),
+        )
+
+    def _compile_plan_text(self, prompt: str) -> str:
+        """Compile natural-language Minecraft goals into strict JSON plans."""
+
+        if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
+            return "{}"
+        try:
+            config = load_app_config(self.workspace / "config.yaml")
+        except Exception:
+            return "{}"
+        if config.llm.use_mock or not (config.llm.is_configured or config.llm.is_expression_configured):
+            return "{}"
+        try:
+            outcome = chat_completion(
+                config.llm,
+                "fast",
+                temperature=min(max(config.llm.temperature, 0.1), 0.6),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "只输出严格的 JSON 对象，不要输出 JSON 以外的任何文本。"},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+        except Exception:
+            return "{}"
+        if not outcome.ok:
+            return "{}"
+        return str(outcome.value or "{}")
+
     def _autonomy_submit(self, session_id: str, intent: dict[str, Any]) -> dict[str, Any]:
         goal_id = f"autonomy-goal-{uuid.uuid4().hex}"
         return self.minecraft.submit_goal(
@@ -768,7 +821,31 @@ class JsonRpcBridge:
             "recent_event_types": recent_event_types,
             "screen_text": str(screen.get("text") or "") if screen.get("ok") else "",
             "persona": self._realtime_persona_prompt(),
+            "memory": self.minecraft.world_memory(session_id),
         }
+
+    def _persist_realtime_transcripts(self, session_id: str, pairs: list[tuple[str, str]]) -> None:
+        """M1: write the sanitized realtime exchange into conversation history.
+
+        Only the bounded text pairs are stored - raw audio, provider IDs and
+        coordinates never reach history. A failed write is silent: realtime
+        stays usable without persistence.
+        """
+
+        try:
+            for user_text, assistant_text in pairs[-40:]:
+                user_text = " ".join(str(user_text).split())[:2000]
+                assistant_text = " ".join(str(assistant_text).split())[:2000]
+                if user_text:
+                    self.collaboration.record_event(
+                        {"type": "user_message", "agent_state": {"text": user_text, "source": "voice.realtime"}}
+                    )
+                if assistant_text:
+                    self.collaboration.record_event(
+                        {"type": "assistant_message", "agent_state": {"text": assistant_text, "source": "voice.realtime"}}
+                    )
+        except Exception:
+            return
 
     def _autonomy_speech_guard(self) -> bool:
         thread_id = str(self.collaboration.context().get("thread_id") or "")
@@ -1143,6 +1220,24 @@ class JsonRpcBridge:
                 for session_id in self.game_adapters.minecraft_active_sessions()
             },
         }
+
+    def game_adapter_minecraft_snapshot_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        session_id = str((params or {}).get("session_id") or "")
+        if not session_id:
+            return {"ok": False, "error": "session_id_required"}
+        return self.game_adapters.minecraft_snapshot(session_id)
+
+    def game_adapter_plan_preview_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.plan(params)
+
+    def game_adapter_plan_execute_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.execute_plan(params)
+
+    def game_adapter_plan_status_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.plan_status(params)
+
+    def game_adapter_plan_cancel_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.plan_cancel(params)
 
     def game_adapter_goal_submit_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.minecraft.submit_goal(params)
@@ -2522,6 +2617,8 @@ class JsonRpcBridge:
             voice_locale=self.tts.voice_language,
             chat_locale=self.app.chat_language,
             persona=self._realtime_persona_prompt,
+            world_memory=self.minecraft.world_memory,
+            transcript_sink=self._persist_realtime_transcripts,
         )
         self.tts.reload()
         self.watch_commentary.reload()

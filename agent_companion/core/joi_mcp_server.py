@@ -253,6 +253,29 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "description": "List external MCP tools discovered by Joi.",
         "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}},
     },
+    {
+        "name": "joi_minecraft_status",
+        "description": "Read Joi's Minecraft adapter and autonomy status.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "joi_minecraft_snapshot",
+        "description": "Read the sanitized live state of an active Joi Minecraft session (no coordinates).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    },
+    {
+        "name": "joi_minecraft_plan",
+        "description": "Compile a natural-language Minecraft goal into an approval-gated step plan preview.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}, "goal_text": {"type": "string"}},
+            "required": ["session_id", "goal_text"],
+        },
+    },
 ]
 
 
@@ -325,6 +348,18 @@ class JoiMcpServer:
         router.register("joi_voice_status", lambda _: self._core("runtime.status", {}))
         router.register("joi_files_read", lambda args: self._core_skill("files.read", {"path": str(args.get("path") or "")}))
         router.register("joi_mcp_list", lambda args: self._core_skill("mcp.list_tools", {"query": str(args.get("query") or "")}))
+        router.register("joi_minecraft_status", lambda _: self._core("game.adapter.minecraft.autonomy.status", {}))
+        router.register(
+            "joi_minecraft_snapshot",
+            lambda args: self._core("game.adapter.minecraft.snapshot", {"session_id": str(args.get("session_id") or "")}),
+        )
+        router.register(
+            "joi_minecraft_plan",
+            lambda args: self._core(
+                "game.adapter.minecraft.plan.preview",
+                {"session_id": str(args.get("session_id") or ""), "goal_text": str(args.get("goal_text") or "")},
+            ),
+        )
         return router
 
     async def _tool_watch_start(self, arguments: dict[str, Any]) -> dict[str, Any]:

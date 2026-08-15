@@ -70,6 +70,7 @@ class GameAdapterRegistry:
         self._minecraft_states: dict[str, str] = {}
         self._minecraft_event_queues: dict[str, deque[dict[str, Any]]] = {}
         self._minecraft_event_disposers: dict[str, Callable[[], None]] = {}
+        self._minecraft_event_forwarder: Callable[[str, dict[str, Any]], None] | None = None
         self._minecraft_checkpoints: dict[str, dict[str, Any]] = self._load_minecraft_checkpoints()
         self._manifests = {manifest.id: manifest for manifest in _builtin_manifests()}
         self._state = self._load_state()
@@ -272,11 +273,19 @@ class GameAdapterRegistry:
             return result
 
         def on_bridge_event(event: dict[str, Any]) -> None:
-            # Unsolicited events (combat, snapshots) arrive on the stdout reader
-            # thread. The queue is the only storage: no Core ID, coordinate or
-            # child detail is ever exposed beyond the sanitized projection.
+            # Unsolicited events (combat, snapshots, chat) arrive on the stdout
+            # reader thread. The queue is the only storage: no Core ID,
+            # coordinate or child detail is ever exposed beyond the sanitized
+            # projection. A registered forwarder (chat routing) runs on this
+            # same thread and must dispatch its own work off-thread.
             with self._lock:
                 self._minecraft_event_queues.setdefault(session_id, deque(maxlen=64)).append(event)
+                forwarder = self._minecraft_event_forwarder
+            if forwarder is not None:
+                try:
+                    forwarder(session_id, dict(event))
+                except Exception:
+                    pass
 
         disposer = client.add_event_listener(on_bridge_event)
         with self._lock:
@@ -284,6 +293,16 @@ class GameAdapterRegistry:
             self._minecraft_states[session_id] = "ready"
             self._minecraft_event_disposers[session_id] = disposer
         return result
+
+    def set_minecraft_event_forwarder(self, callback: Callable[[str, dict[str, Any]], None] | None) -> None:
+        """Route unsolicited bridge events (chat, combat) to Core.
+
+        Invoked on the bridge stdout reader thread; the callback must return
+        quickly and dispatch its own work off-thread.
+        """
+
+        with self._lock:
+            self._minecraft_event_forwarder = callback
 
     def minecraft_snapshot(self, session_id: str) -> dict[str, Any]:
         """Ask the persistent bridge for its sanitized live state."""
@@ -409,8 +428,9 @@ class GameAdapterRegistry:
         result = client.stop()
         with self._lock:
             self._minecraft_states[session_id] = "stopped"
-            self._minecraft_checkpoints.pop(session_id, None)
-            self._delete_minecraft_checkpoint(session_id)
+            # M2: the last checkpoint survives the session as private world
+            # memory; clearing it is now an explicit operator action instead of
+            # an automatic side effect of stopping.
         return result
 
     def minecraft_session_status(self, session_id: str) -> dict[str, Any]:

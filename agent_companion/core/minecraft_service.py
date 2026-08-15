@@ -18,10 +18,13 @@ from agent_companion.core.minecraft_contract import (
     check_intent_scope,
     estimated_world_changes,
 )
+from agent_companion.core.minecraft_memory import MinecraftWorldMemory
+from agent_companion.core.minecraft_planner import compile_plan, compile_single_action
 from agent_companion.core.minecraft_screen import MinecraftScreenCache, sanitized_screen_text
 
 
 _EXTERNAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
+_PLAYER = re.compile(r"^[A-Za-z0-9_]{1,32}$")
 
 
 class MinecraftGameService:
@@ -32,14 +35,19 @@ class MinecraftGameService:
         collaboration: CollaborationStore,
         adapters: GameAdapterRegistry,
         screen_cache: MinecraftScreenCache | None = None,
+        plan_compiler: Callable[[str], Any] | None = None,
     ) -> None:
         self.collaboration = collaboration
         self.adapters = adapters
         self.screen_cache = screen_cache
+        self._plan_compiler = plan_compiler
+        self.memory = MinecraftWorldMemory(self.collaboration.data_home)
         self._lock = threading.RLock()
         self._runtime: dict[str, dict[str, Any]] = {}
         self._goals: dict[tuple[str, str], dict[str, Any]] = {}
         self._scope_approvals: dict[str, dict[str, Any]] = {}
+        self._plan_approvals: dict[str, dict[str, Any]] = {}
+        self._plans: dict[tuple[str, str], dict[str, Any]] = {}
 
     def start_session(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
         source = params if isinstance(params, Mapping) else {}
@@ -332,6 +340,186 @@ class MinecraftGameService:
             },
         )
 
+    def plan(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Compile one natural-language goal into a preview awaiting approval."""
+
+        source = params if isinstance(params, Mapping) else {}
+        session_id = _external_id(source.get("session_id"))
+        if not session_id:
+            return {"ok": False, "error": "session_id_required"}
+        if self._plan_compiler is None:
+            return {"ok": False, "error": "minecraft_planning_unavailable"}
+        session = self.collaboration.session_payload(session_id, include_receipts=False)
+        if not session or session.get("state") != "running":
+            return {"ok": False, "error": "minecraft_session_not_runnable"}
+        compiled = compile_plan(str(source.get("goal_text") or ""), self._plan_compiler)
+        if not compiled.get("ok"):
+            return {"ok": False, "error": str(compiled.get("error") or "plan_compile_failed")}
+        plan_id = f"plan-{uuid.uuid4().hex}"
+        approval_id = f"minecraft-plan-approval-{uuid.uuid4().hex}"
+        digest = _plan_approval_digest(session_id, plan_id, compiled)
+        with self._lock:
+            self._prune_plan_approvals()
+            self._plan_approvals[approval_id] = {
+                "digest": digest,
+                "expires_at": time.monotonic() + 300,
+                "session_id": session_id,
+                "plan_id": plan_id,
+                "plan": compiled,
+            }
+        return {
+            "ok": True,
+            "requires_approval": True,
+            "approval_id": approval_id,
+            "plan_id": plan_id,
+            "summary": compiled["summary"],
+            "steps": compiled["steps"],
+            "estimated_actions": compiled["estimated_actions"],
+            "estimated_changes": compiled["estimated_changes"],
+        }
+
+    def execute_plan(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Run an approved plan step by step; every step keeps its own gates."""
+
+        source = params if isinstance(params, Mapping) else {}
+        session_id = _external_id(source.get("session_id"))
+        plan_id = _external_id(source.get("plan_id"))
+        approval_id = _external_id(source.get("approval_id"))
+        if not session_id or not plan_id or not approval_id or source.get("confirmed") is not True:
+            return {"ok": False, "error": "plan_approval_required", "requires_approval": True}
+        with self._lock:
+            self._prune_plan_approvals()
+            approval = self._plan_approvals.pop(approval_id, None)
+        if (
+            not approval
+            or approval.get("plan_id") != plan_id
+            or approval.get("session_id") != session_id
+            or approval.get("digest") != _plan_approval_digest(session_id, plan_id, approval.get("plan") or {})
+        ):
+            return {"ok": False, "error": "plan_approval_invalid", "requires_approval": True}
+        plan = approval["plan"]
+        with self._lock:
+            if (session_id, plan_id) in self._plans:
+                return {"ok": False, "error": "plan_already_exists"}
+            self._plans[(session_id, plan_id)] = {
+                "state": "running",
+                "steps_total": len(plan["steps"]),
+                "steps_done": 0,
+                "summary": plan["summary"],
+                "steps": list(plan["steps"]),
+                "cancel_requested": False,
+                "current_goal_id": "",
+            }
+        thread = threading.Thread(
+            target=self._run_plan, args=(session_id, plan_id), name=f"minecraft-plan-{plan_id[-8:]}", daemon=True
+        )
+        thread.start()
+        return {"ok": True, "state": "running", "plan_id": plan_id}
+
+    def plan_status(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
+        source = params if isinstance(params, Mapping) else {}
+        session_id = _external_id(source.get("session_id"))
+        plan_id = _external_id(source.get("plan_id"))
+        with self._lock:
+            row = self._plans.get((session_id, plan_id))
+        if row is None:
+            return {"ok": False, "error": "plan_not_found"}
+        return {
+            "ok": True,
+            "state": row["state"],
+            "steps_total": row["steps_total"],
+            "steps_done": row["steps_done"],
+            "summary": row["summary"],
+        }
+
+    def plan_cancel(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
+        source = params if isinstance(params, Mapping) else {}
+        session_id = _external_id(source.get("session_id"))
+        plan_id = _external_id(source.get("plan_id"))
+        with self._lock:
+            row = self._plans.get((session_id, plan_id))
+            if row is not None:
+                row["cancel_requested"] = True
+            current_goal = str(row.get("current_goal_id") or "") if row is not None else ""
+        if row is None:
+            return {"ok": False, "error": "plan_not_found"}
+        if current_goal:
+            self.adapters.cancel_minecraft_goal(session_id, current_goal)
+        return {"ok": True, "state": "cancelling", "plan_id": plan_id}
+
+    def handle_chat(self, session_id: str, player: str, text: str) -> dict[str, Any]:
+        """A whitelisted player's in-game chat line becomes at most one action.
+
+        Runs off the bridge reader thread: the compile + submit happen on a
+        worker so the event pump never blocks. Busy sessions skip (B4).
+        """
+
+        session_id = _external_id(session_id)
+        player = str(player or "").strip()
+        if not session_id or not _PLAYER.fullmatch(player) or not text.strip():
+            return {"ok": False, "error": "chat_command_invalid"}
+        session = self.collaboration.session_payload(session_id, include_receipts=False)
+        if not session or session.get("state") != "running":
+            return {"ok": False, "error": "minecraft_session_not_runnable"}
+        permission = self.collaboration.permission_for_session(session_id)
+        scope_wrapper = permission.get("scope") if isinstance(permission.get("scope"), dict) else {}
+        scope = scope_wrapper.get("minecraft") if isinstance(scope_wrapper.get("minecraft"), dict) else {}
+        allowed_players = {str(name).casefold() for name in (scope.get("allowed_players") or [])}
+        if player.casefold() not in allowed_players:
+            return {"ok": False, "error": "chat_player_out_of_scope"}
+        if self._plan_compiler is None:
+            return {"ok": False, "error": "minecraft_planning_unavailable"}
+        bounded = " ".join(str(text).split())[:300]
+
+        def worker() -> None:
+            intent = compile_single_action(bounded, self._plan_compiler)
+            if intent is None:
+                return
+            self.submit_goal(
+                {
+                    "session_id": session_id,
+                    "goal_id": f"chat-goal-{uuid.uuid4().hex}",
+                    "final": True,
+                    "source": "text",
+                    "intent": intent,
+                }
+            )
+
+        threading.Thread(target=worker, name=f"minecraft-chat-{session_id[-8:]}", daemon=True).start()
+        return {"ok": True, "queued": True}
+
+    def _run_plan(self, session_id: str, plan_id: str) -> None:
+        with self._lock:
+            row = self._plans.get((session_id, plan_id))
+        if row is None:
+            return
+        steps = list(row.get("steps") or [])
+        for step in steps:
+            with self._lock:
+                if row.get("cancel_requested"):
+                    row["state"] = "cancelled"
+                    return
+                goal_id = f"plan-goal-{uuid.uuid4().hex}"
+                row["current_goal_id"] = goal_id
+            result = self.submit_goal(
+                {"session_id": session_id, "goal_id": goal_id, "final": True, "source": "voice", "intent": step}
+            )
+            with self._lock:
+                row["steps_done"] += 1
+                row["current_goal_id"] = ""
+            if not result.get("ok"):
+                with self._lock:
+                    row["state"] = "failed"
+                return
+        with self._lock:
+            row["state"] = "completed"
+
+    def _prune_plan_approvals(self) -> None:
+        now = time.monotonic()
+        self._plan_approvals = {
+            key: value for key, value in self._plan_approvals.items() if float(value.get("expires_at") or 0) > now
+        }
+
     def pause(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
         return self._control(params, "pause")
 
@@ -346,12 +534,42 @@ class MinecraftGameService:
         session_id = _external_id(source.get("session_id"))
         if not session_id:
             return {"ok": False, "error": "session_id_required"}
+        memory = self._session_memory_input(session_id)
         result = self.adapters.stop_minecraft_session(session_id)
         if result.get("ok") or result.get("forced_terminated"):
             self.collaboration.transition_session(session_id, "cancelled")
             with self._lock:
                 self._runtime.pop(session_id, None)
+            if memory is not None:
+                self.memory.remember(
+                    memory["server_id"],
+                    memory["world"],
+                    observation=memory["observation"],
+                    recent_goals=memory["recent_goals"],
+                )
         return {**result, "session": _public_session(self.collaboration.session_payload(session_id))}
+
+    def world_memory(self, session_id: str) -> str:
+        """Sanitized per-world memory for prompts; coordinates never cross."""
+
+        memory = self._session_memory_input(session_id)
+        if memory is None:
+            return ""
+        return self.memory.summary(memory["server_id"], memory["world"])
+
+    def _session_memory_input(self, session_id: str) -> dict[str, Any] | None:
+        permission = self.collaboration.permission_for_session(session_id)
+        scope_wrapper = permission.get("scope") if isinstance(permission.get("scope"), dict) else {}
+        scope = scope_wrapper.get("minecraft") if isinstance(scope_wrapper.get("minecraft"), dict) else {}
+        server_id = str(scope.get("server_id") or "")
+        world = str(scope.get("world") or "")
+        if not server_id or not world:
+            return None
+        snapshot = self.adapters.minecraft_snapshot(session_id)
+        observation = snapshot.get("observation") if isinstance(snapshot.get("observation"), dict) else {}
+        receipts = self.collaboration.list_receipts(session_id, limit=12)
+        recent_goals = [str(row.get("action") or "") for row in receipts if isinstance(row, dict)]
+        return {"server_id": server_id, "world": world, "observation": observation, "recent_goals": recent_goals}
 
     def status(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
         session_id = _external_id((params or {}).get("session_id") if isinstance(params, Mapping) else "")
@@ -442,6 +660,16 @@ def _cancelled(check: Callable[[], bool] | None) -> bool:
 
 def _scope_approval_digest(mode: str, scope: Mapping[str, Any], budget: Any) -> str:
     payload = {"mode": mode, "scope": dict(scope), "budget": budget if isinstance(budget, dict) else {}}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _plan_approval_digest(session_id: str, plan_id: str, plan: Mapping[str, Any]) -> str:
+    payload = {
+        "session_id": session_id,
+        "plan_id": plan_id,
+        "summary": plan.get("summary"),
+        "steps": list(plan.get("steps") or []),
+    }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 

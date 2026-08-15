@@ -232,6 +232,20 @@ class _FakeRegistry:
     def minecraft_session_status(self, session_id: str) -> dict[str, object]:
         return {"ok": True, "state": "ready", "active_goal": False}
 
+    def minecraft_snapshot(self, session_id: str) -> dict[str, object]:
+        return {
+            "ok": True,
+            "observation": {
+                "dimension": "overworld",
+                "health": 20,
+                "food": 18,
+                "inventory_slots": 2,
+                "inventory_total": 20,
+                "world": {"time_of_day": 6000, "raining": False, "entities": []},
+            },
+            "checkpoint": {},
+        }
+
     def shutdown(self) -> None:
         return None
 
@@ -375,6 +389,86 @@ class MinecraftCoreGateTests(unittest.TestCase):
         self.assertTrue(goal["zero_actions"])
         self.assertEqual(self.registry.submit_calls, 0)
         self.assertEqual(self.store.list_receipts(session_id), [])
+
+    def _service_with_planner(self) -> tuple[MinecraftGameService, str]:
+        def compiler(prompt: str) -> str:
+            if "聊天指令" in prompt:
+                return '{"intent":{"action":"observe"}}'
+            return '{"summary":"两步计划","steps":[{"action":"observe"},{"action":"inventory"}]}'
+
+        service = MinecraftGameService(self.store, self.registry, plan_compiler=compiler)  # type: ignore[arg-type]
+        scope = SAFE_SCOPE
+        budget = {"max_steps": 20, "max_seconds": 60, "max_failures": 2}
+        preview = service.start_session({"mode": "companion", "scope": scope, "budget": budget})
+        started = service.start_session(
+            {"mode": "companion", "scope": scope, "budget": budget, "confirmed_scope": True, "approval_id": preview["approval_id"]}
+        )
+        self.assertTrue(started["ok"], started)
+        self.service = service
+        return service, str(started["session"]["id"])
+
+    def test_plan_preview_requires_approval_then_executes_steps_with_receipts(self) -> None:
+        service, session_id = self._service_with_planner()
+        preview = service.plan({"session_id": session_id, "goal_text": "先观察再整理"})
+        self.assertTrue(preview["ok"], preview)
+        self.assertTrue(preview["requires_approval"])
+        self.assertEqual(len(preview["steps"]), 2)
+        self.assertEqual(preview["estimated_actions"], 2)
+        executed = service.execute_plan(
+            {"session_id": session_id, "plan_id": preview["plan_id"], "approval_id": preview["approval_id"], "confirmed": True}
+        )
+        self.assertTrue(executed["ok"], executed)
+        deadline = time.monotonic() + 3
+        state = "running"
+        while time.monotonic() < deadline:
+            state = str(service.plan_status({"session_id": session_id, "plan_id": preview["plan_id"]})["state"])
+            if state in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.02)
+        self.assertEqual(state, "completed")
+        self.assertEqual(self.registry.submit_calls, 2)
+        self.assertEqual(len(self.store.list_receipts(session_id)), 2)
+
+    def test_plan_approval_is_single_use_and_digest_bound(self) -> None:
+        service, session_id = self._service_with_planner()
+        preview = service.plan({"session_id": session_id, "goal_text": "目标"})
+        executed = service.execute_plan(
+            {"session_id": session_id, "plan_id": preview["plan_id"], "approval_id": preview["approval_id"], "confirmed": True}
+        )
+        self.assertTrue(executed["ok"], executed)
+        replay = service.execute_plan(
+            {"session_id": session_id, "plan_id": preview["plan_id"], "approval_id": preview["approval_id"], "confirmed": True}
+        )
+        self.assertFalse(replay["ok"])
+        self.assertEqual(replay["error"], "plan_approval_invalid")
+        wrong_plan = service.execute_plan(
+            {"session_id": session_id, "plan_id": "plan-other", "approval_id": "minecraft-plan-approval-other", "confirmed": True}
+        )
+        self.assertFalse(wrong_plan["ok"])
+
+    def test_chat_from_whitelisted_player_compiles_one_action_and_skips_strangers(self) -> None:
+        service, session_id = self._service_with_planner()
+        queued = service.handle_chat(session_id, "Player", "帮我看看周围")
+        self.assertTrue(queued["ok"], queued)
+        deadline = time.monotonic() + 3
+        while self.registry.submit_calls < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.registry.submit_calls, 1)
+        stranger = service.handle_chat(session_id, "Stranger", "帮我看看")
+        self.assertEqual(stranger["error"], "chat_player_out_of_scope")
+        invalid = service.handle_chat(session_id, "坏名字!", "帮我看看")
+        self.assertEqual(invalid["error"], "chat_command_invalid")
+
+    def test_stop_session_remembers_sanitized_world_memory(self) -> None:
+        session_id = self._start()
+        self._submit(session_id, "goal-one", {"action": "observe"})
+        stopped = self.service.stop_session({"session_id": session_id})
+        self.assertTrue(stopped["ok"], stopped)
+        summary = self.service.memory.summary("local-survival", "world")
+        self.assertIn("overworld", summary)
+        self.assertIn("minecraft.observe", summary)
+        for forbidden in ("position", "坐标"):
+            self.assertNotIn(forbidden, summary)
 
     def test_partial_scope_denial_and_permission_denial_send_zero_bridge_actions(self) -> None:
         session_id = self._start()
@@ -1031,9 +1125,13 @@ class MinecraftBridgeIntegrationTests(unittest.TestCase):
         self.assertTrue(snapshot["ok"], snapshot)
         self.assertEqual(
             set(snapshot["observation"]),
-            {"dimension", "health", "food", "inventory_slots", "inventory_total"},
+            {"dimension", "health", "food", "inventory_slots", "inventory_total", "world"},
         )
         self.assertEqual(snapshot["observation"]["dimension"], "overworld")
+        world = snapshot["observation"]["world"]
+        self.assertEqual(world["time_of_day"], 6000)
+        self.assertFalse(world["raining"])
+        self.assertIsInstance(world["entities"], list)
         checkpoint = snapshot["checkpoint"]
         self.assertEqual(set(checkpoint["position"]), {"x", "y", "z"})
         self.assertEqual(checkpoint["dimension"], "overworld")
@@ -1053,6 +1151,34 @@ class MinecraftBridgeIntegrationTests(unittest.TestCase):
         guard = self.client.submit_goal("goal-guard", {"action": "guard", "dimension": "overworld"})
         self.assertTrue(guard["ok"], guard)
         self.assertEqual(guard["effects"], 1)
+
+    def test_fake_bridge_emits_whitelisted_chat_lines(self) -> None:
+        self.client.close()
+        self.client = MinecraftBridgeClient(
+            [str(shutil.which("node")), str(self.bridge_script)],
+            session_id="session-chat",
+            mode="companion",
+            scope=canonicalize_minecraft_scope(SAFE_SCOPE),
+            budget={"max_steps": 20, "max_seconds": 60},
+            environment={
+                **self.environment,
+                "JOI_MINECRAFT_FAKE_CHAT_LINES": json.dumps(
+                    [{"player": "Player", "text": "帮我挖点木头"}, {"player": "Player", "text": "注意安全"}]
+                ),
+            },
+        )
+        received: list[dict[str, object]] = []
+        disposer = self.client.add_event_listener(received.append)
+        self.assertTrue(self.client.start()["ok"])
+        deadline = time.monotonic() + 6
+        while sum(1 for event in received if event.get("type") == "chat.observed") < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        chats = [event for event in received if event.get("type") == "chat.observed"]
+        self.assertEqual(len(chats), 2)
+        self.assertEqual(chats[0]["payload"], {"player": "Player", "text": "帮我挖点木头"})
+        self.assertEqual(chats[0]["session_id"], "session-chat")
+        self.assertEqual(chats[0]["reply_to"], "")
+        disposer()
 
     def test_unsolicited_events_reach_listeners_and_disposer_stops_them(self) -> None:
         self.client.close()

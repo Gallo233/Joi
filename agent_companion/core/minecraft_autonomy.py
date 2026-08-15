@@ -176,6 +176,7 @@ def _build_prompt(context: Mapping[str, Any]) -> str:
     persona = str(context.get("persona") or "")[:800]
     hostile_line = "、".join(f"{row.get('name')}×{row.get('count')}" for row in hostiles[:8]) or "无"
     events_line = "、".join(str(item)[:40] for item in recent_events[-8:]) or "无"
+    memory = str(context.get("memory") or "")[:500]
     return "\n".join(
         [
             "你是 Joi，正在 Minecraft 里自主观察。基于下面的 sanitized 状态，决定此刻是否要做点什么。",
@@ -189,6 +190,7 @@ def _build_prompt(context: Mapping[str, Any]) -> str:
             f"附近敌对生物：{hostile_line}",
             f"最近事件：{events_line}",
             f"屏幕摘要：{screen_text or '无'}",
+            f"世界记忆：{memory or '无'}",
             f"角色设定：{persona or 'Joi'}",
         ]
     )

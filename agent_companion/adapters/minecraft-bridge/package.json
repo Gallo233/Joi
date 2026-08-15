@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "ncc build index.js -o dist --minify --external minecraft-data && node scripts/stage-runtime.mjs",
+    "build": "ncc build index.js -o dist --minify --external minecraft-data --external prismarine-viewer && node scripts/stage-runtime.mjs",
     "check": "node --check index.js"
   },
   "dependencies": {

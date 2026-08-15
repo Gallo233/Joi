@@ -286,7 +286,32 @@ function botOptions() {
     plugins: { time: false, joi_time: injectTimeCompat },
   }
   if (process.env.JOI_MINECRAFT_PROFILES_FOLDER) options.profilesFolder = process.env.JOI_MINECRAFT_PROFILES_FOLDER
+  const viewer = viewerOptions()
+  if (viewer) options.viewer = viewer
   return options
+}
+
+// Web POV (prismarine-viewer) is an optional, dev-only enhancement: when the
+// package is absent the bridge still joins and plays, it just has no viewer.
+function viewerOptions() {
+  if (process.env.JOI_MINECRAFT_VIEWER !== '1') return null
+  try {
+    require('prismarine-viewer')
+  } catch (_error) {
+    process.stderr.write('joi.minecraft viewer: prismarine-viewer is not installed; POV viewer disabled\n')
+    return null
+  }
+  return { port: Number(process.env.JOI_MINECRAFT_VIEWER_PORT || 3007), firstPerson: true }
+}
+
+function watchChat(candidate) {
+  if (fakeMode || !candidate) return
+  candidate.on('chat', (username, message) => {
+    if (closing || recoveryRequired) return
+    const text = String(message || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').slice(0, 500)
+    if (!text) return
+    emit('chat.observed', { player: String(username || '').slice(0, 32), text }, null, { sessionId: currentSessionId })
+  })
 }
 
 // Connect failures used to collapse into one opaque code, which left the shell showing
@@ -332,6 +357,7 @@ function createConnectedBot() {
       candidate.loadPlugin(pathfinder)
       configureSafeMovements(candidate)
       watchCombat(candidate)
+      watchChat(candidate)
       resolve(candidate)
     })
     candidate.on('error', (error) => {
@@ -464,6 +490,41 @@ function privateCheckpoint() {
   }
 }
 
+function safeWorld() {
+  // Time, weather and entity census: type-and-count only, never coordinates.
+  if (fakeMode) {
+    return {
+      time_of_day: 6000,
+      raining: false,
+      entities: combatActive ? [{ type: 'mob', kind: 'hostile', name: 'zombie', count: 2 }] : [],
+    }
+  }
+  const world = {
+    time_of_day: Number(bot?.time?.timeOfDay || 0),
+    raining: Boolean(bot?.isRaining),
+    entities: [],
+  }
+  const position = currentPosition()
+  if (bot && position && sessionConfig?.scope) {
+    const radius = Number(sessionConfig.scope.max_radius || 0)
+    const counts = new Map()
+    for (const entity of Object.values(bot.entities)) {
+      if (!entity.position || entity.position.distanceTo(position) > radius) continue
+      const key = entity.type === 'player' ? 'player' : `${entity.type}:${entity.kind || ''}:${entity.name || ''}`
+      const row = counts.get(key) || {
+        type: String(entity.type || 'unknown'),
+        kind: String(entity.kind || entity.mobType || ''),
+        name: String(entity.name || ''),
+        count: 0,
+      }
+      row.count += 1
+      counts.set(key, row)
+    }
+    world.entities = Array.from(counts.values()).slice(0, 16)
+  }
+  return world
+}
+
 function safeObservation(checkpoint) {
   const observation = {
     dimension: String(checkpoint.dimension || ''),
@@ -471,6 +532,7 @@ function safeObservation(checkpoint) {
     food: Number(checkpoint.food || 0),
     inventory_slots: Array.isArray(checkpoint.inventory) ? checkpoint.inventory.length : 0,
     inventory_total: Array.isArray(checkpoint.inventory) ? checkpoint.inventory.reduce((total, row) => total + Number(row.count || 0), 0) : 0,
+    world: safeWorld(),
   }
   const hostiles = nearbyHostiles()
   if (hostiles.length) observation.nearby_hostiles = hostiles
@@ -993,6 +1055,24 @@ async function handleFresh(request) {
           setTimeout(toggleCombat, fakeCombatMs)
         }
         setTimeout(toggleCombat, fakeCombatMs)
+      }
+      // Fake-world chat lines: emit each entry once so the chat.observed
+      // channel is deterministic for Core-side tests.
+      if (fakeMode) {
+        try {
+          const lines = JSON.parse(process.env.JOI_MINECRAFT_FAKE_CHAT_LINES || '[]')
+          if (Array.isArray(lines)) {
+            lines.slice(0, 8).forEach((row, index) => {
+              if (!row || typeof row !== 'object') return
+              setTimeout(() => {
+                if (closing || recoveryRequired) return
+                emit('chat.observed', { player: String(row.player || '').slice(0, 32), text: String(row.text || '').slice(0, 500) }, null, { sessionId: currentSessionId })
+              }, 50 + index * 50)
+            })
+          }
+        } catch (_) {
+          // Invalid fake-chat JSON is a test setup mistake; ignore it.
+        }
       }
       const fakeIdleDisconnectMs = Number(process.env.JOI_MINECRAFT_FAKE_IDLE_DISCONNECT_MS || 0)
       if (fakeMode && fakeIdleDisconnectMs > 0) {

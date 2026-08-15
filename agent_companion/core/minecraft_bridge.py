@@ -42,6 +42,9 @@ _SAFE_ENVIRONMENT_KEYS = frozenset(
         "JOI_MINECRAFT_FAKE_IDLE_DISCONNECT_MS",
         "JOI_MINECRAFT_FAKE_PUSH_SNAPSHOT_MS",
         "JOI_MINECRAFT_FAKE_COMBAT_MS",
+        "JOI_MINECRAFT_FAKE_CHAT_LINES",
+        "JOI_MINECRAFT_VIEWER",
+        "JOI_MINECRAFT_VIEWER_PORT",
     }
 )
 _OUTPUT_REQUIRED = {
@@ -70,6 +73,7 @@ _OUTPUT_TYPES = frozenset(
         "state.snapshot",
         "combat.started",
         "combat.ended",
+        "chat.observed",
         "recovery.required",
         "error",
     }
@@ -608,7 +612,7 @@ def _safe_observation(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     required = {"dimension", "health", "food", "inventory_slots", "inventory_total"}
-    if set(value) - required - {"nearby_hostiles"} or not required.issubset(set(value)):
+    if set(value) - required - {"nearby_hostiles", "world"} or not required.issubset(set(value)):
         return {}
     dimension = str(value.get("dimension") or "").replace("minecraft:", "")
     if dimension not in _DIMENSIONS:
@@ -632,6 +636,36 @@ def _safe_observation(value: Any) -> dict[str, Any]:
                 continue
             rows.append({"name": name, "count": count})
         observation["nearby_hostiles"] = rows
+    world = value.get("world")
+    if isinstance(world, Mapping):
+        safe_world: dict[str, Any] = {}
+        time_of_day = _safe_int(world.get("time_of_day"))
+        if 0 <= time_of_day <= 24_000:
+            safe_world["time_of_day"] = time_of_day
+        if isinstance(world.get("raining"), bool):
+            safe_world["raining"] = world["raining"]
+        entities = world.get("entities")
+        if isinstance(entities, list):
+            rows = []
+            for row in entities[:16]:
+                if not isinstance(row, Mapping):
+                    continue
+                entity_type = str(row.get("type") or "").strip().casefold()
+                name = str(row.get("name") or "").strip().casefold()
+                kind = str(row.get("kind") or "").strip().casefold()
+                count = _safe_int(row.get("count"))
+                if entity_type not in {"player", "mob", "object", "animal", "unknown"} or len(name) > 40 or len(kind) > 40:
+                    continue
+                if not name.replace("_", "").replace(":", "").isalnum() or not kind.replace("_", "").replace(":", "").isalnum():
+                    continue
+                if not 1 <= count <= 256:
+                    continue
+                entry: dict[str, Any] = {"type": entity_type, "name": name, "count": count}
+                if kind:
+                    entry["kind"] = kind
+                rows.append(entry)
+            safe_world["entities"] = rows
+        observation["world"] = safe_world
     return observation
 
 
@@ -705,6 +739,7 @@ def _validate_event_payload(message_type: str, payload: Mapping[str, Any]) -> No
         "state.snapshot": ({"observation", "checkpoint"}, set()),
         "combat.started": ({"state"}, set()),
         "combat.ended": ({"state"}, set()),
+        "chat.observed": ({"player", "text"}, set()),
         "recovery.required": ({"error", "verified", "status", "changes", "effects", "recovery_required", "before", "after", "checkpoint"}, {"replayed"}),
         "error": ({"error"}, set()),
     }
