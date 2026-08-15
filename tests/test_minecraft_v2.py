@@ -887,6 +887,145 @@ class MinecraftBridgeIntegrationTests(unittest.TestCase):
                 if stream:
                     stream.close()
 
+    def test_state_snapshot_request_returns_sanitized_live_state(self) -> None:
+        started = self.client.start()
+        self.assertTrue(started["ok"], started)
+        snapshot = self.client.request_snapshot()
+        self.assertTrue(snapshot["ok"], snapshot)
+        self.assertEqual(
+            set(snapshot["observation"]),
+            {"dimension", "health", "food", "inventory_slots", "inventory_total"},
+        )
+        self.assertEqual(snapshot["observation"]["dimension"], "overworld")
+        checkpoint = snapshot["checkpoint"]
+        self.assertEqual(set(checkpoint["position"]), {"x", "y", "z"})
+        self.assertEqual(checkpoint["dimension"], "overworld")
+        self.assertTrue(any(row["name"] == "oak_log" for row in checkpoint["inventory"]))
+        self.assertEqual(snapshot["bridge_instance_id"], started["bridge_instance_id"])
+
+    def test_unsolicited_events_reach_listeners_and_disposer_stops_them(self) -> None:
+        self.client.close()
+        self.client = MinecraftBridgeClient(
+            [str(shutil.which("node")), str(self.bridge_script)],
+            session_id="session-push",
+            mode="companion",
+            scope=canonicalize_minecraft_scope(SAFE_SCOPE),
+            budget={"max_steps": 20, "max_seconds": 60},
+            environment={**self.environment, "JOI_MINECRAFT_FAKE_PUSH_SNAPSHOT_MS": "40"},
+        )
+        received: list[dict[str, object]] = []
+        disposer = self.client.add_event_listener(received.append)
+        self.assertTrue(self.client.start()["ok"])
+        deadline = time.monotonic() + 6
+        while sum(1 for event in received if event.get("type") == "state.snapshot") < 3 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        snapshots = [event for event in received if event.get("type") == "state.snapshot"]
+        self.assertGreaterEqual(len(snapshots), 3)
+        self.assertEqual(snapshots[0]["session_id"], "session-push")
+        self.assertEqual(snapshots[0]["reply_to"], "")
+        disposer()
+        time.sleep(0.2)
+        settled = len(received)
+        time.sleep(0.2)
+        self.assertEqual(len(received), settled)
+        # The buffered event window is bounded: consumed replies and old
+        # unsolicited events are evicted instead of leaking.
+        self.assertLessEqual(len(self.client._events), 512)
+        self.assertLessEqual(len(self.client._seen_output), 512)
+
+    def test_combat_events_and_nearby_hostiles_flow_to_listeners_and_snapshot(self) -> None:
+        self.client.close()
+        self.client = MinecraftBridgeClient(
+            [str(shutil.which("node")), str(self.bridge_script)],
+            session_id="session-combat",
+            mode="companion",
+            scope=canonicalize_minecraft_scope(SAFE_SCOPE),
+            budget={"max_steps": 20, "max_seconds": 60},
+            environment={
+                **self.environment,
+                "JOI_MINECRAFT_FAKE_PUSH_SNAPSHOT_MS": "40",
+                "JOI_MINECRAFT_FAKE_COMBAT_MS": "40",
+            },
+        )
+        received: list[dict[str, object]] = []
+        disposer = self.client.add_event_listener(received.append)
+        self.assertTrue(self.client.start()["ok"])
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            if any(event.get("type") == "combat.started" for event in received) and any(
+                event.get("type") == "combat.ended" for event in received
+            ):
+                break
+            time.sleep(0.05)
+        self.assertTrue(any(event.get("type") == "combat.started" for event in received))
+        self.assertTrue(any(event.get("type") == "combat.ended" for event in received))
+        combat = next(event for event in received if event.get("type") == "combat.started")
+        self.assertEqual(combat["payload"]["state"], "active")
+        self.assertEqual(combat["reply_to"], "")
+        # While combat is active the sanitized observation carries hostiles.
+        hostile_seen = False
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            snapshot = self.client.request_snapshot()
+            hostiles = snapshot.get("observation", {}).get("nearby_hostiles") or []
+            if hostiles:
+                hostile_seen = True
+                self.assertEqual(hostiles[0], {"name": "zombie", "count": 2})
+                break
+            time.sleep(0.02)
+        self.assertTrue(hostile_seen)
+        disposer()
+
+    def test_registry_forwards_unsolicited_events_and_serves_snapshots(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "JOI_MINECRAFT_HOST": "127.0.0.1",
+                "JOI_MINECRAFT_PORT": "25565",
+                "JOI_MINECRAFT_USERNAME": "Joi",
+                "JOI_MINECRAFT_AUTH": "offline",
+                "JOI_MINECRAFT_FAKE": "1",
+                "JOI_MINECRAFT_FAKE_DELAY_MS": "5",
+                "JOI_MINECRAFT_FAKE_PUSH_SNAPSHOT_MS": "40",
+                "JOI_MINECRAFT_FAKE_COMBAT_MS": "40",
+                "JOI_MINECRAFT_SERVER_ID": "local-survival",
+                "JOI_MINECRAFT_WORLD": "world",
+            },
+            clear=False,
+        ):
+            with tempfile.TemporaryDirectory() as temporary:
+                registry = GameAdapterRegistry(Path(__file__).parents[1], Path(temporary) / "data")
+                registry._state["minecraft"] = {"installed": True, "enabled": True, "installed_at": time.time()}
+                started = registry.start_minecraft_session(
+                    "session-registry-events", "companion", canonicalize_minecraft_scope(SAFE_SCOPE), {}
+                )
+        self.assertTrue(started["ok"], started)
+        try:
+            deadline = time.monotonic() + 6
+            events: list[dict[str, object]] = []
+            while time.monotonic() < deadline:
+                events = registry.minecraft_session_events("session-registry-events")
+                if any(event.get("type") == "combat.started" for event in events) and len(events) >= 4:
+                    break
+                time.sleep(0.05)
+            self.assertGreaterEqual(len(events), 4)
+            types = {event.get("type") for event in events}
+            self.assertIn("state.snapshot", types)
+            self.assertIn("combat.started", types)
+            self.assertIn("combat.ended", types)
+            self.assertEqual(events[0]["session_id"], "session-registry-events")
+            snapshot = registry.minecraft_snapshot("session-registry-events")
+            self.assertTrue(snapshot["ok"], snapshot)
+            # Combat may be active or clear at this instant; hostiles must be
+            # a sanitized name+count list when present and never coordinates.
+            hostiles = snapshot["observation"].get("nearby_hostiles") or []
+            for row in hostiles:
+                self.assertEqual(set(row), {"name", "count"})
+            missing = registry.minecraft_snapshot("session-not-found")
+            self.assertEqual(missing["error"], "minecraft_session_not_found")
+        finally:
+            registry.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -100,3 +100,11 @@
 - 屏幕摘要进云端增加披露面，保持“只摘要、不原图、不落盘”。
 - 自主 ticker 增加 LLM 调用成本与打扰风险，频率上限 + 静音开关必须落地。
 - 战斗人格策略不能由模型自行发挥，Core 解析结构规则后注入。
+
+## 8. 实施进度（分支 minecraft-slice-dev / worktree Joi-minecraft-slice）
+
+- **S1.0 完成**（2026-08-15）：`MinecraftBridgeClient.add_event_listener`（reply_to=="" 的主动事件泵送，监听器在 stdout 读线程上执行、带 disposer）；`request_snapshot()`；`_events`/`_seen_output` 消费驱逐与 512 上限；JS 侧 `seenMessages`/`cachedResponses` 4096 上限；fake 桥接新增 `JOI_MINECRAFT_FAKE_PUSH_SNAPSHOT_MS` 主动快照推送；`GameAdapterRegistry` 订阅事件到 per-session deque(64) 并提供 `minecraft_snapshot`/`minecraft_session_events`。验收测试 3 个。
+- **S1.1 完成**：`RealtimeVoiceCoordinator` 增加 `persona` 按会话读取回调；`_conversation_instructions`/`_minecraft_instructions` 注入 sanitized+1,200 字符上限的人设块（会话级 instructions 不变内容，按轮上下文仍走 `conversation.item.create`）；server 以 `_realtime_persona_prompt`（`CharacterHarness.prompt_header()`）接线。验收测试 4 个。
+- **S1.3 完成**：bridge 战斗感知——`nearby_hostiles`（类型+数量、无坐标，作为 observation 的可选键，三处白名单同步扩展）、`combat.started/combat.ended` 主动事件（真实服：被攻击启动、8 格内无敌怪清除；fake 用 `JOI_MINECRAFT_FAKE_COMBAT_MS` 交替触发）。验收测试 2 个。
+- 验证：`test_minecraft_v2` 34 通过、`test_realtime_voice` 27 通过、`test_realtime_privacy_contract` 3 通过；`minecraft_p5_smoke` 通过；`node --check` 通过；ncc 包已重建。
+- **待做**：S1.2（observe_screen 契约 + Core 异步屏幕摘要缓存）、S2（attack/flee/guard + 方案 A 人格策略）、S3（自主 ticker + 主动聊天）、S4。

@@ -125,6 +125,7 @@ class QwenRealtimeSession:
         connector: Connector = _default_connector,
         voice_locale: str = "",
         chat_locale: str = "",
+        persona: str = "",
     ) -> None:
         self.config = config
         self.session_id = str(session_id)
@@ -133,6 +134,7 @@ class QwenRealtimeSession:
         self.minecraft_session_id = str(minecraft_session_id)
         self.voice_locale = str(voice_locale or "")
         self.chat_locale = str(chat_locale or "")
+        self.persona = str(persona or "")
         self.splits_channels = _splits_channels(self.voice_locale, self.chat_locale)
         self._emit_sink = emit
         self._execute_action = execute_action
@@ -261,9 +263,9 @@ class QwenRealtimeSession:
             "input_audio_format": "pcm",
             "max_history_turns": int(self.config.max_history_turns),
             "instructions": (
-                _minecraft_instructions(self.voice_locale, self.chat_locale)
+                _minecraft_instructions(self.voice_locale, self.chat_locale, self.persona)
                 if self.mode == "minecraft"
-                else _conversation_instructions(self.voice_locale, self.chat_locale)
+                else _conversation_instructions(self.voice_locale, self.chat_locale, self.persona)
             ),
             "turn_detection": {"type": self.config.turn_detection.strip()},
         }
@@ -719,6 +721,7 @@ class RealtimeVoiceCoordinator:
         connector: Connector = _default_connector,
         voice_locale: Callable[[], str] | None = None,
         chat_locale: Callable[[], str] | None = None,
+        persona: Callable[[], str] | None = None,
     ) -> None:
         self.config = config
         self._execute_action = execute_action or (lambda *_: {"ok": False, "status": "failed"})
@@ -730,6 +733,7 @@ class RealtimeVoiceCoordinator:
         # character, voice language or chat language between two realtime calls.
         self._voice_locale = voice_locale or (lambda: "")
         self._chat_locale = chat_locale or (lambda: "")
+        self._persona = persona or (lambda: "")
         self._lock = threading.RLock()
         self._sessions: dict[str, QwenRealtimeSession] = {}
         self._owner_sessions: dict[str, str] = {}
@@ -769,6 +773,7 @@ class RealtimeVoiceCoordinator:
             connector=self._connector,
             voice_locale=_safe_voice_locale(self._voice_locale),
             chat_locale=_safe_voice_locale(self._chat_locale),
+            persona=_safe_persona(self._persona),
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -870,6 +875,20 @@ def _safe_voice_locale(source: Callable[[], str]) -> str:
     return locale[:16] if locale.replace("-", "").replace("_", "").isalnum() else ""
 
 
+def _safe_persona(source: Callable[[], str]) -> str:
+    """Read the character harness per session, sanitized and bounded.
+
+    A missing or broken persona callback leaves the instructions unchanged:
+    the voice must still work with the generic Joi identity.
+    """
+
+    try:
+        text = str(source() or "")
+    except Exception:
+        return ""
+    return _bounded_text(text, 1_200).strip()
+
+
 def build_realtime_voice_coordinator(
     workspace: Path,
     *,
@@ -880,6 +899,7 @@ def build_realtime_voice_coordinator(
     connector: Connector = _default_connector,
     voice_locale: Callable[[], str] | None = None,
     chat_locale: Callable[[], str] | None = None,
+    persona: Callable[[], str] | None = None,
 ) -> tuple[RealtimeVoiceCoordinator, RealtimeVoiceRuntimeState]:
     config_path = workspace / "config.yaml"
     if not config_path.is_file():
@@ -909,6 +929,7 @@ def build_realtime_voice_coordinator(
             connector=connector,
             voice_locale=voice_locale,
             chat_locale=chat_locale,
+            persona=persona,
         ),
         state,
     )
@@ -1174,10 +1195,11 @@ def _language_rule(voice_locale: str, chat_locale: str) -> str:
     )
 
 
-def _conversation_instructions(voice_locale: str = "", chat_locale: str = "") -> str:
+def _conversation_instructions(voice_locale: str = "", chat_locale: str = "", persona: str = "") -> str:
     return "".join(
         [
             "你是 Joi，正在与用户进行低延迟语音对话。回答简洁、自然、友好。",
+            _persona_block(persona),
             "输出必须是适合直接朗读的纯文本；不要说模型、供应商、路径、标识符、日志、JSON、命令或秘密。",
             "当前没有任何工具权限，不要声称执行了外部操作。",
             _language_rule(voice_locale, chat_locale),
@@ -1185,16 +1207,31 @@ def _conversation_instructions(voice_locale: str = "", chat_locale: str = "") ->
     )
 
 
-def _minecraft_instructions(voice_locale: str = "", chat_locale: str = "") -> str:
+def _minecraft_instructions(voice_locale: str = "", chat_locale: str = "", persona: str = "") -> str:
     return "".join(
         [
             "你是 Joi，正在和用户一起玩 Minecraft。简短自然地对话。",
+            _persona_block(persona),
             "你可以在确有必要时调用一个 minecraft_* 工具提出单个游戏动作；工具只是提案，Core 会独立检查权限、范围和预算。",
             "每一轮最多提出一个动作，不要猜测坐标、权限、会话标识或完成结果。",
             "收到工具结果后才可以描述是否完成；输出必须是适合直接朗读的纯文本。",
             _language_rule(voice_locale, chat_locale),
         ]
     )
+
+
+def _persona_block(persona: str) -> str:
+    """The character harness, sanitized and bounded for the cloud instructions.
+
+    Persona text is session-invariant, so it belongs in instructions (which
+    ``session.update`` sends exactly once at start); per-turn context must go
+    through ``conversation.item.create`` instead.
+    """
+
+    text = _bounded_text(persona, 1_200).strip()
+    if not text:
+        return ""
+    return f"角色设定（始终遵守）：\n{text}\n"
 
 
 def _follows_user(chat_locale: str) -> bool:

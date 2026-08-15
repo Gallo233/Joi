@@ -150,6 +150,72 @@ class QwenRealtimeConfigurationTests(unittest.TestCase):
         self.assertEqual(state.output, "local_tts")
 
 
+class QwenRealtimePersonaTests(unittest.TestCase):
+    def _start(self, mode: str = "conversation", persona: object = lambda: "") -> tuple[_FakeSocket, RealtimeVoiceCoordinator, dict[str, object]]:
+        socket = _ready_socket()
+        connector = _Connector(socket)
+        coordinator = RealtimeVoiceCoordinator(
+            _config(),
+            connector=connector,
+            persona=persona,  # type: ignore[arg-type]
+        )
+        events: list[dict[str, object]] = []
+        result = coordinator.start("owner-persona", events.append, mode=mode, minecraft_session_id="session-mc-1")
+        return socket, coordinator, result
+
+    def _instructions(self, socket: _FakeSocket) -> str:
+        updates = [message for message in socket.sent if message.get("type") == "session.update"]
+        self.assertTrue(updates)
+        return str(updates[0]["session"]["instructions"])
+
+    def test_harness_persona_reaches_conversation_and_minecraft_instructions(self) -> None:
+        for mode in ("conversation", "minecraft"):
+            with self.subTest(mode=mode):
+                socket, coordinator, result = self._start(mode=mode, persona=lambda: "角色：胆小\n语气：小声\n人设：害怕战斗\n边界：\n- 不主动攻击")
+                self.assertTrue(result["ok"], result)
+                instructions = self._instructions(socket)
+                self.assertIn("角色设定（始终遵守）", instructions)
+                self.assertIn("胆小", instructions)
+                self.assertIn("不主动攻击", instructions)
+                coordinator.stop("owner-persona", str(result["session_id"]))
+
+    def test_persona_is_read_per_session_not_once_at_build_time(self) -> None:
+        current = ["第一人格"]
+        socket = _ready_socket()
+        connector = _Connector(socket)
+        coordinator = RealtimeVoiceCoordinator(_config(), connector=connector, persona=lambda: current[0])
+        first = coordinator.start("owner-persona", lambda event: None)
+        self.assertTrue(first["ok"], first)
+        self.assertIn("第一人格", self._instructions(socket))
+        coordinator.stop("owner-persona", str(first["session_id"]))
+        current[0] = "第二人格"
+        socket2 = _ready_socket()
+        connector.socket = socket2
+        second = coordinator.start("owner-persona", lambda event: None)
+        self.assertTrue(second["ok"], second)
+        self.assertIn("第二人格", self._instructions(socket2))
+
+    def test_unsafe_or_oversized_persona_is_bounded_and_never_fails_the_call(self) -> None:
+        persona = "坏\u0000控制字符" + ("长" * 3000)
+        socket, coordinator, result = self._start(persona=lambda: persona)
+        self.assertTrue(result["ok"], result)
+        instructions = self._instructions(socket)
+        self.assertNotIn("\u0000", instructions)
+        block = instructions.split("角色设定（始终遵守）：\n", 1)[1]
+        for marker in ("\n输出必须是适合直接朗读", "\n你可以在确有必要时"):
+            block = block.split(marker, 1)[0]
+        self.assertLessEqual(len(block), 1250)
+        coordinator.stop("owner-persona", str(result["session_id"]))
+
+    def test_missing_or_broken_persona_leaves_generic_identity(self) -> None:
+        for persona in (None, lambda: (_ for _ in ()).throw(RuntimeError("broken"))):
+            with self.subTest(persona=persona):
+                socket, coordinator, result = self._start(persona=persona)
+                self.assertTrue(result["ok"], result)
+                self.assertNotIn("角色设定（始终遵守）", self._instructions(socket))
+                coordinator.stop("owner-persona", str(result["session_id"]))
+
+
 class QwenRealtimeSessionTests(unittest.TestCase):
     def _session(
         self,

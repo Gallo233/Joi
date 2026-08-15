@@ -151,6 +151,7 @@ class JsonRpcBridge:
                 validate_binding=self._realtime_minecraft_binding_ready,
                 voice_locale=self.tts.voice_language,
                 chat_locale=self.app.chat_language,
+                persona=self._realtime_persona_prompt,
             )
         else:
             self.realtime_voice = realtime_voice_coordinator
@@ -700,6 +701,21 @@ class JsonRpcBridge:
         status = self.minecraft.status({"session_id": session_id})
         session = status.get("session") if isinstance(status.get("session"), dict) else {}
         return bool(status.get("ok") and status.get("bridge_state") == "ready" and session.get("state") == "running")
+
+    def _realtime_persona_prompt(self) -> str:
+        """The active character harness, read per realtime session.
+
+        A missing or broken harness leaves the generic Joi identity; the
+        realtime call must never fail because a character package changed.
+        """
+
+        character = getattr(self.app, "character", None)
+        if character is None:
+            return ""
+        try:
+            return str(character.prompt_header() or "")
+        except Exception:
+            return ""
 
     def _rpc_artifact_read(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.read_artifact_command(str(params.get("artifact") or ""))
@@ -2349,6 +2365,9 @@ class JsonRpcBridge:
             cancel_action=self._cancel_realtime_minecraft_action,
             control_action=self._control_realtime_minecraft_action,
             validate_binding=self._realtime_minecraft_binding_ready,
+            voice_locale=self.tts.voice_language,
+            chat_locale=self.app.chat_language,
+            persona=self._realtime_persona_prompt,
         )
         self.tts.reload()
         self.watch_commentary.reload()

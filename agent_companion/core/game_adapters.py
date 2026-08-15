@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -67,6 +68,8 @@ class GameAdapterRegistry:
         self._minecraft_sessions: dict[str, MinecraftBridgeClient] = {}
         self._minecraft_goals: dict[str, str] = {}
         self._minecraft_states: dict[str, str] = {}
+        self._minecraft_event_queues: dict[str, deque[dict[str, Any]]] = {}
+        self._minecraft_event_disposers: dict[str, Callable[[], None]] = {}
         self._minecraft_checkpoints: dict[str, dict[str, Any]] = self._load_minecraft_checkpoints()
         self._manifests = {manifest.id: manifest for manifest in _builtin_manifests()}
         self._state = self._load_state()
@@ -267,10 +270,39 @@ class GameAdapterRegistry:
                 print(f"minecraft bridge start failed ({result.get('error')}):\n{detail}", file=sys.stderr, flush=True)
             client.close()
             return result
+
+        def on_bridge_event(event: dict[str, Any]) -> None:
+            # Unsolicited events (combat, snapshots) arrive on the stdout reader
+            # thread. The queue is the only storage: no Core ID, coordinate or
+            # child detail is ever exposed beyond the sanitized projection.
+            with self._lock:
+                self._minecraft_event_queues.setdefault(session_id, deque(maxlen=64)).append(event)
+
+        disposer = client.add_event_listener(on_bridge_event)
         with self._lock:
             self._minecraft_sessions[session_id] = client
             self._minecraft_states[session_id] = "ready"
+            self._minecraft_event_disposers[session_id] = disposer
         return result
+
+    def minecraft_snapshot(self, session_id: str) -> dict[str, Any]:
+        """Ask the persistent bridge for its sanitized live state."""
+
+        with self._lock:
+            client = self._minecraft_sessions.get(session_id)
+        if client is None:
+            return {"ok": False, "error": "minecraft_session_not_found"}
+        request_snapshot = getattr(client, "request_snapshot", None)
+        if request_snapshot is None:
+            return {"ok": False, "error": "minecraft_bridge_snapshot_unsupported"}
+        return request_snapshot()
+
+    def minecraft_session_events(self, session_id: str) -> list[dict[str, Any]]:
+        """Sanitized unsolicited events received for a session, oldest first."""
+
+        with self._lock:
+            queue = self._minecraft_event_queues.get(session_id)
+            return [dict(row) for row in queue] if queue else []
 
     def submit_minecraft_goal(
         self,
@@ -368,6 +400,10 @@ class GameAdapterRegistry:
         with self._lock:
             client = self._minecraft_sessions.pop(session_id, None)
             self._minecraft_goals.pop(session_id, None)
+            disposer = self._minecraft_event_disposers.pop(session_id, None)
+            self._minecraft_event_queues.pop(session_id, None)
+        if disposer is not None:
+            disposer()
         if client is None:
             return {"ok": False, "error": "minecraft_session_not_found"}
         result = client.stop()
@@ -388,8 +424,13 @@ class GameAdapterRegistry:
     def shutdown(self) -> None:
         with self._lock:
             clients = list(self._minecraft_sessions.values())
+            disposers = list(self._minecraft_event_disposers.values())
             self._minecraft_sessions.clear()
             self._minecraft_goals.clear()
+            self._minecraft_event_disposers.clear()
+            self._minecraft_event_queues.clear()
+        for disposer in disposers:
+            disposer()
         for client in clients:
             client.close()
 

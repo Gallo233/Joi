@@ -94,6 +94,15 @@ let recoveryRequired = false
 let scopeAnchor = null
 const seenMessages = new Map()
 const cachedResponses = new Map()
+const MAX_CACHED_MESSAGES = 4096
+
+// Long voice sessions stream many requests and unsolicited events. Replay
+// protection only needs the most recent window: message IDs are random and
+// Core never retries old ones, so evicting the oldest entries keeps both
+// maps bounded without weakening the replay contract.
+function capCache(map) {
+  if (map.size > MAX_CACHED_MESSAGES) map.delete(map.keys().next().value)
+}
 const fakeState = {
   position: { x: 0, y: 64, z: 0 },
   dimension: 'overworld',
@@ -129,6 +138,7 @@ function emit(type, payload, request = null, options = {}) {
 function cacheAndEmit(request, type, payload, options = {}) {
   const cached = { type, payload, goalId: options.goalId !== undefined ? options.goalId : request.goal_id || '' }
   cachedResponses.set(request.message_id, cached)
+  capCache(cachedResponses)
   emit(type, payload, request, options)
 }
 
@@ -315,6 +325,7 @@ function createConnectedBot() {
       clearTimeout(timeout)
       candidate.loadPlugin(pathfinder)
       configureSafeMovements(candidate)
+      watchCombat(candidate)
       resolve(candidate)
     })
     candidate.on('error', (error) => {
@@ -363,6 +374,54 @@ function positionInScope(position) {
   return radius > 0 && (dx * dx + dy * dy + dz * dz) <= radius * radius
 }
 
+// Combat awareness: type-and-count only, never coordinates. The fake world
+// toggles on a timer so Core-side listeners can be tested deterministically;
+// a real world reports being attacked and only clears when no hostile stays
+// within melee range.
+let combatActive = false
+
+function isHostileMob(entity) {
+  if (!entity || entity.type !== 'mob') return false
+  if (entity.kind === 'Hostile mobs') return true
+  const category = String(entity.mobType || '').toLowerCase()
+  return category === 'hostile'
+}
+
+function nearbyHostiles() {
+  if (fakeMode) return combatActive ? [{ name: 'zombie', count: 2 }] : []
+  const position = currentPosition()
+  if (!bot || !position || !sessionConfig?.scope) return []
+  const radius = Number(sessionConfig.scope.max_radius || 0)
+  const counts = new Map()
+  for (const entity of Object.values(bot.entities)) {
+    if (!isHostileMob(entity) || !entity.position) continue
+    if (entity.position.distanceTo(position) > radius) continue
+    const name = String(entity.mobType || entity.name || 'hostile').toLowerCase()
+    counts.set(name, (counts.get(name) || 0) + 1)
+  }
+  return Array.from(counts.entries()).map(([name, count]) => ({ name, count }))
+}
+
+function watchCombat(candidate) {
+  if (fakeMode || !candidate) return
+  candidate.on('entityHurt', (entity) => {
+    if (entity !== candidate.entity || combatActive || closing) return
+    combatActive = true
+    emit('combat.started', { state: 'active' }, null, { sessionId: currentSessionId })
+  })
+  candidate.on('physicTick', () => {
+    if (!combatActive || closing) return
+    const position = currentPosition()
+    const threatened = position && Object.values(candidate.entities).some(
+      (entity) => isHostileMob(entity) && entity.position && entity.position.distanceTo(position) <= 8,
+    )
+    if (!threatened) {
+      combatActive = false
+      emit('combat.ended', { state: 'clear' }, null, { sessionId: currentSessionId })
+    }
+  })
+}
+
 function assertCurrentScope() {
   if (!Array.isArray(sessionConfig?.scope?.dimensions) || !sessionConfig.scope.dimensions.includes(currentDimension())) {
     throw new Error('dimension_out_of_scope')
@@ -400,13 +459,16 @@ function privateCheckpoint() {
 }
 
 function safeObservation(checkpoint) {
-  return {
+  const observation = {
     dimension: String(checkpoint.dimension || ''),
     health: Number(checkpoint.health || 0),
     food: Number(checkpoint.food || 0),
     inventory_slots: Array.isArray(checkpoint.inventory) ? checkpoint.inventory.length : 0,
     inventory_total: Array.isArray(checkpoint.inventory) ? checkpoint.inventory.reduce((total, row) => total + Number(row.count || 0), 0) : 0,
   }
+  const hostiles = nearbyHostiles()
+  if (hostiles.length) observation.nearby_hostiles = hostiles
+  return observation
 }
 
 function inventoryCount(rows, name) {
@@ -836,6 +898,31 @@ async function handleFresh(request) {
         })
       }
       cacheAndEmit(request, 'session.ready', { capabilities, state: 'ready' })
+      // Fake-world diagnostic push: periodically emit an unsolicited, sanitized
+      // state.snapshot so Core-side listeners (and their tests) can exercise
+      // the push channel without a real server.
+      const fakePushSnapshotMs = Math.max(0, Number(process.env.JOI_MINECRAFT_FAKE_PUSH_SNAPSHOT_MS || 0))
+      if (fakeMode && fakePushSnapshotMs > 0) {
+        const pushSnapshot = () => {
+          if (closing || recoveryRequired) return
+          const checkpoint = privateCheckpoint()
+          emit('state.snapshot', { observation: safeObservation(checkpoint), checkpoint }, null, { sessionId: currentSessionId })
+          setTimeout(pushSnapshot, fakePushSnapshotMs)
+        }
+        setTimeout(pushSnapshot, fakePushSnapshotMs)
+      }
+      // Fake-world combat toggle: alternates started/ended so combat events and
+      // nearby_hostiles observations are deterministic for Core-side tests.
+      const fakeCombatMs = Math.max(0, Number(process.env.JOI_MINECRAFT_FAKE_COMBAT_MS || 0))
+      if (fakeMode && fakeCombatMs > 0) {
+        const toggleCombat = () => {
+          if (closing || recoveryRequired) return
+          combatActive = !combatActive
+          emit(combatActive ? 'combat.started' : 'combat.ended', { state: combatActive ? 'active' : 'clear' }, null, { sessionId: currentSessionId })
+          setTimeout(toggleCombat, fakeCombatMs)
+        }
+        setTimeout(toggleCombat, fakeCombatMs)
+      }
       const fakeIdleDisconnectMs = Number(process.env.JOI_MINECRAFT_FAKE_IDLE_DISCONNECT_MS || 0)
       if (fakeMode && fakeIdleDisconnectMs > 0) {
         setTimeout(() => { if (!closing && !activeGoal) recoveryRequired = true }, fakeIdleDisconnectMs)
@@ -963,6 +1050,7 @@ async function handleLine(line) {
   }
   expectedInputSequence = request.sequence
   seenMessages.set(request.message_id, messageDigest)
+  capCache(seenMessages)
   await handleFresh(request)
 }
 
