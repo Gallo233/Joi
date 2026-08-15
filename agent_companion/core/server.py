@@ -32,7 +32,7 @@ from agent_companion.core.collaboration_store import CollaborationStore, DEFAULT
 from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.codex_runtime import CodexRuntimeSession
 from agent_companion.core.coercion import bool_or, float_or, optional_int
-from agent_companion.core.config import load_workspace_config
+from agent_companion.core.config import load_app_config, load_workspace_config
 from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update
 from agent_companion.core.rpc import (
@@ -51,7 +51,9 @@ from agent_companion.core.scene_session import SceneSession
 from agent_companion.core.game_adapters import GameAdapterRegistry
 from agent_companion.core.minecraft_service import MinecraftGameService
 from agent_companion.core.minecraft_screen import MinecraftScreenCache
+from agent_companion.core.minecraft_autonomy import MinecraftAutonomyTicker
 from agent_companion.core.platform_factory import get_screen_observer
+from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.services import ArtifactService, BackgroundContextService, MemoryService
 from agent_companion.core.skill_manifest import build_native_skill_manifest
@@ -129,6 +131,15 @@ class JsonRpcBridge:
                 PytesseractOcrExtractor(),
                 summarizer=self.app._build_vision_summarizer(),
             ),
+        )
+        self.autonomy_enabled = False
+        self.autonomy_interval_seconds = 30.0
+        self.autonomy = MinecraftAutonomyTicker(
+            propose=self._autonomy_propose,
+            submit=self._autonomy_submit,
+            session_context=self._autonomy_context,
+            on_speak=self._autonomy_speak,
+            speech_guard=self._autonomy_speech_guard,
         )
         self.app.set_session_authorizer(self._session_policy_decision)
         self.app.bus.set_context_provider(self.collaboration.context)
@@ -239,6 +250,7 @@ class JsonRpcBridge:
                     # hold its weights in memory until the next reboot.
                     self.tts.stop_local_service()
         finally:
+            self.autonomy.stop_all()
             self.realtime_voice.shutdown()
             self.minecraft.shutdown()
             self._stop_character_asset_server()
@@ -456,6 +468,8 @@ class JsonRpcBridge:
         router.register("game.adapter.run", self.game_adapter_run_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.minecraft.connection.status", lambda _: self.game_adapters.minecraft_connection_status())
         router.register("game.adapter.minecraft.connection.configure", self.game_adapter_minecraft_connection_configure_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.minecraft.autonomy.configure", self.game_adapter_autonomy_configure_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.minecraft.autonomy.status", self.game_adapter_autonomy_status_command)
         router.register("game.adapter.pause", self.game_adapter_pause_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.resume", self.game_adapter_resume_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.session.start", self.game_adapter_session_start_command, run_in_thread=True, broadcast_ready=True)
@@ -728,6 +742,96 @@ class JsonRpcBridge:
         except Exception:
             return ""
 
+    def _autonomy_submit(self, session_id: str, intent: dict[str, Any]) -> dict[str, Any]:
+        goal_id = f"autonomy-goal-{uuid.uuid4().hex}"
+        return self.minecraft.submit_goal(
+            {"session_id": session_id, "goal_id": goal_id, "final": True, "source": "voice", "intent": intent},
+            autonomy=True,
+        )
+
+    def _autonomy_context(self, session_id: str) -> dict[str, Any]:
+        status = self.minecraft.status({"session_id": session_id})
+        session = status.get("session") if isinstance(status.get("session"), dict) else {}
+        bridge = self.game_adapters.minecraft_session_status(session_id)
+        if not status.get("ok") or bridge.get("active_goal") or session.get("state") != "running":
+            return {"ok": False}
+        snapshot = self.game_adapters.minecraft_snapshot(session_id)
+        observation = snapshot.get("observation") if isinstance(snapshot.get("observation"), dict) else {}
+        screen = self.minecraft.screen_cache.cached() if self.minecraft.screen_cache is not None else {}
+        # Bridge event payloads stay inside Core: only sanitized types and the
+        # observation projection reach the prompt (and never coordinates).
+        recent_event_types = [str(event.get("type") or "") for event in self.game_adapters.minecraft_session_events(session_id)[-8:]]
+        return {
+            "ok": True,
+            "observation": observation,
+            "hostiles": list(observation.get("nearby_hostiles") or []),
+            "recent_event_types": recent_event_types,
+            "screen_text": str(screen.get("text") or "") if screen.get("ok") else "",
+            "persona": self._realtime_persona_prompt(),
+        }
+
+    def _autonomy_speech_guard(self) -> bool:
+        thread_id = str(self.collaboration.context().get("thread_id") or "")
+        return self.app.voice_generations.current(thread_id) is not None
+
+    def _autonomy_speak(self, text: str) -> None:
+        """Speak one proactive line through the normal voice pipeline.
+
+        The line still passes safe_voice_line, the speaker lock and the
+        generation gate: no coordinates, no JSON, no talking over the user's
+        own turn.
+        """
+
+        thread_id = str(self.collaboration.context().get("thread_id") or "")
+        generation = self.app.voice_generations.begin(thread_id, character_id=str(self.app.character.id))
+        self.app.bus.emit(
+            AgentEvent(
+                EventType.TOOL_COMPLETED,
+                f"minecraft-autonomy-{uuid.uuid4().hex[:8]}",
+                DisplayCard("Joi", text[:200], status="info"),
+                safe_voice_line(text, fallback=""),
+                {
+                    "tool": "minecraft.autonomy",
+                    "voice_generation": generation.generation_id,
+                    "skill_id": "joi.minecraft",
+                    "skill_category": "game",
+                    "skill_permission_level": "low",
+                },
+            )
+        )
+
+    def _autonomy_propose(self, prompt: str) -> dict[str, Any]:
+        """One bounded text completion deciding speak/propose/none.
+
+        Disabled LLM, mock or unconfigured providers degrade to {"kind":
+        "none"}: autonomy is optional, silence is the right failure.
+        """
+
+        if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
+            return {"kind": "none"}
+        try:
+            config = load_app_config(self.workspace / "config.yaml")
+        except Exception:
+            return {"kind": "none"}
+        if config.llm.use_mock or not (config.llm.is_configured or config.llm.is_expression_configured):
+            return {"kind": "none"}
+        try:
+            outcome = chat_completion(
+                config.llm,
+                "voice_style",
+                temperature=min(max(config.llm.temperature, 0.2), 0.85),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "只输出严格的 JSON 对象，不要输出 JSON 以外的任何文本。"},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+        except Exception:
+            return {"kind": "none"}
+        if not outcome.ok:
+            return {"kind": "none"}
+        return str(outcome.value or "{}")
+
     def _rpc_artifact_read(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.read_artifact_command(str(params.get("artifact") or ""))
 
@@ -993,13 +1097,52 @@ class JsonRpcBridge:
         params = params if isinstance(params, dict) else {}
         if str(params.get("adapter_id") or "minecraft") != "minecraft":
             return {"ok": False, "error": "persistent_session_not_supported"}
-        return self.minecraft.start_session(params)
+        result = self.minecraft.start_session(params)
+        if result.get("ok") and self.autonomy_enabled:
+            session_id = str((result.get("session") or {}).get("id") or "")
+            if session_id:
+                self.autonomy.start(session_id)
+        return result
 
     def game_adapter_session_status_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.minecraft.status(params)
 
     def game_adapter_session_stop_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        session_id = str(params.get("session_id") or "")
+        if session_id:
+            self.autonomy.stop(session_id)
         return self.minecraft.stop_session(params)
+
+    def game_adapter_autonomy_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        if set(params) - {"enabled", "interval_seconds"}:
+            return {"ok": False, "error": "autonomy_configure_invalid"}
+        if "enabled" in params:
+            self.autonomy_enabled = bool(params.get("enabled"))
+        if "interval_seconds" in params:
+            try:
+                self.autonomy_interval_seconds = float(params.get("interval_seconds"))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "autonomy_configure_invalid"}
+            self.autonomy.set_interval(self.autonomy_interval_seconds)
+        for session_id in self.game_adapters.minecraft_active_sessions():
+            if self.autonomy_enabled:
+                self.autonomy.start(session_id)
+            else:
+                self.autonomy.stop(session_id)
+        return self.game_adapter_autonomy_status_command()
+
+    def game_adapter_autonomy_status_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "enabled": self.autonomy_enabled,
+            "interval_seconds": self.autonomy.interval_seconds,
+            "sessions": {
+                session_id: self.autonomy.status(session_id)
+                for session_id in self.game_adapters.minecraft_active_sessions()
+            },
+        }
 
     def game_adapter_goal_submit_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.minecraft.submit_goal(params)

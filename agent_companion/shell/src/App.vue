@@ -3535,7 +3535,7 @@ async function startMinecraftSession() {
     const dimensions = scope.dimensions.join('、')
     const confirmed = await requestAppConfirm({
       title: '确认 Minecraft 能力范围',
-      message: `模式：${minecraftMode.value === 'delegate' ? 'Joi 单独玩' : '与 Joi 一起玩'}\n服务器标签：${scope.server_id}\n世界：${scope.world}\n维度：${dimensions}\n起点半径：${scope.max_radius}\n最多动作：${scope.max_actions}\n最多修改方块：${scope.max_blocks_changed}\n允许方块：${scope.allowed_blocks.join('、')}\n允许玩家：${scope.allowed_players.join('、') || '无'}\n建造：${scope.allow_build ? '允许' : '禁止'}\n容器：${scope.allow_containers ? '允许' : '禁止'}\n\n确认后 Joi 才会连接游戏；每条动作仍会单独校验和留回执。`,
+      message: `模式：${minecraftMode.value === 'delegate' ? 'Joi 单独玩' : '与 Joi 一起玩'}\n服务器标签：${scope.server_id}\n世界：${scope.world}\n维度：${dimensions}\n起点半径：${scope.max_radius}\n最多动作：${scope.max_actions}\n最多修改方块：${scope.max_blocks_changed}\n允许方块：${scope.allowed_blocks.join('、')}\n允许玩家：${scope.allowed_players.join('、') || '无'}\n建造：${scope.allow_build ? '允许' : '禁止'}\n容器：${scope.allow_containers ? '允许' : '禁止'}\n\n确认后 Joi 才会连接游戏；每条动作仍会单独校验和留回执。自主行为（如主动观察/评论）与你的指令共用上述动作与方块额度，且攻击只在收到你明确指令后才会执行。`,
       confirmLabel: '确认并连接',
     })
     if (!confirmed) {

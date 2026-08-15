@@ -181,6 +181,7 @@ class MinecraftContractTests(unittest.TestCase):
 class _FakeRegistry:
     def __init__(self) -> None:
         self.submit_calls = 0
+        self.cancel_calls: list[str] = []
         self.started = False
         self.result: dict[str, object] = {
             "ok": True,
@@ -222,6 +223,7 @@ class _FakeRegistry:
         return {"ok": True, "acknowledged": True}
 
     def cancel_minecraft_goal(self, session_id: str, goal_id: str) -> dict[str, object]:
+        self.cancel_calls.append(goal_id)
         return {"ok": True, "acknowledged": True}
 
     def stop_minecraft_session(self, session_id: str) -> dict[str, object]:
@@ -330,6 +332,49 @@ class MinecraftCoreGateTests(unittest.TestCase):
         self.assertFalse(goal["ok"])
         self.assertEqual(goal["error"], "screen_observation_unavailable")
         self.assertEqual(self.registry.submit_calls, 0)
+
+    def _submit_autonomy(self, session_id: str, goal_id: str, intent: dict[str, object]) -> dict[str, object]:
+        return self.service.submit_goal(
+            {
+                "session_id": session_id,
+                "goal_id": goal_id,
+                "final": True,
+                "source": "voice",
+                "intent": intent,
+            },
+            autonomy=True,
+        )
+
+    def test_user_goal_preempts_an_active_autonomy_goal(self) -> None:
+        session_id = self._start()
+        with self.service._lock:
+            self.service._runtime[session_id]["active_goal"] = "autonomy-goal-1"
+            self.service._runtime[session_id]["active_goal_autonomy"] = True
+        goal = self._submit(session_id, "goal-user", {"action": "inventory"})
+        self.assertTrue(goal["ok"], goal)
+        self.assertEqual(self.registry.cancel_calls, ["autonomy-goal-1"])
+        self.assertEqual(self.service._runtime[session_id]["active_goal"], "")
+
+    def test_autonomy_goal_skips_while_any_goal_is_active(self) -> None:
+        session_id = self._start()
+        first = self._submit_autonomy(session_id, "goal-autonomy", {"action": "observe"})
+        self.assertTrue(first["ok"], first)
+        # A goal is only active while its submission is in flight; simulate one.
+        with self.service._lock:
+            self.service._runtime[session_id]["active_goal"] = "goal-user-busy"
+        skipped = self._submit_autonomy(session_id, "goal-autonomy-2", {"action": "inventory"})
+        self.assertFalse(skipped["ok"])
+        self.assertEqual(skipped["error"], "minecraft_goal_already_running")
+        self.assertTrue(skipped["zero_actions"])
+
+    def test_autonomy_attack_is_forbidden_at_the_service_layer(self) -> None:
+        session_id = self._start()
+        goal = self._submit_autonomy(session_id, "goal-autonomy-attack", {"action": "attack", "count": 1, "radius": 8, "dimension": "overworld"})
+        self.assertFalse(goal["ok"])
+        self.assertEqual(goal["error"], "autonomy_attack_forbidden")
+        self.assertTrue(goal["zero_actions"])
+        self.assertEqual(self.registry.submit_calls, 0)
+        self.assertEqual(self.store.list_receipts(session_id), [])
 
     def test_partial_scope_denial_and_permission_denial_send_zero_bridge_actions(self) -> None:
         session_id = self._start()

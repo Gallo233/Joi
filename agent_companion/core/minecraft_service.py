@@ -121,6 +121,7 @@ class MinecraftGameService:
         cancel_requested: Callable[[], bool] | None = None,
         on_registered: Callable[[], None] | None = None,
         on_submitted: Callable[[], None] | None = None,
+        autonomy: bool = False,
     ) -> dict[str, Any]:
         source = params if isinstance(params, Mapping) else {}
         if _cancelled(cancel_requested):
@@ -139,8 +140,13 @@ class MinecraftGameService:
             )
         except MinecraftContractError as exc:
             return {"ok": False, "error": exc.code, "zero_actions": True}
+        if autonomy and str(intent.get("action") or "") == "attack":
+            # Scheme A, second layer: even a compromised proposer can never make
+            # autonomy attack. The voice-path gate is the first layer.
+            return {"ok": False, "error": "autonomy_attack_forbidden", "zero_actions": True}
         intent_digest = hashlib.sha256(json.dumps(intent, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         key = (session_id, goal_id)
+        preempt_goal = ""
         with self._lock:
             previous = self._goals.get(key)
             if previous:
@@ -152,11 +158,27 @@ class MinecraftGameService:
             runtime = self._runtime.get(session_id)
             self._goals[key] = {"digest": intent_digest, "result": None}
             if runtime is not None and runtime.get("active_goal"):
-                result = {"ok": False, "error": "minecraft_goal_already_running", "zero_actions": True}
-                self._goals[key]["result"] = result
-                return result
+                if autonomy:
+                    # Autonomy never queues behind anything: skip this tick.
+                    result = {"ok": False, "error": "minecraft_goal_already_running", "zero_actions": True}
+                    self._goals[key]["result"] = result
+                    return result
+                if runtime.get("active_goal_autonomy"):
+                    # B4: a user goal preempts the running autonomy goal. The
+                    # cancelled goal's blocked submit returns goal.cancelled and
+                    # cannot restart itself (no-replay).
+                    preempt_goal = str(runtime["active_goal"])
+                    runtime["active_goal"] = ""
+                    runtime["active_goal_autonomy"] = False
+                else:
+                    result = {"ok": False, "error": "minecraft_goal_already_running", "zero_actions": True}
+                    self._goals[key]["result"] = result
+                    return result
             if runtime is not None:
                 runtime["active_goal"] = goal_id
+                runtime["active_goal_autonomy"] = bool(autonomy)
+        if preempt_goal:
+            self.adapters.cancel_minecraft_goal(session_id, preempt_goal)
         if runtime is None:
             return self._finish_goal(key, {"ok": False, "error": "minecraft_session_not_found", "zero_actions": True})
         if _cancelled(cancel_requested):
@@ -400,6 +422,7 @@ class MinecraftGameService:
             runtime = self._runtime.get(key[0])
             if runtime is not None and runtime.get("active_goal") == key[1]:
                 runtime["active_goal"] = ""
+                runtime["active_goal_autonomy"] = False
         return result
 
 

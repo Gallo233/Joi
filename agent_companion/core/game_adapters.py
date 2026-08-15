@@ -421,6 +421,10 @@ class GameAdapterRegistry:
                 "active_goal": bool(self._minecraft_goals.get(session_id)),
             }
 
+    def minecraft_active_sessions(self) -> list[str]:
+        with self._lock:
+            return sorted(self._minecraft_sessions)
+
     def shutdown(self) -> None:
         with self._lock:
             clients = list(self._minecraft_sessions.values())
