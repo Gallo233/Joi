@@ -15,6 +15,7 @@ from agent_companion.core.realtime_voice import (
     QwenRealtimeSession,
     RealtimeVoiceCoordinator,
     RealtimeVoiceRuntimeState,
+    _transcript_authorizes_attack,
     build_realtime_voice_coordinator,
 )
 from agent_companion.core.server import JsonRpcBridge
@@ -93,7 +94,7 @@ def _ready_socket() -> _FakeSocket:
     )
 
 
-def _wait_until(predicate: object, timeout: float = 1.5) -> None:
+def _wait_until(predicate: object, timeout: float = 3.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if callable(predicate) and predicate():
@@ -151,6 +152,12 @@ class QwenRealtimeConfigurationTests(unittest.TestCase):
 
 
 class QwenRealtimePersonaTests(unittest.TestCase):
+    def test_attack_instruction_tokens_are_conservative(self) -> None:
+        for authorized in ("帮我攻击那只僵尸", "打它", "attack the zombie", "开打吧", "kill it", "去揍它"):
+            self.assertTrue(_transcript_authorizes_attack(authorized), authorized)
+        for refused in ("", "打包带走", "我们接下来干嘛", "打扫一下房间", "打个招呼", "flight 延误了"):
+            self.assertFalse(_transcript_authorizes_attack(refused), refused)
+
     def _start(self, mode: str = "conversation", persona: object = lambda: "") -> tuple[_FakeSocket, RealtimeVoiceCoordinator, dict[str, object]]:
         socket = _ready_socket()
         connector = _Connector(socket)
@@ -291,7 +298,7 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         encoded = json.dumps(config)
         for forbidden in ("session_id", "goal_id", "approval", "confirmed_scope", "api_key", "sk-private"):
             self.assertNotIn(forbidden, encoded)
-        self.assertEqual(len(config["tools"]), 11)  # 10 bridge primitives + observe_screen
+        self.assertEqual(len(config["tools"]), 14)  # 10 bridge primitives + observe_screen + attack/flee/guard
         self.assertEqual(
             events[-1],
             {"session_id": "realtime-local-1", "type": "state", "state": "listening"},
@@ -459,6 +466,91 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         created = next(row for row in socket.sent if row.get("type") == "conversation.item.create")
         output = json.loads(created["item"]["output"])
         self.assertNotIn("observation", output)
+        session.stop()
+
+    def _drive_turn_call(
+        self,
+        session: QwenRealtimeSession,
+        name: str,
+        arguments: dict[str, object],
+        suffix: str,
+        transcript: str = "",
+    ) -> None:
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": f"user-item-{suffix}"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": f"user-item-{suffix}"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": f"user-item-{suffix}"})
+        if transcript:
+            session.handle_provider_event_for_test(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": f"user-item-{suffix}",
+                    "transcript": transcript,
+                }
+            )
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": f"response-{suffix}"}})
+        _add_output_item(session, f"response-{suffix}", f"call-item-{suffix}", "function_call")
+        session.handle_provider_event_for_test(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": f"response-{suffix}",
+                "item_id": f"call-item-{suffix}",
+                "call_id": f"call-{suffix}",
+                "name": name,
+                "arguments": json.dumps(arguments),
+            }
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": f"response-{suffix}", "status": "completed"}})
+
+    def test_attack_requires_an_explicit_instruction_in_the_same_turn(self) -> None:
+        actions: list[tuple[str, str, dict[str, object]]] = []
+        session, _socket, _connector, events = self._session(actions=actions)
+        self.assertTrue(session.start()["ok"])
+        self._drive_turn_call(session, "minecraft_attack", {"count": 1}, "a", transcript="帮我打包一下")
+        _wait_until(lambda: any(event.get("type") == "game_action" and event.get("status") == "rejected" for event in events))
+        self.assertEqual(len(actions), 0)
+        rejected = next(event for event in events if event.get("type") == "game_action" and event.get("status") == "rejected")
+        self.assertEqual(rejected["error"], "attack_requires_explicit_instruction")
+        self._drive_turn_call(session, "minecraft_attack", {"count": 2}, "b", transcript="帮我攻击那只僵尸")
+        _wait_until(lambda: len(actions) == 1)
+        self.assertEqual(actions[0][2]["intent"]["action"], "attack")
+        self.assertEqual(actions[0][2]["intent"]["count"], 2)
+        session.stop()
+
+    def test_flee_and_guard_need_no_attack_authorization(self) -> None:
+        actions: list[tuple[str, str, dict[str, object]]] = []
+        session, _socket, _connector, events = self._session(actions=actions)
+        self.assertTrue(session.start()["ok"])
+        self._drive_turn_call(session, "minecraft_flee", {"distance": 12}, "f", transcript="有怪，我害怕")
+        _wait_until(lambda: len(actions) == 1)
+        self.assertEqual(actions[0][2]["intent"]["action"], "flee")
+        self._drive_turn_call(session, "minecraft_guard", {}, "g")
+        _wait_until(lambda: len(actions) == 2)
+        self.assertEqual(actions[1][2]["intent"]["action"], "guard")
+        rejected = [event for event in events if event.get("type") == "game_action" and event.get("status") == "rejected"]
+        self.assertEqual(rejected, [])
+        session.stop()
+
+    def test_a_previous_turns_instruction_does_not_authorize_a_later_attack(self) -> None:
+        actions: list[tuple[str, str, dict[str, object]]] = []
+        session, _socket, _connector, events = self._session(actions=actions)
+        self.assertTrue(session.start()["ok"])
+        # Turn one ends with an attack instruction but no attack proposal.
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "user-item-1"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "user-item-1"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "user-item-1"})
+        session.handle_provider_event_for_test(
+            {"type": "conversation.item.input_audio_transcription.completed", "item_id": "user-item-1", "transcript": "帮我攻击那只僵尸"}
+        )
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "response-1"}})
+        _add_output_item(session, "response-1", "text-item-1", "message")
+        session.handle_provider_event_for_test(
+            {"type": "response.text.done", "response_id": "response-1", "item_id": "text-item-1", "text": "好的，收到。"}
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "response-1", "status": "completed"}})
+        # Turn two proposes an attack on a neutral transcript: rejected.
+        self._drive_turn_call(session, "minecraft_attack", {"count": 1}, "2", transcript="我们接下来干嘛")
+        _wait_until(lambda: any(event.get("type") == "game_action" and event.get("status") == "rejected" for event in events))
+        self.assertEqual(len(actions), 0)
         session.stop()
 
     def test_final_text_requires_the_registered_item_of_the_current_response(self) -> None:

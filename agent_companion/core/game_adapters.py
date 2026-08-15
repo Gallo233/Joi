@@ -652,7 +652,7 @@ def _builtin_manifests() -> tuple[GameAdapterManifest, ...]:
             modes=("companion", "delegate"),
             detection=("structured_bridge", "foreground_window"),
             observation_sources=("mineflayer_state", "screen", "accessibility"),
-            action_sets=("observe", "inventory", "follow_player", "come_to_player", "collect", "mine", "craft", "eat", "place_blueprint", "deposit"),
+            action_sets=("observe", "inventory", "follow_player", "come_to_player", "collect", "mine", "craft", "eat", "place_blueprint", "deposit", "attack", "flee", "guard"),
             pause_strategy="session_goal_ack_or_forced_termination",
             verification=("world_state", "inventory_delta", "screen_change"),
             checkpoint_strategy="private_core_checkpoint_no_auto_replay",

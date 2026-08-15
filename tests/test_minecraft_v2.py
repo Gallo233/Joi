@@ -60,6 +60,9 @@ class MinecraftContractTests(unittest.TestCase):
                 ],
             },
             {"action": "deposit", "container": "chest", "items": [{"item": "oak_log", "count": 2}], "radius": 8},
+            {"action": "attack", "count": 2, "radius": 12, "dimension": "overworld"},
+            {"action": "flee", "distance": 12, "duration_seconds": 15, "dimension": "overworld"},
+            {"action": "guard", "dimension": "overworld"},
         )
         for sample in samples:
             with self.subTest(action=sample["action"]):
@@ -120,6 +123,33 @@ class MinecraftContractTests(unittest.TestCase):
         scope = canonicalize_minecraft_scope(SAFE_SCOPE)
         self.assertEqual(check_intent_scope(intent, scope), "")
         self.assertEqual(estimated_world_changes(intent), 0)
+
+    def test_combat_actions_have_strict_schemas_and_players_cannot_be_targets(self) -> None:
+        attack = canonicalize_game_intent(
+            {"final": True, "source": "voice", "intent": {"action": "attack", "count": 1, "radius": 8, "dimension": "overworld"}}
+        )
+        self.assertEqual(attack["count"], 1)
+        # The schema has no target field at all: a player cannot be expressed.
+        with self.assertRaises(MinecraftContractError) as raised:
+            canonicalize_game_intent({"final": True, "source": "voice", "intent": {"action": "attack", "player": "Player"}})
+        self.assertEqual(raised.exception.code, "unexpected_intent_field")
+        for invalid in (
+            {"action": "attack", "count": 100},
+            {"action": "flee", "distance": 1},
+            {"action": "guard", "dimension": "aether"},
+        ):
+            with self.subTest(intent=invalid):
+                with self.assertRaises(MinecraftContractError):
+                    canonicalize_game_intent({"final": True, "source": "voice", "intent": invalid})
+        scope = canonicalize_minecraft_scope(SAFE_SCOPE)
+        self.assertEqual(check_intent_scope(attack, scope), "")
+        tight_scope = canonicalize_minecraft_scope({**SAFE_SCOPE, "max_radius": 16})
+        out_of_radius = canonicalize_game_intent(
+            {"final": True, "source": "voice", "intent": {"action": "attack", "radius": 32, "dimension": "overworld"}}
+        )
+        self.assertEqual(check_intent_scope(out_of_radius, tight_scope), "radius_out_of_scope")
+        for action in (attack, {"action": "flee"}, {"action": "guard"}):
+            self.assertEqual(estimated_world_changes(action), 0)
 
     def test_scope_requires_world_bounds_and_checks_every_mutating_intent(self) -> None:
         scope = canonicalize_minecraft_scope(SAFE_SCOPE)
@@ -964,6 +994,20 @@ class MinecraftBridgeIntegrationTests(unittest.TestCase):
         self.assertEqual(checkpoint["dimension"], "overworld")
         self.assertTrue(any(row["name"] == "oak_log" for row in checkpoint["inventory"]))
         self.assertEqual(snapshot["bridge_instance_id"], started["bridge_instance_id"])
+
+    def test_fake_bridge_executes_combat_actions_with_verified_effects(self) -> None:
+        started = self.client.start()
+        self.assertTrue(started["ok"], started)
+        attack = self.client.submit_goal("goal-attack", {"action": "attack", "count": 3, "radius": 8, "dimension": "overworld"})
+        self.assertTrue(attack["ok"], attack)
+        self.assertEqual(attack["effects"], 3)
+        self.assertTrue(attack["verified"])
+        flee = self.client.submit_goal("goal-flee", {"action": "flee", "distance": 12, "duration_seconds": 1, "dimension": "overworld"})
+        self.assertTrue(flee["ok"], flee)
+        self.assertEqual(flee["effects"], 1)
+        guard = self.client.submit_goal("goal-guard", {"action": "guard", "dimension": "overworld"})
+        self.assertTrue(guard["ok"], guard)
+        self.assertEqual(guard["effects"], 1)
 
     def test_unsolicited_events_reach_listeners_and_disposer_stops_them(self) -> None:
         self.client.close()

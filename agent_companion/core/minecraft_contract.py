@@ -18,6 +18,9 @@ GAME_ACTIONS = frozenset(
         "eat",
         "place_blueprint",
         "deposit",
+        "attack",
+        "flee",
+        "guard",
     }
 )
 # Core-executed read-only action: the bridge never sees it (the bridge cannot
@@ -98,6 +101,9 @@ def canonicalize_game_intent(payload: Mapping[str, Any] | None) -> dict[str, Any
         "eat": _eat,
         "place_blueprint": _blueprint,
         "deposit": _deposit,
+        "attack": _attack,
+        "flee": _flee,
+        "guard": _guard,
     }
     return builders[action](raw)
 
@@ -199,6 +205,34 @@ def _observe(raw: Mapping[str, Any]) -> dict[str, Any]:
 def _observe_screen(raw: Mapping[str, Any]) -> dict[str, Any]:
     _exact_fields(raw, {"action"}, set(), "unexpected_intent_field")
     return {"action": "observe_screen"}
+
+
+def _attack(raw: Mapping[str, Any]) -> dict[str, Any]:
+    # No player/entity name field exists: the target is always resolved by the
+    # bridge as the nearest hostile mob within radius, so a player target
+    # cannot even be expressed here.
+    _exact_fields(raw, {"action"}, {"count", "radius", "dimension"}, "unexpected_intent_field")
+    return {
+        "action": "attack",
+        "count": _integer(raw.get("count", 1), 1, 64, "invalid_attack_count"),
+        "radius": _integer(raw.get("radius", 16), 1, 32, "invalid_attack_radius"),
+        "dimension": _dimension(raw.get("dimension", "overworld")),
+    }
+
+
+def _flee(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action"}, {"distance", "duration_seconds", "dimension"}, "unexpected_intent_field")
+    return {
+        "action": "flee",
+        "distance": _integer(raw.get("distance", 12), 4, 32, "invalid_flee_distance"),
+        "duration_seconds": _integer(raw.get("duration_seconds", 15), 1, 120, "invalid_flee_duration"),
+        "dimension": _dimension(raw.get("dimension", "overworld")),
+    }
+
+
+def _guard(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action"}, {"dimension"}, "unexpected_intent_field")
+    return {"action": "guard", "dimension": _dimension(raw.get("dimension", "overworld"))}
 
 
 def _inventory(raw: Mapping[str, Any]) -> dict[str, Any]:

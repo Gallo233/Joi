@@ -156,6 +156,7 @@ class QwenRealtimeSession:
         self._speech_item_key = ""
         self._input_item_epochs: dict[str, int] = {}
         self._input_item_order: deque[str] = deque(maxlen=64)
+        self._user_final_by_epoch: dict[int, str] = {}
         self._response_open = False
         self._response_epoch = -1
         self._response_key = ""
@@ -350,6 +351,10 @@ class QwenRealtimeSession:
             epoch = self._input_item_epoch(event)
             text = _bounded_transcript(event.get("transcript"))
             if text and epoch >= 0:
+                with self._lock:
+                    self._user_final_by_epoch[epoch] = text
+                    while len(self._user_final_by_epoch) > 8:
+                        self._user_final_by_epoch.pop(min(self._user_final_by_epoch), None)
                 self._emit({"type": "user_transcript", "text": text, "final": True, "epoch": epoch})
             return
         if event_type == "response.created":
@@ -533,6 +538,21 @@ class QwenRealtimeSession:
             self._handled_calls[call["call_id"]] = digest
             if proposal is None or self._active_goal_id or self._last_action_epoch == epoch or self._stopped:
                 self._emit({"type": "game_action", "status": "rejected", "error": "realtime_action_invalid"})
+                return
+            proposed_action = str((proposal.get("intent") or {}).get("action") or "")
+            # Scheme A: an attack is the one primitive that actively harms an
+            # entity, so it never runs on the model's own initiative. The same
+            # turn's final user transcript must contain an explicit attack
+            # instruction; autonomy can only ever propose flee/guard.
+            if proposed_action == "attack" and not _transcript_authorizes_attack(self._user_final_by_epoch.get(epoch, "")):
+                self._emit(
+                    {
+                        "type": "game_action",
+                        "action": "attack",
+                        "status": "rejected",
+                        "error": "attack_requires_explicit_instruction",
+                    }
+                )
                 return
             goal_id = f"voice-goal-{uuid.uuid4().hex}"
             permit = ActionDispatchPermit()
@@ -1023,6 +1043,32 @@ def minecraft_proposal_tools() -> list[dict[str, Any]]:
             {},
             [],
         ),
+        tool(
+            "attack",
+            "Attack the nearest hostile mob within radius. Never targets players. Only allowed after the user explicitly instructed an attack.",
+            {
+                "count": {"type": "integer", "minimum": 1, "maximum": 64},
+                "radius": {"type": "integer", "minimum": 1, "maximum": 32},
+                "dimension": dimension,
+            },
+            [],
+        ),
+        tool(
+            "flee",
+            "Move away from nearby hostile mobs for a bounded duration.",
+            {
+                "distance": {"type": "integer", "minimum": 4, "maximum": 32},
+                "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+                "dimension": dimension,
+            },
+            [],
+        ),
+        tool(
+            "guard",
+            "Stop moving and stay alert where Joi stands.",
+            {"dimension": dimension},
+            [],
+        ),
     ]
 
 
@@ -1154,7 +1200,7 @@ def _safe_public_event(payload: Mapping[str, Any]) -> dict[str, Any]:
         result = {"type": "game_action", "status": status if status in {"acting", "completed", "partial", "unverified", "failed", "cancelled", "rejected"} else "failed"}
         if action:
             result["action"] = action[:40]
-        if payload.get("error") in {"realtime_action_ambiguous", "realtime_action_invalid"}:
+        if payload.get("error") in {"realtime_action_ambiguous", "realtime_action_invalid", "attack_requires_explicit_instruction"}:
             result["error"] = payload["error"]
         if "recovery_required" in payload:
             result["recovery_required"] = bool(payload.get("recovery_required"))
@@ -1227,10 +1273,39 @@ def _minecraft_instructions(voice_locale: str = "", chat_locale: str = "", perso
             _persona_block(persona),
             "你可以在确有必要时调用一个 minecraft_* 工具提出单个游戏动作；工具只是提案，Core 会独立检查权限、范围和预算。",
             "每一轮最多提出一个动作，不要猜测坐标、权限、会话标识或完成结果。",
+            "战斗规则：除非用户在同一轮里明确要求攻击，否则永远不要提出 minecraft_attack；害怕或躲避时可以提出 minecraft_flee 或 minecraft_guard。任何动作都不得以玩家为目标。",
             "收到工具结果后才可以描述是否完成；输出必须是适合直接朗读的纯文本。",
             _language_rule(voice_locale, chat_locale),
         ]
     )
+
+
+_ATTACK_INSTRUCTION_TOKENS = (
+    "攻击",
+    "打它",
+    "打他",
+    "打她",
+    "打怪",
+    "打死",
+    "打那",
+    "开打",
+    "揍",
+    "attack",
+    "kill",
+    "fight",
+)
+
+
+def _transcript_authorizes_attack(text: str) -> bool:
+    """Scheme A gate: only an explicit attack instruction in the same turn counts.
+
+    Conservative by design: false negatives merely refuse an attack, while the
+    token list avoids generic words like a bare "打" so that "打包/打扫" can
+    never arm the most dangerous primitive.
+    """
+
+    lowered = str(text or "").casefold().strip()
+    return bool(lowered) and any(token in lowered for token in _ATTACK_INSTRUCTION_TOKENS)
 
 
 def _persona_block(persona: str) -> str:

@@ -436,10 +436,16 @@ def _result_matches_intent(intent: Mapping[str, Any], result: Mapping[str, Any])
     action = str(intent.get("action") or "")
     changes = max(0, int(result.get("changes") or 0))
     effects = max(0, int(result.get("effects") or 0))
-    if action in {"observe", "inventory"}:
+    if action in {"observe", "inventory", "observe_screen"}:
         return changes == 0 and effects == 0
     if action in {"follow_player", "come_to_player", "eat"}:
         return effects >= 1
+    if action == "attack":
+        return effects >= int(intent.get("count") or 1)
+    if action in {"flee", "guard"}:
+        # Verified by the bridge's own distance/state checks; no hostile nearby
+        # is a legitimate zero-effect completion.
+        return True
     if action in {"collect", "mine"}:
         requested = int(intent.get("count") or 0)
         return changes == requested and effects >= requested

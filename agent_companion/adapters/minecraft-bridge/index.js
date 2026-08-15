@@ -31,6 +31,9 @@ const capabilities = [
   'eat',
   'place_blueprint',
   'deposit',
+  'attack',
+  'flee',
+  'guard',
 ]
 const allowedTypes = new Set([
   'session.start',
@@ -199,6 +202,9 @@ function validateIntent(intent) {
     eat: [['action', 'item'], ['action']],
     place_blueprint: [['action', 'anchor', 'dimension', 'player', 'blocks'], ['action', 'anchor', 'blocks']],
     deposit: [['action', 'container', 'items', 'radius', 'dimension'], ['action', 'items']],
+    attack: [['action', 'count', 'radius', 'dimension'], ['action']],
+    flee: [['action', 'distance', 'duration_seconds', 'dimension'], ['action']],
+    guard: [['action', 'dimension'], ['action']],
   }[intent.action]
   const keys = Object.keys(intent)
   if (!fields[1].every((key) => keys.includes(key)) || keys.some((key) => !fields[0].includes(key))) return 'unexpected_intent_field'
@@ -594,6 +600,22 @@ async function executeFake(intent, goal) {
       effects += row.count
       goal.effects = effects
     }
+  } else if (intent.action === 'attack') {
+    for (let index = 0; index < intent.count; index += 1) {
+      await waitControlled(goal, delay)
+      effects += 1
+      goal.effects = effects
+    }
+  } else if (intent.action === 'flee') {
+    await waitControlled(goal, delay)
+    fakeState.position.x += 1
+    assertCurrentScope()
+    effects += 1
+    goal.effects = effects
+  } else if (intent.action === 'guard') {
+    await waitControlled(goal, delay)
+    effects += 1
+    goal.effects = effects
   } else {
     await waitControlled(goal, delay)
   }
@@ -770,6 +792,55 @@ async function executeReal(intent, goal) {
     const deposited = intent.items.every((row) => inventoryCount(beforeInventory, row.item) - inventoryCount(privateCheckpoint().inventory, row.item) >= row.count)
     return { changes, effects, summary: 'deposit_completed', verified: deposited }
   }
+  if (intent.action === 'attack') {
+    // PvP is structurally impossible here: the filter only ever admits hostile
+    // mobs, so a player can never be resolved as the target (contract side
+    // offers no target field either - the two layers enforce together).
+    let attacked = 0
+    for (let index = 0; index < intent.count; index += 1) {
+      await waitControlled(goal, 0)
+      const target = bot.nearestEntity(
+        (entity) => isHostileMob(entity) && entity.position && bot.entity.position.distanceTo(entity.position) <= intent.radius,
+      )
+      if (!target) throw new Error('hostile_not_found')
+      assertPositionScope(target.position)
+      await safeGoto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 3))
+      await waitControlled(goal, 0)
+      await runAtomic(goal, async () => {
+        await bot.attack(target)
+        attacked += 1
+        effects += 1
+        goal.effects = effects
+      })
+      await waitControlled(goal, 0)
+    }
+    return { changes, effects, summary: 'attack_completed', verified: attacked >= intent.count }
+  }
+  if (intent.action === 'flee') {
+    const hostile = bot.nearestEntity(
+      (entity) => isHostileMob(entity) && entity.position && bot.entity.position.distanceTo(entity.position) <= 32,
+    )
+    if (!hostile) return { changes, effects: 0, summary: 'flee_completed', verified: true }
+    bot.pathfinder.setGoal(new goals.GoalInvert(new goals.GoalFollow(hostile, intent.distance)), true)
+    const deadline = Date.now() + intent.duration_seconds * 1000
+    while (Date.now() < deadline) {
+      await waitControlled(goal, 100)
+      assertCurrentScope()
+    }
+    bot.pathfinder.stop()
+    const after = bot.nearestEntity(
+      (entity) => isHostileMob(entity) && entity.position && bot.entity.position.distanceTo(entity.position) <= 8,
+    )
+    effects = 1
+    goal.effects = effects
+    return { changes, effects, summary: 'flee_completed', verified: !after || after.position.distanceTo(bot.entity.position) >= intent.distance - 2 }
+  }
+  if (intent.action === 'guard') {
+    if (bot?.pathfinder) bot.pathfinder.stop()
+    if (bot && typeof bot.stopDigging === 'function') bot.stopDigging()
+    const threatened = nearbyHostiles().length > 0
+    return { changes, effects: threatened ? 1 : 0, summary: 'guard_completed', verified: true }
+  }
   throw new Error('unknown_game_action')
 }
 
@@ -789,7 +860,7 @@ function safeError(error) {
     'cannot_dig_block', 'unknown_item', 'recipe_not_found', 'food_not_found',
     'blueprint_anchor_not_found', 'missing_build_item', 'missing_reference_block',
     'collect_item_not_acquired', 'container_not_found', 'deposit_item_not_found', 'deposit_item_count_insufficient', 'minecraft_connect_failed', 'spawn_timeout',
-    'dimension_out_of_scope', 'spatial_scope_exceeded',
+    'dimension_out_of_scope', 'spatial_scope_exceeded', 'hostile_not_found',
   ])
   return allow.has(value) ? value : 'minecraft_goal_failed'
 }

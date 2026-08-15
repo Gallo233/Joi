@@ -97,6 +97,7 @@ _BRIDGE_ERROR_CODES = frozenset(
         "goal_not_active",
         "goal_not_paused",
         "goal_timeout",
+        "hostile_not_found",
         "verification_failed",
         "invalid_blueprint",
         "invalid_bridge_envelope",
