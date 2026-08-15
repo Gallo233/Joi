@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -32,6 +33,7 @@ from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.codex_runtime import CodexRuntimeSession
 from agent_companion.core.coercion import bool_or, float_or, optional_int
 from agent_companion.core.config import load_workspace_config
+from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update
 from agent_companion.core.rpc import (
     JsonRpcProtocolError,
@@ -47,8 +49,15 @@ from agent_companion.core.policy import PolicyDecision
 from agent_companion.core.runtime_status import build_runtime_status
 from agent_companion.core.scene_session import SceneSession
 from agent_companion.core.game_adapters import GameAdapterRegistry
+from agent_companion.core.minecraft_service import MinecraftGameService
 from agent_companion.core.services import ArtifactService, BackgroundContextService, MemoryService
 from agent_companion.core.skill_manifest import build_native_skill_manifest
+from agent_companion.core.realtime_voice import (
+    ActionDispatchPermit,
+    RealtimeVoiceCoordinator,
+    RealtimeVoiceRuntimeState,
+    build_realtime_voice_coordinator,
+)
 from agent_companion.core.speech_input import AsrRuntimeState, SpeechInputProvider, build_asr_provider
 from agent_companion.core.tts_bridge import TtsBridge
 from agent_companion.core.voice import safe_voice_line
@@ -66,6 +75,7 @@ SPEAKABLE_EVENTS = {
 
 JOI_CORE_PRODUCT = "joi-core"
 JOI_CORE_PROTOCOL_VERSION = 1
+MAX_VOICE_INPUT_GENERATIONS = 256
 
 
 def _next_voice_audio_payload(stream: Any) -> dict[str, Any] | None:
@@ -85,6 +95,8 @@ class JsonRpcBridge:
         port: int = 8765,
         asr_provider: SpeechInputProvider | None = None,
         asr_state: AsrRuntimeState | None = None,
+        realtime_voice_coordinator: RealtimeVoiceCoordinator | None = None,
+        realtime_voice_state: RealtimeVoiceRuntimeState | None = None,
         allow_mock_asr: bool = False,
         session_token: str = "",
         instance_id: str = "",
@@ -106,6 +118,7 @@ class JsonRpcBridge:
         self.capability_orchestrator = ComputerUseOrchestrator(self.workspace, self.collaboration)
         self.agent_skills = AgentSkillService(self.workspace, self.collaboration)
         self.game_adapters = GameAdapterRegistry(self.workspace, self.collaboration.data_home)
+        self.minecraft = MinecraftGameService(self.collaboration, self.game_adapters)
         self.app.set_session_authorizer(self._session_policy_decision)
         self.app.bus.set_context_provider(self.collaboration.context)
         self.app.bus.subscribe(self._record_collaboration_event)
@@ -129,7 +142,30 @@ class JsonRpcBridge:
         else:
             self.asr = asr_provider
             self.asr_state = asr_state or AsrRuntimeState(True, True, "injected")
+        if realtime_voice_coordinator is None:
+            self.realtime_voice, self.realtime_voice_state = build_realtime_voice_coordinator(
+                self.workspace,
+                execute_action=self._execute_realtime_minecraft_action,
+                cancel_action=self._cancel_realtime_minecraft_action,
+                control_action=self._control_realtime_minecraft_action,
+                validate_binding=self._realtime_minecraft_binding_ready,
+                voice_locale=self.tts.voice_language,
+                chat_locale=self.app.chat_language,
+            )
+        else:
+            self.realtime_voice = realtime_voice_coordinator
+            self.realtime_voice_state = realtime_voice_state or RealtimeVoiceRuntimeState(True, True, "injected")
+        # An ASR request can outlive the intent that started it. Keep only a
+        # bounded, in-memory generation marker per conversation so a late
+        # transcript cannot become a new user command after the user typed,
+        # cancelled, or switched conversations.
+        self._voice_generation_lock = threading.Lock()
+        self._voice_generations: dict[str, str] = {}
         self.clients: set[Any] = set()
+        self._client_owners: dict[Any, str] = {}
+        self._owner_clients: dict[str, Any] = {}
+        self._realtime_epochs: dict[str, int] = {}
+        self._tts_speaker_lock: asyncio.Lock | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.queue: asyncio.Queue[AgentEvent] | None = None
         # Serialization is per conversation, not global -- see RunCoordinator.
@@ -159,6 +195,7 @@ class JsonRpcBridge:
             raise RuntimeError("缺少 websockets 依赖，请先安装 requirements.txt。") from exc
 
         self.loop = asyncio.get_running_loop()
+        self._tts_speaker_lock = asyncio.Lock()
         self.queue = asyncio.Queue()
         self.app.bus.subscribe(self._on_event)
         self._start_character_asset_server()
@@ -190,6 +227,8 @@ class JsonRpcBridge:
                     # hold its weights in memory until the next reboot.
                     self.tts.stop_local_service()
         finally:
+            self.realtime_voice.shutdown()
+            self.minecraft.shutdown()
             self._stop_character_asset_server()
             self._remove_ready_file()
 
@@ -278,7 +317,10 @@ class JsonRpcBridge:
         if self.session_token and _websocket_session_token(websocket) != self.session_token:
             await websocket.close(code=4401, reason="joi_core_auth_required")
             return
+        owner_id = f"shell-{uuid.uuid4().hex}"
         self.clients.add(websocket)
+        self._client_owners[websocket] = owner_id
+        self._owner_clients[owner_id] = websocket
         try:
             ready_payload = await asyncio.to_thread(self._ready_payload)
             await websocket.send(
@@ -294,17 +336,25 @@ class JsonRpcBridge:
             # native window quits. Treat that as a normal client disconnect.
             return
         finally:
+            await asyncio.to_thread(self.realtime_voice.stop_owner, owner_id, "transport_lost")
             self.clients.discard(websocket)
+            self._client_owners.pop(websocket, None)
+            self._owner_clients.pop(owner_id, None)
 
     async def _handle_message(self, websocket: Any, raw: str) -> None:
         request_id: Any = None
         try:
             request = parse_request(raw)
             request_id = request.request_id
-            dispatched = await self.rpc.dispatch(request.method, request.params)
-            await websocket.send(self._result(request_id, dispatched.result))
-            if dispatched.broadcast_ready:
-                await self._broadcast_ready()
+            owner_id = self._client_owners.get(websocket, "")
+            if request.method.startswith("voice.realtime."):
+                result = await self._dispatch_realtime_voice(owner_id, request.method, request.params)
+                await websocket.send(self._result(request_id, result))
+            else:
+                dispatched = await self.rpc.dispatch(request.method, request.params)
+                await websocket.send(self._result(request_id, dispatched.result))
+                if dispatched.broadcast_ready:
+                    await self._broadcast_ready()
         except JsonRpcProtocolError as exc:
             await websocket.send(self._error(exc.request_id, exc.code, exc.message))
         except RpcMethodNotFound as exc:
@@ -392,8 +442,17 @@ class JsonRpcBridge:
         router.register("game.adapter.uninstall", self.game_adapter_uninstall_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.enable", self.game_adapter_enable_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.run", self.game_adapter_run_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.minecraft.connection.status", lambda _: self.game_adapters.minecraft_connection_status())
+        router.register("game.adapter.minecraft.connection.configure", self.game_adapter_minecraft_connection_configure_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.pause", self.game_adapter_pause_command, run_in_thread=True, broadcast_ready=True)
         router.register("game.adapter.resume", self.game_adapter_resume_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.session.start", self.game_adapter_session_start_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.session.status", self.game_adapter_session_status_command)
+        router.register("game.adapter.session.stop", self.game_adapter_session_stop_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.goal.submit", self.game_adapter_goal_submit_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.goal.pause", self.game_adapter_goal_pause_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.goal.resume", self.game_adapter_goal_resume_command, run_in_thread=True, broadcast_ready=True)
+        router.register("game.adapter.goal.cancel", self.game_adapter_goal_cancel_command, run_in_thread=True, broadcast_ready=True)
         router.register("character.list", lambda _: self.character_list_command())
         router.register("character.detail", self.character_detail_command)
         router.register("character.create", self.character_create_command, run_in_thread=True, broadcast_ready=True)
@@ -426,8 +485,8 @@ class JsonRpcBridge:
             "voice.transcribe",
             self._rpc_voice_transcribe,
             aliases=("audio.transcribe",),
-            run_in_thread=True,
         )
+        router.register("voice.cancel", self._rpc_voice_cancel)
         router.register("artifact.read", self._rpc_artifact_read, run_in_thread=True)
         router.register("core.ping", lambda _: {"ok": True})
         return router
@@ -470,11 +529,177 @@ class JsonRpcBridge:
         updates = params.get("updates")
         return self.apply_runtime_config_update_command(updates if isinstance(updates, dict) else {})
 
-    def _rpc_voice_transcribe(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.transcribe_and_submit(
+    async def _rpc_voice_transcribe(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return as soon as ASR finishes; never include the LLM turn latency.
+
+        The previous RPC called ``submit_user_text`` before replying. That made
+        the shell's “transcribing” spinner cover ASR *plus* planning, model
+        generation, tools, and sometimes TTS. Besides feeling slow, it made it
+        impossible to tell which stage was actually slow.
+        """
+
+        thread_id = str(params.get("thread_id") or "").strip()[:120]
+        if not thread_id and hasattr(self, "collaboration"):
+            thread_id = str(self.collaboration.context().get("thread_id") or "")[:120]
+        generation_id = str(params.get("generation_id") or "").strip()[:120] or f"voice-{uuid.uuid4().hex[:12]}"
+        self._set_voice_generation(thread_id, generation_id)
+
+        payload = await asyncio.to_thread(
+            self.transcribe_audio,
             str(params.get("audio_base64") or ""),
             str(params.get("mime_type") or ""),
         )
+        payload["generation_id"] = generation_id
+
+        if not self._voice_request_is_current(thread_id, generation_id):
+            return {
+                **payload,
+                "submitted": False,
+                "stale": True,
+                "events": [],
+            }
+        if not payload.get("ok"):
+            error = str(payload.get("error") or "asr_failed")
+            message = str(payload.get("message") or _friendly_asr_message(error))
+            failure = await asyncio.to_thread(self._asr_error, error, message)
+            return {**failure, "generation_id": generation_id, "latency": payload.get("latency", {})}
+
+        transcript = str(payload.get("transcript") or "")
+        asyncio.create_task(
+            asyncio.to_thread(self._submit_voice_transcript, transcript, thread_id, generation_id)
+        )
+        return {
+            **payload,
+            "submitted": True,
+            "submission": "queued",
+            "stale": False,
+        }
+
+    def _rpc_voice_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
+        thread_id = str(params.get("thread_id") or "").strip()[:120]
+        if not thread_id and hasattr(self, "collaboration"):
+            thread_id = str(self.collaboration.context().get("thread_id") or "")[:120]
+        with self._voice_generation_lock:
+            previous = self._voice_generations.pop(thread_id or "__active__", "")
+        return {"ok": True, "cancelled": bool(previous)}
+
+    async def _dispatch_realtime_voice(
+        self,
+        owner_id: str,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Dispatch an owner-bound realtime call outside the general RPC router.
+
+        The owner comes from the authenticated WebSocket connection, never from
+        JavaScript parameters. This prevents one Joi window from observing or
+        stopping another window's ephemeral microphone session.
+        """
+
+        if not owner_id:
+            return {"ok": False, "error": "realtime_owner_required"}
+        if method == "voice.realtime.session.start":
+            allowed = {"mode", "minecraft_session_id", "disclosure_accepted"}
+            if set(params) - allowed or params.get("disclosure_accepted") is not True:
+                return {"ok": False, "error": "realtime_disclosure_required"}
+            mode = str(params.get("mode") or "conversation")
+            minecraft_session_id = str(params.get("minecraft_session_id") or "")
+            if mode not in {"conversation", "minecraft"}:
+                return {"ok": False, "error": "realtime_mode_invalid"}
+            if mode == "conversation" and minecraft_session_id:
+                return {"ok": False, "error": "realtime_binding_invalid"}
+
+            def emit(payload: dict[str, Any]) -> None:
+                self._schedule_realtime_event(owner_id, payload)
+
+            return await asyncio.to_thread(
+                self.realtime_voice.start,
+                owner_id,
+                emit,
+                mode=mode,
+                minecraft_session_id=minecraft_session_id,
+            )
+        if method == "voice.realtime.audio.append":
+            return await asyncio.to_thread(self.realtime_voice.append_audio, owner_id, params)
+        if method == "voice.realtime.session.stop":
+            if set(params) != {"session_id"}:
+                return {"ok": False, "error": "realtime_stop_envelope_invalid"}
+            session_id = str(params.get("session_id") or "")
+            result = await asyncio.to_thread(self.realtime_voice.stop, owner_id, session_id)
+            self._realtime_epochs.pop(session_id, None)
+            return result
+        if method == "voice.realtime.session.status":
+            if set(params) - {"session_id"}:
+                return {"ok": False, "error": "realtime_status_envelope_invalid"}
+            return self.realtime_voice.status(owner_id, str(params.get("session_id") or ""))
+        if method == "voice.realtime.game.control":
+            if set(params) != {"session_id", "action"}:
+                return {"ok": False, "error": "realtime_game_control_invalid"}
+            return await asyncio.to_thread(
+                self.realtime_voice.control,
+                owner_id,
+                str(params.get("session_id") or ""),
+                str(params.get("action") or ""),
+            )
+        raise RpcMethodNotFound(method)
+
+    def _schedule_realtime_event(self, owner_id: str, payload: dict[str, Any]) -> None:
+        loop = self.loop
+        if loop is None or loop.is_closed():
+            return
+
+        def schedule() -> None:
+            asyncio.create_task(self._handle_realtime_event(owner_id, payload))
+
+        loop.call_soon_threadsafe(schedule)
+
+    async def _handle_realtime_event(self, owner_id: str, payload: dict[str, Any]) -> None:
+        event_type = str(payload.get("type") or "")
+        session_id = str(payload.get("session_id") or "")
+        epoch = max(0, int(payload.get("epoch") or 0))
+        if event_type == "barge_in":
+            self._realtime_epochs[session_id] = max(self._realtime_epochs.get(session_id, 0), epoch)
+            context = self.collaboration.context()
+            self.app.voice_generations.retire(str(context.get("thread_id") or ""), "superseded")
+        await self._send_to_owner(
+            owner_id,
+            json.dumps(
+                {"jsonrpc": "2.0", "method": "voice.realtime.event", "params": payload},
+                ensure_ascii=False,
+            ),
+        )
+        if event_type == "assistant_text":
+            await self._synthesize_realtime_text(owner_id, payload)
+
+    def _execute_realtime_minecraft_action(
+        self,
+        session_id: str,
+        goal_id: str,
+        envelope: dict[str, Any],
+        permit: ActionDispatchPermit,
+    ) -> dict[str, Any]:
+        return self.minecraft.submit_goal(
+            {"session_id": session_id, "goal_id": goal_id, **envelope},
+            cancel_requested=permit.cancel_requested.is_set,
+            on_registered=permit.registered.set,
+            on_submitted=permit.submitted.set,
+        )
+
+    def _cancel_realtime_minecraft_action(self, session_id: str, goal_id: str) -> dict[str, Any]:
+        return self.minecraft.cancel({"session_id": session_id, "goal_id": goal_id})
+
+    def _control_realtime_minecraft_action(self, action: str, session_id: str, goal_id: str) -> dict[str, Any]:
+        operation = {
+            "pause": self.minecraft.pause,
+            "resume": self.minecraft.resume,
+            "cancel": self.minecraft.cancel,
+        }.get(action)
+        return operation({"session_id": session_id, "goal_id": goal_id}) if operation else {"ok": False}
+
+    def _realtime_minecraft_binding_ready(self, session_id: str) -> bool:
+        status = self.minecraft.status({"session_id": session_id})
+        session = status.get("session") if isinstance(status.get("session"), dict) else {}
+        return bool(status.get("ok") and status.get("bridge_state") == "ready" and session.get("state") == "running")
 
     def _rpc_artifact_read(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.read_artifact_command(str(params.get("artifact") or ""))
@@ -671,6 +896,9 @@ class JsonRpcBridge:
         params = params if isinstance(params, dict) else {}
         return self.game_adapters.set_enabled(str(params.get("adapter_id") or ""), bool(params.get("enabled", True)))
 
+    def game_adapter_minecraft_connection_configure_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.game_adapters.configure_minecraft_connection(params if isinstance(params, dict) else {})
+
     def game_adapter_run_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params if isinstance(params, dict) else {}
         adapter_id = str(params.get("adapter_id") or "")
@@ -679,6 +907,14 @@ class JsonRpcBridge:
         dry_run = bool(params.get("dry_run", True))
         if dry_run:
             return self.game_adapters.prepare(adapter_id, mode, goal, True)
+        if adapter_id == "minecraft":
+            return {
+                "ok": False,
+                "error": "persistent_session_rpc_required",
+                "zero_actions": True,
+                "start_method": "game.adapter.session.start",
+                "goal_method": "game.adapter.goal.submit",
+            }
         session_result = self.collaboration.start_session(
             "game",
             goal,
@@ -708,6 +944,8 @@ class JsonRpcBridge:
 
     def game_adapter_pause_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         adapter_id = str((params or {}).get("adapter_id") or "")
+        if adapter_id == "minecraft":
+            return self.minecraft.pause(params)
         result = self.game_adapters.pause(adapter_id)
         session_id = str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or "")
         if session_id:
@@ -716,11 +954,37 @@ class JsonRpcBridge:
 
     def game_adapter_resume_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         adapter_id = str((params or {}).get("adapter_id") or "")
+        if adapter_id == "minecraft":
+            return self.minecraft.resume(params)
         result = self.game_adapters.resume(adapter_id)
         session_id = str((params or {}).get("session_id") or self.collaboration.context().get("session_id") or "")
         if session_id:
             result["session"] = self.collaboration.transition_session(session_id, "running").get("session") or {}
         return result
+
+    def game_adapter_session_start_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        if str(params.get("adapter_id") or "minecraft") != "minecraft":
+            return {"ok": False, "error": "persistent_session_not_supported"}
+        return self.minecraft.start_session(params)
+
+    def game_adapter_session_status_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.status(params)
+
+    def game_adapter_session_stop_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.stop_session(params)
+
+    def game_adapter_goal_submit_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.submit_goal(params)
+
+    def game_adapter_goal_pause_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.pause(params)
+
+    def game_adapter_goal_resume_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.resume(params)
+
+    def game_adapter_goal_cancel_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.minecraft.cancel(params)
 
     def character_list_command(self) -> dict[str, Any]:
         result = self._character_command(self.app.character_packages.list)
@@ -1002,6 +1266,14 @@ class JsonRpcBridge:
                 asyncio.create_task(self._synthesize_voice(event))
 
     async def _synthesize_voice(self, event: AgentEvent) -> None:
+        lock = getattr(self, "_tts_speaker_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._tts_speaker_lock = lock
+        async with lock:
+            await self._synthesize_voice_unlocked(event)
+
+    async def _synthesize_voice_unlocked(self, event: AgentEvent) -> None:
         generation = str(event.agent_state.get("voice_generation") or "")
         thread_id = str(event.thread_id or "")
         generations = self.app.voice_generations
@@ -1090,35 +1362,197 @@ class JsonRpcBridge:
                 # worker; never turn shutdown into a second error.
                 pass
 
-    def transcribe_and_submit(self, audio_base64: str, mime_type: str = "") -> dict[str, Any]:
+    async def _synthesize_realtime_text(self, owner_id: str, event: dict[str, Any]) -> None:
+        """Speak safe Qwen text through the selected local GPT-SoVITS voice.
+
+        Realtime never falls back to provider audio, a system voice, or a cloud
+        TTS voice. The Shell gets captions plus an explicit muted state when
+        the local character voice is unavailable.
+        """
+
+        session_id = str(event.get("session_id") or "")
+        epoch = max(0, int(event.get("epoch") or 0))
+        self._realtime_epochs[session_id] = max(self._realtime_epochs.get(session_id, 0), epoch)
+        line = safe_voice_line(str(event.get("text") or ""), fallback="")
+        status = self.tts.status_payload()
+        if not line.text or str(status.get("provider") or "").strip().casefold() != "gpt-sovits" or not status.get("configured"):
+            await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_local_tts_unavailable")
+            return
+        lock = getattr(self, "_tts_speaker_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._tts_speaker_lock = lock
+        async with lock:
+            if self._realtime_epochs.get(session_id, -1) != epoch:
+                return
+            stream = self.tts.synthesize_stream(line.text, line.emotion, line.delivery)
+            try:
+                while True:
+                    audio = await asyncio.to_thread(_next_voice_audio_payload, stream)
+                    if audio is None:
+                        return
+                    if self._realtime_epochs.get(session_id, -1) != epoch:
+                        return
+                    if audio.get("voice_audio_error"):
+                        await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_local_tts_failed")
+                        return
+                    payload = {
+                        "realtime_session_id": session_id,
+                        "realtime_epoch": epoch,
+                        "voice_text": line.text,
+                        "voice_emotion": line.emotion,
+                        "voice_sprite": line.sprite,
+                        **audio,
+                    }
+                    # Refuse accidental provider fallback even if the TTS
+                    # implementation changes under this call in the future.
+                    if payload.get("voice_audio_source") not in {"local", None}:
+                        await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_local_tts_unavailable")
+                        return
+                    await self._send_to_owner(
+                        owner_id,
+                        json.dumps({"jsonrpc": "2.0", "method": "agent.voice_audio", "params": payload}, ensure_ascii=False),
+                    )
+                    if audio.get("voice_audio_final"):
+                        return
+            finally:
+                try:
+                    stream.close()
+                except (RuntimeError, ValueError):
+                    pass
+
+    async def _send_realtime_tts_state(
+        self,
+        owner_id: str,
+        session_id: str,
+        epoch: int,
+        state: str,
+        error: str,
+    ) -> None:
+        payload = {
+            "session_id": session_id,
+            "type": "tts_state",
+            "state": state if state == "muted" else "muted",
+            "error": error if error in {"realtime_local_tts_unavailable", "realtime_local_tts_failed"} else "realtime_local_tts_failed",
+            "epoch": epoch,
+        }
+        await self._send_to_owner(
+            owner_id,
+            json.dumps({"jsonrpc": "2.0", "method": "voice.realtime.event", "params": payload}, ensure_ascii=False),
+        )
+
+    def transcribe_audio(self, audio_base64: str, mime_type: str = "") -> dict[str, Any]:
+        """Decode and recognize one bounded clip, with safe stage timings.
+
+        Timings are coarse integer milliseconds and contain no transcript,
+        endpoint, model, path, key, or provider error detail. They are useful
+        for deciding whether the delay is local preparation, transport/ASR, or
+        the separate LLM turn without expanding the diagnostic data surface.
+        """
+
+        started = time.perf_counter()
         if _encoded_audio_exceeds_limit(audio_base64, self.asr_state.max_bytes):
-            return self._asr_error("audio_too_large", _friendly_asr_message("audio_too_large"))
+            return self._asr_result_error("audio_too_large", started)
+        decode_started = time.perf_counter()
         audio = _decode_audio_base64(audio_base64)
+        decode_ms = _elapsed_ms(decode_started)
         if audio_base64 and not audio:
-            return self._asr_error("audio_decode_failed", _friendly_asr_message("audio_decode_failed"))
+            return self._asr_result_error("audio_decode_failed", started, decode_ms=decode_ms)
         if not self.asr_state.configured:
-            return self._asr_error("asr_unconfigured", _friendly_asr_message(self.asr_state.error or "asr_unconfigured"))
+            return self._asr_result_error(self.asr_state.error or "asr_unconfigured", started, decode_ms=decode_ms)
         if len(audio) > self.asr_state.max_bytes:
-            return self._asr_error("audio_too_large", _friendly_asr_message("audio_too_large"))
+            return self._asr_result_error("audio_too_large", started, decode_ms=decode_ms)
+        provider_started = time.perf_counter()
         result = self.asr.transcribe(audio, mime_type)
+        provider_ms = _elapsed_ms(provider_started)
         if not result.ok:
             error_code = _safe_asr_error_code(result.error)
-            return self._asr_error(error_code, _friendly_asr_message(error_code))
+            return self._asr_result_error(
+                error_code,
+                started,
+                decode_ms=decode_ms,
+                provider_ms=provider_ms,
+            )
         payload: dict[str, Any] = {
             "ok": result.ok,
             "transcript": result.transcript,
             "confidence": result.confidence,
             "provider": result.provider,
             "submitted": False,
+            "latency": {
+                "decode_ms": decode_ms,
+                "provider_ms": provider_ms,
+                "total_ms": _elapsed_ms(started),
+            },
         }
-        if result.ok:
-            submitted = self.submit_user_text(result.transcript)
-            payload["submitted"] = True
-            payload["sequence"] = submitted.get("sequence")
-            payload["events"] = submitted.get("events", [])
-            if "watch_loop" in submitted:
-                payload["watch_loop"] = submitted["watch_loop"]
         return payload
+
+    def transcribe_and_submit(self, audio_base64: str, mime_type: str = "") -> dict[str, Any]:
+        """Synchronous compatibility path used by direct Core callers/tests."""
+
+        payload = self.transcribe_audio(audio_base64, mime_type)
+        if not payload.get("ok"):
+            error = str(payload.get("error") or "asr_failed")
+            failure = self._asr_error(error, str(payload.get("message") or _friendly_asr_message(error)))
+            failure["latency"] = payload.get("latency", {})
+            return failure
+        submitted = self.submit_user_text(str(payload.get("transcript") or ""))
+        payload["submitted"] = True
+        payload["sequence"] = submitted.get("sequence")
+        payload["events"] = submitted.get("events", [])
+        if "watch_loop" in submitted:
+            payload["watch_loop"] = submitted["watch_loop"]
+        return payload
+
+    def _asr_result_error(
+        self,
+        error: str,
+        started: float,
+        *,
+        decode_ms: int = 0,
+        provider_ms: int = 0,
+    ) -> dict[str, Any]:
+        error_code = _safe_asr_error_code(error)
+        return {
+            "ok": False,
+            "submitted": False,
+            "transcript": "",
+            "error": error_code,
+            "message": _friendly_asr_message(error_code),
+            "latency": {
+                "decode_ms": max(0, int(decode_ms)),
+                "provider_ms": max(0, int(provider_ms)),
+                "total_ms": _elapsed_ms(started),
+            },
+        }
+
+    def _set_voice_generation(self, thread_id: str, generation_id: str) -> None:
+        key = thread_id or "__active__"
+        with self._voice_generation_lock:
+            # Dicts preserve insertion order. Refreshing an existing thread
+            # makes it the newest marker; evicting an older marker is fail-safe
+            # because any still-running ASR for it will become stale.
+            self._voice_generations.pop(key, None)
+            while len(self._voice_generations) >= MAX_VOICE_INPUT_GENERATIONS:
+                self._voice_generations.pop(next(iter(self._voice_generations)))
+            self._voice_generations[key] = generation_id
+
+    def _voice_generation_is_current(self, thread_id: str, generation_id: str) -> bool:
+        with self._voice_generation_lock:
+            return self._voice_generations.get(thread_id or "__active__") == generation_id
+
+    def _voice_request_is_current(self, thread_id: str, generation_id: str) -> bool:
+        if not self._voice_generation_is_current(thread_id, generation_id):
+            return False
+        if thread_id and hasattr(self, "collaboration"):
+            active_thread = str(self.collaboration.context().get("thread_id") or "")
+            return active_thread == thread_id
+        return True
+
+    def _submit_voice_transcript(self, transcript: str, thread_id: str, generation_id: str) -> None:
+        if not self._voice_request_is_current(thread_id, generation_id):
+            return
+        self.submit_user_text(transcript)
 
     def submit_user_text(self, text: str) -> dict[str, Any]:
         context = self.collaboration.context()
@@ -1159,6 +1593,7 @@ class JsonRpcBridge:
             "ok": True,
             "runtime": self.codex_runtime.status_payload(),
             "asr": self._asr_payload(),
+            "realtime_voice": self._realtime_voice_payload(),
             "tts": self.tts.status_payload(),
             "joi_mcp": dict(self._joi_mcp_status),
             "byok": self.byok.status(probe_secret=False),
@@ -1687,6 +2122,34 @@ class JsonRpcBridge:
             "error": self.asr_state.error,
         }
 
+    def _realtime_voice_payload(self) -> dict[str, Any]:
+        return {
+            "enabled": self.realtime_voice_state.enabled,
+            "configured": self.realtime_voice_state.configured,
+            "provider": _safe_realtime_metadata(self.realtime_voice_state.provider),
+            "model": _safe_realtime_metadata(self.realtime_voice_state.model),
+            "output": "local_tts",
+            "timeout_seconds": min(120, max(1, int(self.realtime_voice_state.timeout_seconds or 15))),
+            "error": _safe_realtime_error(self.realtime_voice_state.error),
+            "modes": ["conversation", "minecraft"],
+        }
+
+    def _language_payload(self) -> dict[str, Any]:
+        """What Joi shows, writes and says, in one place the shell can render.
+
+        The voice language is reported but not settable here: it belongs to the
+        character package, which is where the user picks the voice itself.
+        """
+
+        language = self.app.language_settings()
+        return {
+            "interface": language.interface,
+            "chat": language.chat,
+            "chat_choices": list(CHAT_LANGUAGE_CHOICES),
+            "interface_choices": ["zh"],
+            "voice": self.tts.voice_language(),
+        }
+
     @staticmethod
     def _voice_audio_data_url(path_text: str) -> str:
         if not path_text:
@@ -1760,6 +2223,21 @@ class JsonRpcBridge:
         for client in stale:
             self.clients.discard(client)
 
+    async def _send_to_owner(self, owner_id: str, message: str) -> None:
+        """Send ephemeral microphone/transcript/audio state to one window."""
+
+        client = self._owner_clients.get(owner_id)
+        if client is None:
+            await asyncio.to_thread(self.realtime_voice.stop_owner, owner_id, "transport_lost")
+            return
+        try:
+            await client.send(message)
+        except Exception:
+            await asyncio.to_thread(self.realtime_voice.stop_owner, owner_id, "transport_lost")
+            self.clients.discard(client)
+            self._client_owners.pop(client, None)
+            self._owner_clients.pop(owner_id, None)
+
     def _ready_payload(self) -> dict[str, Any]:
         tts_status = self.tts.status_payload()
         memory_status = self.app.memory.status()
@@ -1776,8 +2254,15 @@ class JsonRpcBridge:
             "event_cursor": self.app.bus.latest_sequence,
             "active_approval_ids": self._active_approval_ids(),
             "asr": self._asr_payload(),
+            "realtime_voice": self._realtime_voice_payload(),
             "tts": tts_status,
-            "runtime": build_runtime_status(self.workspace, self.asr_state, tts_status),
+            "language": self._language_payload(),
+            "runtime": build_runtime_status(
+                self.workspace,
+                self.asr_state,
+                tts_status,
+                self.realtime_voice_state,
+            ),
             "codex_runtime": self.codex_runtime.status_payload(),
             "joi_mcp": dict(self._joi_mcp_status),
             "watch_loop": self.watch_loop.snapshot().to_agent_state(),
@@ -1857,6 +2342,14 @@ class JsonRpcBridge:
 
     def _reload_runtime_after_config_change(self) -> None:
         self.asr, self.asr_state = build_asr_provider(self.workspace)
+        self.realtime_voice.shutdown()
+        self.realtime_voice, self.realtime_voice_state = build_realtime_voice_coordinator(
+            self.workspace,
+            execute_action=self._execute_realtime_minecraft_action,
+            cancel_action=self._cancel_realtime_minecraft_action,
+            control_action=self._control_realtime_minecraft_action,
+            validate_binding=self._realtime_minecraft_binding_ready,
+        )
         self.tts.reload()
         self.watch_commentary.reload()
         self.app.reload_runtime_policy()
@@ -2076,6 +2569,10 @@ def _decode_audio_base64(audio_base64: str) -> bytes:
         return b""
 
 
+def _elapsed_ms(started: float) -> int:
+    return max(0, int(round((time.perf_counter() - started) * 1000)))
+
+
 def _encoded_audio_exceeds_limit(audio_base64: str, max_bytes: int) -> bool:
     if not audio_base64:
         return False
@@ -2133,6 +2630,34 @@ def _safe_agent_cli_label(value: object) -> str:
     if any(fragment in text.casefold() for fragment in ("sk-", "token", "secret", "api_key", "key=", "/users/", "c:\\")):
         return "默认"
     return text[:80]
+
+
+def _safe_realtime_metadata(value: object) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    lowered = text.casefold()
+    if not text:
+        return ""
+    if any(fragment in lowered for fragment in ("sk-", "token", "secret", "api_key", "key=", "/users/", "c:\\")):
+        return "redacted"
+    if any(char in text for char in ("/", "\\", "{", "}", "$", "%")):
+        return "redacted"
+    return text[:80]
+
+
+def _safe_realtime_error(value: object) -> str:
+    code = str(value or "").strip().casefold()
+    allowed = {
+        "",
+        "realtime_unconfigured",
+        "realtime_config_error",
+        "realtime_invalid_request",
+        "realtime_invalid_response",
+        "realtime_auth_failed",
+        "realtime_rate_limited",
+        "realtime_timeout",
+        "realtime_unavailable",
+    }
+    return code if code in allowed else "realtime_unavailable"
 
 
 def _codex_executable() -> str:

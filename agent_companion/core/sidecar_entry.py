@@ -16,6 +16,7 @@ SEED_PATHS: tuple[str, ...] = (
     "agent_companion/web_widget/assets",
     "agent_companion/shell/public/live2d/joi",
 )
+IMMUTABLE_SEED_PREFIXES = ("agent_companion/adapters", "agent_companion/config", "agent_companion/web_widget/assets")
 
 
 def bundled_root() -> Path | None:
@@ -52,7 +53,8 @@ def seed_installed_workspace(workspace: Path, source_root: Path | None = None) -
             if not item.is_file():
                 continue
             target = destination / item.relative_to(origin)
-            if target.exists():
+            immutable = relative.startswith(IMMUTABLE_SEED_PREFIXES)
+            if target.exists() and not immutable:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, target)

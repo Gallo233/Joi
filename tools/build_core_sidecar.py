@@ -93,13 +93,23 @@ def build_sidecar(workspace: Path, *, target: str = "", if_missing: bool = False
         (workspace / "config.example.yaml", "."),
         (workspace / "agent_companion" / "config", "agent_companion/config"),
         (workspace / "agent_companion" / "skills", "agent_companion/skills"),
-        (workspace / "agent_companion" / "adapters", "agent_companion/adapters"),
         (workspace / "agent_companion" / "web_widget" / "assets", "agent_companion/web_widget/assets"),
         (workspace / "agent_companion" / "shell" / "public" / "live2d" / "joi", "agent_companion/shell/public/live2d/joi"),
     )
     for source, bundled_path in seed_paths:
         if source.exists():
             command.extend(["--add-data", _data_argument(source, bundled_path)])
+    adapters_source = workspace / "agent_companion" / "adapters"
+    reviewed_adapters = target_root / "reviewed-adapters"
+    if reviewed_adapters.exists():
+        shutil.rmtree(reviewed_adapters)
+    if adapters_source.is_dir():
+        shutil.copytree(
+            adapters_source,
+            reviewed_adapters,
+            ignore=shutil.ignore_patterns("node_modules", ".cache", "core", "*.pyc"),
+        )
+        command.extend(["--add-data", _data_argument(reviewed_adapters, "agent_companion/adapters")])
     command.append(str(entry))
     subprocess.run(command, cwd=workspace, check=True)
 

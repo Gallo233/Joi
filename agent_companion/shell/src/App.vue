@@ -7,6 +7,7 @@ import {
   ArrowUp,
   Archive,
   AppWindow,
+  AudioLines,
   Bot,
   Brain,
   CheckCircle2,
@@ -67,7 +68,7 @@ import ThinkingOrb from './components/ThinkingOrb.vue'
 import { normalizeCharacterMotion, type CharacterMotionRequest } from './characterMotion'
 import { assistantDisplayText, isAssistantPresentationEvent } from './conversationPresentation'
 import type { Live2DEmotion, Live2DRuntimeMapping } from './live2d/runtime'
-import type { ActionReceipt, AgentCliListResult, AgentCliModelOption, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, AgentSkillDraft, AgentSkillInspection, AgentSkillInstallation, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ByokConnectResult, ByokPreset, ByokStatus, ByokTestResult, CapabilitySession, CharacterSummary, CodexRuntimeStatus, CollaborationSnapshot, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, GameAdapterManifest, JoiMcpStatus, JoiProject, JoiThread, MemoryCandidate, MemoryCandidatePage, MemoryPage, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, PermissionProfile, ResourceBinding, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
+import type { ActionReceipt, AgentCliListResult, AgentCliModelOption, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, AgentSkillDraft, AgentSkillInspection, AgentSkillInstallation, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ByokConnectResult, ByokPreset, ByokStatus, ByokTestResult, CapabilitySession, CharacterSummary, CodexRuntimeStatus, CollaborationSnapshot, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, GameAdapterManifest, JoiMcpStatus, JoiProject, JoiThread, LanguageSettings, MemoryCandidate, MemoryCandidatePage, MemoryPage, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, PermissionProfile, ResourceBinding, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { settingsSubtitle, settingsTabs, settingsTitle, type SettingsTabId } from './settings'
 import { asRecord, stringValue } from './composables/safeRecord'
 import { errorLabel, sourceLabel } from './composables/watchLabels'
@@ -79,14 +80,18 @@ import { useAgentSkills } from './composables/useAgentSkills'
 import { useMemory } from './composables/useMemory'
 import { ProjectsContextKey, type AttachmentKind } from './shellContext'
 import {
+  asrLatencyLabel,
   asrRpcTimeoutMs,
   isPlayableVoiceEventType,
   nextVoiceEpoch,
   shouldPlayVoiceAudio,
+  voiceGenerationId,
   voiceAudioKey,
+  type AsrLatencyBreakdown,
 } from './voiceRuntime'
 import { attachLipSync, detachLipSync, enqueuePcm16Chunk, unlockAudioPlayback } from './voiceLipSync'
 import { VoiceRecorder } from './voiceRecorder'
+import { RealtimeVoiceSession, type RealtimeVoiceEvent, type RealtimeVoiceState } from './realtimeVoice'
 
 const input = ref('')
 const status = ref<CoreStatus>('offline')
@@ -201,6 +206,42 @@ const skillManifest = ref<NativeSkillManifest | null>(null)
 const skillRefreshLoading = ref(false)
 const gameAdapterRows = ref<GameAdapterManifest[]>([])
 const gameAdapterNotice = ref('')
+const minecraftBusy = ref(false)
+const languageSettings = ref<LanguageSettings | null>(null)
+const languageBusy = ref(false)
+const languageNotice = ref('')
+interface AppConfirmOptions {
+  title: string
+  message: string
+  confirmLabel?: string
+  cancelLabel?: string
+  danger?: boolean
+}
+interface AppConfirmRequest extends Required<AppConfirmOptions> {
+  resolve: (accepted: boolean) => void
+}
+const appConfirmDialog = ref<HTMLDialogElement | null>(null)
+const appConfirmRequest = ref<AppConfirmRequest | null>(null)
+const minecraftMode = ref<'companion' | 'delegate'>('companion')
+const minecraftConnectionDraft = ref({
+  host: '127.0.0.1',
+  port: 0,
+  username: 'Joi',
+  auth: 'offline' as 'offline' | 'microsoft',
+  server_id: 'local-hmcl',
+  world: 'world',
+  version: '',
+})
+const minecraftScopeDraft = ref({
+  dimensions: ['overworld'] as string[],
+  max_radius: 32,
+  max_actions: 40,
+  max_blocks_changed: 128,
+  allowed_blocks: 'oak_log,oak_planks,cobblestone,crafting_table,chest,barrel',
+  allowed_players: '',
+  allow_build: true,
+  allow_containers: true,
+})
 const executionMode = ref<'local_cli' | 'byok'>('local_cli')
 
 const selectedAgentCliId = ref('codex')
@@ -275,13 +316,14 @@ const settingsIconMap: Record<SettingsTabId, Component> = {
   runtime: Cpu,
   memory: Brain,
   skills: Sparkles,
+  language: Globe2,
   appearance: Palette,
   developer: Code2,
 }
 
 const settingsGroupDefinitions: Array<{ label: string; tabs: SettingsTabId[] }> = [
   { label: 'Joi', tabs: ['execution', 'runtime', 'memory', 'skills'] },
-  { label: '体验', tabs: ['appearance'] },
+  { label: '体验', tabs: ['language', 'appearance'] },
   { label: '高级', tabs: ['developer'] },
 ]
 
@@ -573,6 +615,9 @@ watch(previewArtifact, (newVal) => {
 
 const voiceState = ref<'idle' | 'recording' | 'transcribing'>('idle')
 const lastTranscript = ref('')
+const lastAsrLatency = ref<AsrLatencyBreakdown>({})
+const realtimeVoiceState = ref<RealtimeVoiceState>('idle')
+const realtimeAssistantTranscript = ref('')
 const lastTtsError = ref('')
 const nowSeconds = ref(Date.now() / 1000)
 const runtimeDraft = ref(defaultRuntimeDraft())
@@ -584,6 +629,9 @@ const artifactDataUrls = ref<Record<string, string>>({})
 const artifactLoadFailed = ref<Record<string, boolean>>({})
 // Records WAV directly; see voiceRecorder.ts for why not MediaRecorder.
 const voiceRecorder = new VoiceRecorder()
+let realtimeVoiceSession: RealtimeVoiceSession | null = null
+const realtimeVoiceDisclosuresAccepted = new Set<'conversation' | 'minecraft'>()
+let realtimePlaybackEpoch = 0
 let voiceStopTimer: number | null = null
 let clockTimer: number | null = null
 let currentAudio: HTMLAudioElement | null = null
@@ -630,6 +678,7 @@ const client = new CoreClient({
     skillManifest.value = payload.skills || skillManifest.value
     installedAgentSkills.value = payload.agent_skills || installedAgentSkills.value
     gameAdapterRows.value = payload.game_adapters || gameAdapterRows.value
+    languageSettings.value = payload.language || languageSettings.value
     codexRuntime.value = payload.codex_runtime || codexRuntime.value
     joiMcpStatus.value = payload.joi_mcp || joiMcpStatus.value
     syncAgentCliFromReady(payload)
@@ -639,6 +688,7 @@ const client = new CoreClient({
     void refreshConversationHistory()
   },
   onVoiceAudio: (payload) => void playVoiceAudio(payload),
+  onRealtimeVoice: (payload) => realtimeVoiceSession?.handleCoreEvent(payload),
   onError: (message) => {
     if (isTransientRuntimeNotice(message)) return
     errorText.value = message
@@ -1523,6 +1573,13 @@ const currentSemanticSelectionId = computed(() => {
   return ''
 })
 const asrConfigured = computed(() => Boolean(ready.value?.asr?.configured))
+const realtimeVoiceConfigured = computed(() => Boolean(ready.value?.realtime_voice?.configured))
+const realtimeVoiceActive = computed(() => !['idle', 'error'].includes(realtimeVoiceState.value))
+const activeMinecraftSessionId = computed(() => {
+  const session = activeCapabilitySession.value
+  return session?.driver === 'minecraft_game_adapter_v2' && session.state === 'running' ? session.id : ''
+})
+const minecraftAdapter = computed(() => gameAdapterRows.value.find((adapter) => adapter.id === 'minecraft'))
 const voiceMaxSeconds = computed(() => Math.max(1, Number(ready.value?.asr?.max_seconds || 30)))
 const voiceMaxBytes = computed(() => Math.max(1024, Number(ready.value?.asr?.max_bytes || 12 * 1024 * 1024)))
 const voiceAsrTimeoutSeconds = computed(() => Math.max(1, Number(ready.value?.asr?.timeout_seconds || 30)))
@@ -1535,11 +1592,24 @@ const voiceButtonLabel = computed(() => {
 })
 const previewArtifactSrc = computed(() => (previewArtifact.value ? artifactSrc(previewArtifact.value) : ''))
 const voiceStatusText = computed(() => {
+  if (realtimeVoiceState.value === 'connecting') return '实时语音连接中…'
+  if (realtimeVoiceState.value === 'user_speaking') return '实时语音：正在听你说'
+  if (realtimeVoiceState.value === 'assistant_speaking') return 'Joi 正在回答，可直接开口打断'
+  if (realtimeVoiceState.value === 'listening') return realtimeAssistantTranscript.value || '实时语音已连接，再次点击“结束实时语音”退出。'
   if (!asrConfigured.value) return 'ASR 未配置，请先在 config.yaml 中启用语音识别。'
   if (voiceState.value === 'recording') return `录音中，最长 ${voiceMaxSeconds.value} 秒。`
   if (voiceState.value === 'transcribing') return '转写中...'
-  if (lastTranscript.value) return `识别：${lastTranscript.value}`
+  if (lastTranscript.value) {
+    const latency = developerMode.value ? asrLatencyLabel(lastAsrLatency.value) : ''
+    return `识别：${lastTranscript.value}${latency ? ` · ${latency}` : ''}`
+  }
   return ''
+})
+
+// Once signaling Core is gone, fail closed instead of leaving a provider-side
+// microphone session alive with no Joi connection status behind it.
+watch(connected, (isConnected) => {
+  if (!isConnected && realtimeVoiceActive.value) stopRealtimeVoice()
 })
 
 function eventIdentity(event: AgentEvent) {
@@ -2738,12 +2808,19 @@ async function playAudioPath(path?: string, dataUrl?: string) {
 }
 
 function playVoiceAudio(payload: VoiceAudioPayload) {
-  if (!isPlayableVoiceEventType(payload.event_type)) return
+  const realtimeSessionId = stringValue(payload.realtime_session_id)
+  const isRealtimeAudio = Boolean(realtimeSessionId)
+  if (isRealtimeAudio) {
+    if (realtimeSessionId !== realtimeVoiceSession?.sessionId) return
+    const epoch = Math.max(0, Number(payload.realtime_epoch || 0))
+    if (epoch !== realtimePlaybackEpoch || payload.voice_audio_source !== 'local') return
+    if (payload.voice_audio_sequence === 0) realtimeVoiceState.value = 'assistant_speaking'
+  } else if (!isPlayableVoiceEventType(payload.event_type)) return
   rememberVoiceLatency(payload)
   if (payload.voice_audio_error) {
     lastTtsError.value = ttsErrorLabel(payload.voice_audio_error)
   }
-  const audioKey = voiceAudioKey(payload)
+  const audioKey = isRealtimeAudio ? `realtime:${realtimeSessionId}:${realtimePlaybackEpoch}` : voiceAudioKey(payload)
   const isStreaming = Boolean(payload.voice_audio_pcm16_base64 || payload.voice_audio_final)
   const sequence = Math.max(0, Math.floor(Number(payload.voice_audio_sequence) || 0))
   if (isStreaming && sequence === 0 && shouldSuppressProactiveVoice(payload)) {
@@ -2754,11 +2831,16 @@ function playVoiceAudio(payload: VoiceAudioPayload) {
     return
   }
   if (!isStreaming && shouldSuppressProactiveVoice(payload)) return
-  const eventEpoch = voiceEventEpochs.get(audioKey)
-  if (!shouldPlayVoiceAudio(eventEpoch, voiceEpoch)) return
+  if (!isRealtimeAudio) {
+    const eventEpoch = voiceEventEpochs.get(audioKey)
+    if (!shouldPlayVoiceAudio(eventEpoch, voiceEpoch)) return
+  }
   if (playedVoiceAudioKeys.has(audioKey)) return
   if (isStreaming) {
     playStreamingVoiceAudio(payload, audioKey, sequence)
+    if (isRealtimeAudio && payload.voice_audio_final && realtimeVoiceState.value === 'assistant_speaking') {
+      realtimeVoiceState.value = 'listening'
+    }
     return
   }
   rememberPlayedVoiceAudioKey(audioKey)
@@ -2852,8 +2934,14 @@ function rememberVoiceEventEpoch(event: AgentEvent) {
 }
 
 function beginNewVoiceIntent() {
+  if (realtimeVoiceActive.value) stopRealtimeVoice()
+  if (voiceRecorder.active || voiceStopTimer !== null) void cleanupVoiceStream()
+  voiceState.value = 'idle'
   voiceEpoch = nextVoiceEpoch(voiceEpoch)
   stopSpokenAudio()
+  if (connected.value) {
+    void client.cancelVoiceInput(activeContext.value.thread_id || '').catch(() => undefined)
+  }
   return voiceEpoch
 }
 
@@ -2867,6 +2955,7 @@ function runtimeStatusRows(): RuntimeProviderStatus[] {
     )
   }
   const asr = ready.value?.asr
+  const realtime = ready.value?.realtime_voice
   const tts = ready.value?.tts
   return [
     {
@@ -2880,6 +2969,19 @@ function runtimeStatusRows(): RuntimeProviderStatus[] {
       timeout_seconds: asr?.timeout_seconds || 30,
       limit: formatBytes(asr?.max_bytes || 0),
       notes: [`max ${asr?.max_seconds || 30}s`],
+    },
+    {
+      name: 'realtime_voice',
+      label: 'Realtime Voice (Debug)',
+      state: realtime?.configured ? 'ready' : realtime?.enabled ? 'error' : 'off',
+      enabled: Boolean(realtime?.enabled),
+      configured: Boolean(realtime?.configured),
+      provider: realtime?.configured ? realtime?.provider || 'qwen_audio' : 'none',
+      model: realtime?.configured ? realtime?.model : '',
+      summary: realtime?.configured ? '实时对话与 Minecraft 协作' : realtime?.enabled ? '未配置' : '未启用',
+      timeout_seconds: realtime?.timeout_seconds || 15,
+      last_error: realtime?.error || '',
+      notes: ['text-only cloud response', 'local GPT-SoVITS output', 'scoped Minecraft tools'],
     },
     {
       name: 'tts',
@@ -3216,6 +3318,7 @@ async function refreshSkills() {
     if (result.skills) skillManifest.value = result.skills
     installedAgentSkills.value = catalog.skills || []
     gameAdapterRows.value = adapters.adapters || []
+    await refreshMinecraftConnection()
     agentSkillDrafts.value = (drafts.drafts || []).filter((draft) => draft.status === 'draft')
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : '技能清单刷新失败'
@@ -3235,16 +3338,48 @@ async function refreshSkills() {
 
 
 
+function requestAppConfirm(options: AppConfirmOptions): Promise<boolean> {
+  if (appConfirmRequest.value) resolveAppConfirm(false)
+  return new Promise((resolve) => {
+    appConfirmRequest.value = {
+      title: options.title,
+      message: options.message,
+      confirmLabel: options.confirmLabel || '确认',
+      cancelLabel: options.cancelLabel || '取消',
+      danger: Boolean(options.danger),
+      resolve,
+    }
+    void nextTick(() => {
+      const dialog = appConfirmDialog.value
+      if (dialog && !dialog.open) dialog.showModal()
+    })
+  })
+}
+
+function resolveAppConfirm(accepted: boolean) {
+  const request = appConfirmRequest.value
+  if (!request) return
+  appConfirmRequest.value = null
+  const dialog = appConfirmDialog.value
+  if (dialog?.open) dialog.close()
+  request.resolve(accepted)
+}
+
 async function installGameAdapter(adapter: GameAdapterManifest) {
   const review = `${adapter.name} ${adapter.version}\n来源：${adapter.source}\n许可：${adapter.license}\n动作：${adapter.action_sets.join('、')}\n\n安装代码适配器？首次实际运行仍会经过能力会话权限。`
-  if (!window.confirm(review)) return
+  if (!await requestAppConfirm({ title: `安装 ${adapter.name} 适配器`, message: review, confirmLabel: '确认安装' })) return
   const result = await client.gameAdapterInstall(adapter.id, true) as { ok?: boolean; error?: string; adapter?: GameAdapterManifest }
   gameAdapterNotice.value = result.ok ? `${adapter.name} 适配器已安装。` : result.error || '适配器安装失败'
   await refreshSkills()
 }
 
 async function uninstallGameAdapter(adapter: GameAdapterManifest) {
-  if (!window.confirm(`卸载 ${adapter.name} 适配器？不会删除游戏存档或聊天记录。`)) return
+  if (!await requestAppConfirm({
+    title: `卸载 ${adapter.name} 适配器`,
+    message: `卸载 ${adapter.name} 适配器？不会删除游戏存档或聊天记录。`,
+    confirmLabel: '确认卸载',
+    danger: true,
+  })) return
   const result = await client.gameAdapterUninstall(adapter.id, true) as { ok?: boolean; error?: string }
   gameAdapterNotice.value = result.ok ? `${adapter.name} 适配器已卸载。` : result.error || '适配器卸载失败'
   await refreshSkills()
@@ -3259,6 +3394,182 @@ async function inspectGameAdapterRun(adapter: GameAdapterManifest) {
   const mode = adapter.modes.includes('companion') ? 'companion' : adapter.modes[0]
   const result = await client.gameAdapterRun({ adapter_id: adapter.id, mode, goal: '连接检查', dry_run: true }) as { ready?: boolean; error?: string; detection_status?: { setup_hint?: string } }
   gameAdapterNotice.value = result.ready ? `${adapter.name} 已准备好。` : result.detection_status?.setup_hint || result.error || `${adapter.name} 还需要配置。`
+}
+
+function minecraftList(value: string) {
+  return [...new Set(value.split(',').map((item) => item.trim()).filter(Boolean))]
+}
+
+const LANGUAGE_LABELS: Record<string, string> = {
+  follow: '跟随我的输入',
+  zh: '中文',
+  en: 'English',
+  ja: '日本語',
+  ko: '한국어',
+  yue: '粤语',
+}
+
+function languageLabel(code: string) {
+  const normalized = String(code || '').trim().toLowerCase().split(/[-_]/)[0]
+  return LANGUAGE_LABELS[normalized] || (normalized ? normalized : '未设置')
+}
+
+const chatLanguageChoices = computed(() => languageSettings.value?.chat_choices?.length
+  ? languageSettings.value.chat_choices
+  : ['follow', 'zh', 'en', 'ja', 'ko'])
+
+const currentChatLanguage = computed(() => String(languageSettings.value?.chat || 'zh'))
+
+const voiceLanguageLabel = computed(() => languageLabel(String(languageSettings.value?.voice || '')))
+
+/**
+ * The chat language is Core's, not the shell's: it changes what the model is
+ * told to write, so it is stored with the rest of the runtime configuration.
+ */
+async function saveChatLanguage(code: string) {
+  if (languageBusy.value || code === currentChatLanguage.value) return
+  languageBusy.value = true
+  languageNotice.value = ''
+  try {
+    const result = (await client.applyRuntimeConfig({ language: { chat: code } })) as {
+      ok?: boolean
+      preview?: RuntimeConfigMutationResult
+    }
+    if (result.ok === false) {
+      languageNotice.value = result.preview?.summary || '聊天语言没有保存。'
+      return
+    }
+    languageSettings.value = { ...(languageSettings.value || {}), chat: code }
+    languageNotice.value = `Joi 的回复语言已设为${languageLabel(code)}。`
+  } catch (error) {
+    languageNotice.value = error instanceof Error ? error.message : '聊天语言保存失败。'
+  } finally {
+    languageBusy.value = false
+  }
+}
+
+function minecraftErrorLabel(code: string) {
+  return {
+    minecraft_version_unsupported: '这个 Minecraft 版本超出了 Joi 桥接支持的范围；请把世界换成受支持的版本，或更新桥接。',
+    minecraft_connect_refused: '游戏拒绝了连接：请确认世界已「对局域网开放」，并核对端口。',
+    minecraft_host_unreachable: '连不上这个地址：请确认地址填写正确，且游戏与 Joi 在同一台机器或同一网络。',
+    minecraft_login_rejected: '游戏拒绝了 Joi 的登录：请核对登录方式（局域网世界用「离线 / LAN」）。',
+    spawn_timeout: 'Joi 连上了但没能进入世界；请重新打开局域网后再试。',
+    minecraft_connect_failed: 'Joi 无法连接 Minecraft；具体原因见 Joi Core 日志。',
+    minecraft_connection_scope_unconfigured: '请先保存连接配置：服务器标签与世界标签不能为空。',
+    minecraft_connection_scope_mismatch: '范围里的服务器/世界标签与已保存的连接配置不一致。',
+    minecraft_bridge_not_found: '找不到已构建的 Minecraft 桥接，请先构建 minecraft-bridge。',
+    minecraft_bridge_unreachable: '无法启动 Minecraft 桥接进程。',
+    adapter_not_enabled: 'Minecraft 适配器还没有启用。',
+  }[code] || code
+}
+
+async function refreshMinecraftConnection() {
+  try {
+    const result = await client.minecraftConnectionStatus() as { connection?: Record<string, unknown> } & Record<string, unknown>
+    const connection = (result.connection || result) as Record<string, unknown>
+    if (connection.source !== 'private_core') return
+    minecraftConnectionDraft.value = {
+      host: stringValue(connection.host) || '127.0.0.1',
+      port: Math.max(0, Number(connection.port || 0)),
+      username: stringValue(connection.username) || 'Joi',
+      auth: connection.auth === 'microsoft' ? 'microsoft' : 'offline',
+      server_id: stringValue(connection.server_id) || 'local-hmcl',
+      world: stringValue(connection.world) || 'world',
+      version: stringValue(connection.version),
+    }
+  } catch {
+    return
+  }
+}
+
+async function saveMinecraftConnection() {
+  minecraftBusy.value = true
+  try {
+    const result = await client.minecraftConnectionConfigure({ ...minecraftConnectionDraft.value }) as { ok?: boolean; error?: string }
+    gameAdapterNotice.value = result.ok ? 'Minecraft 连接配置已安全保存在 Joi Core 私有目录。' : result.error || 'Minecraft 连接配置无效。'
+    if (result.ok) await refreshSkills()
+  } catch (error) {
+    gameAdapterNotice.value = error instanceof Error ? error.message : 'Minecraft 连接配置失败。'
+  } finally {
+    minecraftBusy.value = false
+  }
+}
+
+function minecraftScopePayload() {
+  return {
+    server_id: minecraftConnectionDraft.value.server_id.trim().toLowerCase(),
+    world: minecraftConnectionDraft.value.world.trim().toLowerCase(),
+    dimensions: [...minecraftScopeDraft.value.dimensions],
+    max_radius: Math.round(Number(minecraftScopeDraft.value.max_radius)),
+    max_actions: Math.round(Number(minecraftScopeDraft.value.max_actions)),
+    max_blocks_changed: Math.round(Number(minecraftScopeDraft.value.max_blocks_changed)),
+    allowed_blocks: minecraftList(minecraftScopeDraft.value.allowed_blocks),
+    allowed_players: minecraftList(minecraftScopeDraft.value.allowed_players),
+    allow_build: Boolean(minecraftScopeDraft.value.allow_build),
+    allow_containers: Boolean(minecraftScopeDraft.value.allow_containers),
+  }
+}
+
+async function startMinecraftSession() {
+  if (activeMinecraftSessionId.value) return
+  minecraftBusy.value = true
+  try {
+    const scope = minecraftScopePayload()
+    const budget = {
+      max_steps: scope.max_actions,
+      max_seconds: minecraftMode.value === 'delegate' ? 1800 : 900,
+      max_failures: 3,
+    }
+    const request = {
+      mode: minecraftMode.value,
+      goal_summary: minecraftMode.value === 'delegate' ? '让 Joi 在已确认范围内单独游玩' : '与 Joi 一起游玩 Minecraft',
+      scope,
+      budget,
+    }
+    const preview = await client.minecraftSessionStart(request) as { ok?: boolean; requires_approval?: boolean; approval_id?: string; error?: string }
+    if (!preview.requires_approval || !preview.approval_id) {
+      gameAdapterNotice.value = minecraftErrorLabel(preview.error || '') || 'Minecraft 范围预览失败。'
+      return
+    }
+    const dimensions = scope.dimensions.join('、')
+    const confirmed = await requestAppConfirm({
+      title: '确认 Minecraft 能力范围',
+      message: `模式：${minecraftMode.value === 'delegate' ? 'Joi 单独玩' : '与 Joi 一起玩'}\n服务器标签：${scope.server_id}\n世界：${scope.world}\n维度：${dimensions}\n起点半径：${scope.max_radius}\n最多动作：${scope.max_actions}\n最多修改方块：${scope.max_blocks_changed}\n允许方块：${scope.allowed_blocks.join('、')}\n允许玩家：${scope.allowed_players.join('、') || '无'}\n建造：${scope.allow_build ? '允许' : '禁止'}\n容器：${scope.allow_containers ? '允许' : '禁止'}\n\n确认后 Joi 才会连接游戏；每条动作仍会单独校验和留回执。`,
+      confirmLabel: '确认并连接',
+    })
+    if (!confirmed) {
+      gameAdapterNotice.value = '已取消；没有连接 Minecraft。'
+      return
+    }
+    const result = await client.minecraftSessionStart({
+      ...request,
+      confirmed_scope: true,
+      approval_id: preview.approval_id,
+    }) as { ok?: boolean; error?: string; session?: CapabilitySession; state?: string }
+    if (result.session?.id) activeCapabilitySession.value = result.session
+    gameAdapterNotice.value = result.ok
+      ? 'Minecraft 已连接。现在可启动“实时语音 + Minecraft”。'
+      : minecraftErrorLabel(result.error || '') || 'Minecraft 连接失败。'
+  } catch (error) {
+    gameAdapterNotice.value = error instanceof Error ? error.message : 'Minecraft 会话启动失败。'
+  } finally {
+    minecraftBusy.value = false
+  }
+}
+
+async function stopMinecraftSession() {
+  const sessionId = activeMinecraftSessionId.value
+  if (!sessionId) return
+  if (realtimeVoiceActive.value) stopRealtimeVoice()
+  minecraftBusy.value = true
+  try {
+    const result = await client.minecraftSessionStop(sessionId) as { ok?: boolean; error?: string; session?: CapabilitySession }
+    if (result.session) activeCapabilitySession.value = result.session
+    gameAdapterNotice.value = result.ok ? 'Minecraft 会话已结束，Bridge 已关闭。' : result.error || 'Minecraft 会话停止失败。'
+  } finally {
+    minecraftBusy.value = false
+  }
 }
 
 
@@ -3589,6 +3900,168 @@ function stopSpokenAudio() {
   detachLipSync()
 }
 
+function realtimeVoiceErrorLabel(error: string) {
+  const labels: Record<string, string> = {
+    realtime_unconfigured: '实时语音未配置，请先在 realtime_voice 中启用。',
+    realtime_config_error: '实时语音配置有误。',
+    realtime_auth_failed: '实时语音密钥无效或无权限。',
+    realtime_rate_limited: '实时语音当前被限流，请稍后再试。',
+    realtime_timeout: '实时语音连接超时，请稍后再试。',
+    realtime_invalid_request: '实时语音会话参数未被服务接受。',
+    realtime_provider_error: '云端实时语音服务返回错误，会话已停止，麦克风已释放。',
+    microphone_unavailable: '麦克风不可用，请检查系统权限。',
+    audio_capture_unavailable: '当前环境无法采集实时 PCM 音频。',
+    realtime_disconnected: '实时语音连接已断开。',
+    realtime_audio_overflow: '实时音频发送来不及处理，会话已安全停止。',
+    minecraft_session_not_runnable: 'Minecraft 会话尚未就绪，请先连接游戏并确认范围。',
+    realtime_local_tts_unavailable: '本地 GPT-SoVITS 未就绪；字幕可用，Joi 暂时静音。',
+    realtime_local_tts_failed: '本地 GPT-SoVITS 合成失败；字幕仍可用。',
+    realtime_unavailable: '实时语音暂时不可用。',
+  }
+  return labels[error] || labels.realtime_unavailable
+}
+
+/**
+ * A realtime turn is a conversation, so it belongs in the conversation.
+ *
+ * These events are built here and never persisted: a realtime session is
+ * ephemeral by design, and Core stays the only author of stored history. What
+ * this fixes is a session that looked like nothing was happening -- the speech
+ * Joi heard and the line she answered with only ever reached a status line.
+ */
+function showRealtimeTurn(epoch: number, role: 'user' | 'assistant', text: string) {
+  const summary = text.trim()
+  if (!summary) return
+  const taskId = `realtime-turn-${Math.max(0, Math.floor(Number(epoch) || 0))}`
+  // A turn renders around what the user said. If transcription produced
+  // nothing, say so rather than dropping Joi's answer out of the conversation.
+  if (role === 'assistant' && !events.value.some((row) => row.task_id === taskId && row.type === 'user_message')) {
+    showRealtimeTurn(epoch, 'user', lastTranscript.value.trim() || '（未识别到语音）')
+  }
+  mergeConversationEvents([
+    {
+      event_id: `${taskId}-${role}`,
+      // '对话' is what marks an assistant event as speech rather than work, so
+      // a realtime answer renders as a reply and never as a task card.
+      type: role === 'user' ? 'user_message' : 'tool_completed',
+      task_id: taskId,
+      created_at: Date.now() / 1000,
+      display_card: { title: role === 'user' ? '语音' : '对话', summary },
+      voice_line: { text: '' },
+    } as AgentEvent,
+  ])
+}
+
+function handleRealtimeVoiceEvent(event: RealtimeVoiceEvent) {
+  if (event.kind === 'barge_in') {
+    realtimePlaybackEpoch = event.epoch
+    realtimeAssistantTranscript.value = ''
+    stopSpokenAudio()
+  }
+  if (event.kind === 'user_transcript' && event.final) {
+    lastTranscript.value = event.text
+    showRealtimeTurn(Number(event.epoch || 0), 'user', event.text)
+  }
+  if (event.kind === 'assistant_transcript') {
+    realtimePlaybackEpoch = Math.max(realtimePlaybackEpoch, Number(event.epoch || 0))
+    realtimeAssistantTranscript.value = event.final
+      ? event.text
+      : `${realtimeAssistantTranscript.value}${event.text}`.slice(-8000)
+    if (event.final) showRealtimeTurn(Number(event.epoch || 0), 'assistant', realtimeAssistantTranscript.value)
+  }
+  if (event.kind === 'game_action') {
+    realtimeAssistantTranscript.value = event.status === 'acting'
+      ? `Joi 正在执行 ${event.action || 'Minecraft 操作'}…`
+      : `Minecraft 操作：${event.status}`
+  }
+  if (event.kind === 'tts_state') errorText.value = realtimeVoiceErrorLabel(event.error)
+  if (event.kind === 'error') errorText.value = realtimeVoiceErrorLabel(event.error)
+}
+
+async function toggleRealtimeVoice(useMinecraft = false) {
+  if (realtimeVoiceActive.value) {
+    stopRealtimeVoice()
+    return
+  }
+  if (!realtimeVoiceConfigured.value) {
+    errorText.value = realtimeVoiceErrorLabel('realtime_unconfigured')
+    return
+  }
+  const mode: 'conversation' | 'minecraft' = useMinecraft ? 'minecraft' : 'conversation'
+  const minecraftSessionId = mode === 'minecraft' ? activeMinecraftSessionId.value : ''
+  if (mode === 'minecraft' && !minecraftSessionId) {
+    errorText.value = realtimeVoiceErrorLabel('minecraft_session_not_runnable')
+    return
+  }
+  if (!realtimeVoiceDisclosuresAccepted.has(mode)) {
+    const disclosure = mode === 'minecraft'
+      ? '实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。模型可以提出一条 Minecraft 操作，但只能在你已确认的服务器、世界、维度、半径、方块和预算范围内执行；Joi Core 会逐条校验并保留回执。是否开始？'
+      : '实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。云端只返回文本，Joi 仍使用本地 GPT-SoVITS 发声；本模式不执行 Minecraft 操作。是否开始？'
+    const accepted = await requestAppConfirm({
+      title: mode === 'minecraft' ? '启动实时语音 + Minecraft' : '启动实时语音',
+      message: disclosure,
+      confirmLabel: '允许并开始',
+    })
+    if (!accepted) return
+    realtimeVoiceDisclosuresAccepted.add(mode)
+  }
+  if (voiceRecorder.active) await cleanupVoiceStream()
+  voiceState.value = 'idle'
+  beginNewVoiceIntent()
+  lastTranscript.value = ''
+  realtimeAssistantTranscript.value = ''
+  errorText.value = ''
+  realtimeVoiceSession = new RealtimeVoiceSession({
+    mode,
+    minecraftSessionId,
+    startSession: async () => client.startRealtimeVoiceSession(
+      mode,
+      minecraftSessionId,
+      Math.max(1000, Number(ready.value?.realtime_voice?.timeout_seconds || 15) * 1000 + 5000),
+    ) as Promise<{ ok?: boolean; session_id?: string; state?: string; error?: string }>,
+    appendAudio: (params) => {
+      if (!client.appendRealtimeVoiceAudio(params)) throw new Error('realtime_disconnected')
+    },
+    stopSession: (sessionId) => {
+      void client.stopRealtimeVoiceSession(sessionId).catch(() => undefined)
+    },
+    onState: (state) => {
+      realtimeVoiceState.value = state
+    },
+    onEvent: handleRealtimeVoiceEvent,
+  })
+  try {
+    await realtimeVoiceSession.start()
+  } catch (error) {
+    const code = error instanceof Error ? error.message : 'realtime_unavailable'
+    errorText.value = realtimeVoiceErrorLabel(code)
+  }
+}
+
+function stopRealtimeVoice() {
+  realtimeVoiceSession?.stop()
+  realtimeVoiceSession = null
+  realtimePlaybackEpoch += 1
+  stopSpokenAudio()
+  realtimeVoiceState.value = 'idle'
+  realtimeAssistantTranscript.value = ''
+}
+
+async function controlRealtimeMinecraft(action: 'pause' | 'resume' | 'cancel') {
+  const sessionId = realtimeVoiceSession?.sessionId || ''
+  if (!sessionId) return
+  try {
+    const result = await client.controlRealtimeMinecraft(sessionId, action) as { ok?: boolean; state?: string; error?: string; recovery_required?: boolean }
+    if (!result.ok) {
+      errorText.value = result.recovery_required ? 'Minecraft Bridge 已进入恢复等待；请结束当前游戏会话后重新连接。' : result.error || '当前没有可控制的 Minecraft 动作。'
+      return
+    }
+    realtimeVoiceState.value = action === 'pause' ? 'paused' : action === 'resume' ? 'acting' : 'listening'
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : 'Minecraft 动作控制失败。'
+  }
+}
+
 async function toggleVoiceInput() {
   if (voiceState.value === 'recording') {
     void stopVoiceRecording()
@@ -3610,6 +4083,7 @@ async function startVoiceRecording() {
     }
     beginNewVoiceIntent()
     lastTranscript.value = ''
+    lastAsrLatency.value = {}
     // Recorded as WAV rather than through MediaRecorder: that gives webm in
     // Chromium and mp4 in the packaged WKWebView, and the recogniser reads
     // neither. Getting the container wrong fails only after upload.
@@ -3640,7 +4114,7 @@ async function stopVoiceRecording() {
     errorText.value = '我没有录到声音，请再说一次。'
     return
   }
-  await transcribeVoiceBlob(recording.blob, recording.mimeType)
+  await transcribeVoiceBlob(recording.blob, recording.mimeType, recording.prepareMs)
 }
 
 async function cleanupVoiceStream() {
@@ -3651,7 +4125,9 @@ async function cleanupVoiceStream() {
   if (voiceRecorder.active) await voiceRecorder.stop()
 }
 
-async function transcribeVoiceBlob(blob: Blob, mimeType: string) {
+async function transcribeVoiceBlob(blob: Blob, mimeType: string, prepareMs = 0) {
+  const perceivedStarted = performance.now()
+  const generationId = voiceGenerationId(voiceEpoch)
   try {
     if (blob.size <= 0) {
       errorText.value = '我没有录到声音，请再说一次。'
@@ -3661,14 +4137,45 @@ async function transcribeVoiceBlob(blob: Blob, mimeType: string) {
       errorText.value = '这段语音太长了，我没有发送出去。'
       return
     }
+    const encodeStarted = performance.now()
     const audioBase64 = await blobToBase64(blob)
-    const result = (await client.transcribeVoice(audioBase64, mimeType, voiceTranscribeTimeoutMs.value)) as { ok?: boolean; transcript?: string; error?: string; message?: string }
-    if (result.ok && result.transcript) lastTranscript.value = result.transcript
-    if (!result.ok) errorText.value = result.message || result.error || '没有识别到语音'
+    const encodeMs = Math.max(0, Math.round(performance.now() - encodeStarted))
+    const rpcStarted = performance.now()
+    const result = (await client.transcribeVoice(
+      audioBase64,
+      mimeType,
+      voiceTranscribeTimeoutMs.value,
+      activeContext.value.thread_id || '',
+      generationId,
+    )) as {
+      ok?: boolean
+      transcript?: string
+      error?: string
+      message?: string
+      generation_id?: string
+      stale?: boolean
+      latency?: AsrLatencyBreakdown
+    }
+    const rpcMs = Math.max(0, Math.round(performance.now() - rpcStarted))
+    const current = result.generation_id === generationId && !result.stale && generationId === voiceGenerationId(voiceEpoch)
+    if (current) {
+      lastAsrLatency.value = {
+        prepare_ms: Math.max(0, Math.round(prepareMs)),
+        encode_ms: encodeMs,
+        rpc_ms: rpcMs,
+        decode_ms: result.latency?.decode_ms,
+        provider_ms: result.latency?.provider_ms,
+        total_ms: Math.max(0, Math.round(prepareMs + performance.now() - perceivedStarted)),
+      }
+    }
+    if (result.ok && result.transcript && current) lastTranscript.value = result.transcript
+    if (!result.ok && current) errorText.value = result.message || result.error || '没有识别到语音'
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '语音转写失败'
+    if (generationId === voiceGenerationId(voiceEpoch)) {
+      errorText.value = error instanceof Error ? error.message : '语音转写失败'
+    }
   } finally {
-    voiceState.value = 'idle'
+    if (generationId === voiceGenerationId(voiceEpoch)) voiceState.value = 'idle'
   }
 }
 
@@ -3712,7 +4219,9 @@ onBeforeUnmount(() => {
     agentCliSyncTimer = null
   }
   void cleanupVoiceStream()
+  stopRealtimeVoice()
   stopSpokenAudio()
+  resolveAppConfirm(false)
   client.close()
 })
 
@@ -4354,6 +4863,14 @@ provide(ProjectsContextKey, {
                 <MonitorPlay :size="18" :stroke-width="1.75" />
                 <span>{{ watchLoopActive ? '停止实时陪看' : '开始实时陪看' }}</span>
               </button>
+              <button type="button" :disabled="!connected || (!realtimeVoiceConfigured && !realtimeVoiceActive)" @click="toggleRealtimeVoice(); quickMenuOpen = false">
+                <AudioLines :size="18" :stroke-width="1.75" />
+                <span>{{ realtimeVoiceActive ? '结束实时语音' : '开始实时语音' }}</span>
+              </button>
+              <button v-if="activeMinecraftSessionId && !realtimeVoiceActive" type="button" :disabled="!connected || !realtimeVoiceConfigured" @click="toggleRealtimeVoice(true); quickMenuOpen = false">
+                <Gamepad2 :size="18" :stroke-width="1.75" />
+                <span>实时语音 + Minecraft</span>
+              </button>
               <button type="button" :disabled="compactTransitioning" @click="toggleCompactMode(); quickMenuOpen = false">
                 <Minimize2 :size="18" :stroke-width="1.75" />
                 <span>切换微缩模式</span>
@@ -4374,7 +4891,7 @@ provide(ProjectsContextKey, {
             type="button"
             class="composer-icon-btn composer-mic-btn"
             :class="{ recording: voiceState === 'recording' }"
-            :disabled="!connected || !asrConfigured || voiceState === 'transcribing'"
+            :disabled="!connected || !asrConfigured || voiceState === 'transcribing' || realtimeVoiceActive"
             @click="toggleVoiceInput"
             title="语音说话"
           >
@@ -4859,6 +5376,55 @@ provide(ProjectsContextKey, {
 
               <section class="game-adapter-settings">
                 <header><div><strong>游戏适配器</strong><span>独立代码扩展，不会伪装成 Skill</span></div><Gamepad2 :size="19" /></header>
+                <div v-if="minecraftAdapter?.installed && minecraftAdapter.enabled" class="minecraft-setup-card">
+                  <header>
+                    <div><strong>Minecraft Skill</strong><span>HMCL / Java 版 · Mineflayer V2 Bridge</span></div>
+                    <em :class="{ ready: activeMinecraftSessionId }">{{ activeMinecraftSessionId ? '已连接' : '待连接' }}</em>
+                  </header>
+                  <div class="minecraft-mode-picker" role="group" aria-label="Minecraft 游玩模式">
+                    <button type="button" :class="{ active: minecraftMode === 'companion' }" :aria-pressed="minecraftMode === 'companion'" :disabled="Boolean(activeMinecraftSessionId)" @click="minecraftMode = 'companion'">与 Joi 一起玩</button>
+                    <button type="button" :class="{ active: minecraftMode === 'delegate' }" :aria-pressed="minecraftMode === 'delegate'" :disabled="Boolean(activeMinecraftSessionId)" @click="minecraftMode = 'delegate'">让 Joi 单独玩</button>
+                  </div>
+                  <details :open="!activeMinecraftSessionId">
+                    <summary>1. HMCL 局域网连接</summary>
+                    <div class="minecraft-field-grid">
+                      <label><span>地址</span><input v-model.trim="minecraftConnectionDraft.host" spellcheck="false" placeholder="127.0.0.1" /></label>
+                      <label><span>LAN 端口</span><input v-model.number="minecraftConnectionDraft.port" type="number" min="1" max="65535" placeholder="打开局域网后显示" /></label>
+                      <label><span>Joi 玩家名</span><input v-model.trim="minecraftConnectionDraft.username" spellcheck="false" /></label>
+                      <label><span>登录方式</span><select v-model="minecraftConnectionDraft.auth"><option value="offline">离线 / LAN</option><option value="microsoft">Microsoft</option></select></label>
+                      <label><span>服务器标签</span><input v-model.trim="minecraftConnectionDraft.server_id" spellcheck="false" /></label>
+                      <label><span>世界标签</span><input v-model.trim="minecraftConnectionDraft.world" spellcheck="false" /></label>
+                      <label><span>MC 版本（可留空）</span><input v-model.trim="minecraftConnectionDraft.version" spellcheck="false" placeholder="自动检测" /></label>
+                    </div>
+                    <button type="button" :disabled="minecraftBusy || minecraftConnectionDraft.port < 1" :aria-busy="minecraftBusy" @click="saveMinecraftConnection">保存连接配置</button>
+                  </details>
+                  <details :open="!activeMinecraftSessionId">
+                    <summary>2. 确认世界能力范围</summary>
+                    <div class="minecraft-field-grid">
+                      <label><span>维度</span><select v-model="minecraftScopeDraft.dimensions" multiple><option value="overworld">主世界</option><option value="the_nether">下界</option><option value="the_end">末地</option></select></label>
+                      <label><span>起点最大半径</span><input v-model.number="minecraftScopeDraft.max_radius" type="number" min="4" max="128" /></label>
+                      <label><span>最多动作</span><input v-model.number="minecraftScopeDraft.max_actions" type="number" min="1" max="200" /></label>
+                      <label><span>最多修改方块</span><input v-model.number="minecraftScopeDraft.max_blocks_changed" type="number" min="0" max="512" /></label>
+                      <label class="wide"><span>允许方块（逗号分隔）</span><input v-model="minecraftScopeDraft.allowed_blocks" spellcheck="false" /></label>
+                      <label class="wide"><span>允许跟随的玩家（逗号分隔）</span><input v-model="minecraftScopeDraft.allowed_players" spellcheck="false" :placeholder="minecraftConnectionDraft.username === 'Joi' ? '填写你的 MC 玩家名' : ''" /></label>
+                      <label class="check"><input v-model="minecraftScopeDraft.allow_build" type="checkbox" /><span>允许建造</span></label>
+                      <label class="check"><input v-model="minecraftScopeDraft.allow_containers" type="checkbox" /><span>允许存入容器</span></label>
+                    </div>
+                  </details>
+                  <div class="minecraft-session-actions">
+                    <template v-if="activeMinecraftSessionId">
+                      <button type="button" :disabled="!realtimeVoiceConfigured" @click="toggleRealtimeVoice(true)"><AudioLines :size="16" />{{ realtimeVoiceActive ? '结束实时语音' : '启动实时语音 + Minecraft' }}</button>
+                      <button v-if="realtimeVoiceState === 'acting'" type="button" @click="controlRealtimeMinecraft('pause')"><Pause :size="15" />暂停当前动作</button>
+                      <button v-if="realtimeVoiceState === 'paused'" type="button" @click="controlRealtimeMinecraft('resume')"><Play :size="15" />继续当前动作</button>
+                      <button v-if="['acting', 'paused'].includes(realtimeVoiceState)" type="button" class="danger" @click="controlRealtimeMinecraft('cancel')"><X :size="15" />取消当前动作</button>
+                      <button type="button" class="danger" :disabled="minecraftBusy" @click="stopMinecraftSession"><Unplug :size="15" />结束游戏会话</button>
+                    </template>
+                    <button v-else type="button" class="primary" :disabled="minecraftBusy || minecraftConnectionDraft.port < 1 || !minecraftScopeDraft.allowed_blocks.trim()" :aria-busy="minecraftBusy" @click="startMinecraftSession">
+                      <Gamepad2 :size="16" />{{ minecraftBusy ? '连接中…' : '预览范围并连接' }}
+                    </button>
+                  </div>
+                  <p class="minecraft-privacy-note"><ShieldCheck :size="15" />部分转写不会执行动作；断线、停止或 Core 失联会取消当前目标且绝不自动重放。坐标、背包明细和 Bridge 日志不会进入语音或公开回执。</p>
+                </div>
                 <div class="game-adapter-list">
                   <article v-for="adapter in gameAdapterRows" :key="adapter.id" :class="{ disabled: adapter.installed && !adapter.enabled }">
                     <div>
@@ -4917,6 +5483,54 @@ provide(ProjectsContextKey, {
               </div>
               <p class="settings-memory-summary">{{ memoryProfile?.summary || 'Joi 会从对话中提出可记忆内容，只有确认后才会进入长期记忆。' }}</p>
               <button type="button" class="settings-memory-open" @click="openCabin('memory')"><Brain :size="18" />打开记忆管理</button>
+            </div>
+
+            <div class="runtime-settings language-settings" v-else-if="activeSettingsTab === 'language'">
+              <div class="runtime-settings-head">
+                <strong>界面语言</strong>
+                <span>Joi 自己的按钮和文案</span>
+              </div>
+              <div class="language-options" role="group" aria-label="界面语言">
+                <button type="button" class="language-option active" aria-pressed="true">中文</button>
+                <button type="button" class="language-option" disabled>English</button>
+                <button type="button" class="language-option" disabled>日本語</button>
+              </div>
+              <p class="language-hint">目前只有中文界面。其他语言还没有本地化，选了也只会显示中文，所以先不开放。</p>
+
+              <div class="runtime-settings-head">
+                <strong>聊天语言</strong>
+                <span>Joi 在屏幕上写字用的语言</span>
+              </div>
+              <div class="language-options" role="group" aria-label="聊天语言">
+                <button
+                  v-for="code in chatLanguageChoices"
+                  :key="code"
+                  type="button"
+                  class="language-option"
+                  :class="{ active: currentChatLanguage === code }"
+                  :aria-pressed="currentChatLanguage === code"
+                  :disabled="languageBusy"
+                  @click="saveChatLanguage(code)"
+                >{{ languageLabel(code) }}</button>
+              </div>
+              <p class="language-hint">
+                {{ currentChatLanguage === 'follow'
+                  ? 'Joi 会用你这句话所用的语言回复。'
+                  : `不管你用什么语言提问，Joi 都用${languageLabel(currentChatLanguage)}回复。` }}
+              </p>
+
+              <div class="runtime-settings-head">
+                <strong>说话语言</strong>
+                <span>来自角色包</span>
+              </div>
+              <div class="language-voice-row">
+                <strong>{{ voiceLanguageLabel }}</strong>
+                <button type="button" class="memory-link-button" @click="openCabin('characters')">在角色库里切换</button>
+              </div>
+              <p class="language-hint">
+                角色包里选的语言只决定 Joi 用什么语言发声。她可以用{{ voiceLanguageLabel }}说话，同时在屏幕上写{{ currentChatLanguage === 'follow' ? '你所用的语言' : languageLabel(currentChatLanguage) }}。
+              </p>
+              <p v-if="languageNotice" class="agent-skill-notice">{{ languageNotice }}</p>
             </div>
 
             <div class="runtime-settings" v-else-if="activeSettingsTab === 'appearance'">
@@ -5132,7 +5746,7 @@ provide(ProjectsContextKey, {
             type="button"
             class="mini-mic-btn"
             :class="{ recording: voiceState === 'recording' }"
-            :disabled="!connected || !asrConfigured || voiceState === 'transcribing'"
+            :disabled="!connected || !asrConfigured || voiceState === 'transcribing' || realtimeVoiceActive"
             @click="toggleVoiceInput"
             title="语音说话"
           >
@@ -5199,6 +5813,19 @@ provide(ProjectsContextKey, {
           </div>
         </div>
       </div>
+    </dialog>
+    <dialog ref="appConfirmDialog" class="app-confirm-modal" @cancel.prevent="resolveAppConfirm(false)">
+      <section v-if="appConfirmRequest" class="app-confirm-card" role="document">
+        <header>
+          <ShieldCheck :size="22" />
+          <h2>{{ appConfirmRequest.title }}</h2>
+        </header>
+        <p>{{ appConfirmRequest.message }}</p>
+        <footer>
+          <button type="button" class="secondary" @click="resolveAppConfirm(false)">{{ appConfirmRequest.cancelLabel }}</button>
+          <button type="button" :class="{ danger: appConfirmRequest.danger }" @click="resolveAppConfirm(true)">{{ appConfirmRequest.confirmLabel }}</button>
+        </footer>
+      </section>
     </dialog>
   </main>
 </template>

@@ -19,6 +19,8 @@ export interface VoiceRecording {
   blob: Blob
   mimeType: string
   seconds: number
+  /** Microphone teardown, sample merge, and WAV encoding after stop. */
+  prepareMs: number
 }
 
 /**
@@ -113,6 +115,7 @@ export class VoiceRecorder {
 
   /** Stop, release the microphone, and return what was captured. */
   async stop(): Promise<VoiceRecording | null> {
+    const prepareStarted = performance.now()
     const context = this.context
     const sampleRate = context?.sampleRate || TARGET_SAMPLE_RATE
     if (this.processor) this.processor.onaudioprocess = null
@@ -139,6 +142,7 @@ export class VoiceRecorder {
       blob: new Blob([wav], { type: 'audio/wav' }),
       mimeType: 'audio/wav',
       seconds: merged.length / sampleRate,
+      prepareMs: Math.max(0, Math.round(performance.now() - prepareStarted)),
     }
   }
 }

@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES
 from agent_companion.core.skill_manifest import KNOWN_SKILL_IDS, normalize_skill_id
 
 
@@ -94,6 +95,10 @@ _ALLOWED_FIELDS: dict[tuple[str, str], _FieldSpec] = {
     ("llm", "expression_model"): _FieldSpec("Expression model", "expression_model", "model", lambda value: _validate_model(value)),
     ("llm", "temperature"): _FieldSpec("Text temperature", "llm_temperature", "number", lambda value: _validate_float_range(value, 0.0, 2.0)),
     ("llm", "use_mock"): _FieldSpec("Mock text model", "llm_use_mock", "boolean", lambda value: _validate_bool(value)),
+    # What Joi shows and writes. The language she speaks is the character
+    # package's and is not settable from here.
+    ("language", "interface"): _FieldSpec("Interface language", "interface_language", "language", lambda value: _validate_choice(value, ("zh",))),
+    ("language", "chat"): _FieldSpec("Chat language", "chat_language", "language", lambda value: _validate_choice(value, CHAT_LANGUAGE_CHOICES)),
 }
 
 
@@ -242,6 +247,13 @@ def _validate_language(value: object) -> tuple[bool, object | None, str]:
     if not _LANG_RE.match(text) or _SECRET_VALUE_RE.search(text):
         return False, None, "invalid_value"
     return True, text, ""
+
+
+def _validate_choice(value: object, allowed: tuple[str, ...]) -> tuple[bool, object | None, str]:
+    if not isinstance(value, str):
+        return False, None, "invalid_type"
+    text = value.strip().replace("_", "-").casefold().split("-")[0]
+    return (True, text, "") if text in allowed else (False, None, "invalid_value")
 
 
 def _validate_model(value: object) -> tuple[bool, object | None, str]:

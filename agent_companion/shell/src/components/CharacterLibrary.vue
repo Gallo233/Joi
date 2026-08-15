@@ -512,7 +512,7 @@ async function switchLocale(locale: string) {
     if (!result.ok) throw new Error(rpcMessage(result, '语言切换失败。'))
     // The persona, greeting and voice all changed, so the character has to be
     // re-read rather than having a label swapped in place.
-    notice.value = `已切换到${localeLabel(locale)}配音；聊天文字仍跟随你本轮输入。`
+    notice.value = `已切换到${localeLabel(locale)}配音；屏幕上的文字仍按「设置 → 语言」里的聊天语言显示。`
     if (selectedId.value === activeId.value) emit('activated', selectedId.value, result.ready)
     await refresh(selectedId.value)
   } catch (reason) {

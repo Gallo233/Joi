@@ -4230,6 +4230,63 @@ dialog.artifact-modal {
   overflow: hidden;
 }
 
+dialog.app-confirm-modal {
+  width: min(560px, calc(100vw - 40px));
+  max-height: min(720px, calc(100vh - 40px));
+  margin: auto;
+  padding: 0;
+  border: 1px solid rgba(49, 79, 121, 0.18);
+  border-radius: 24px;
+  background: rgba(250, 252, 255, 0.98);
+  color: var(--text-primary, #1f2d3d);
+  box-shadow: 0 30px 90px rgba(21, 42, 72, 0.3);
+}
+
+dialog.app-confirm-modal::backdrop {
+  background: rgba(28, 43, 64, 0.34);
+  backdrop-filter: blur(8px);
+}
+
+.app-confirm-card {
+  display: grid;
+  gap: 18px;
+  padding: 26px;
+}
+
+.app-confirm-card header {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.app-confirm-card h2,
+.app-confirm-card p {
+  margin: 0;
+}
+
+.app-confirm-card h2 {
+  font-size: 19px;
+}
+
+.app-confirm-card p {
+  max-height: min(470px, 55vh);
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.72;
+  color: var(--text-secondary, #516176);
+}
+
+.app-confirm-card footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.app-confirm-card footer button {
+  min-width: 104px;
+}
+
 dialog.artifact-modal::backdrop {
   background: rgba(6, 8, 14, 0.75);
   backdrop-filter: blur(12px);
@@ -6304,6 +6361,81 @@ dialog.artifact-modal {
 .game-adapter-list button.primary { color: #fff; border-color: #2b68ee; background: #2b68ee; }
 .game-adapter-list button.danger { color: #b45259; }
 
+.minecraft-setup-card {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  display: grid;
+  gap: var(--sp-3);
+  border: 1px solid rgba(43, 104, 238, 0.16);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(145deg, rgba(239, 246, 255, 0.94), rgba(255, 255, 255, 0.9));
+}
+
+.minecraft-setup-card > header,
+.minecraft-session-actions,
+.minecraft-mode-picker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.minecraft-setup-card > header > div { display: grid; }
+.minecraft-setup-card > header strong { color: #243b5a; font-size: var(--text-sm); }
+.minecraft-setup-card > header span,
+.minecraft-setup-card summary,
+.minecraft-privacy-note { color: #5d6f86; font-size: var(--text-xs); }
+.minecraft-setup-card > header em { color: #8b6d42; font-size: var(--text-xs); font-style: normal; }
+.minecraft-setup-card > header em.ready { color: #2f7a54; }
+.minecraft-setup-card details { padding: var(--sp-2); border-radius: var(--radius-md); background: rgba(255, 255, 255, 0.72); }
+.minecraft-setup-card summary { font-weight: 700; cursor: pointer; }
+
+.minecraft-mode-picker { justify-content: flex-start; }
+.minecraft-mode-picker button,
+.minecraft-session-actions button,
+.minecraft-setup-card details > button {
+  min-height: 34px;
+  padding: 0 var(--sp-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  border: 1px solid rgba(62, 98, 149, 0.18);
+  border-radius: var(--radius-md);
+  color: #4a617e;
+  background: #fff;
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.minecraft-mode-picker button.active,
+.minecraft-session-actions button.primary { color: #fff; border-color: #2b68ee; background: #2b68ee; }
+.minecraft-session-actions button.danger { color: #b45259; }
+
+.minecraft-field-grid {
+  margin: var(--sp-3) 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+.minecraft-field-grid label { display: grid; gap: var(--sp-1); color: #586b84; font-size: var(--text-xs); }
+.minecraft-field-grid label.wide { grid-column: 1 / -1; }
+.minecraft-field-grid label.check { display: flex; align-items: center; }
+.minecraft-field-grid input:not([type='checkbox']),
+.minecraft-field-grid select {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 var(--sp-2);
+  border: 1px solid rgba(62, 98, 149, 0.17);
+  border-radius: var(--radius-sm);
+  color: #2f425c;
+  background: #fff;
+  font-size: var(--text-xs);
+}
+
+.minecraft-privacy-note { margin: 0; display: flex; align-items: flex-start; gap: var(--sp-2); line-height: 1.6; }
+
 @media (max-width: 760px) {
   .agent-skill-source-row { grid-template-columns: 1fr 1fr 1fr; }
   .agent-skill-source-row input { grid-column: 1 / -1; }
@@ -6877,4 +7009,57 @@ dialog.artifact-modal {
 
 .stage-rail-pending:hover {
   border-color: var(--warning);
+}
+
+/* Language settings: three pickers that answer three different questions --
+   what the app is written in, what Joi writes, and what she says. Keeping them
+   in one panel is what makes the difference legible. */
+.language-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.language-option {
+  min-height: 34px;
+  padding: 0 var(--sp-3);
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(62, 98, 149, 0.18);
+  border-radius: var(--radius-md);
+  color: #4a617e;
+  background: #fff;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.language-option.active {
+  color: #fff;
+  border-color: #2b68ee;
+  background: #2b68ee;
+}
+
+.language-option:disabled {
+  color: var(--text-disabled);
+  background: #f6f7f9;
+  cursor: not-allowed;
+}
+
+.language-hint {
+  margin: 0;
+  color: #687281;
+  font-size: var(--text-sm);
+}
+
+.language-voice-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.language-voice-row strong {
+  color: #1f2937;
+  font-size: var(--text-md);
 }

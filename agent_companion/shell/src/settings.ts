@@ -3,6 +3,7 @@ export type SettingsTabId =
   | 'runtime'
   | 'memory'
   | 'skills'
+  | 'language'
   | 'appearance'
   | 'developer'
 
@@ -24,12 +25,15 @@ interface SettingsTab {
  * could reach, and each carried an icon import and a subtitle that read like a
  * shipped feature. Removing them is not a reduction in scope: it makes the
  * list say what the product does.
+ *
+ * `language` is back because it now routes to a panel that changes behaviour.
  */
 export const settingsTabs: SettingsTab[] = [
   { id: 'execution', label: '基础设置', icon: 'settings', subtitle: '选择本机 Agent CLI、模型和执行方式。' },
   { id: 'runtime', label: '模型与运行时', icon: 'cpu', subtitle: '管理模型提供商、语音和本地运行参数。' },
   { id: 'memory', label: '记忆', icon: 'brain', subtitle: '管理长期记忆和待确认候选。' },
   { id: 'skills', label: '技能', icon: 'sparkles', subtitle: '导入、审核和管理可复用工作流。' },
+  { id: 'language', label: '语言', icon: 'globe', subtitle: '选择界面语言和 Joi 回复的语言；说话的语言来自角色。' },
   { id: 'appearance', label: '外观', icon: 'palette', subtitle: '调整 Joi 外观和微缩模式装扮。' },
   { id: 'developer', label: '开发者', icon: 'code', subtitle: '查看审计、背景上下文和事件流。' },
 ]

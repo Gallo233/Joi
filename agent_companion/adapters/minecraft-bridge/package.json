@@ -1,11 +1,21 @@
 {
   "name": "@joi/minecraft-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Isolated Mineflayer bridge for Joi GameAdapter v1",
+  "description": "Persistent, typed Mineflayer bridge for Joi GameAdapter v2",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "ncc build index.js -o dist --minify --external minecraft-data && node scripts/stage-runtime.mjs",
+    "check": "node --check index.js"
+  },
   "dependencies": {
-    "mineflayer": "^4.29.0",
-    "mineflayer-pathfinder": "^2.4.5"
+    "mineflayer": "4.37.1",
+    "mineflayer-pathfinder": "2.4.5"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "0.45.0"
   }
 }

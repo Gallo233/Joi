@@ -5,13 +5,47 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
-from agent_companion.core.secret_store import LLM_API_KEY_ENV, managed_secret
+from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES, CHAT_LANGUAGE_FOLLOW
+from agent_companion.core.secret_store import LLM_API_KEY_ENV, QWEN_REALTIME_API_KEY_ENV, managed_secret
 
 
 _ENV_REFERENCE_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$|^%([A-Za-z_][A-Za-z0-9_]*)%$")
+
+
+_QWEN_WORKSPACE_HOST = re.compile(
+    r"^[a-z0-9][a-z0-9-]{0,62}\.(?:cn-beijing|ap-southeast-1)\.maas\.aliyuncs\.com$"
+)
+QWEN_REALTIME_MODELS = frozenset(
+    {"qwen-audio-3.0-realtime-flash", "qwen-audio-3.0-realtime-plus"}
+)
+
+
+def is_safe_qwen_realtime_url(value: str) -> bool:
+    """Accept only the reviewed TLS Qwen Realtime WebSocket endpoints.
+
+    The model is appended by Core after validation. Rejecting a pre-existing
+    query prevents credentials or caller-controlled routing from hiding there.
+    """
+
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        # Accessing port validates malformed or out-of-range port text.
+        _ = parsed.port
+    except ValueError:
+        return False
+    if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return False
+    host = parsed.hostname.casefold()
+    return bool(
+        parsed.scheme.casefold() == "wss"
+        and parsed.port in {None, 443}
+        and parsed.path == "/api-ws/v1/realtime"
+        and (host == "dashscope.aliyuncs.com" or _QWEN_WORKSPACE_HOST.fullmatch(host))
+    )
 
 
 def _expand_env(value: Any) -> Any:
@@ -20,7 +54,7 @@ def _expand_env(value: Any) -> Any:
         if match:
             name = match.group(1) or match.group(2) or ""
             resolved = os.environ.get(name, "").strip()
-            if not resolved and name == LLM_API_KEY_ENV:
+            if not resolved:
                 resolved = managed_secret(name)
             return resolved or value
         return os.path.expandvars(value)
@@ -449,11 +483,63 @@ class AsrConfig:
 
 
 @dataclass(frozen=True)
+class RealtimeVoiceConfig:
+    """Core-owned Qwen Audio Realtime configuration.
+
+    Qwen is fixed to text output so the selected local GPT-SoVITS character
+    remains Joi's only voice. The long-lived key never enters the WebView.
+    """
+
+    enabled: bool = False
+    provider: str = "qwen_audio"
+    url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    model: str = "qwen-audio-3.0-realtime-flash"
+    api_key: str = ""
+    turn_detection: str = "server_vad"
+    threshold: float = 0.5
+    silence_duration_ms: int = 500
+    max_history_turns: int = 8
+    timeout_seconds: int = 15
+
+    @property
+    def is_configured(self) -> bool:
+        key = self.api_key.strip()
+        return bool(
+            self.enabled
+            and self.provider.strip().casefold() == "qwen_audio"
+            and is_safe_qwen_realtime_url(self.url)
+            and self.model.strip() in QWEN_REALTIME_MODELS
+            and self.turn_detection.strip() in {"server_vad", "smart_turn"}
+            and key
+            and not key.startswith("${")
+            and not key.startswith("%")
+        )
+
+
+@dataclass(frozen=True)
 class OcrConfig:
     timeout_seconds: int = 5
     language: str = "chi_sim+eng"
     tesseract_cmd: str = ""
     tessdata_dir: str = ""
+
+
+@dataclass(frozen=True)
+class LanguageConfig:
+    """What Joi shows and writes -- never what she says.
+
+    The language she speaks belongs to the character package, so a Japanese
+    voice can answer a Chinese message on screen in Chinese. `interface` is the
+    shell's own language; only Chinese is localized today, so any other value
+    would promise a translation that does not exist and is read as Chinese.
+    """
+
+    interface: str = "zh"
+    chat: str = "zh"
+
+    @property
+    def chat_follows_user(self) -> bool:
+        return self.chat == CHAT_LANGUAGE_FOLLOW
 
 
 @dataclass(frozen=True)
@@ -472,8 +558,10 @@ class AppConfig:
     llm: LlmConfig
     tts: TtsConfig
     asr: AsrConfig
+    realtime_voice: RealtimeVoiceConfig
     ocr: OcrConfig
     computer_use: ComputerUseConfig
+    language: LanguageConfig
     skills: dict[str, SkillSettingConfig]
     characters: list[CharacterConfig]
 
@@ -505,12 +593,21 @@ def load_app_config(path: Path) -> AppConfig:
         llm_section = raw.setdefault("llm", {})
         if isinstance(llm_section, dict):
             llm_section["api_key"] = managed_llm_key
+    managed_realtime_key = managed_secret(QWEN_REALTIME_API_KEY_ENV)
+    if managed_realtime_key:
+        realtime_section = raw.setdefault("realtime_voice", {})
+        if isinstance(realtime_section, dict):
+            # The native Core's managed secret is authoritative. A stale
+            # secrets.yaml entry must never silently select another account.
+            realtime_section["api_key"] = managed_realtime_key
 
     llm_raw = raw.get("llm") or {}
     tts_raw = raw.get("tts") or {}
     asr_raw = raw.get("asr") or {}
+    realtime_voice_raw = raw.get("realtime_voice") or {}
     ocr_raw = raw.get("ocr") or {}
     computer_use_raw = raw.get("computer_use") or {}
+    language_raw = raw.get("language") or {}
     skills_raw = raw.get("skills") or {}
     character_rows = raw.get("characters") or []
     characters = [_parse_character(row) for row in character_rows if isinstance(row, dict)]
@@ -582,6 +679,28 @@ def load_app_config(path: Path) -> AppConfig:
             max_bytes=max(1024, int(asr_raw.get("max_bytes", 12 * 1024 * 1024) or 12 * 1024 * 1024)),
             timeout_seconds=max(1, int(asr_raw.get("timeout_seconds", 30) or 30)),
         ),
+        realtime_voice=RealtimeVoiceConfig(
+            enabled=bool(realtime_voice_raw.get("enabled", False)),
+            provider=str(realtime_voice_raw.get("provider", "qwen_audio") or "qwen_audio"),
+            url=str(
+                realtime_voice_raw.get("url", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime")
+                or "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+            ),
+            model=str(
+                realtime_voice_raw.get("model", "qwen-audio-3.0-realtime-flash")
+                or "qwen-audio-3.0-realtime-flash"
+            ),
+            api_key=str(realtime_voice_raw.get("api_key", "") or ""),
+            turn_detection=str(realtime_voice_raw.get("turn_detection", "server_vad") or "server_vad"),
+            threshold=max(-1.0, min(1.0, float(realtime_voice_raw.get("threshold", 0.5) or 0.5))),
+            silence_duration_ms=max(
+                200, min(6000, int(realtime_voice_raw.get("silence_duration_ms", 500) or 500))
+            ),
+            max_history_turns=max(
+                1, min(50, int(realtime_voice_raw.get("max_history_turns", 8) or 8))
+            ),
+            timeout_seconds=min(120, max(1, int(realtime_voice_raw.get("timeout_seconds", 15) or 15))),
+        ),
         ocr=OcrConfig(
             timeout_seconds=max(1, int(ocr_raw.get("timeout_seconds", 5) or 5)),
             language=str(ocr_raw.get("language", "chi_sim+eng") or "chi_sim+eng"),
@@ -591,6 +710,7 @@ def load_app_config(path: Path) -> AppConfig:
         computer_use=ComputerUseConfig(
             post_action_settle_ms=max(0, int(computer_use_raw.get("post_action_settle_ms", 200) or 0)),
         ),
+        language=_parse_language(language_raw),
         skills=_parse_skill_settings(skills_raw),
         characters=characters,
     )
@@ -611,6 +731,19 @@ def load_workspace_config(workspace: Path) -> AppConfig | None:
 def normalize_skill_setting_id(value: str) -> str:
     text = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
     return re.sub(r"[^a-z0-9_.]+", "", text)[:80]
+
+
+def _parse_language(raw: Any) -> LanguageConfig:
+    source = raw if isinstance(raw, dict) else {}
+    chat = str(source.get("chat", "zh") or "zh").strip().replace("_", "-").casefold().split("-")[0]
+    if chat == "auto":
+        chat = CHAT_LANGUAGE_FOLLOW
+    return LanguageConfig(
+        # The shell is written in Chinese and nothing else is translated yet, so
+        # storing another value here would promise a UI that does not exist.
+        interface="zh",
+        chat=chat if chat in CHAT_LANGUAGE_CHOICES else "zh",
+    )
 
 
 def _parse_skill_settings(raw: Any) -> dict[str, SkillSettingConfig]:

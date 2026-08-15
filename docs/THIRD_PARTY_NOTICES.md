@@ -17,6 +17,10 @@ This inventory records the primary directly bundled runtimes as of Joi 0.1.0. It
 | OpenAI Python SDK | 2.37.0 | Apache-2.0 |
 | keyring | 25.7.0 | MIT |
 | rand | 0.9.5 | MIT OR Apache-2.0 |
+| Node.js runtime | 22.22.3 | MIT and bundled third-party notices |
+| Mineflayer | 4.37.1 | MIT |
+| mineflayer-pathfinder | 2.4.5 | MIT |
+| minecraft-data | 3.113.1 | MIT |
 
 `thinking-orbs` is vendored rather than installed: it is published as a React
 component and this shell is Vue, so `agent_companion/shell/src/vendor/thinkingOrbs.js`

@@ -1,4 +1,5 @@
 import type { AgentEvent, CoreReadyPayload, VoiceAudioPayload } from './protocol'
+import type { RealtimeCoreEvent } from './realtimeVoice'
 
 export type CoreStatus = 'offline' | 'connecting' | 'online'
 
@@ -8,6 +9,7 @@ export interface CoreClientOptions {
   onEvent: (event: AgentEvent) => void
   onReady?: (payload: CoreReadyPayload) => void
   onVoiceAudio?: (payload: VoiceAudioPayload) => void
+  onRealtimeVoice?: (payload: RealtimeCoreEvent) => void
   onError?: (message: string) => void
 }
 
@@ -92,12 +94,42 @@ export class CoreClient {
     return this.send('runtime.config.apply', { updates })
   }
 
-  transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number) {
+  transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number): Promise<unknown>
+  transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number, threadId: string, generationId: string): Promise<unknown>
+  transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number, threadId = '', generationId = '') {
     return this.send(
       'voice.transcribe',
-      { audio_base64: audioBase64, mime_type: mimeType },
+      { audio_base64: audioBase64, mime_type: mimeType, thread_id: threadId, generation_id: generationId },
       { timeoutMs, timeoutMessage: '语音识别等太久了，我先停下，你可以再试一次。' },
     )
+  }
+
+  cancelVoiceInput(threadId = '') {
+    return this.send('voice.cancel', { thread_id: threadId })
+  }
+
+  startRealtimeVoiceSession(mode: 'conversation' | 'minecraft', minecraftSessionId = '', timeoutMs = 20000) {
+    return this.send(
+      'voice.realtime.session.start',
+      { mode, minecraft_session_id: minecraftSessionId, disclosure_accepted: true },
+      { timeoutMs, timeoutMessage: '实时语音连接超时，请检查网络或稍后再试。' },
+    )
+  }
+
+  appendRealtimeVoiceAudio(params: Record<string, unknown>) {
+    return this.notify('voice.realtime.audio.append', params)
+  }
+
+  stopRealtimeVoiceSession(sessionId: string) {
+    return this.send('voice.realtime.session.stop', { session_id: sessionId })
+  }
+
+  realtimeVoiceSessionStatus(sessionId = '') {
+    return this.send('voice.realtime.session.status', sessionId ? { session_id: sessionId } : {})
+  }
+
+  controlRealtimeMinecraft(sessionId: string, action: 'pause' | 'resume' | 'cancel') {
+    return this.send('voice.realtime.game.control', { session_id: sessionId, action })
   }
 
   readArtifact(artifact: string) {
@@ -382,6 +414,38 @@ export class CoreClient {
     return this.send('game.adapter.run', params, { timeoutMs: 920000, timeoutMessage: '游戏适配器运行超时。' })
   }
 
+  minecraftConnectionStatus() {
+    return this.send('game.adapter.minecraft.connection.status', {})
+  }
+
+  minecraftConnectionConfigure(params: Record<string, unknown>) {
+    return this.send('game.adapter.minecraft.connection.configure', params)
+  }
+
+  minecraftSessionStart(params: Record<string, unknown>) {
+    return this.send('game.adapter.session.start', { adapter_id: 'minecraft', ...params }, { timeoutMs: 130000, timeoutMessage: 'Minecraft 连接超时，请确认已开放局域网并检查端口。' })
+  }
+
+  minecraftSessionStatus(sessionId: string) {
+    return this.send('game.adapter.session.status', { session_id: sessionId })
+  }
+
+  minecraftSessionStop(sessionId: string) {
+    return this.send('game.adapter.session.stop', { session_id: sessionId })
+  }
+
+  minecraftGoalPause(sessionId: string, goalId: string) {
+    return this.send('game.adapter.goal.pause', { session_id: sessionId, goal_id: goalId })
+  }
+
+  minecraftGoalResume(sessionId: string, goalId: string) {
+    return this.send('game.adapter.goal.resume', { session_id: sessionId, goal_id: goalId })
+  }
+
+  minecraftGoalCancel(sessionId: string, goalId: string) {
+    return this.send('game.adapter.goal.cancel', { session_id: sessionId, goal_id: goalId })
+  }
+
   gameAdapterPause(adapterId: string, sessionId = '') {
     return this.send('game.adapter.pause', { adapter_id: adapterId, session_id: sessionId })
   }
@@ -436,8 +500,9 @@ export class CoreClient {
    *
    * Its persona, greeting and the description its voice is generated from all
    * change together, so this reloads the character the same way activating one
-   * does -- and retires any line still being spoken in the old language. The
-   * display reply remains bound to the current user message's language.
+   * does -- and retires any line still being spoken in the old language. This
+   * chooses the language Joi speaks, never the one she writes: what appears on
+   * screen follows the chat language in settings.
    */
   characterSetLocale(characterId: string, locale: string) {
     return this.send(
@@ -526,6 +591,12 @@ export class CoreClient {
     return Promise.reject(new Error('Joi runtime is starting'))
   }
 
+  private notify(method: string, params: Record<string, unknown>) {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false
+    this.socket.send(JSON.stringify({ jsonrpc: '2.0', method, params }))
+    return true
+  }
+
   private handleMessage(raw: string) {
     try {
       const payload = JSON.parse(raw)
@@ -552,6 +623,10 @@ export class CoreClient {
       }
       if (payload?.method === 'agent.voice_audio' && payload.params) {
         this.options.onVoiceAudio?.(payload.params)
+        return
+      }
+      if (payload?.method === 'voice.realtime.event' && payload.params) {
+        this.options.onRealtimeVoice?.(payload.params as RealtimeCoreEvent)
       }
     } catch {
       this.options.onError?.('Invalid Joi runtime message')

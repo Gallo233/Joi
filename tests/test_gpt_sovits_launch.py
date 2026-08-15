@@ -35,6 +35,58 @@ class _Config:
         self.tts = TtsConfig(**settings)  # type: ignore[arg-type]
 
 
+class _Character:
+    """Only the parts of CharacterConfig the synthesis payload reads."""
+
+    sprites: list[object] = []
+
+    def __init__(self, text_lang: str) -> None:
+        self._text_lang = text_lang
+
+    def voice_text_lang(self, fallback: str) -> str:
+        return self._text_lang or fallback
+
+    def voice_prompt_lang(self, fallback: str) -> str:
+        return self._text_lang or fallback
+
+    def voice_refer_audio_path(self) -> str:
+        return ""
+
+    def voice_prompt_text(self) -> str:
+        return ""
+
+    def voice_speech_speed(self, fallback: float) -> float:
+        return fallback
+
+    def voice_emotion(self, _emotion: str) -> object | None:
+        return None
+
+
+class SpokenLanguageTests(unittest.TestCase):
+    """A Japanese voice handed a Chinese line read it as kanji readings.
+
+    That is not an accent: nothing in the sentence survives. The voice itself --
+    weights and reference clip -- is chosen by the user and never changes here;
+    only the phonetics follow the words actually written.
+    """
+
+    def _payload(self, voice_lang: str, text: str) -> dict[str, object]:
+        client = GptSoVitsClient(_Config(Path("/tmp"), text_lang=voice_lang, prompt_lang=voice_lang))  # type: ignore[arg-type]
+        with patch.object(GptSoVitsClient, "_ensure_server_started"), patch.object(GptSoVitsClient, "_switch_model"):
+            return client._synthesis_payload(text, _Character(voice_lang), "1", "neutral")  # type: ignore[arg-type]
+
+    def test_a_chinese_line_under_a_japanese_voice_is_pronounced_as_chinese(self) -> None:
+        self.assertEqual(self._payload("ja", "我们先看看今天的安排。")["text_lang"], "zh")
+
+    def test_a_line_in_the_selected_language_keeps_that_language(self) -> None:
+        self.assertEqual(self._payload("ja", "今日の予定を確認します。")["text_lang"], "ja")
+        self.assertEqual(self._payload("zh", "我们先看看今天的安排。")["text_lang"], "zh")
+
+    def test_the_reference_voice_is_never_swapped_by_the_language_check(self) -> None:
+        payload = self._payload("ja", "我们先看看今天的安排。")
+        self.assertEqual(payload["prompt_lang"], "ja")
+
+
 class InterpreterDiscoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

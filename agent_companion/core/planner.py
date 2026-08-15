@@ -5,13 +5,13 @@ import sys
 import uuid
 
 from agent_companion.core.character_motion import character_motion_from_text
-from agent_companion.core.language_policy import display_language_policy
+from agent_companion.core.language_policy import chat_language_policy
 from agent_companion.core.schemas import AgentPlan, ToolRequest
 
 SEARCH_VERB_RE = r"(?:搜索|搜一下|查找|搜(?!集))"
 
 
-def build_plan(user_text: str) -> AgentPlan:
+def build_plan(user_text: str, chat_language: str = "") -> AgentPlan:
     text = " ".join((user_text or "").strip().split())
     task_id = f"task-{uuid.uuid4().hex[:10]}"
     lowered = text.casefold()
@@ -27,12 +27,12 @@ def build_plan(user_text: str) -> AgentPlan:
                     "character.perform",
                     {
                         "motion": character_motion,
-                        # What the user wrote in, so the line she says on screen
-                        # follows the message rather than the voice she is
+                        # The chat language the user set, or what they wrote in
+                        # when it follows them -- never the voice she is
                         # configured to speak. A Chinese "跳个舞" answered in
                         # Japanese is the same violation the chat replies
                         # already avoid.
-                        "reply_language": display_language_policy(text).code,
+                        "reply_language": chat_language_policy(chat_language, text).code,
                     },
                     "播放本地角色动作，不操作外部应用。",
                 )

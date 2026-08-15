@@ -69,6 +69,22 @@ asr:
   max_bytes: 12582912
   timeout_seconds: 30
 
+# Qwen Audio Realtime input. Shell sends bounded PCM16 frames only; Core owns
+# provider authentication and accepts text output only. Joi keeps speaking via
+# the configured local GPT-SoVITS voice. Minecraft tools are proposals routed
+# through the ordinary scoped permission/budget/receipt gate.
+realtime_voice:
+  enabled: false
+  provider: qwen_audio
+  url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
+  model: qwen-audio-3.0-realtime-flash
+  api_key: ${JOI_QWEN_REALTIME_API_KEY}
+  turn_detection: server_vad
+  threshold: 0.5
+  silence_duration_ms: 500
+  max_history_turns: 8
+  timeout_seconds: 15
+
 ocr:
   timeout_seconds: 5
   language: chi_sim+eng+jpn
@@ -80,6 +96,14 @@ ocr:
 computer_use:
   # Wait briefly before the post-action screenshot so Windows/UI updates can settle.
   post_action_settle_ms: 200
+
+language:
+  # The shell's own language. Only Chinese is translated, so this stays "zh".
+  interface: zh
+  # What Joi writes on screen: zh, en, ja, ko, or "follow" to take the language
+  # of each message. What she *says* is the character package's voice language
+  # and is chosen with the voice, not here.
+  chat: zh
 
 characters:
   - name: 星野澪

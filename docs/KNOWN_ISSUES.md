@@ -9,6 +9,9 @@
 - Plugin discovery only scans `agent_companion/plugins/`; user workspace plugins need config support.
 - Subconscious loop auto-approves only low-risk candidates (preference/fact/note); complex memories require manual review.
 - LLM planner requires configured text model; falls back to rule-based planner when unconfigured.
+- Realtime Voice requires Qwen Audio Realtime network access and a configured local GPT-SoVITS service; when the local voice is unavailable, captions remain available but Joi stays muted.
+- Minecraft real-server smoke requires a Java Edition world opened to LAN and the displayed ephemeral LAN port. Disconnect recovery is fail-closed and requires a new explicitly confirmed session rather than automatic replay.
+- Minecraft version support trails the game: the bridge accepts mineflayer's tested versions plus the releases listed in `compatibleVersions` in `agent_companion/adapters/minecraft-bridge/index.js` (currently `26.1`). A newer release needs a shim for whatever packets it reshaped and a verified real join before that list grows.
 
 ## Fixed
 

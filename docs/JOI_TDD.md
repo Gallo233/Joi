@@ -805,11 +805,13 @@ OpenHuman 的本地 Memory Tree 和 Obsidian 可读性只作为“可见记忆�
 ### 10.3 ASR/TTS 与打断
 
 - ASR 输入限制 MIME、字节数、时长、采样率和超时；临时音频用后即删。
+- 点击录音链路把录音准备、编码、ASR provider、RPC 往返和后续 LLM/tool run 分阶段计时；`voice.transcribe` 在转写完成后返回，普通 Joi turn 另行排队，避免把模型生成时间伪装成识别时间。
 - 每个 user turn 生成 `generation_id`；TTS item 绑定 generation/run/character。
 - 新用户输入、cancel、takeover 或角色切换使旧 generation 失效，并停止当前播放/队列。
 - 迟到 ASR/TTS/provider 结果在 generation 不匹配时丢弃，但记录 redacted 诊断。
 - 仅 `SPEAKABLE_EVENTS` 可触发 TTS；`safe_voice_line` 二次清洗。
 - TTS 不可用时保留 display，不阻塞 run；麦克风拒绝时保留键盘输入。
+- 实时语音是独立、显式启停且按窗口 owner 绑定的 debug session：Shell 只发有序 16 kHz PCM16，长期 Qwen key 和 provider 事件只留在 Core，云端只回文本，本地 GPT-SoVITS 是唯一声音。普通模式无工具；Minecraft 模式只能在已确认的 persistent game session 上提出一条 strict GameIntent，并继续经过 Core 权限、实时 scope、预算和回执门禁。VAD/插话/停止/transport loss 必须淘汰旧文本与音频；停止时取消在途游戏目标，ACK 超时强杀 Bridge 且禁止重放。
 
 ### 10.4 Scene Session
 

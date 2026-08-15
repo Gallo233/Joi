@@ -204,6 +204,8 @@ export interface CollaborationSnapshot {
 }
 
 export interface VoiceAudioPayload {
+  realtime_session_id?: string
+  realtime_epoch?: number
   task_id?: string
   event_type?: string
   event_created_at?: number
@@ -222,6 +224,7 @@ export interface VoiceAudioPayload {
   voice_audio_error?: string
   voice_audio_ttfb_ms?: number
   voice_audio_total_ms?: number
+  voice_audio_source?: 'local' | 'cloud' | string
 }
 
 export interface ArtifactReadResult {
@@ -842,6 +845,20 @@ export interface CharacterRuntime extends CharacterSummary {
   }>
 }
 
+/**
+ * What Joi shows and writes, and -- read-only here -- what she says.
+ *
+ * The voice language belongs to the character package, so it is reported for
+ * display and changed where the voice itself is chosen.
+ */
+export interface LanguageSettings {
+  interface?: string
+  chat?: string
+  chat_choices?: string[]
+  interface_choices?: string[]
+  voice?: string
+}
+
 export interface CoreReadyPayload {
   product?: string
   protocol_version?: number
@@ -863,6 +880,17 @@ export interface CoreReadyPayload {
     timeout_seconds?: number
     error?: string
   }
+  realtime_voice?: {
+    enabled?: boolean
+    configured?: boolean
+    provider?: string
+    model?: string
+    output?: 'local_tts' | string
+    timeout_seconds?: number
+    error?: string
+    modes?: Array<'conversation' | 'minecraft' | string>
+  }
+  language?: LanguageSettings
   tts?: {
     enabled?: boolean
     configured?: boolean

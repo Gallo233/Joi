@@ -11,7 +11,7 @@ from agent_companion.core.config import load_workspace_config
 from agent_companion.core.character_packages import CharacterPackageManager
 from agent_companion.core.language_policy import (
     DisplayLanguagePolicy,
-    display_language_policy,
+    chat_language_policy,
     language_mismatch_fallback,
     obvious_language_mismatch,
     obvious_voice_language_mismatch,
@@ -75,10 +75,11 @@ class CompanionChatTool(ToolAdapter):
         )
 
     def _reply(self, text: str, memory_context: list[dict[str, str]] | None = None) -> "ChatReply":
-        display_policy = display_language_policy(text)
+        config = self._config
+        chat_language = str(getattr(getattr(config, "language", None), "chat", "") or "")
+        display_policy = chat_language_policy(chat_language, text)
         fallback = _fallback_chat_reply(display_policy)
         fallback_emotion = _fallback_chat_emotion(text)
-        config = self._config
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
             memory_reply = _fallback_memory_reply(text, memory_context or [])
             if memory_reply:
@@ -170,7 +171,7 @@ class CompanionChatTool(ToolAdapter):
             reply = str(payload.get("reply") or content or fallback).strip()
             voice_text = str(payload.get("voice_text") or reply).strip()
             language_repaired = False
-            display_mismatch = obvious_language_mismatch(text, reply)
+            display_mismatch = obvious_language_mismatch(text, reply, chat_language)
             voice_mismatch = obvious_voice_language_mismatch(voice_lang, voice_text)
             if display_mismatch or voice_mismatch:
                 repaired = self._repair_language_channels(
@@ -182,7 +183,7 @@ class CompanionChatTool(ToolAdapter):
                 )
                 repaired_reply = str(repaired.get("reply") or "").strip()
                 repaired_voice = str(repaired.get("voice_text") or "").strip()
-                if display_mismatch and repaired_reply and not obvious_language_mismatch(text, repaired_reply):
+                if display_mismatch and repaired_reply and not obvious_language_mismatch(text, repaired_reply, chat_language):
                     reply = repaired_reply
                     language_repaired = True
                 elif display_mismatch:
@@ -228,9 +229,10 @@ class CompanionChatTool(ToolAdapter):
     ) -> dict[str, str]:
         """Correct a clear channel mix-up, with a short exceptional-path call."""
 
+        wanted = f"用户选定的聊天语言（{policy.label}）" if policy.chosen else f"用户本轮输入的同一种自然语言（提示：{policy.label}）"
         system_prompt = (
             "你只修复显示与配音两个语言通道，不回答新问题。"
-            f"reply 必须使用用户本轮输入的同一种自然语言（提示：{policy.label}）；"
+            f"reply 必须使用{wanted}；"
             f"voice_text 必须用用户选择的配音语言 {spoken_language} 忠实转述 reply。"
             "保持原意和角色语气，不添加信息。"
             "只输出 JSON：{\"reply\":\"修复后的屏幕回复\",\"voice_text\":\"修复后的配音短句\"}。"

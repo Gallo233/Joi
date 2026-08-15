@@ -12,14 +12,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# What the chat language setting can be set to. "follow" is the behaviour that
+# predates the setting: every reply takes the language of the message it answers.
+CHAT_LANGUAGE_FOLLOW = "follow"
+CHAT_LANGUAGE_CHOICES = (CHAT_LANGUAGE_FOLLOW, "zh", "en", "ja", "ko")
+
+
 @dataclass(frozen=True)
 class DisplayLanguagePolicy:
     code: str
     label: str
     script: str
+    chosen: bool = False
 
     @property
     def prompt_instruction(self) -> str:
+        if self.chosen:
+            return (
+                f"reply 是屏幕文字，必须使用用户在设置里选定的聊天语言（{self.label}）。"
+                "用户用别的语言提问时也不要改变这一点；不要因为角色设定、角色姓名或配音语言而翻译 reply；"
+                "用户刻意保留的专有名词可以维持原文。"
+            )
         return (
             "reply 是屏幕文字，必须使用用户本轮输入所使用的同一种自然语言"
             f"（本轮提示：{self.label}）。不要因为角色设定、角色姓名或配音语言而翻译 reply；"
@@ -112,10 +125,24 @@ def display_language_policy(text: str) -> DisplayLanguagePolicy:
     return DisplayLanguagePolicy(code, label, script)
 
 
-def reply_language_instruction(text: str) -> str:
+def chat_language_policy(chat_language: str, user_text: str) -> DisplayLanguagePolicy:
+    """The language a reply is written in: the standing choice, else the message's.
+
+    The choice covers the display channel only. What Joi *says* is the character
+    package's voice language, and the two are allowed to differ.
+    """
+
+    code = str(chat_language or "").strip().replace("_", "-").casefold().split("-")[0]
+    if code not in CHAT_LANGUAGE_CHOICES or code == CHAT_LANGUAGE_FOLLOW:
+        return display_language_policy(user_text)
+    label, script = _SCRIPT_LABELS[code]
+    return DisplayLanguagePolicy(code, label, script, chosen=True)
+
+
+def reply_language_instruction(text: str, chat_language: str = "") -> str:
     """A high-priority instruction for a user-visible answer channel."""
 
-    return display_language_policy(text).prompt_instruction
+    return chat_language_policy(chat_language, text).prompt_instruction
 
 
 def voice_language_label(locale: str) -> str:
@@ -124,16 +151,17 @@ def voice_language_label(locale: str) -> str:
     return _VOICE_LANGUAGE_LABELS.get(base, normalized or "用户选择的配音语言")
 
 
-def obvious_language_mismatch(user_text: str, reply: str) -> bool:
+def obvious_language_mismatch(user_text: str, reply: str, chat_language: str = "") -> bool:
     """Return true only for a clear script-level contract violation.
 
     This is deliberately conservative.  Chinese and Japanese share Han
     characters, while Spanish and English share Latin letters; uncertain cases
     are left to the model instead of being repeatedly "corrected" into the
-    wrong language.
+    wrong language.  It has to be checked against the same policy the prompt
+    asked for, or a chosen chat language reads as a violation of the message's.
     """
 
-    return _obvious_policy_mismatch(display_language_policy(user_text), reply)
+    return _obvious_policy_mismatch(chat_language_policy(chat_language, user_text), reply)
 
 
 def obvious_voice_language_mismatch(locale: str, voice_text: str) -> bool:
@@ -145,6 +173,40 @@ def obvious_voice_language_mismatch(locale: str, voice_text: str) -> bool:
         return False
     label, script = _SCRIPT_LABELS[code]
     return _obvious_policy_mismatch(DisplayLanguagePolicy(code, label, script), voice_text)
+
+
+def spoken_language_override(locale: str, voice_text: str) -> str:
+    """The language to pronounce `voice_text` in when it clearly is not `locale`.
+
+    A voice set to Japanese pronounces Chinese words with Japanese kanji
+    readings, which is not an accent but an unintelligible line.  Pronouncing
+    the words as they are actually written keeps the character's own voice --
+    timbre and reference audio never change -- and only corrects phonetics.
+
+    Returns "" whenever the text can be read as the selected language, because
+    Chinese and Japanese share Han characters and a wrong correction is worse
+    than none.  The one confident call is the script the other language cannot
+    do without: Japanese prose of any length carries kana, and Chinese has none.
+    """
+
+    base = str(locale or "").strip().replace("_", "-").casefold().split("-")[0]
+    base = {"yue": "zh", "cmn": "zh", "jpn": "ja", "kor": "ko", "eng": "en"}.get(base, base)
+    if base not in {"zh", "ja", "ko", "en"}:
+        return ""
+    counts = _script_counts(voice_text)
+    if counts["kana"]:
+        detected = "ja"
+    elif counts["hangul"]:
+        detected = "ko"
+    elif counts["han"] >= 4:
+        # Short all-kanji lines ("了解") are ordinary Japanese; a long run of Han
+        # characters without a single kana is not.
+        detected = "zh"
+    elif not counts["han"] and counts["latin"] >= 4:
+        detected = "en"
+    else:
+        return ""
+    return detected if detected != base else ""
 
 
 def _obvious_policy_mismatch(policy: DisplayLanguagePolicy, reply: str) -> bool:

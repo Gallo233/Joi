@@ -9,9 +9,11 @@ from types import SimpleNamespace
 from agent_companion.core.character import CharacterHarness
 from agent_companion.core.codex_runtime import CodexRuntimeSession
 from agent_companion.core.language_policy import (
+    chat_language_policy,
     display_language_policy,
     obvious_language_mismatch,
     obvious_voice_language_mismatch,
+    spoken_language_override,
 )
 from agent_companion.core.model_call import CallOutcome
 from agent_companion.core.schemas import ToolRequest
@@ -55,6 +57,35 @@ class LanguagePolicyTests(unittest.TestCase):
         self.assertTrue(obvious_voice_language_mismatch("zh-CN", "こんにちは。"))
         self.assertFalse(obvious_voice_language_mismatch("ja-JP", "こんにちは。"))
 
+    def test_a_chosen_chat_language_outranks_the_message_language(self) -> None:
+        policy = chat_language_policy("zh", "Who are you?")
+        self.assertEqual(policy.code, "zh")
+        self.assertTrue(policy.chosen)
+        self.assertIn("设置里选定的聊天语言", policy.prompt_instruction)
+        # And the repair check has to agree, or a correct reply reads as broken.
+        self.assertFalse(obvious_language_mismatch("Who are you?", "我是你的桌面伙伴。", "zh"))
+        self.assertTrue(obvious_language_mismatch("Who are you?", "僕はアバターです。", "zh"))
+
+    def test_follow_keeps_the_language_of_each_message(self) -> None:
+        for setting in ("follow", "", "auto"):
+            policy = chat_language_policy(setting, "Who are you?")
+            self.assertEqual(policy.code, "en", setting)
+            self.assertFalse(policy.chosen, setting)
+            self.assertIn("用户本轮输入", policy.prompt_instruction)
+
+    def test_a_japanese_voice_reads_a_chinese_line_as_chinese(self) -> None:
+        # The failure this prevents: kanji readings instead of words.
+        self.assertEqual(spoken_language_override("ja", "我们先看看今天的安排。"), "zh")
+        self.assertEqual(spoken_language_override("zh", "今日の予定を見てみましょう。"), "ja")
+        self.assertEqual(spoken_language_override("ja", "한국어로 말할게요."), "ko")
+
+    def test_a_line_the_selected_voice_can_read_is_left_alone(self) -> None:
+        self.assertEqual(spoken_language_override("ja", "今日の予定を確認します。"), "")
+        self.assertEqual(spoken_language_override("zh-CN", "我们先看看今天的安排。"), "")
+        self.assertEqual(spoken_language_override("ja", "了解。"), "")
+        self.assertEqual(spoken_language_override("", "我们先看看今天的安排。"), "")
+        self.assertEqual(spoken_language_override("fr", "我们先看看今天的安排。"), "")
+
     def test_codex_display_prompt_is_not_overridden_by_a_japanese_character(self) -> None:
         character = CharacterHarness("x", "テスト", "日本語の人格", "自然", locale="ja")
         app = SimpleNamespace(
@@ -69,6 +100,21 @@ class LanguagePolicyTests(unittest.TestCase):
         self.assertIn("最终显示回复语言（最高优先级）", prompt)
         self.assertIn("本轮提示：中文", prompt)
         self.assertNotIn("返答は必ず日本語", prompt)
+
+    def test_a_japanese_voice_does_not_move_the_chosen_chat_language(self) -> None:
+        character = CharacterHarness("x", "テスト", "日本語の人格", "自然", locale="ja")
+        app = SimpleNamespace(
+            character=character,
+            memory=SimpleNamespace(context=lambda *_args, **_kwargs: []),
+            background_context=SimpleNamespace(status=lambda: {}),
+            _memory_scope=lambda: {},
+            chat_language=lambda: "zh",
+        )
+        runtime = object.__new__(CodexRuntimeSession)
+        runtime.app = app
+        prompt = runtime._build_prompt("Who are you?", include_harness=True)
+        self.assertIn("设置里选定的聊天语言（中文）", prompt)
+        self.assertNotIn("本轮提示：English", prompt)
 
     def test_codex_final_text_is_repaired_when_the_prompt_is_still_ignored(self) -> None:
         runtime = object.__new__(CodexRuntimeSession)

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterator
 
 from agent_companion.core.config import AppConfig, CharacterConfig
+from agent_companion.core.language_policy import spoken_language_override
 from agent_companion.core.voice import sprite_for_emotion
 
 
@@ -211,12 +212,17 @@ class GptSoVitsClient:
                 prompt_text = mood.prompt_text
             if mood.speech_speed is not None:
                 speed_factor = mood.speech_speed
+        # `text_lang` selects the phonetics for these words, not the character's
+        # identity: that stays in the weights and the reference clip above. A
+        # line written in another language is read as words, not spelled out in
+        # the selected language's readings.
+        text_lang = character.voice_text_lang(self._config.tts.text_lang)
         return {
             "ref_audio_path": self._resolve_config_path(ref_audio_path),
             "prompt_text": prompt_text or "",
             "prompt_lang": prompt_lang or self._config.tts.prompt_lang,
             "text": text,
-            "text_lang": character.voice_text_lang(self._config.tts.text_lang),
+            "text_lang": spoken_language_override(text_lang, text) or text_lang,
             "text_split_method": "cut5",
             "batch_size": 1,
             "speed_factor": speed_factor,

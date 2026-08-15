@@ -8,6 +8,8 @@ from typing import Any
 SERVICE_NAME = "Joi BYOK"
 LLM_API_KEY_ACCOUNT = "llm.api_key"
 LLM_API_KEY_ENV = "JOI_LLM_API_KEY"
+QWEN_REALTIME_API_KEY_ACCOUNT = "realtime_voice.qwen_api_key"
+QWEN_REALTIME_API_KEY_ENV = "JOI_QWEN_REALTIME_API_KEY"
 _SECRET_CACHE: dict[str, str] = {}
 _SECRET_READ_BLOCKED: set[str] = set()
 _SECRET_CACHE_LOCK = RLock()
@@ -83,7 +85,10 @@ def delete_managed_secret(name: str) -> tuple[bool, str]:
 
 
 def _account_for_name(name: str) -> str:
-    return LLM_API_KEY_ACCOUNT if name == LLM_API_KEY_ENV else ""
+    return {
+        LLM_API_KEY_ENV: LLM_API_KEY_ACCOUNT,
+        QWEN_REALTIME_API_KEY_ENV: QWEN_REALTIME_API_KEY_ACCOUNT,
+    }.get(name, "")
 
 
 def _keyring_backend() -> Any | None:

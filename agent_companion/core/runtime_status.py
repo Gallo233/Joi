@@ -11,6 +11,7 @@ import sys
 from typing import Any
 
 from agent_companion.core.config import MODEL_ROUTE_LABELS, AppConfig, ModelRouter, load_workspace_config
+from agent_companion.core.realtime_voice import RealtimeVoiceRuntimeState
 from agent_companion.core.speech_input import AsrRuntimeState
 
 
@@ -33,11 +34,17 @@ class RuntimeProviderStatus:
         return asdict(self)
 
 
-def build_runtime_status(workspace: Path, asr_state: AsrRuntimeState, tts_status: dict[str, Any]) -> dict[str, Any]:
+def build_runtime_status(
+    workspace: Path,
+    asr_state: AsrRuntimeState,
+    tts_status: dict[str, Any],
+    realtime_voice_state: RealtimeVoiceRuntimeState | None = None,
+) -> dict[str, Any]:
     workspace = workspace.resolve()
     config = _load_config(workspace)
     providers = [
         _asr_status(asr_state),
+        *([_realtime_voice_status(realtime_voice_state)] if realtime_voice_state is not None else []),
         _tts_status(tts_status),
         _ocr_status(config),
         *[_model_status(config, route) for route in ModelRouter.stable_routes()],
@@ -95,6 +102,25 @@ def _tts_status(payload: dict[str, Any]) -> RuntimeProviderStatus:
         timeout_seconds=max(1, int(payload.get("timeout_seconds") or 1)),
         last_error=_safe_error(payload.get("last_error")),
         notes=notes,
+    )
+
+
+def _realtime_voice_status(state: RealtimeVoiceRuntimeState) -> RuntimeProviderStatus:
+    configured = bool(state.configured)
+    enabled = bool(state.enabled)
+    status = "ready" if configured else "off" if not enabled else "error"
+    return RuntimeProviderStatus(
+        "realtime_voice",
+        "Realtime Voice (Debug)",
+        status,
+        enabled=enabled,
+        configured=configured,
+        provider=_safe_identifier(state.provider) if configured else "none",
+        model=_safe_model(state.model if configured else ""),
+        summary="实时对话与 Minecraft 协作" if configured else "未启用" if not enabled else "未配置",
+        timeout_seconds=max(1, int(state.timeout_seconds or 1)),
+        last_error=_safe_error(state.error),
+        notes=["text-only cloud response", "local GPT-SoVITS output", "scoped Minecraft tools"],
     )
 
 

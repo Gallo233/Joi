@@ -300,6 +300,21 @@ class TtsBridge:
         except Exception:
             pass
 
+    def voice_language(self) -> str:
+        """The language the selected character voice is set to speak.
+
+        Callers that write a line for this voice need it before synthesis, not
+        after: text written in another language is read as that language's
+        readings of the same characters rather than as words.
+        """
+
+        if self._config is None:
+            return ""
+        try:
+            return str(self._config.primary_character.voice_text_lang(self._config.tts.text_lang) or "")
+        except (AttributeError, ValueError):
+            return ""
+
     def reload(self) -> None:
         self.shutdown()
         self._config = None

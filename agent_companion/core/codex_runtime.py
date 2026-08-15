@@ -15,7 +15,7 @@ from agent_companion.core.codex_events import sanitized_codex_text
 from agent_companion.core.codex_support import codex_executable, permission_fingerprint
 from agent_companion.core.config import load_workspace_config
 from agent_companion.core.language_policy import (
-    display_language_policy,
+    chat_language_policy,
     language_mismatch_fallback,
     obvious_language_mismatch,
     reply_language_instruction,
@@ -262,17 +262,28 @@ class CodexRuntimeSession:
     def has_pending_for_task(self, task_id: str) -> bool:
         return any(row.task_id == task_id for row in self._pending.values())
 
+    def _chat_language(self) -> str:
+        """The language the user set for what Joi writes, not for what she says."""
+
+        reader = getattr(getattr(self, "app", None), "chat_language", None)
+        try:
+            return str(reader() or "") if callable(reader) else ""
+        except Exception:
+            return ""
+
     def _ensure_display_language(self, user_text: str, final_text: str) -> tuple[str, bool, str]:
         """Fail closed when Codex lets the localized persona choose display text."""
 
-        policy = display_language_policy(user_text)
-        if not obvious_language_mismatch(user_text, final_text):
+        chat_language = self._chat_language()
+        policy = chat_language_policy(chat_language, user_text)
+        if not obvious_language_mismatch(user_text, final_text, chat_language):
             return final_text, False, policy.code
         config = load_workspace_config(self.workspace)
         if config is not None and config.llm.is_configured:
+            wanted = f"用户选定的聊天语言（{policy.label}）" if policy.chosen else f"用户本轮输入所用的同一种自然语言（提示：{policy.label}）"
             system_prompt = (
                 "你只修复最终屏幕回复的语言，不回答新问题。"
-                f"把 reply 改写为用户本轮输入所用的同一种自然语言（提示：{policy.label}），"
+                f"把 reply 改写为{wanted}，"
                 "保持原意、事实边界和角色语气，不添加完成状态或新信息。"
                 "角色的配音语言与这里无关。只输出 JSON：{\"reply\":\"修复后的屏幕回复\"}。"
             )
@@ -296,7 +307,7 @@ class CodexRuntimeSession:
                 )
                 payload = json.loads(str(outcome.value or "{}")) if outcome.ok else {}
                 repaired = str(payload.get("reply") or "").strip() if isinstance(payload, dict) else ""
-                if repaired and not obvious_language_mismatch(user_text, repaired):
+                if repaired and not obvious_language_mismatch(user_text, repaired, chat_language):
                     return _safe_joi_text(repaired, final_text), True, policy.code
             except Exception:
                 pass
@@ -425,7 +436,7 @@ class CodexRuntimeSession:
             return user_text
         sections = [
             "你是 Joi 的主执行内核，但用户只应感知到 Joi 这个角色。",
-            reply_language_instruction(user_text),
+            reply_language_instruction(user_text, self._chat_language()),
             "不要把自己描述成 Codex，也不要把普通请求说成写代码任务。",
             "Joi 桌面壳负责显示、语音、设置、记忆和陪看状态；你负责理解用户目标并持续推进。",
             "最终回复先给结果，默认控制在 2 至 5 个短句；只有确实需要时才列出不超过 4 项。不要重复用户请求，也不要逐条复述内部执行日志。",
@@ -459,7 +470,7 @@ class CodexRuntimeSession:
         # be Japanese while a Chinese user message still requires Chinese
         # display text.  The selected voice language is handled later by the
         # expression/TTS channel and never changes this final answer contract.
-        sections.append("最终显示回复语言（最高优先级）：\n" + reply_language_instruction(user_text))
+        sections.append("最终显示回复语言（最高优先级）：\n" + reply_language_instruction(user_text, self._chat_language()))
         return "\n\n".join(sections)
 
     def _record_memory_candidate(self, task_id: str, user_text: str, final_text: str) -> None:

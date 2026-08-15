@@ -44,3 +44,27 @@ export function asrRpcTimeoutMs(timeoutSeconds: number | undefined, graceSeconds
   const grace = Number.isFinite(Number(graceSeconds)) ? Number(graceSeconds) : 10
   return Math.max(1, Math.floor(timeout)) * 1000 + Math.max(0, Math.floor(grace)) * 1000
 }
+
+export interface AsrLatencyBreakdown {
+  prepare_ms?: number
+  encode_ms?: number
+  rpc_ms?: number
+  decode_ms?: number
+  provider_ms?: number
+  total_ms?: number
+}
+
+export function voiceGenerationId(epoch: number) {
+  const value = Number.isFinite(epoch) ? Math.max(0, Math.floor(epoch)) : 0
+  return `voice-${value}`
+}
+
+/** A deliberately small debug projection: timings only, never transcript/provider details. */
+export function asrLatencyLabel(latency: AsrLatencyBreakdown) {
+  const provider = Number(latency.provider_ms)
+  const total = Number(latency.total_ms)
+  const parts: string[] = []
+  if (Number.isFinite(provider) && provider >= 0) parts.push(`ASR ${Math.round(provider)}ms`)
+  if (Number.isFinite(total) && total >= 0) parts.push(`端到端 ${Math.round(total)}ms`)
+  return parts.join(' · ')
+}

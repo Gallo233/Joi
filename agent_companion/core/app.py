@@ -20,7 +20,7 @@ from agent_companion.core.audit_store import AuditStore
 from agent_companion.core.background_context import BackgroundContextStore
 from agent_companion.core.character import CharacterHarness, load_character
 from agent_companion.core.character_packages import CharacterPackageManager
-from agent_companion.core.config import AppConfig, ModelRouter, load_workspace_config
+from agent_companion.core.config import AppConfig, LanguageConfig, ModelRouter, load_workspace_config
 from agent_companion.core.codex_events import codex_cancel_run_state
 from agent_companion.core.desktop_context import (
     DesktopContext,
@@ -137,7 +137,7 @@ class AgentCompanionApp:
                 steps=[ToolRequest("vision.select_target", {"selection": selection}, "根据上一次候选列表选择目标，继续进入点击确认。")],
             )
         else:
-            plan = build_plan(text)
+            plan = build_plan(text, self.chat_language())
             plan = self._refine_plan_with_llm(text, plan)
             plan = self._rewrite_plan_for_desktop_context(plan)
         return self._start_plan(
@@ -372,6 +372,15 @@ class AgentCompanionApp:
         if self.character_packages.memory_namespace() == "disabled":
             self.memory.set_enabled(False)
         self.reload_runtime_policy()
+
+    def language_settings(self) -> LanguageConfig:
+        """The language Joi shows and writes in; her voice's is the package's."""
+
+        config = self._runtime_config or self._load_runtime_config()
+        return config.language if config is not None else LanguageConfig()
+
+    def chat_language(self) -> str:
+        return self.language_settings().chat
 
     def skill_settings_payload(self) -> dict[str, bool]:
         config = self._runtime_config or self._load_runtime_config()
