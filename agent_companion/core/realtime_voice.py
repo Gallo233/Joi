@@ -49,6 +49,7 @@ _LOCAL_SESSION = re.compile(r"^realtime-[a-f0-9]{16,64}$")
 _MINECRAFT_SESSION = re.compile(r"^session-[A-Za-z0-9_.:-]{1,95}$")
 _SPOKEN_TAG = re.compile(r"^\s*(?:朗读|朗讀|speak)\s*[:：]\s*")
 _CAPTION_TAG = re.compile(r"^\s*(?:字幕|caption)\s*[:：]\s*")
+_CAPTION_TAG_INLINE = re.compile(r"\s*(?:字幕|caption)\s*[:：]\s*")
 
 
 class RealtimeSocket(Protocol):
@@ -80,6 +81,8 @@ ActionCanceller = Callable[[str, str], dict[str, Any]]
 ActionController = Callable[[str, str, str], dict[str, Any]]
 BindingValidator = Callable[[str], bool]
 TerminalSink = Callable[[str, str], None]
+# (spoken line, chat locale) -> the same line written in the chat language.
+CaptionRepair = Callable[[str, str], str]
 
 
 @dataclass(frozen=True)
@@ -128,6 +131,7 @@ class QwenRealtimeSession:
         chat_locale: str = "",
         persona: str = "",
         world_memory_text: str = "",
+        caption_repair: CaptionRepair | None = None,
     ) -> None:
         self.config = config
         self.session_id = str(session_id)
@@ -138,6 +142,7 @@ class QwenRealtimeSession:
         self.chat_locale = str(chat_locale or "")
         self.persona = str(persona or "")
         self.world_memory_text = str(world_memory_text or "")
+        self._caption_repair = caption_repair or (lambda _spoken, _locale: "")
         self.splits_channels = _splits_channels(self.voice_locale, self.chat_locale)
         self._emit_sink = emit
         self._execute_action = execute_action
@@ -498,20 +503,61 @@ class QwenRealtimeSession:
             self._dispatch_call(epoch, calls[0])
             return
         if text and committed:
-            spoken, caption = _split_spoken_and_caption(text) if self.splits_channels else (text, text)
-            with self._lock:
-                # M1: keep the sanitized exchange for optional persistence when
-                # the session ends. Raw audio and provider IDs never join it.
-                user_text = self._user_final_by_epoch.get(epoch, "")
-                if user_text or caption:
-                    self._transcript_pairs.append((user_text, caption))
-                    if len(self._transcript_pairs) > 200:
-                        self._transcript_pairs = self._transcript_pairs[-200:]
-            self._emit({"type": "assistant_transcript", "text": caption, "final": True, "epoch": epoch})
+            if self.splits_channels:
+                spoken, caption = _split_spoken_and_caption(text)
+            else:
+                spoken, caption = text, text
+            # Speak first, always. The voice is the low-latency channel; a
+            # caption that needs repairing must never hold the audio back, and
+            # this runs on the provider reader thread, which must not block.
             self._emit({"type": "assistant_text", "text": spoken, "epoch": epoch, "output": "local_tts"})
             self._emit({"type": "state", "state": "assistant_speaking", "epoch": epoch})
+            if caption:
+                self._publish_caption(epoch, spoken, caption)
+            else:
+                threading.Thread(
+                    target=self._repair_and_publish_caption,
+                    args=(epoch, spoken),
+                    name=f"qwen-caption-{self.session_id[-8:]}",
+                    daemon=True,
+                ).start()
         else:
             self._emit({"type": "state", "state": "listening", "epoch": epoch})
+
+    def _publish_caption(self, epoch: int, spoken: str, caption: str) -> None:
+        """Emit the line the user reads, and keep it for optional persistence."""
+
+        with self._lock:
+            if epoch != self._epoch:
+                # The user has spoken again; this caption belongs to a turn that
+                # is no longer on screen.
+                return
+            # M1: keep the sanitized exchange for optional persistence when the
+            # session ends. Raw audio and provider IDs never join it.
+            user_text = self._user_final_by_epoch.get(epoch, "")
+            if user_text or caption:
+                self._transcript_pairs.append((user_text, caption))
+                if len(self._transcript_pairs) > 200:
+                    self._transcript_pairs = self._transcript_pairs[-200:]
+        self._emit({"type": "assistant_transcript", "text": caption, "final": True, "epoch": epoch})
+
+    def _repair_and_publish_caption(self, epoch: int, spoken: str) -> None:
+        """Write the caption in the chat language when the model gave one line.
+
+        A speech model answers with a single utterance far more often than with
+        the requested two lines, and captioning that utterance verbatim shows
+        the spoken language on screen -- exactly what the chat language setting
+        says should not happen. Translating it costs one short text call, off
+        the audio path; if that is unavailable the spoken line is still shown,
+        because a caption in the wrong language beats no caption at all.
+        """
+
+        caption = ""
+        try:
+            caption = _bounded_assistant_text(self._caption_repair(spoken, self.chat_locale))
+        except Exception:
+            caption = ""
+        self._publish_caption(epoch, spoken, caption or spoken)
 
     def control_active_goal(self, action: str) -> dict[str, Any]:
         if action not in {"pause", "resume", "cancel"}:
@@ -768,6 +814,7 @@ class RealtimeVoiceCoordinator:
         persona: Callable[[], str] | None = None,
         world_memory: Callable[[str], str] | None = None,
         transcript_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
+        caption_repair: CaptionRepair | None = None,
     ) -> None:
         self.config = config
         self._execute_action = execute_action or (lambda *_: {"ok": False, "status": "failed"})
@@ -782,6 +829,7 @@ class RealtimeVoiceCoordinator:
         self._persona = persona or (lambda: "")
         self._world_memory = world_memory or (lambda _session_id: "")
         self._transcript_sink = transcript_sink
+        self._caption_repair = caption_repair
         self._lock = threading.RLock()
         self._sessions: dict[str, QwenRealtimeSession] = {}
         self._owner_sessions: dict[str, str] = {}
@@ -824,6 +872,7 @@ class RealtimeVoiceCoordinator:
             chat_locale=_safe_voice_locale(self._chat_locale),
             persona=_safe_persona(self._persona),
             world_memory_text=_safe_world_memory(self._world_memory, minecraft_session_id),
+            caption_repair=self._caption_repair,
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -965,6 +1014,7 @@ def build_realtime_voice_coordinator(
     persona: Callable[[], str] | None = None,
     world_memory: Callable[[str], str] | None = None,
     transcript_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
+    caption_repair: CaptionRepair | None = None,
 ) -> tuple[RealtimeVoiceCoordinator, RealtimeVoiceRuntimeState]:
     config_path = workspace / "config.yaml"
     if not config_path.is_file():
@@ -997,6 +1047,7 @@ def build_realtime_voice_coordinator(
             persona=persona,
             world_memory=world_memory,
             transcript_sink=transcript_sink,
+            caption_repair=caption_repair,
         ),
         state,
     )
@@ -1272,6 +1323,22 @@ def _close_socket(socket: RealtimeSocket | None) -> None:
         return
 
 
+def _caption_language_label(chat_locale: str) -> str:
+    return "用户本轮说话所用的语言" if _follows_user(chat_locale) else voice_language_label(chat_locale)
+
+
+def _format_lead(voice_locale: str, chat_locale: str) -> str:
+    """The two-line contract, stated before anything else can bury it."""
+
+    if not _splits_channels(voice_locale, chat_locale):
+        return ""
+    spoken = voice_language_label(voice_locale)
+    return (
+        f"输出格式（最高优先级）：每一轮都只输出两行，第一行以「朗读：」开头并用{spoken}，"
+        f"第二行以「字幕：」开头并用{_caption_language_label(chat_locale)}；两行是同一句话的两种语言。\n"
+    )
+
+
 def _language_rule(voice_locale: str, chat_locale: str) -> str:
     """Realtime's one text channel has to serve both the ear and the screen.
 
@@ -1291,10 +1358,10 @@ def _language_rule(voice_locale: str, chat_locale: str) -> str:
             f"你的每一句回答都会被角色的{spoken}声音直接朗读，因此必须完整使用{spoken}书写。"
             f"即使用户用别的语言说话，也不要切换朗读语言，也不要混用两种语言；只在{spoken}里自然表达。"
         )
-    caption = "用户本轮说话所用的语言" if _follows_user(chat_locale) else voice_language_label(chat_locale)
+    caption = _caption_language_label(chat_locale)
     return (
-        f"你的回答会被角色的{spoken}声音朗读，而字幕要用{caption}显示，所以每轮都必须输出下面两行，"
-        "不要有第三行，也不要有解释：\n"
+        f"再说一次输出格式，这是硬性要求：你的回答会被角色的{spoken}声音朗读，而字幕要用{caption}显示，"
+        "所以每一轮都必须输出下面两行，不要有第三行，也不要有解释，即使只是打个招呼也要两行：\n"
         f"朗读：<用{spoken}写的那句话>\n"
         f"字幕：<同一句话，用{caption}写>\n"
         f"两行必须是同一句话的两种语言；朗读行只能是{spoken}，不要混用语言。"
@@ -1304,6 +1371,7 @@ def _language_rule(voice_locale: str, chat_locale: str) -> str:
 def _conversation_instructions(voice_locale: str = "", chat_locale: str = "", persona: str = "") -> str:
     return "".join(
         [
+            _format_lead(voice_locale, chat_locale),
             "你是 Joi，正在与用户进行低延迟语音对话。回答简洁、自然、友好。",
             _persona_block(persona),
             "输出必须是适合直接朗读的纯文本；不要说模型、供应商、路径、标识符、日志、JSON、命令或秘密。",
@@ -1316,6 +1384,7 @@ def _conversation_instructions(voice_locale: str = "", chat_locale: str = "", pe
 def _minecraft_instructions(voice_locale: str = "", chat_locale: str = "", persona: str = "", world_memory: str = "") -> str:
     return "".join(
         [
+            _format_lead(voice_locale, chat_locale),
             "你是 Joi，正在和用户一起玩 Minecraft。简短自然地对话。",
             _persona_block(persona),
             _world_memory_block(world_memory),
@@ -1393,16 +1462,28 @@ def _splits_channels(voice_locale: str, chat_locale: str) -> bool:
 
 
 def _split_spoken_and_caption(text: str) -> tuple[str, str]:
-    """Read the two tagged lines, or fall back to one text for both channels.
+    """Read the two tagged parts, or return the whole answer with no caption.
 
-    A model that ignores the format must still be heard and read, so an
-    unparseable answer is spoken and captioned whole rather than dropped.
+    A speech model does not reliably produce a two-line format, so this reports
+    what it actually found: an empty caption means "the model gave one line",
+    and the caller decides what to show rather than captioning the spoken
+    language as if it were the requested one.
+
+    The caption tag is also honoured mid-line. A model that answers
+    "朗读：X 字幕：Y" on one line used to have the whole string both spoken and
+    displayed, which made Joi read the word "字幕" out loud.
     """
 
+    raw = str(text or "")
+    inline = _CAPTION_TAG_INLINE.search(raw)
+    if inline and "\n" not in raw[: inline.start()]:
+        spoken_part = raw[: inline.start()]
+        caption_part = raw[inline.end():]
+        return _strip_tags(spoken_part), _strip_tags(caption_part)
     spoken: list[str] = []
     caption: list[str] = []
     current: list[str] | None = None
-    for line in str(text or "").splitlines():
+    for line in raw.splitlines():
         if _SPOKEN_TAG.match(line):
             current = spoken
             line = _SPOKEN_TAG.sub("", line, count=1)
@@ -1414,7 +1495,12 @@ def _split_spoken_and_caption(text: str) -> tuple[str, str]:
         current.append(line)
     spoken_text = "\n".join(spoken).strip()
     caption_text = "\n".join(caption).strip()
-    if not spoken_text or not caption_text:
-        whole = "\n".join(_CAPTION_TAG.sub("", _SPOKEN_TAG.sub("", row, count=1), count=1) for row in str(text or "").splitlines()).strip()
-        return whole, whole
-    return spoken_text, caption_text
+    if spoken_text and caption_text:
+        return spoken_text, caption_text
+    return _strip_tags(raw), ""
+
+
+def _strip_tags(value: str) -> str:
+    return "\n".join(
+        _CAPTION_TAG.sub("", _SPOKEN_TAG.sub("", row, count=1), count=1) for row in str(value or "").splitlines()
+    ).strip()

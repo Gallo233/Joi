@@ -33,7 +33,7 @@ from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.codex_runtime import CodexRuntimeSession
 from agent_companion.core.coercion import bool_or, float_or, optional_int
 from agent_companion.core.config import load_app_config, load_workspace_config
-from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES
+from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES, voice_language_label
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update
 from agent_companion.core.rpc import (
     JsonRpcProtocolError,
@@ -53,6 +53,7 @@ from agent_companion.core.minecraft_service import MinecraftGameService
 from agent_companion.core.minecraft_screen import MinecraftScreenCache
 from agent_companion.core.minecraft_autonomy import MinecraftAutonomyTicker
 from agent_companion.core.platform_factory import get_screen_observer
+from agent_companion.core.model_call import CallBudget
 from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.services import ArtifactService, BackgroundContextService, MemoryService
@@ -186,6 +187,7 @@ class JsonRpcBridge:
                 persona=self._realtime_persona_prompt,
                 world_memory=self.minecraft.world_memory,
                 transcript_sink=self._persist_realtime_transcripts,
+                caption_repair=self._realtime_caption,
             )
         else:
             self.realtime_voice = realtime_voice_coordinator
@@ -904,6 +906,46 @@ class JsonRpcBridge:
                 },
             )
         )
+
+    def _realtime_caption(self, spoken: str, chat_locale: str) -> str:
+        """Write a spoken realtime line in the chat language, for the subtitle.
+
+        Used only when the provider answered with one line instead of the two
+        it was asked for. It runs off the audio path, so the character's voice
+        never waits on it, and it fails to an empty string rather than delaying
+        or inventing a caption.
+        """
+
+        line = str(spoken or "").strip()
+        label = voice_language_label(chat_locale)
+        if not line or not label or os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
+            return ""
+        try:
+            config = load_app_config(self.workspace / "config.yaml")
+        except Exception:
+            return ""
+        if config.llm.use_mock or not config.llm.is_configured:
+            return ""
+        system_prompt = (
+            f"你只把这句话改写成{label}，用于屏幕字幕。"
+            "保持原意、语气和长度，不要解释，不要加引号，不要添加任何新信息。只输出改写后的那一句。"
+        )
+        try:
+            outcome = chat_completion(
+                config.llm,
+                "fast",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": line[:600]},
+                ],
+                budget=CallBudget(timeout_ms=6_000, max_fallbacks=0, allow_categories=("text",)),
+                temperature=0.2,
+                instructions=system_prompt,
+                user_input=line[:600],
+            )
+        except Exception:
+            return ""
+        return str(outcome.value or "").strip() if outcome.ok else ""
 
     def _autonomy_propose(self, prompt: str) -> dict[str, Any] | str:
         """One bounded text completion deciding speak/propose/none.
@@ -2647,6 +2689,7 @@ class JsonRpcBridge:
             persona=self._realtime_persona_prompt,
             world_memory=self.minecraft.world_memory,
             transcript_sink=self._persist_realtime_transcripts,
+            caption_repair=self._realtime_caption,
         )
         self.tts.reload()
         self.watch_commentary.reload()

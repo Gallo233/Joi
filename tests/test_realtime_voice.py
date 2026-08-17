@@ -237,6 +237,7 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         chat_locale: str = "",
         on_transcripts: object = None,
         world_memory_text: str = "",
+        caption_repair: object = None,
     ) -> tuple[QwenRealtimeSession, _FakeSocket, _Connector, list[dict[str, object]]]:
         socket = socket or _ready_socket()
         emitted = events if events is not None else []
@@ -266,6 +267,7 @@ class QwenRealtimeSessionTests(unittest.TestCase):
             voice_locale=voice_locale,
             chat_locale=chat_locale,
             world_memory_text=world_memory_text,
+            caption_repair=caption_repair,
         )
         return session, socket, connector, emitted
 
@@ -643,13 +645,74 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         self.assertEqual(caption, "我们来看看今天的安排。")
         session.stop()
 
-    def test_an_answer_that_ignores_the_format_is_still_heard_and_read(self) -> None:
+    def test_a_one_line_answer_is_captioned_in_the_chat_language(self) -> None:
+        """A speech model answers with one utterance far more often than two.
+
+        Captioning that utterance verbatim put Japanese on screen for a user who
+        had chosen Chinese -- the exact thing the chat language setting exists
+        to prevent.
+        """
+
+        repairs: list[tuple[str, str]] = []
+
+        def repair(spoken: str, locale: str) -> str:
+            repairs.append((spoken, locale))
+            return "我们来看看今天的安排。"
+
+        session, _socket, _connector, events = self._session(
+            voice_locale="ja", chat_locale="zh", caption_repair=repair
+        )
+        self.assertTrue(session.start()["ok"])
+        self._one_text_turn(session, "今日の予定を見ましょう。")
+        _wait_until(lambda: any(row.get("type") == "assistant_transcript" for row in events))
+        spoken, caption = self._channels(events)
+        self.assertEqual(spoken, "今日の予定を見ましょう。")
+        self.assertEqual(caption, "我们来看看今天的安排。")
+        self.assertEqual(repairs, [("今日の予定を見ましょう。", "zh")])
+        session.stop()
+
+    def test_the_voice_never_waits_for_the_caption(self) -> None:
+        # The spoken line reaches TTS before any repair is attempted.
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_repair(spoken: str, locale: str) -> str:
+            started.set()
+            release.wait(2.0)
+            return "慢一点的字幕"
+
+        session, _socket, _connector, events = self._session(
+            voice_locale="ja", chat_locale="zh", caption_repair=slow_repair
+        )
+        self.assertTrue(session.start()["ok"])
+        self._one_text_turn(session, "今日の予定を見ましょう。")
+        self.assertTrue(started.wait(2.0))
+        spoken_rows = [row for row in events if row.get("type") == "assistant_text"]
+        self.assertEqual(len(spoken_rows), 1)
+        self.assertEqual(spoken_rows[-1]["text"], "今日の予定を見ましょう。")
+        self.assertFalse([row for row in events if row.get("type") == "assistant_transcript"])
+        release.set()
+        _wait_until(lambda: any(row.get("type") == "assistant_transcript" for row in events))
+        session.stop()
+
+    def test_an_unavailable_repair_still_shows_something(self) -> None:
         session, _socket, _connector, events = self._session(voice_locale="ja", chat_locale="zh")
         self.assertTrue(session.start()["ok"])
         self._one_text_turn(session, "今日の予定を見ましょう。")
+        _wait_until(lambda: any(row.get("type") == "assistant_transcript" for row in events))
+        spoken, caption = self._channels(events)
+        self.assertEqual(caption, spoken)
+        session.stop()
+
+    def test_both_parts_on_one_line_are_still_two_channels(self) -> None:
+        # Otherwise Joi reads the word "字幕" out loud.
+        session, _socket, _connector, events = self._session(voice_locale="ja", chat_locale="zh")
+        self.assertTrue(session.start()["ok"])
+        self._one_text_turn(session, "朗读：今日の予定を見ましょう。字幕：我们来看看今天的安排。")
+        _wait_until(lambda: any(row.get("type") == "assistant_transcript" for row in events))
         spoken, caption = self._channels(events)
         self.assertEqual(spoken, "今日の予定を見ましょう。")
-        self.assertEqual(caption, "今日の予定を見ましょう。")
+        self.assertEqual(caption, "我们来看看今天的安排。")
         session.stop()
 
     def test_one_language_for_both_channels_asks_for_one_line(self) -> None:
