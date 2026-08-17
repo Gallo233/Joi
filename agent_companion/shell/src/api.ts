@@ -434,6 +434,21 @@ export class CoreClient {
     return this.send('game.adapter.session.stop', { session_id: sessionId })
   }
 
+  /**
+   * Turn Joi's own initiative in Minecraft on or off.
+   *
+   * Autonomy spends the same action and block budget the user approved for the
+   * session, so it stays off until they ask for it and can be stopped at any
+   * moment without ending the session.
+   */
+  minecraftAutonomyConfigure(params: { enabled?: boolean; interval_seconds?: number }) {
+    return this.send('game.adapter.minecraft.autonomy.configure', params)
+  }
+
+  minecraftAutonomyStatus() {
+    return this.send('game.adapter.minecraft.autonomy.status', {})
+  }
+
   minecraftGoalPause(sessionId: string, goalId: string) {
     return this.send('game.adapter.goal.pause', { session_id: sessionId, goal_id: goalId })
   }

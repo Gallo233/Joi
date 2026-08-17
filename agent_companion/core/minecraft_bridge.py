@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
 import hashlib
 import json
 import os
@@ -14,6 +14,8 @@ from agent_companion.core.minecraft_contract import GAME_ACTIONS, MINECRAFT_PROT
 
 
 _MAX_MESSAGE_BYTES = 256 * 1024
+_MAX_BUFFERED_EVENTS = 512
+_MAX_SEEN_OUTPUT = 512
 _SAFE_ENVIRONMENT_KEYS = frozenset(
     {
         "LANG",
@@ -38,6 +40,11 @@ _SAFE_ENVIRONMENT_KEYS = frozenset(
         "JOI_MINECRAFT_FAKE_DISCONNECT_AFTER_EFFECT",
         "JOI_MINECRAFT_FAKE_IGNORE_CONTROL",
         "JOI_MINECRAFT_FAKE_IDLE_DISCONNECT_MS",
+        "JOI_MINECRAFT_FAKE_PUSH_SNAPSHOT_MS",
+        "JOI_MINECRAFT_FAKE_COMBAT_MS",
+        "JOI_MINECRAFT_FAKE_CHAT_LINES",
+        "JOI_MINECRAFT_VIEWER",
+        "JOI_MINECRAFT_VIEWER_PORT",
     }
 )
 _OUTPUT_REQUIRED = {
@@ -64,6 +71,9 @@ _OUTPUT_TYPES = frozenset(
         "goal.resumed",
         "goal.cancelled",
         "state.snapshot",
+        "combat.started",
+        "combat.ended",
+        "chat.observed",
         "recovery.required",
         "error",
     }
@@ -91,6 +101,7 @@ _BRIDGE_ERROR_CODES = frozenset(
         "goal_not_active",
         "goal_not_paused",
         "goal_timeout",
+        "hostile_not_found",
         "verification_failed",
         "invalid_blueprint",
         "invalid_bridge_envelope",
@@ -159,7 +170,8 @@ class MinecraftBridgeClient:
         self._write_lock = threading.Lock()
         self._goal_dispatch_lock = threading.Lock()
         self._events: list[dict[str, Any]] = []
-        self._seen_output: dict[str, str] = {}
+        self._seen_output: OrderedDict[str, str] = OrderedDict()
+        self._event_listeners: list[Callable[[dict[str, Any]], None]] = []
         self._out_sequence = 0
         self._in_sequence = 0
         self._bridge_instance_id = ""
@@ -193,6 +205,45 @@ class MinecraftBridgeClient:
 
     def read_ready_for_test(self) -> dict[str, Any]:
         return self._wait_for(lambda event: event.get("type") == "bridge.ready", timeout=self.control_timeout)
+
+    def add_event_listener(self, callback: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+        """Subscribe to unsolicited bridge events (``reply_to == ""``).
+
+        The stdout reader thread invokes listeners with a plain-dict copy of
+        the event; they must not block or call back into this client. Returns
+        a disposer that removes the subscription.
+        """
+
+        with self._condition:
+            self._event_listeners.append(callback)
+
+        def remove() -> None:
+            with self._condition:
+                if callback in self._event_listeners:
+                    self._event_listeners.remove(callback)
+
+        return remove
+
+    def request_snapshot(self, timeout: float | None = None) -> dict[str, Any]:
+        """Ask the bridge for its sanitized live state (observation + checkpoint)."""
+
+        try:
+            request_id = self._send("state.snapshot.request", {})
+            response = self._wait_for(
+                lambda event: event.get("reply_to") == request_id and event.get("type") in {"state.snapshot", "error"},
+                timeout=timeout or self.response_timeout,
+            )
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc), "recovery_required": True}
+        if response.get("type") != "state.snapshot":
+            return {"ok": False, "error": _event_error(response, "state_snapshot_rejected")}
+        payload = response.get("payload") if isinstance(response.get("payload"), dict) else {}
+        return {
+            "ok": True,
+            "observation": _safe_observation(payload.get("observation")),
+            "checkpoint": _safe_checkpoint(payload.get("checkpoint")),
+            "bridge_instance_id": self._bridge_instance_id,
+        }
 
     def start(self) -> dict[str, Any]:
         try:
@@ -393,6 +444,7 @@ class MinecraftBridgeClient:
                     break
                 digest = hashlib.sha256(json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
                 message_id = str(event["message_id"])
+                unsolicited = str(event.get("reply_to") or "") == ""
                 with self._condition:
                     previous = self._seen_output.get(message_id)
                     if previous and previous != digest:
@@ -402,8 +454,19 @@ class MinecraftBridgeClient:
                     if previous:
                         continue
                     self._seen_output[message_id] = digest
+                    self._seen_output.move_to_end(message_id)
+                    while len(self._seen_output) > _MAX_SEEN_OUTPUT:
+                        self._seen_output.popitem(last=False)
                     self._events.append(event)
+                    if len(self._events) > _MAX_BUFFERED_EVENTS:
+                        self._events = [row for row in self._events if not row.get("_consumed")][-_MAX_BUFFERED_EVENTS:]
                     self._condition.notify_all()
+                    listeners = list(self._event_listeners) if unsolicited else []
+                for listener in listeners:
+                    try:
+                        listener({key: value for key, value in event.items() if key != "_consumed"})
+                    except Exception:
+                        pass
         except ValueError:
             # _terminate() closed the pipe under this reader; shutdown owns the error code.
             pass
@@ -548,18 +611,62 @@ def _event_error(event: Mapping[str, Any], fallback: str) -> str:
 def _safe_observation(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
-    if set(value) != {"dimension", "health", "food", "inventory_slots", "inventory_total"}:
+    required = {"dimension", "health", "food", "inventory_slots", "inventory_total"}
+    if set(value) - required - {"nearby_hostiles", "world"} or not required.issubset(set(value)):
         return {}
     dimension = str(value.get("dimension") or "").replace("minecraft:", "")
     if dimension not in _DIMENSIONS:
         return {}
-    return {
+    observation = {
         "dimension": dimension,
         "health": _bounded_number(value.get("health"), 0, 40),
         "food": _bounded_number(value.get("food"), 0, 40),
         "inventory_slots": min(_safe_int(value.get("inventory_slots")), 128),
         "inventory_total": min(_safe_int(value.get("inventory_total")), 100_000),
     }
+    hostiles = value.get("nearby_hostiles")
+    if isinstance(hostiles, list):
+        rows: list[dict[str, Any]] = []
+        for row in hostiles[:16]:
+            if not isinstance(row, Mapping):
+                continue
+            name = str(row.get("name") or "").strip().casefold()
+            count = _safe_int(row.get("count"))
+            if not name.replace("_", "").replace(":", "").isalnum() or len(name) > 40 or not 1 <= count <= 256:
+                continue
+            rows.append({"name": name, "count": count})
+        observation["nearby_hostiles"] = rows
+    world = value.get("world")
+    if isinstance(world, Mapping):
+        safe_world: dict[str, Any] = {}
+        time_of_day = _safe_int(world.get("time_of_day"))
+        if 0 <= time_of_day <= 24_000:
+            safe_world["time_of_day"] = time_of_day
+        if isinstance(world.get("raining"), bool):
+            safe_world["raining"] = world["raining"]
+        entities = world.get("entities")
+        if isinstance(entities, list):
+            rows = []
+            for row in entities[:16]:
+                if not isinstance(row, Mapping):
+                    continue
+                entity_type = str(row.get("type") or "").strip().casefold()
+                name = str(row.get("name") or "").strip().casefold()
+                kind = str(row.get("kind") or "").strip().casefold()
+                count = _safe_int(row.get("count"))
+                if entity_type not in {"player", "mob", "object", "animal", "unknown"} or len(name) > 40 or len(kind) > 40:
+                    continue
+                if not name.replace("_", "").replace(":", "").isalnum() or not kind.replace("_", "").replace(":", "").isalnum():
+                    continue
+                if not 1 <= count <= 256:
+                    continue
+                entry: dict[str, Any] = {"type": entity_type, "name": name, "count": count}
+                if kind:
+                    entry["kind"] = kind
+                rows.append(entry)
+            safe_world["entities"] = rows
+        observation["world"] = safe_world
+    return observation
 
 
 def _safe_checkpoint(value: Any) -> dict[str, Any]:
@@ -630,6 +737,9 @@ def _validate_event_payload(message_type: str, payload: Mapping[str, Any]) -> No
         "goal.resumed": ({"state"}, set()),
         "goal.cancelled": ({"state", "status", "verified", "changes", "effects", "before", "after", "checkpoint"}, {"replayed"}),
         "state.snapshot": ({"observation", "checkpoint"}, set()),
+        "combat.started": ({"state"}, set()),
+        "combat.ended": ({"state"}, set()),
+        "chat.observed": ({"player", "text"}, set()),
         "recovery.required": ({"error", "verified", "status", "changes", "effects", "recovery_required", "before", "after", "checkpoint"}, {"replayed"}),
         "error": ({"error"}, set()),
     }

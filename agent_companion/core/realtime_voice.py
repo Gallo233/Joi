@@ -122,9 +122,12 @@ class QwenRealtimeSession:
         cancel_action: ActionCanceller,
         control_action: ActionController | None = None,
         on_terminal: TerminalSink | None = None,
+        on_transcripts: Callable[[str, list[tuple[str, str]]], None] | None = None,
         connector: Connector = _default_connector,
         voice_locale: str = "",
         chat_locale: str = "",
+        persona: str = "",
+        world_memory_text: str = "",
     ) -> None:
         self.config = config
         self.session_id = str(session_id)
@@ -133,12 +136,17 @@ class QwenRealtimeSession:
         self.minecraft_session_id = str(minecraft_session_id)
         self.voice_locale = str(voice_locale or "")
         self.chat_locale = str(chat_locale or "")
+        self.persona = str(persona or "")
+        self.world_memory_text = str(world_memory_text or "")
         self.splits_channels = _splits_channels(self.voice_locale, self.chat_locale)
         self._emit_sink = emit
         self._execute_action = execute_action
         self._cancel_action = cancel_action
         self._control_action = control_action or (lambda action, session_id, goal_id: self._cancel_action(session_id, goal_id) if action == "cancel" else {"ok": False})
         self._on_terminal = on_terminal
+        self._on_transcripts = on_transcripts
+        self._transcript_pairs: list[tuple[str, str]] = []
+        self._transcripts_delivered = False
         self._connector = connector
         self._socket: RealtimeSocket | None = None
         self._lock = threading.RLock()
@@ -154,6 +162,7 @@ class QwenRealtimeSession:
         self._speech_item_key = ""
         self._input_item_epochs: dict[str, int] = {}
         self._input_item_order: deque[str] = deque(maxlen=64)
+        self._user_final_by_epoch: dict[int, str] = {}
         self._response_open = False
         self._response_epoch = -1
         self._response_key = ""
@@ -261,9 +270,9 @@ class QwenRealtimeSession:
             "input_audio_format": "pcm",
             "max_history_turns": int(self.config.max_history_turns),
             "instructions": (
-                _minecraft_instructions(self.voice_locale, self.chat_locale)
+                _minecraft_instructions(self.voice_locale, self.chat_locale, self.persona, self.world_memory_text)
                 if self.mode == "minecraft"
-                else _conversation_instructions(self.voice_locale, self.chat_locale)
+                else _conversation_instructions(self.voice_locale, self.chat_locale, self.persona)
             ),
             "turn_detection": {"type": self.config.turn_detection.strip()},
         }
@@ -348,6 +357,10 @@ class QwenRealtimeSession:
             epoch = self._input_item_epoch(event)
             text = _bounded_transcript(event.get("transcript"))
             if text and epoch >= 0:
+                with self._lock:
+                    self._user_final_by_epoch[epoch] = text
+                    while len(self._user_final_by_epoch) > 8:
+                        self._user_final_by_epoch.pop(min(self._user_final_by_epoch), None)
                 self._emit({"type": "user_transcript", "text": text, "final": True, "epoch": epoch})
             return
         if event_type == "response.created":
@@ -486,6 +499,14 @@ class QwenRealtimeSession:
             return
         if text and committed:
             spoken, caption = _split_spoken_and_caption(text) if self.splits_channels else (text, text)
+            with self._lock:
+                # M1: keep the sanitized exchange for optional persistence when
+                # the session ends. Raw audio and provider IDs never join it.
+                user_text = self._user_final_by_epoch.get(epoch, "")
+                if user_text or caption:
+                    self._transcript_pairs.append((user_text, caption))
+                    if len(self._transcript_pairs) > 200:
+                        self._transcript_pairs = self._transcript_pairs[-200:]
             self._emit({"type": "assistant_transcript", "text": caption, "final": True, "epoch": epoch})
             self._emit({"type": "assistant_text", "text": spoken, "epoch": epoch, "output": "local_tts"})
             self._emit({"type": "state", "state": "assistant_speaking", "epoch": epoch})
@@ -531,6 +552,21 @@ class QwenRealtimeSession:
             self._handled_calls[call["call_id"]] = digest
             if proposal is None or self._active_goal_id or self._last_action_epoch == epoch or self._stopped:
                 self._emit({"type": "game_action", "status": "rejected", "error": "realtime_action_invalid"})
+                return
+            proposed_action = str((proposal.get("intent") or {}).get("action") or "")
+            # Scheme A: an attack is the one primitive that actively harms an
+            # entity, so it never runs on the model's own initiative. The same
+            # turn's final user transcript must contain an explicit attack
+            # instruction; autonomy can only ever propose flee/guard.
+            if proposed_action == "attack" and not _transcript_authorizes_attack(self._user_final_by_epoch.get(epoch, "")):
+                self._emit(
+                    {
+                        "type": "game_action",
+                        "action": "attack",
+                        "status": "rejected",
+                        "error": "attack_requires_explicit_instruction",
+                    }
+                )
                 return
             goal_id = f"voice-goal-{uuid.uuid4().hex}"
             permit = ActionDispatchPermit()
@@ -687,12 +723,22 @@ class QwenRealtimeSession:
 
     def _notify_terminal(self) -> None:
         callback = self._on_terminal
-        if callback is None:
-            return
-        try:
-            callback(self.session_id, self.owner_id)
-        except Exception:
-            return
+        if callback is not None:
+            try:
+                callback(self.session_id, self.owner_id)
+            except Exception:
+                pass
+        with self._lock:
+            if self._transcripts_delivered or not self._transcript_pairs:
+                return
+            self._transcripts_delivered = True
+            pairs = list(self._transcript_pairs)
+        sink = self._on_transcripts
+        if sink is not None:
+            try:
+                sink(self.session_id, pairs)
+            except Exception:
+                pass
 
     def _emit(self, payload: dict[str, Any]) -> None:
         # The sink receives only this closed projection. Provider identifiers,
@@ -719,6 +765,9 @@ class RealtimeVoiceCoordinator:
         connector: Connector = _default_connector,
         voice_locale: Callable[[], str] | None = None,
         chat_locale: Callable[[], str] | None = None,
+        persona: Callable[[], str] | None = None,
+        world_memory: Callable[[str], str] | None = None,
+        transcript_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
     ) -> None:
         self.config = config
         self._execute_action = execute_action or (lambda *_: {"ok": False, "status": "failed"})
@@ -730,6 +779,9 @@ class RealtimeVoiceCoordinator:
         # character, voice language or chat language between two realtime calls.
         self._voice_locale = voice_locale or (lambda: "")
         self._chat_locale = chat_locale or (lambda: "")
+        self._persona = persona or (lambda: "")
+        self._world_memory = world_memory or (lambda _session_id: "")
+        self._transcript_sink = transcript_sink
         self._lock = threading.RLock()
         self._sessions: dict[str, QwenRealtimeSession] = {}
         self._owner_sessions: dict[str, str] = {}
@@ -766,9 +818,12 @@ class RealtimeVoiceCoordinator:
             cancel_action=self._cancel_action,
             control_action=self._control_action,
             on_terminal=self._retire_session,
+            on_transcripts=self._transcript_sink,
             connector=self._connector,
             voice_locale=_safe_voice_locale(self._voice_locale),
             chat_locale=_safe_voice_locale(self._chat_locale),
+            persona=_safe_persona(self._persona),
+            world_memory_text=_safe_world_memory(self._world_memory, minecraft_session_id),
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -870,6 +925,33 @@ def _safe_voice_locale(source: Callable[[], str]) -> str:
     return locale[:16] if locale.replace("-", "").replace("_", "").isalnum() else ""
 
 
+def _safe_persona(source: Callable[[], str]) -> str:
+    """Read the character harness per session, sanitized and bounded.
+
+    A missing or broken persona callback leaves the instructions unchanged:
+    the voice must still work with the generic Joi identity.
+    """
+
+    try:
+        text = str(source() or "")
+    except Exception:
+        return ""
+    return _bounded_text(text, 1_200).strip()
+
+
+def _safe_world_memory(source: Callable[[str], str], session_id: str) -> str:
+    """Read the per-world memory for this Minecraft session, sanitized.
+
+    A missing, broken or empty memory just means the voice starts without it.
+    """
+
+    try:
+        text = str(source(session_id) or "")
+    except Exception:
+        return ""
+    return _bounded_text(text, 500).strip()
+
+
 def build_realtime_voice_coordinator(
     workspace: Path,
     *,
@@ -880,6 +962,9 @@ def build_realtime_voice_coordinator(
     connector: Connector = _default_connector,
     voice_locale: Callable[[], str] | None = None,
     chat_locale: Callable[[], str] | None = None,
+    persona: Callable[[], str] | None = None,
+    world_memory: Callable[[str], str] | None = None,
+    transcript_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
 ) -> tuple[RealtimeVoiceCoordinator, RealtimeVoiceRuntimeState]:
     config_path = workspace / "config.yaml"
     if not config_path.is_file():
@@ -909,6 +994,9 @@ def build_realtime_voice_coordinator(
             connector=connector,
             voice_locale=voice_locale,
             chat_locale=chat_locale,
+            persona=persona,
+            world_memory=world_memory,
+            transcript_sink=transcript_sink,
         ),
         state,
     )
@@ -996,6 +1084,38 @@ def minecraft_proposal_tools() -> list[dict[str, Any]]:
             },
             ["items"],
         ),
+        tool(
+            "observe_screen",
+            "Read a sanitized summary of the game screen Joi can see right now, without changing anything.",
+            {},
+            [],
+        ),
+        tool(
+            "attack",
+            "Attack the nearest hostile mob within radius. Never targets players. Only allowed after the user explicitly instructed an attack.",
+            {
+                "count": {"type": "integer", "minimum": 1, "maximum": 16},
+                "radius": {"type": "integer", "minimum": 1, "maximum": 32},
+                "dimension": dimension,
+            },
+            [],
+        ),
+        tool(
+            "flee",
+            "Move away from nearby hostile mobs for a bounded duration.",
+            {
+                "distance": {"type": "integer", "minimum": 4, "maximum": 32},
+                "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+                "dimension": dimension,
+            },
+            [],
+        ),
+        tool(
+            "guard",
+            "Stop moving and stay alert where Joi stands.",
+            {"dimension": dimension},
+            [],
+        ),
     ]
 
 
@@ -1025,12 +1145,19 @@ def _safe_action_result(action: str, result: Mapping[str, Any]) -> dict[str, Any
     status = str(result.get("status") or "failed")
     if status not in {"completed", "partial", "unverified", "failed", "cancelled"}:
         status = "failed"
-    return {
+    safe: dict[str, Any] = {
         "action": action if action in {tool["function"]["name"][10:] for tool in minecraft_proposal_tools()} else "unknown",
         "status": status,
         "summary": "completed" if status == "completed" else "not_completed",
         "recovery_required": bool(result.get("recovery_required")),
     }
+    # Only the read-only screen action may carry observation text back to the
+    # provider, and only the bounded sanitized projection the cache produced.
+    if action == "observe_screen" and status == "completed":
+        observation = _bounded_text(result.get("observation"), 1_200)
+        if observation:
+            safe["observation"] = observation
+    return safe
 
 
 def _provider_url(config: RealtimeVoiceConfig) -> str:
@@ -1120,7 +1247,7 @@ def _safe_public_event(payload: Mapping[str, Any]) -> dict[str, Any]:
         result = {"type": "game_action", "status": status if status in {"acting", "completed", "partial", "unverified", "failed", "cancelled", "rejected"} else "failed"}
         if action:
             result["action"] = action[:40]
-        if payload.get("error") in {"realtime_action_ambiguous", "realtime_action_invalid"}:
+        if payload.get("error") in {"realtime_action_ambiguous", "realtime_action_invalid", "attack_requires_explicit_instruction"}:
             result["error"] = payload["error"]
         if "recovery_required" in payload:
             result["recovery_required"] = bool(payload.get("recovery_required"))
@@ -1174,10 +1301,11 @@ def _language_rule(voice_locale: str, chat_locale: str) -> str:
     )
 
 
-def _conversation_instructions(voice_locale: str = "", chat_locale: str = "") -> str:
+def _conversation_instructions(voice_locale: str = "", chat_locale: str = "", persona: str = "") -> str:
     return "".join(
         [
             "你是 Joi，正在与用户进行低延迟语音对话。回答简洁、自然、友好。",
+            _persona_block(persona),
             "输出必须是适合直接朗读的纯文本；不要说模型、供应商、路径、标识符、日志、JSON、命令或秘密。",
             "当前没有任何工具权限，不要声称执行了外部操作。",
             _language_rule(voice_locale, chat_locale),
@@ -1185,16 +1313,68 @@ def _conversation_instructions(voice_locale: str = "", chat_locale: str = "") ->
     )
 
 
-def _minecraft_instructions(voice_locale: str = "", chat_locale: str = "") -> str:
+def _minecraft_instructions(voice_locale: str = "", chat_locale: str = "", persona: str = "", world_memory: str = "") -> str:
     return "".join(
         [
             "你是 Joi，正在和用户一起玩 Minecraft。简短自然地对话。",
+            _persona_block(persona),
+            _world_memory_block(world_memory),
             "你可以在确有必要时调用一个 minecraft_* 工具提出单个游戏动作；工具只是提案，Core 会独立检查权限、范围和预算。",
             "每一轮最多提出一个动作，不要猜测坐标、权限、会话标识或完成结果。",
+            "战斗规则：除非用户在同一轮里明确要求攻击，否则永远不要提出 minecraft_attack；害怕或躲避时可以提出 minecraft_flee 或 minecraft_guard。任何动作都不得以玩家为目标。",
             "收到工具结果后才可以描述是否完成；输出必须是适合直接朗读的纯文本。",
             _language_rule(voice_locale, chat_locale),
         ]
     )
+
+
+def _world_memory_block(world_memory: str) -> str:
+    text = _bounded_text(world_memory, 500).strip()
+    if not text:
+        return ""
+    return f"世界记忆（可参考，不要编造未给出的细节）：\n{text}\n"
+
+
+_ATTACK_INSTRUCTION_TOKENS = (
+    "攻击",
+    "打它",
+    "打他",
+    "打她",
+    "打怪",
+    "打死",
+    "打那",
+    "开打",
+    "揍",
+    "attack",
+    "kill",
+    "fight",
+)
+
+
+def _transcript_authorizes_attack(text: str) -> bool:
+    """Scheme A gate: only an explicit attack instruction in the same turn counts.
+
+    Conservative by design: false negatives merely refuse an attack, while the
+    token list avoids generic words like a bare "打" so that "打包/打扫" can
+    never arm the most dangerous primitive.
+    """
+
+    lowered = str(text or "").casefold().strip()
+    return bool(lowered) and any(token in lowered for token in _ATTACK_INSTRUCTION_TOKENS)
+
+
+def _persona_block(persona: str) -> str:
+    """The character harness, sanitized and bounded for the cloud instructions.
+
+    Persona text is session-invariant, so it belongs in instructions (which
+    ``session.update`` sends exactly once at start); per-turn context must go
+    through ``conversation.item.create`` instead.
+    """
+
+    text = _bounded_text(persona, 1_200).strip()
+    if not text:
+        return ""
+    return f"角色设定（始终遵守）：\n{text}\n"
 
 
 def _follows_user(chat_locale: str) -> bool:

@@ -4236,7 +4236,7 @@ dialog.app-confirm-modal {
   margin: auto;
   padding: 0;
   border: 1px solid rgba(49, 79, 121, 0.18);
-  border-radius: 24px;
+  border-radius: var(--radius-xl);
   background: rgba(250, 252, 255, 0.98);
   color: var(--text-primary, #1f2d3d);
   box-shadow: 0 30px 90px rgba(21, 42, 72, 0.3);
@@ -4249,14 +4249,14 @@ dialog.app-confirm-modal::backdrop {
 
 .app-confirm-card {
   display: grid;
-  gap: 18px;
+  gap: var(--sp-4);
   padding: 26px;
 }
 
 .app-confirm-card header {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: var(--sp-3);
 }
 
 .app-confirm-card h2,
@@ -4265,14 +4265,14 @@ dialog.app-confirm-modal::backdrop {
 }
 
 .app-confirm-card h2 {
-  font-size: 19px;
+  font-size: var(--text-xl);
 }
 
 .app-confirm-card p {
   max-height: min(470px, 55vh);
   overflow: auto;
   white-space: pre-wrap;
-  font-size: 14px;
+  font-size: var(--text-md);
   line-height: 1.72;
   color: var(--text-secondary, #516176);
 }
@@ -4280,7 +4280,7 @@ dialog.app-confirm-modal::backdrop {
 .app-confirm-card footer {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
+  gap: var(--sp-2);
 }
 
 .app-confirm-card footer button {

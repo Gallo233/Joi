@@ -31,6 +31,9 @@ const capabilities = [
   'eat',
   'place_blueprint',
   'deposit',
+  'attack',
+  'flee',
+  'guard',
 ]
 const allowedTypes = new Set([
   'session.start',
@@ -94,6 +97,15 @@ let recoveryRequired = false
 let scopeAnchor = null
 const seenMessages = new Map()
 const cachedResponses = new Map()
+const MAX_CACHED_MESSAGES = 4096
+
+// Long voice sessions stream many requests and unsolicited events. Replay
+// protection only needs the most recent window: message IDs are random and
+// Core never retries old ones, so evicting the oldest entries keeps both
+// maps bounded without weakening the replay contract.
+function capCache(map) {
+  if (map.size > MAX_CACHED_MESSAGES) map.delete(map.keys().next().value)
+}
 const fakeState = {
   position: { x: 0, y: 64, z: 0 },
   dimension: 'overworld',
@@ -129,6 +141,7 @@ function emit(type, payload, request = null, options = {}) {
 function cacheAndEmit(request, type, payload, options = {}) {
   const cached = { type, payload, goalId: options.goalId !== undefined ? options.goalId : request.goal_id || '' }
   cachedResponses.set(request.message_id, cached)
+  capCache(cachedResponses)
   emit(type, payload, request, options)
 }
 
@@ -189,6 +202,9 @@ function validateIntent(intent) {
     eat: [['action', 'item'], ['action']],
     place_blueprint: [['action', 'anchor', 'dimension', 'player', 'blocks'], ['action', 'anchor', 'blocks']],
     deposit: [['action', 'container', 'items', 'radius', 'dimension'], ['action', 'items']],
+    attack: [['action', 'count', 'radius', 'dimension'], ['action']],
+    flee: [['action', 'distance', 'duration_seconds', 'dimension'], ['action']],
+    guard: [['action', 'dimension'], ['action']],
   }[intent.action]
   const keys = Object.keys(intent)
   if (!fields[1].every((key) => keys.includes(key)) || keys.some((key) => !fields[0].includes(key))) return 'unexpected_intent_field'
@@ -270,7 +286,32 @@ function botOptions() {
     plugins: { time: false, joi_time: injectTimeCompat },
   }
   if (process.env.JOI_MINECRAFT_PROFILES_FOLDER) options.profilesFolder = process.env.JOI_MINECRAFT_PROFILES_FOLDER
+  const viewer = viewerOptions()
+  if (viewer) options.viewer = viewer
   return options
+}
+
+// Web POV (prismarine-viewer) is an optional, dev-only enhancement: when the
+// package is absent the bridge still joins and plays, it just has no viewer.
+function viewerOptions() {
+  if (process.env.JOI_MINECRAFT_VIEWER !== '1') return null
+  try {
+    require('prismarine-viewer')
+  } catch (_error) {
+    process.stderr.write('joi.minecraft viewer: prismarine-viewer is not installed; POV viewer disabled\n')
+    return null
+  }
+  return { port: Number(process.env.JOI_MINECRAFT_VIEWER_PORT || 3007), firstPerson: true }
+}
+
+function watchChat(candidate) {
+  if (fakeMode || !candidate) return
+  candidate.on('chat', (username, message) => {
+    if (closing || recoveryRequired) return
+    const text = String(message || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').slice(0, 500)
+    if (!text) return
+    emit('chat.observed', { player: String(username || '').slice(0, 32), text }, null, { sessionId: currentSessionId })
+  })
 }
 
 // Connect failures used to collapse into one opaque code, which left the shell showing
@@ -315,6 +356,8 @@ function createConnectedBot() {
       clearTimeout(timeout)
       candidate.loadPlugin(pathfinder)
       configureSafeMovements(candidate)
+      watchCombat(candidate)
+      watchChat(candidate)
       resolve(candidate)
     })
     candidate.on('error', (error) => {
@@ -363,6 +406,54 @@ function positionInScope(position) {
   return radius > 0 && (dx * dx + dy * dy + dz * dz) <= radius * radius
 }
 
+// Combat awareness: type-and-count only, never coordinates. The fake world
+// toggles on a timer so Core-side listeners can be tested deterministically;
+// a real world reports being attacked and only clears when no hostile stays
+// within melee range.
+let combatActive = false
+
+function isHostileMob(entity) {
+  if (!entity || entity.type !== 'mob') return false
+  if (entity.kind === 'Hostile mobs') return true
+  const category = String(entity.mobType || '').toLowerCase()
+  return category === 'hostile'
+}
+
+function nearbyHostiles() {
+  if (fakeMode) return combatActive ? [{ name: 'zombie', count: 2 }] : []
+  const position = currentPosition()
+  if (!bot || !position || !sessionConfig?.scope) return []
+  const radius = Number(sessionConfig.scope.max_radius || 0)
+  const counts = new Map()
+  for (const entity of Object.values(bot.entities)) {
+    if (!isHostileMob(entity) || !entity.position) continue
+    if (entity.position.distanceTo(position) > radius) continue
+    const name = String(entity.mobType || entity.name || 'hostile').toLowerCase()
+    counts.set(name, (counts.get(name) || 0) + 1)
+  }
+  return Array.from(counts.entries()).map(([name, count]) => ({ name, count }))
+}
+
+function watchCombat(candidate) {
+  if (fakeMode || !candidate) return
+  candidate.on('entityHurt', (entity) => {
+    if (entity !== candidate.entity || combatActive || closing) return
+    combatActive = true
+    emit('combat.started', { state: 'active' }, null, { sessionId: currentSessionId })
+  })
+  candidate.on('physicsTick', () => {
+    if (!combatActive || closing) return
+    const position = currentPosition()
+    const threatened = position && Object.values(candidate.entities).some(
+      (entity) => isHostileMob(entity) && entity.position && entity.position.distanceTo(position) <= 8,
+    )
+    if (!threatened) {
+      combatActive = false
+      emit('combat.ended', { state: 'clear' }, null, { sessionId: currentSessionId })
+    }
+  })
+}
+
 function assertCurrentScope() {
   if (!Array.isArray(sessionConfig?.scope?.dimensions) || !sessionConfig.scope.dimensions.includes(currentDimension())) {
     throw new Error('dimension_out_of_scope')
@@ -399,14 +490,53 @@ function privateCheckpoint() {
   }
 }
 
+function safeWorld() {
+  // Time, weather and entity census: type-and-count only, never coordinates.
+  if (fakeMode) {
+    return {
+      time_of_day: 6000,
+      raining: false,
+      entities: combatActive ? [{ type: 'mob', kind: 'hostile', name: 'zombie', count: 2 }] : [],
+    }
+  }
+  const world = {
+    time_of_day: Number(bot?.time?.timeOfDay || 0),
+    raining: Boolean(bot?.isRaining),
+    entities: [],
+  }
+  const position = currentPosition()
+  if (bot && position && sessionConfig?.scope) {
+    const radius = Number(sessionConfig.scope.max_radius || 0)
+    const counts = new Map()
+    for (const entity of Object.values(bot.entities)) {
+      if (!entity.position || entity.position.distanceTo(position) > radius) continue
+      const key = entity.type === 'player' ? 'player' : `${entity.type}:${entity.kind || ''}:${entity.name || ''}`
+      const row = counts.get(key) || {
+        type: String(entity.type || 'unknown'),
+        kind: String(entity.kind || entity.mobType || ''),
+        name: String(entity.name || ''),
+        count: 0,
+      }
+      row.count += 1
+      counts.set(key, row)
+    }
+    world.entities = Array.from(counts.values()).slice(0, 16)
+  }
+  return world
+}
+
 function safeObservation(checkpoint) {
-  return {
+  const observation = {
     dimension: String(checkpoint.dimension || ''),
     health: Number(checkpoint.health || 0),
     food: Number(checkpoint.food || 0),
     inventory_slots: Array.isArray(checkpoint.inventory) ? checkpoint.inventory.length : 0,
     inventory_total: Array.isArray(checkpoint.inventory) ? checkpoint.inventory.reduce((total, row) => total + Number(row.count || 0), 0) : 0,
+    world: safeWorld(),
   }
+  const hostiles = nearbyHostiles()
+  if (hostiles.length) observation.nearby_hostiles = hostiles
+  return observation
 }
 
 function inventoryCount(rows, name) {
@@ -532,6 +662,22 @@ async function executeFake(intent, goal) {
       effects += row.count
       goal.effects = effects
     }
+  } else if (intent.action === 'attack') {
+    for (let index = 0; index < intent.count; index += 1) {
+      await waitControlled(goal, delay)
+      effects += 1
+      goal.effects = effects
+    }
+  } else if (intent.action === 'flee') {
+    await waitControlled(goal, delay)
+    fakeState.position.x += 1
+    assertCurrentScope()
+    effects += 1
+    goal.effects = effects
+  } else if (intent.action === 'guard') {
+    await waitControlled(goal, delay)
+    effects += 1
+    goal.effects = effects
   } else {
     await waitControlled(goal, delay)
   }
@@ -708,6 +854,55 @@ async function executeReal(intent, goal) {
     const deposited = intent.items.every((row) => inventoryCount(beforeInventory, row.item) - inventoryCount(privateCheckpoint().inventory, row.item) >= row.count)
     return { changes, effects, summary: 'deposit_completed', verified: deposited }
   }
+  if (intent.action === 'attack') {
+    // PvP is structurally impossible here: the filter only ever admits hostile
+    // mobs, so a player can never be resolved as the target (contract side
+    // offers no target field either - the two layers enforce together).
+    let attacked = 0
+    for (let index = 0; index < intent.count; index += 1) {
+      await waitControlled(goal, 0)
+      const target = bot.nearestEntity(
+        (entity) => isHostileMob(entity) && entity.position && bot.entity.position.distanceTo(entity.position) <= intent.radius,
+      )
+      if (!target) throw new Error('hostile_not_found')
+      assertPositionScope(target.position)
+      await safeGoto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 3))
+      await waitControlled(goal, 0)
+      await runAtomic(goal, async () => {
+        await bot.attack(target)
+        attacked += 1
+        effects += 1
+        goal.effects = effects
+      })
+      await waitControlled(goal, 0)
+    }
+    return { changes, effects, summary: 'attack_completed', verified: attacked >= intent.count }
+  }
+  if (intent.action === 'flee') {
+    const hostile = bot.nearestEntity(
+      (entity) => isHostileMob(entity) && entity.position && bot.entity.position.distanceTo(entity.position) <= 32,
+    )
+    if (!hostile) return { changes, effects: 0, summary: 'flee_completed', verified: true }
+    bot.pathfinder.setGoal(new goals.GoalInvert(new goals.GoalFollow(hostile, intent.distance)), true)
+    const deadline = Date.now() + intent.duration_seconds * 1000
+    while (Date.now() < deadline) {
+      await waitControlled(goal, 100)
+      assertCurrentScope()
+    }
+    bot.pathfinder.stop()
+    const after = bot.nearestEntity(
+      (entity) => isHostileMob(entity) && entity.position && bot.entity.position.distanceTo(entity.position) <= 8,
+    )
+    effects = 1
+    goal.effects = effects
+    return { changes, effects, summary: 'flee_completed', verified: !after || after.position.distanceTo(bot.entity.position) >= intent.distance - 2 }
+  }
+  if (intent.action === 'guard') {
+    if (bot?.pathfinder) bot.pathfinder.stop()
+    if (bot && typeof bot.stopDigging === 'function') bot.stopDigging()
+    const threatened = nearbyHostiles().length > 0
+    return { changes, effects: threatened ? 1 : 0, summary: 'guard_completed', verified: true }
+  }
   throw new Error('unknown_game_action')
 }
 
@@ -727,7 +922,7 @@ function safeError(error) {
     'cannot_dig_block', 'unknown_item', 'recipe_not_found', 'food_not_found',
     'blueprint_anchor_not_found', 'missing_build_item', 'missing_reference_block',
     'collect_item_not_acquired', 'container_not_found', 'deposit_item_not_found', 'deposit_item_count_insufficient', 'minecraft_connect_failed', 'spawn_timeout',
-    'dimension_out_of_scope', 'spatial_scope_exceeded',
+    'dimension_out_of_scope', 'spatial_scope_exceeded', 'hostile_not_found',
   ])
   return allow.has(value) ? value : 'minecraft_goal_failed'
 }
@@ -836,6 +1031,49 @@ async function handleFresh(request) {
         })
       }
       cacheAndEmit(request, 'session.ready', { capabilities, state: 'ready' })
+      // Fake-world diagnostic push: periodically emit an unsolicited, sanitized
+      // state.snapshot so Core-side listeners (and their tests) can exercise
+      // the push channel without a real server.
+      const fakePushSnapshotMs = Math.max(0, Number(process.env.JOI_MINECRAFT_FAKE_PUSH_SNAPSHOT_MS || 0))
+      if (fakeMode && fakePushSnapshotMs > 0) {
+        const pushSnapshot = () => {
+          if (closing || recoveryRequired) return
+          const checkpoint = privateCheckpoint()
+          emit('state.snapshot', { observation: safeObservation(checkpoint), checkpoint }, null, { sessionId: currentSessionId })
+          setTimeout(pushSnapshot, fakePushSnapshotMs)
+        }
+        setTimeout(pushSnapshot, fakePushSnapshotMs)
+      }
+      // Fake-world combat toggle: alternates started/ended so combat events and
+      // nearby_hostiles observations are deterministic for Core-side tests.
+      const fakeCombatMs = Math.max(0, Number(process.env.JOI_MINECRAFT_FAKE_COMBAT_MS || 0))
+      if (fakeMode && fakeCombatMs > 0) {
+        const toggleCombat = () => {
+          if (closing || recoveryRequired) return
+          combatActive = !combatActive
+          emit(combatActive ? 'combat.started' : 'combat.ended', { state: combatActive ? 'active' : 'clear' }, null, { sessionId: currentSessionId })
+          setTimeout(toggleCombat, fakeCombatMs)
+        }
+        setTimeout(toggleCombat, fakeCombatMs)
+      }
+      // Fake-world chat lines: emit each entry once so the chat.observed
+      // channel is deterministic for Core-side tests.
+      if (fakeMode) {
+        try {
+          const lines = JSON.parse(process.env.JOI_MINECRAFT_FAKE_CHAT_LINES || '[]')
+          if (Array.isArray(lines)) {
+            lines.slice(0, 8).forEach((row, index) => {
+              if (!row || typeof row !== 'object') return
+              setTimeout(() => {
+                if (closing || recoveryRequired) return
+                emit('chat.observed', { player: String(row.player || '').slice(0, 32), text: String(row.text || '').slice(0, 500) }, null, { sessionId: currentSessionId })
+              }, 50 + index * 50)
+            })
+          }
+        } catch (_) {
+          // Invalid fake-chat JSON is a test setup mistake; ignore it.
+        }
+      }
       const fakeIdleDisconnectMs = Number(process.env.JOI_MINECRAFT_FAKE_IDLE_DISCONNECT_MS || 0)
       if (fakeMode && fakeIdleDisconnectMs > 0) {
         setTimeout(() => { if (!closing && !activeGoal) recoveryRequired = true }, fakeIdleDisconnectMs)
@@ -963,6 +1201,7 @@ async function handleLine(line) {
   }
   expectedInputSequence = request.sequence
   seenMessages.set(request.message_id, messageDigest)
+  capCache(seenMessages)
   await handleFresh(request)
 }
 

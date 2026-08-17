@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -67,6 +68,9 @@ class GameAdapterRegistry:
         self._minecraft_sessions: dict[str, MinecraftBridgeClient] = {}
         self._minecraft_goals: dict[str, str] = {}
         self._minecraft_states: dict[str, str] = {}
+        self._minecraft_event_queues: dict[str, deque[dict[str, Any]]] = {}
+        self._minecraft_event_disposers: dict[str, Callable[[], None]] = {}
+        self._minecraft_event_forwarder: Callable[[str, dict[str, Any]], None] | None = None
         self._minecraft_checkpoints: dict[str, dict[str, Any]] = self._load_minecraft_checkpoints()
         self._manifests = {manifest.id: manifest for manifest in _builtin_manifests()}
         self._state = self._load_state()
@@ -267,10 +271,57 @@ class GameAdapterRegistry:
                 print(f"minecraft bridge start failed ({result.get('error')}):\n{detail}", file=sys.stderr, flush=True)
             client.close()
             return result
+
+        def on_bridge_event(event: dict[str, Any]) -> None:
+            # Unsolicited events (combat, snapshots, chat) arrive on the stdout
+            # reader thread. The queue is the only storage: no Core ID,
+            # coordinate or child detail is ever exposed beyond the sanitized
+            # projection. A registered forwarder (chat routing) runs on this
+            # same thread and must dispatch its own work off-thread.
+            with self._lock:
+                self._minecraft_event_queues.setdefault(session_id, deque(maxlen=64)).append(event)
+                forwarder = self._minecraft_event_forwarder
+            if forwarder is not None:
+                try:
+                    forwarder(session_id, dict(event))
+                except Exception:
+                    pass
+
+        disposer = client.add_event_listener(on_bridge_event)
         with self._lock:
             self._minecraft_sessions[session_id] = client
             self._minecraft_states[session_id] = "ready"
+            self._minecraft_event_disposers[session_id] = disposer
         return result
+
+    def set_minecraft_event_forwarder(self, callback: Callable[[str, dict[str, Any]], None] | None) -> None:
+        """Route unsolicited bridge events (chat, combat) to Core.
+
+        Invoked on the bridge stdout reader thread; the callback must return
+        quickly and dispatch its own work off-thread.
+        """
+
+        with self._lock:
+            self._minecraft_event_forwarder = callback
+
+    def minecraft_snapshot(self, session_id: str) -> dict[str, Any]:
+        """Ask the persistent bridge for its sanitized live state."""
+
+        with self._lock:
+            client = self._minecraft_sessions.get(session_id)
+        if client is None:
+            return {"ok": False, "error": "minecraft_session_not_found"}
+        request_snapshot = getattr(client, "request_snapshot", None)
+        if request_snapshot is None:
+            return {"ok": False, "error": "minecraft_bridge_snapshot_unsupported"}
+        return request_snapshot()
+
+    def minecraft_session_events(self, session_id: str) -> list[dict[str, Any]]:
+        """Sanitized unsolicited events received for a session, oldest first."""
+
+        with self._lock:
+            queue = self._minecraft_event_queues.get(session_id)
+            return [dict(row) for row in queue] if queue else []
 
     def submit_minecraft_goal(
         self,
@@ -368,13 +419,18 @@ class GameAdapterRegistry:
         with self._lock:
             client = self._minecraft_sessions.pop(session_id, None)
             self._minecraft_goals.pop(session_id, None)
+            disposer = self._minecraft_event_disposers.pop(session_id, None)
+            self._minecraft_event_queues.pop(session_id, None)
+        if disposer is not None:
+            disposer()
         if client is None:
             return {"ok": False, "error": "minecraft_session_not_found"}
         result = client.stop()
         with self._lock:
             self._minecraft_states[session_id] = "stopped"
-            self._minecraft_checkpoints.pop(session_id, None)
-            self._delete_minecraft_checkpoint(session_id)
+            # M2: the last checkpoint survives the session as private world
+            # memory; clearing it is now an explicit operator action instead of
+            # an automatic side effect of stopping.
         return result
 
     def minecraft_session_status(self, session_id: str) -> dict[str, Any]:
@@ -385,11 +441,20 @@ class GameAdapterRegistry:
                 "active_goal": bool(self._minecraft_goals.get(session_id)),
             }
 
+    def minecraft_active_sessions(self) -> list[str]:
+        with self._lock:
+            return sorted(self._minecraft_sessions)
+
     def shutdown(self) -> None:
         with self._lock:
             clients = list(self._minecraft_sessions.values())
+            disposers = list(self._minecraft_event_disposers.values())
             self._minecraft_sessions.clear()
             self._minecraft_goals.clear()
+            self._minecraft_event_disposers.clear()
+            self._minecraft_event_queues.clear()
+        for disposer in disposers:
+            disposer()
         for client in clients:
             client.close()
 
@@ -611,7 +676,7 @@ def _builtin_manifests() -> tuple[GameAdapterManifest, ...]:
             modes=("companion", "delegate"),
             detection=("structured_bridge", "foreground_window"),
             observation_sources=("mineflayer_state", "screen", "accessibility"),
-            action_sets=("observe", "inventory", "follow_player", "come_to_player", "collect", "mine", "craft", "eat", "place_blueprint", "deposit"),
+            action_sets=("observe", "inventory", "follow_player", "come_to_player", "collect", "mine", "craft", "eat", "place_blueprint", "deposit", "attack", "flee", "guard"),
             pause_strategy="session_goal_ack_or_forced_termination",
             verification=("world_state", "inventory_delta", "screen_change"),
             checkpoint_strategy="private_core_checkpoint_no_auto_replay",
