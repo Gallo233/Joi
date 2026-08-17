@@ -2,9 +2,24 @@
 
 Joi 的目标是一个角色人格包裹的多模态 Agent 伴侣：能陪看网页/视频/游戏画面，能执行游戏技能，也能通过 Codex/MCP/本地工具推进工程任务。
 
+**这份文档记录能力轨道（P0–P10）的建设过程，不定义发布范围。** 发布范围以 `docs/JOI_PRD.md` 为准，交付阶段以 `docs/JOI_TDD.md` 的 Phase 0–5 为准；两者冲突时以 PRD/TDD 为准。注意两套编号是不同的轴：这里的 P5 是「记忆内核」这条能力轨道，TDD 的 Phase 5 是「发布候选」这个交付阶段。
+
 OpenHuman-inspired direction is recorded in `docs/OPENHUMAN_INSIGHTS.md`. The key update is that Joi should become an embodied personal agent companion, not a generic integration dashboard: after P4, prioritize local memory, tool-result compression, model routing, skill manifests, and a constrained background companion loop.
 
-P4.32 is the closeout experience-prep milestone: it adds a reproducible real-task demo checklist and local-only sanitized report path. It is not a new capability expansion. After the closeout pass, move to P5 Memory Core unless the report shows a blocking P4 regression.
+## 当前位置
+
+交付阶段：**TDD Phase 4（扩展与供应链）→ Phase 5（发布候选）之间**。Phase 5 的退出条件是所有 P0 追踪项有证据、Safety 与 Quality 独立门禁通过；TDD §22 的 closeout review 结论是当前仍缺 required macOS CI 证据、签名公证、干净机、权限、多屏、VoiceOver 与升级回滚证据，**尚不能称 release-ready**。
+
+平台方向：**macOS-first**（PRD §6.1、TDD ADR-001）。Windows 保留为共享契约的兼容路径，早期文档里的 "Windows-first" 表述已经过期。
+
+### 1.0 发布主线 vs Beta 轨道
+
+PRD §5.2 冻结了这条分界，它决定什么能阻塞发布：
+
+- **1.0 主线（Hero Journey）**：安装 → 基础配置 → 与默认角色的一次真实对话 → 进入项目 → 观察一个可信窗口 → Joi 提出非敏感动作 → 逐步确认 → 执行并重新观察验证 → 生成待确认记忆 → 用户确认。
+- **Beta 轨道（不得阻塞首发，独立验收）**：Watch/Scene、第三方 Skill 安装、**游戏适配器**、完整角色 CRUD、Coding Agent takeover。
+
+推进 1.0 需要的是 Phase 5 的收口证据，不是继续扩展 Beta 轨道的能力。
 
 ## P0 Project Discipline
 
@@ -150,9 +165,19 @@ Status: in progress
 
 ## P10 Packaging
 
-Status: in progress
+Status: in progress — macOS 是发布平台，Windows 工具链保留为兼容路径
 
-- Windows-first release build.
+macOS（发布路径，`docs/MACOS_RELEASE.md` 是权威流程）：
+
+- `Joi macOS Draft Release` workflow 已就绪：`macos-15` runner、semver tag 或手动触发、签名公证、上传 draft prerelease、记录 build-provenance attestation。
+- `ci.yml` 已有 required 的 `macos-15` lane 与 Windows 兼容 lane。
+- Tauri 打包 fail-closed：构建独立 Core sidecar、要求完整 Live2D 源、逐文件校验 `release-assets.json` 的 pinned hash。
+- `tools/packaging_smoke.py` 覆盖版本对齐、Tauri 元数据、窗口权限、启动器接线、release 隐私策略。
+- 未完成：干净机验收、真机签名公证证据、多屏/VoiceOver/权限撤销/升级回滚证据。
+- 已知缺口：`agent_companion/adapters/minecraft-bridge/dist/` 是 gitignored，而 sidecar 打包会原样拷贝 `adapters/`。CI 的全新 clone 里没有这个构建产物，因此 release 包中的 Minecraft 适配器会显示未就绪。要么在 workflow 里补一步 bridge 构建，要么在 release notes 里说明该包不含游戏能力。
+
+Windows（兼容路径，不构成 1.0 承诺）：
+
 - Portable Windows release packager now creates a safe zip from allowlisted runtime files and the release shell.
 - Release privacy validation now checks that packaging rules protect local config, secrets, runtime data, logs, dependency folders, and build caches before Windows artifacts are shipped.
 - Release readiness aggregation now combines doctor, packaging smoke, privacy policy, and portable package dry-run status into one safe RC report.
@@ -164,3 +189,34 @@ Status: in progress
 - Packaging smoke now validates version alignment, Tauri shell metadata, window permissions, and launcher wiring.
 - Mac handoff kept current through a safe Windows RC handoff report that summarizes release readiness without local paths or secrets.
 - CI workflow now runs Python tests, packaging smoke, frontend build, and Tauri debug no-bundle build on Windows.
+
+## B1 Beta 轨道：游戏适配器与实时语音
+
+Status: in progress — 独立验收，不阻塞 1.0
+
+这条轨道过去没有在 roadmap 里登记，但已经有实现和测试，写在这里以免它看起来像 1.0 范围。
+
+- Minecraft GameAdapter v2：13 个严格 GameIntent 原语（含 attack/flee/guard），逐动作权限、scope、预算、回执与 no-replay。
+- 26.1 版本兼容：mineflayer 的 tested-version 门只对本桥接带有验证 shim 的版本放行，更新的版本仍 fail closed。
+- 桥接推送通道：combat/chat/snapshot 等非应答事件能到达 Core，缓冲有上限。
+- Core 侧屏幕证据：截图只在本机做摘要和 OCR，读完即删，云端只收文字。
+- 自主 ticker：可开关、有频率上限、用户指令抢占；attack 在实时语音、autonomy 与 service 三层都要求用户明确指令（Scheme A）。
+- 计划编译器与游戏内聊天：都编译成同一套 GameIntent，走同一套门禁。
+- 实时语音：Qwen Audio Realtime 只收文本，本地 GPT-SoVITS 发声；朗读语言跟角色包，字幕语言跟聊天语言设置。
+- 未完成：真实服的战斗场景走查、实时语音时延实测、句子级流式 TTS、AudioWorklet 采集。
+- 参考：`docs/MINECRAFT_CLOSED_LOOP_SLICE.md`、`docs/AIRI_ABSORPTION_PLAN.md`、`docs/MINECRAFT_PLAN_REVIEW_2026-08-15.md`、`docs/REALTIME_VOICE_DEBUG.md`。
+
+## 发布阻塞项
+
+工程之外的决策，未完成前 GitHub release 只能停留在 draft/prerelease（`docs/MACOS_RELEASE.md`）。
+
+| 阻塞项 | 状态 |
+|---|---|
+| 软件许可证 | 仓库尚无 LICENSE 文件 |
+| 隐私声明 | `docs/PRIVACY.md` 仍是 Draft |
+| 第三方权利通知 | `docs/THIRD_PARTY_NOTICES.md` 仍是 MVP Draft，未覆盖传递依赖 |
+| 角色/图标/字体/声音/Live2D 权利 | 待确认；Live2D Cubism Expandable Application 审批未完成 |
+| 应用图标 | 仍是 provisional 资产 |
+| Apple 签名与公证 | workflow 已就绪，需要 6 个 Apple secrets |
+| 授权资产分发 | 需要 `JOI_RELEASE_ASSETS_URL` 与 `JOI_RELEASE_ASSETS_SHA256`；授权资产不得为通过 CI 而提交进仓库 |
+| 干净机验收 | 未做：需要一台没有 Python/Node/Rust/仓库/配置的 Apple Silicon Mac |
