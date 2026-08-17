@@ -45,6 +45,11 @@ INTENTS = (
     {"action": "eat", "item": "bread"},
     {"action": "place_blueprint", "anchor": "bot", "dimension": "overworld", "blocks": [{"offset": [1, 0, 0], "block": "oak_planks"}]},
     {"action": "deposit", "container": "chest", "items": [{"item": "oak_log", "count": 1}], "radius": 8},
+    # Combat primitives run in the fake world too: they change no blocks, but
+    # they are the ones a review has to see exercised end to end.
+    {"action": "attack", "count": 1, "radius": 8, "dimension": "overworld"},
+    {"action": "flee", "distance": 8, "duration_seconds": 1, "dimension": "overworld"},
+    {"action": "guard", "dimension": "overworld"},
 )
 
 
@@ -109,7 +114,7 @@ def main() -> int:
             raise RuntimeError("minecraft_fake_recovery_gate_failed")
     finally:
         recovery.close()
-    print("minecraft_p5_smoke_ok primitives=10 recovery=no_replay")
+    print(f"minecraft_p5_smoke_ok primitives={len(INTENTS)} recovery=no_replay")
     return 0
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import threading
 import time
 from typing import Any, Mapping
@@ -16,8 +17,12 @@ class MinecraftScreenCache:
     worker thread called it (goal submission already runs off the voice loop).
     One frame feeds both the vision summary and OCR. The cached projection is
     plain text built only from the vision summary and OCR text - no screenshot
-    path, geometry, handle or title detail leaves Core, and nothing is
-    persisted.
+    path, geometry, handle or title detail leaves Core.
+
+    The frame itself is deleted as soon as those two readings are taken. The
+    observer writes it to disk to be read, and leaving it there would have made
+    "only summaries, no raw frames, nothing on disk" false for the one capture
+    path a game session runs most often.
     """
 
     def __init__(
@@ -49,8 +54,11 @@ class MinecraftScreenCache:
         except Exception as exc:
             result = self._failure(f"screen_observation_failed:{type(exc).__name__}"[:120])
             return result
-        summary_text = self._summarize(observation)
-        ocr_text = self._read_ocr(observation)
+        try:
+            summary_text = self._summarize(observation)
+            ocr_text = self._read_ocr(observation)
+        finally:
+            _discard_frame(observation)
         if summary_text and ocr_text and ocr_text not in summary_text:
             text = f"屏幕摘要：{summary_text}\n画面文字：{ocr_text}"
         elif summary_text:
@@ -101,6 +109,23 @@ class MinecraftScreenCache:
         except Exception:
             return ""
         return _bounded_plain(result.detail_text(), self._max_text)
+
+
+def _discard_frame(observation: Any) -> None:
+    """Remove the captured frame once its text has been read.
+
+    A game session captures far more often than a one-off screen question, so
+    keeping the frames would quietly build a picture archive of the user's
+    screen inside the data directory.
+    """
+
+    path = getattr(observation, "screenshot_path", None)
+    if path is None:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        return
 
 
 def _bounded_plain(value: Any, limit: int) -> str:

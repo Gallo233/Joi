@@ -25,6 +25,7 @@ from agent_companion.core.minecraft_screen import MinecraftScreenCache, sanitize
 
 _EXTERNAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 _PLAYER = re.compile(r"^[A-Za-z0-9_]{1,32}$")
+_CHAT_COMMAND_INTERVAL_SECONDS = 5.0
 
 
 class MinecraftGameService:
@@ -48,6 +49,7 @@ class MinecraftGameService:
         self._scope_approvals: dict[str, dict[str, Any]] = {}
         self._plan_approvals: dict[str, dict[str, Any]] = {}
         self._plans: dict[tuple[str, str], dict[str, Any]] = {}
+        self._chat_last_accepted: dict[str, float | None] = {}
 
     def start_session(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
         source = params if isinstance(params, Mapping) else {}
@@ -310,6 +312,10 @@ class MinecraftGameService:
             screen = self.screen_cache.refresh()
         ok = bool(screen.get("ok")) and bool(screen.get("text"))
         status = "completed" if ok else "failed"
+        if not ok:
+            # A capture that produced nothing changed nothing either, so it
+            # must not silently eat one of the user's approved actions.
+            self._release_budget_reservation(session_id, {"action": action})
         receipt_result = self.collaboration.add_receipt(
             session_id,
             {
@@ -469,21 +475,37 @@ class MinecraftGameService:
             return {"ok": False, "error": "chat_player_out_of_scope"}
         if self._plan_compiler is None:
             return {"ok": False, "error": "minecraft_planning_unavailable"}
+        # Chat arrives as fast as anyone can type, and every line would
+        # otherwise cost a model call. One command per interval per session is
+        # plenty for a companion and makes chat flooding cheap to absorb.
+        now = time.monotonic()
+        with self._lock:
+            # No default timestamp: `monotonic()` starts near zero in some
+            # runtimes, so a zero sentinel would throttle the very first line.
+            last = self._chat_last_accepted.get(session_id)
+            if last is not None and now - last < _CHAT_COMMAND_INTERVAL_SECONDS:
+                return {"ok": False, "error": "chat_command_throttled"}
+            self._chat_last_accepted[session_id] = now
         bounded = " ".join(str(text).split())[:300]
 
         def worker() -> None:
-            intent = compile_single_action(bounded, self._plan_compiler)
-            if intent is None:
+            try:
+                intent = compile_single_action(bounded, self._plan_compiler)
+                if intent is None:
+                    return
+                self.submit_goal(
+                    {
+                        "session_id": session_id,
+                        "goal_id": f"chat-goal-{uuid.uuid4().hex}",
+                        "final": True,
+                        "source": "text",
+                        "intent": intent,
+                    }
+                )
+            except Exception:
+                # This runs detached from any caller: a shutting-down store or a
+                # provider error must not take the process with it.
                 return
-            self.submit_goal(
-                {
-                    "session_id": session_id,
-                    "goal_id": f"chat-goal-{uuid.uuid4().hex}",
-                    "final": True,
-                    "source": "text",
-                    "intent": intent,
-                }
-            )
 
         threading.Thread(target=worker, name=f"minecraft-chat-{session_id[-8:]}", daemon=True).start()
         return {"ok": True, "queued": True}
@@ -501,9 +523,17 @@ class MinecraftGameService:
                     return
                 goal_id = f"plan-goal-{uuid.uuid4().hex}"
                 row["current_goal_id"] = goal_id
-            result = self.submit_goal(
-                {"session_id": session_id, "goal_id": goal_id, "final": True, "source": "voice", "intent": step}
-            )
+            try:
+                result = self.submit_goal(
+                    {"session_id": session_id, "goal_id": goal_id, "final": True, "source": "voice", "intent": step}
+                )
+            except Exception:
+                # The plan outlives no one: ending the session (or Core) closes
+                # the store under this thread, and that is a stop, not a crash.
+                with self._lock:
+                    row["state"] = "failed"
+                    row["current_goal_id"] = ""
+                return
             with self._lock:
                 row["steps_done"] += 1
                 row["current_goal_id"] = ""
@@ -680,6 +710,12 @@ def _receipt_status(result: Mapping[str, Any]) -> str:
         return "partial"
     if result.get("recovery_required") or int(result.get("changes") or 0) > 0 or int(result.get("effects") or 0) > 0:
         return "unverified"
+    if str(result.get("status") or "") == "cancelled":
+        # A goal that was stopped before it did anything is not a failure. It
+        # used to be counted as one, so three user interruptions of Joi's own
+        # autonomy -- or three plan cancellations -- exhausted the failure
+        # budget and paused the whole session.
+        return "cancelled"
     return "failed"
 
 
@@ -727,6 +763,8 @@ def _public_action_summary(action: str, status: str, changes: int) -> str:
         return f"{action} cancelled after a partial result"
     if status == "unverified":
         return f"{action} stopped; completion could not be verified"
+    if status == "cancelled":
+        return f"{action} cancelled before it changed anything"
     return f"{action} failed without a verified completion"
 
 

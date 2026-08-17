@@ -165,7 +165,8 @@ interface TurnStep {
 }
 interface ConversationTurn {
   taskId: string
-  user: AgentEvent
+  /** Absent when Joi spoke first: a proactive line answers no message. */
+  user?: AgentEvent
   assistant?: AgentEvent
   approval?: AgentEvent
   rows: AgentEvent[]
@@ -207,6 +208,7 @@ const skillRefreshLoading = ref(false)
 const gameAdapterRows = ref<GameAdapterManifest[]>([])
 const gameAdapterNotice = ref('')
 const minecraftBusy = ref(false)
+const minecraftAutonomyEnabled = ref(false)
 const languageSettings = ref<LanguageSettings | null>(null)
 const languageBusy = ref(false)
 const languageNotice = ref('')
@@ -1199,7 +1201,7 @@ const conversationTurns = computed<ConversationTurn[]>(() => {
   return [...grouped.entries()]
     .map(([taskId, rows]) => buildConversationTurn(taskId, rows))
     .filter((turn): turn is ConversationTurn => Boolean(turn))
-    .sort((left, right) => left.user.created_at - right.user.created_at)
+    .sort((left, right) => turnStartedAt(left) - turnStartedAt(right))
     .slice(-8)
 })
 
@@ -1687,7 +1689,10 @@ function trackLiveApprovalEvent(event: AgentEvent) {
 function buildConversationTurn(taskId: string, sourceRows: AgentEvent[]): ConversationTurn | undefined {
   const rows = [...sourceRows].sort(compareEvents)
   const user = rows.find((event) => event.type === 'user_message')
-  if (!user) return undefined
+  // A turn normally starts with what the user said. Joi speaking on her own
+  // initiative has no such message, and dropping it would have made her
+  // proactive lines audible but invisible.
+  if (!user && !rows.some((event) => isProactiveSpeech(event))) return undefined
   const approval = [...rows]
     .reverse()
     .find((event, reverseIndex) => {
@@ -1735,7 +1740,7 @@ function buildConversationTurn(taskId: string, sourceRows: AgentEvent[]): Conver
     staleApproval,
     steps: buildTurnSteps(rows, status),
     hasTrace: !companionOnly && !simpleCompanionReply && (hasExecution || status !== 'completed'),
-    updatedAt: rows[rows.length - 1]?.created_at || user.created_at,
+    updatedAt: rows[rows.length - 1]?.created_at || user?.created_at || 0,
   }
 }
 
@@ -1816,9 +1821,13 @@ function turnStatusText(turn: ConversationTurn) {
   return latest ? hideRuntimeBrand(latest.display_card.summary) : '正在准备处理这条请求'
 }
 
+function turnStartedAt(turn: ConversationTurn) {
+  return turn.user?.created_at ?? turn.assistant?.created_at ?? turn.rows[0]?.created_at ?? 0
+}
+
 function turnTimeLabel(turn: ConversationTurn) {
   if (turn.status === 'running' || turn.status === 'waiting' || turn.status === 'queued') {
-    const seconds = Math.max(1, Math.floor(nowSeconds.value - turn.user.created_at))
+    const seconds = Math.max(1, Math.floor(nowSeconds.value - turnStartedAt(turn)))
     if (seconds < 60) return `${seconds} 秒`
     return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
   }
@@ -1848,7 +1857,8 @@ function onChatScroll() {
 }
 
 async function retryTurn(turn: ConversationTurn) {
-  if (!connected.value || composerSending.value) return
+  // Nothing to resend when Joi started the exchange herself.
+  if (!turn.user || !connected.value || composerSending.value) return
   composerSending.value = true
   errorText.value = ''
   beginNewVoiceIntent()
@@ -1918,6 +1928,11 @@ function isCompanionChat(event: AgentEvent) {
  */
 function isCharacterMotion(event: AgentEvent) {
   return toolName(event) === 'character.perform'
+}
+
+/** Joi speaking without being asked: her own line, not a task she ran. */
+function isProactiveSpeech(event: AgentEvent) {
+  return event.type === 'tool_completed' && Boolean(asRecord(event.agent_state).proactive)
 }
 
 function isCompanionOnlyEvent(event: AgentEvent) {
@@ -3548,6 +3563,7 @@ async function startMinecraftSession() {
       approval_id: preview.approval_id,
     }) as { ok?: boolean; error?: string; session?: CapabilitySession; state?: string }
     if (result.session?.id) activeCapabilitySession.value = result.session
+    if (result.ok) void refreshMinecraftAutonomy()
     gameAdapterNotice.value = result.ok
       ? 'Minecraft 已连接。现在可启动“实时语音 + Minecraft”。'
       : minecraftErrorLabel(result.error || '') || 'Minecraft 连接失败。'
@@ -3555,6 +3571,42 @@ async function startMinecraftSession() {
     gameAdapterNotice.value = error instanceof Error ? error.message : 'Minecraft 会话启动失败。'
   } finally {
     minecraftBusy.value = false
+  }
+}
+
+/**
+ * Joi's own initiative, off until asked for.
+ *
+ * It spends the same action and block budget the user approved for the
+ * session, which is why this is a visible switch rather than a default.
+ */
+async function toggleMinecraftAutonomy() {
+  if (minecraftBusy.value) return
+  const enabled = !minecraftAutonomyEnabled.value
+  minecraftBusy.value = true
+  try {
+    const result = await client.minecraftAutonomyConfigure({ enabled }) as { ok?: boolean; enabled?: boolean; error?: string }
+    if (result.ok === false) {
+      gameAdapterNotice.value = minecraftErrorLabel(result.error || '') || '自主行为切换失败。'
+      return
+    }
+    minecraftAutonomyEnabled.value = Boolean(result.enabled)
+    gameAdapterNotice.value = minecraftAutonomyEnabled.value
+      ? 'Joi 会在空闲时主动观察和搭话，用的是你已批准的动作额度。攻击仍然只在你明确要求时才会执行。'
+      : 'Joi 已停止主动行为，只在你开口时回应。'
+  } catch (error) {
+    gameAdapterNotice.value = error instanceof Error ? error.message : '自主行为切换失败。'
+  } finally {
+    minecraftBusy.value = false
+  }
+}
+
+async function refreshMinecraftAutonomy() {
+  try {
+    const result = await client.minecraftAutonomyStatus() as { ok?: boolean; enabled?: boolean }
+    if (result.ok) minecraftAutonomyEnabled.value = Boolean(result.enabled)
+  } catch {
+    return
   }
 }
 
@@ -3995,7 +4047,7 @@ async function toggleRealtimeVoice(useMinecraft = false) {
   }
   if (!realtimeVoiceDisclosuresAccepted.has(mode)) {
     const disclosure = mode === 'minecraft'
-      ? '实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。模型可以提出一条 Minecraft 操作，但只能在你已确认的服务器、世界、维度、半径、方块和预算范围内执行；Joi Core 会逐条校验并保留回执。是否开始？'
+      ? '实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。模型可以提出一条 Minecraft 操作，但只能在你已确认的服务器、世界、维度、半径、方块和预算范围内执行；Joi Core 会逐条校验并保留回执。\n\nJoi 还可能读取当前游戏画面来理解你的意图：截图只在本机做文字识别，识别后立即删除，云端只收到一段文字摘要，原图不会上传也不会留存。是否开始？'
       : '实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。云端只返回文本，Joi 仍使用本地 GPT-SoVITS 发声；本模式不执行 Minecraft 操作。是否开始？'
     const accepted = await requestAppConfirm({
       title: mode === 'minecraft' ? '启动实时语音 + Minecraft' : '启动实时语音',
@@ -4715,7 +4767,7 @@ provide(ProjectsContextKey, {
             <!-- No "你" label: a right-aligned bubble already says who wrote
                  it, and repeating it on every turn is noise GPT and Claude
                  both dropped. The timestamp moves to a tooltip. -->
-            <div class="message-row human" :title="turnTimeLabel(turn)">
+            <div class="message-row human" v-if="turn.user" :title="turnTimeLabel(turn)">
               <div class="message-bubble">{{ turn.user.display_card.summary }}</div>
             </div>
 
@@ -5417,6 +5469,13 @@ provide(ProjectsContextKey, {
                       <button v-if="realtimeVoiceState === 'acting'" type="button" @click="controlRealtimeMinecraft('pause')"><Pause :size="15" />暂停当前动作</button>
                       <button v-if="realtimeVoiceState === 'paused'" type="button" @click="controlRealtimeMinecraft('resume')"><Play :size="15" />继续当前动作</button>
                       <button v-if="['acting', 'paused'].includes(realtimeVoiceState)" type="button" class="danger" @click="controlRealtimeMinecraft('cancel')"><X :size="15" />取消当前动作</button>
+                      <button
+                        type="button"
+                        :class="{ primary: minecraftAutonomyEnabled }"
+                        :disabled="minecraftBusy"
+                        :aria-pressed="minecraftAutonomyEnabled"
+                        @click="toggleMinecraftAutonomy"
+                      ><Sparkles :size="15" />{{ minecraftAutonomyEnabled ? '关闭自主行为' : '让 Joi 主动一点' }}</button>
                       <button type="button" class="danger" :disabled="minecraftBusy" @click="stopMinecraftSession"><Unplug :size="15" />结束游戏会话</button>
                     </template>
                     <button v-else type="button" class="primary" :disabled="minecraftBusy || minecraftConnectionDraft.port < 1 || !minecraftScopeDraft.allowed_blocks.trim()" :aria-busy="minecraftBusy" @click="startMinecraftSession">

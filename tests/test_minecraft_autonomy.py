@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
+from pathlib import Path
+import tempfile
 import time
 import unittest
 
@@ -8,6 +11,11 @@ from agent_companion.core.minecraft_autonomy import (
     MinecraftAutonomyTicker,
     _build_prompt,
     _parse_decision,
+)
+from agent_companion.core.server import (
+    AUTONOMY_SPEECH_HOLD_SECONDS,
+    AUTONOMY_VOICE_RUN_ID,
+    JsonRpcBridge,
 )
 
 
@@ -116,6 +124,55 @@ class MinecraftAutonomyTickerTests(unittest.TestCase):
         self.assertEqual(_parse_decision({"kind": "speak", "text": "hi"})["kind"], "speak")
         self.assertEqual(_parse_decision(json.dumps({"kind": "none"}))["kind"], "none")
         self.assertEqual(_parse_decision("broken")["kind"], "none")
+
+
+class SpeechGuardTests(unittest.TestCase):
+    """Joi has to be able to speak more than once.
+
+    A voice generation is only retired on barge-in, cancel or a character
+    switch, so "a generation exists" stays true for the rest of the session.
+    Guarding on that silenced every proactive line after the first turn -- and
+    a proactive line, which starts a generation of its own, silenced itself.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temporary.name)
+        (self.workspace / "config.yaml").write_text(
+            "characters:\n  - name: 测试角色\n    setting: 测试\n", encoding="utf-8"
+        )
+        self.bridge = JsonRpcBridge(self.workspace)
+        self.thread_id = str(self.bridge.collaboration.context().get("thread_id") or "")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_a_fresh_user_turn_holds_the_channel(self) -> None:
+        self.bridge.app.voice_generations.begin(self.thread_id, character_id="c", run_id="user-turn")
+        self.assertTrue(self.bridge._autonomy_speech_guard())
+
+    def test_an_old_user_turn_no_longer_holds_it(self) -> None:
+        generation = self.bridge.app.voice_generations.begin(self.thread_id, character_id="c", run_id="user-turn")
+        aged = replace(generation, created_at=time.time() - AUTONOMY_SPEECH_HOLD_SECONDS - 1)
+        self.bridge.app.voice_generations._current[self.thread_id or "__global__"] = aged
+        self.assertFalse(self.bridge._autonomy_speech_guard())
+
+    def test_joi_does_not_silence_herself(self) -> None:
+        self.bridge.app.voice_generations.begin(
+            self.thread_id, character_id="c", run_id=AUTONOMY_VOICE_RUN_ID
+        )
+        self.assertFalse(self.bridge._autonomy_speech_guard())
+
+    def test_a_proactive_line_is_marked_as_speech_not_as_work(self) -> None:
+        self.bridge._autonomy_speak("那边有怪，要我去看看吗？")
+        events = self.bridge.app.bus.drain()
+        spoken = [event for event in events if (event.agent_state or {}).get("tool") == "minecraft.autonomy"]
+        self.assertEqual(len(spoken), 1)
+        self.assertEqual(spoken[0].display_card.title, "对话")
+        self.assertTrue((spoken[0].agent_state or {}).get("proactive"))
+        self.assertIn("要我去看看吗", spoken[0].voice_line.text)
+        # And having spoken, she is still allowed to speak again.
+        self.assertFalse(self.bridge._autonomy_speech_guard())
 
 
 if __name__ == "__main__":

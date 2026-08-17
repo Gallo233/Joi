@@ -441,7 +441,7 @@ function watchCombat(candidate) {
     combatActive = true
     emit('combat.started', { state: 'active' }, null, { sessionId: currentSessionId })
   })
-  candidate.on('physicTick', () => {
+  candidate.on('physicsTick', () => {
     if (!combatActive || closing) return
     const position = currentPosition()
     const threatened = position && Object.values(candidate.entities).some(

@@ -214,7 +214,9 @@ def _attack(raw: Mapping[str, Any]) -> dict[str, Any]:
     _exact_fields(raw, {"action"}, {"count", "radius", "dimension"}, "unexpected_intent_field")
     return {
         "action": "attack",
-        "count": _integer(raw.get("count", 1), 1, 64, "invalid_attack_count"),
+        # One goal reserves one action from the user's budget, so an unbounded
+        # count would turn a single confirmed instruction into a long fight.
+        "count": _integer(raw.get("count", 1), 1, 16, "invalid_attack_count"),
         "radius": _integer(raw.get("radius", 16), 1, 32, "invalid_attack_radius"),
         "dimension": _dimension(raw.get("dimension", "overworld")),
     }

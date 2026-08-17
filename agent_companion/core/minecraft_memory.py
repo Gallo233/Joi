@@ -46,23 +46,27 @@ class MinecraftWorldMemory:
         key = _world_key(server_id, world)
         observation = observation if isinstance(observation, Mapping) else {}
         world_view = observation.get("world") if isinstance(observation.get("world"), Mapping) else {}
-        row = self._store.setdefault(key, {})
-        row.update(
-            {
-                "server_id": _bounded(server_id, 80),
-                "world": _bounded(world, 80),
-                "last_dimension": _bounded(observation.get("dimension"), 24),
-                "last_health": int(observation.get("health") or 0),
-                "last_food": int(observation.get("food") or 0),
-                "last_time_of_day": int(world_view.get("time_of_day") or 0),
-                "recent_goals": [_bounded(goal, 80) for goal in (recent_goals or [])][-_MAX_RECENT_GOALS:],
-                "updated_at": time.time(),
-            }
-        )
-        self._save()
+        # Session stop, the autonomy ticker and a plan runner can all land here
+        # at once; the declared lock has to actually cover the update and write.
+        with self._lock:
+            row = self._store.setdefault(key, {})
+            row.update(
+                {
+                    "server_id": _bounded(server_id, 80),
+                    "world": _bounded(world, 80),
+                    "last_dimension": _bounded(observation.get("dimension"), 24),
+                    "last_health": int(observation.get("health") or 0),
+                    "last_food": int(observation.get("food") or 0),
+                    "last_time_of_day": int(world_view.get("time_of_day") or 0),
+                    "recent_goals": [_bounded(goal, 80) for goal in (recent_goals or [])][-_MAX_RECENT_GOALS:],
+                    "updated_at": time.time(),
+                }
+            )
+            self._save()
 
     def summary(self, server_id: str, world: str) -> str:
-        row = self._store.get(_world_key(server_id, world))
+        with self._lock:
+            row = dict(self._store.get(_world_key(server_id, world)) or {})
         if not row:
             return ""
         parts = [

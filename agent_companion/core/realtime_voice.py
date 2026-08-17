@@ -1094,7 +1094,7 @@ def minecraft_proposal_tools() -> list[dict[str, Any]]:
             "attack",
             "Attack the nearest hostile mob within radius. Never targets players. Only allowed after the user explicitly instructed an attack.",
             {
-                "count": {"type": "integer", "minimum": 1, "maximum": 64},
+                "count": {"type": "integer", "minimum": 1, "maximum": 16},
                 "radius": {"type": "integer", "minimum": 1, "maximum": 32},
                 "dimension": dimension,
             },

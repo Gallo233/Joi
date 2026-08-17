@@ -80,6 +80,11 @@ SPEAKABLE_EVENTS = {
 
 JOI_CORE_PRODUCT = "joi-core"
 JOI_CORE_PROTOCOL_VERSION = 1
+# Joi's own proactive lines carry this run id so the autonomy speech guard can
+# tell "the user is still talking" from "I just said something myself".
+AUTONOMY_VOICE_RUN_ID = "minecraft-autonomy"
+# How long a user turn is assumed to still own the voice channel.
+AUTONOMY_SPEECH_HOLD_SECONDS = 12.0
 MAX_VOICE_INPUT_GENERATIONS = 256
 
 
@@ -128,7 +133,10 @@ class JsonRpcBridge:
             self.game_adapters,
             screen_cache=MinecraftScreenCache(
                 get_screen_observer(self.workspace),
-                PytesseractOcrExtractor(),
+                # The user's own OCR settings: a default-constructed extractor
+                # ignored their language list and any custom tesseract path,
+                # so screen reading silently produced nothing for them.
+                _configured_ocr_extractor(self.workspace),
                 summarizer=self.app._build_vision_summarizer(),
             ),
             plan_compiler=self._compile_plan_text,
@@ -848,8 +856,19 @@ class JsonRpcBridge:
             return
 
     def _autonomy_speech_guard(self) -> bool:
+        """True while the user's own turn still owns the voice channel.
+
+        A generation is only retired on barge-in, cancel or a character switch,
+        so "a generation exists" is true forever after the first turn and would
+        silence proactive speech for the rest of the session. What matters is
+        whether a *recent* turn that autonomy did not start is still speaking.
+        """
+
         thread_id = str(self.collaboration.context().get("thread_id") or "")
-        return self.app.voice_generations.current(thread_id) is not None
+        current = self.app.voice_generations.current(thread_id)
+        if current is None or current.run_id == AUTONOMY_VOICE_RUN_ID:
+            return False
+        return (time.time() - float(current.created_at or 0)) < AUTONOMY_SPEECH_HOLD_SECONDS
 
     def _autonomy_speak(self, text: str) -> None:
         """Speak one proactive line through the normal voice pipeline.
@@ -860,15 +879,24 @@ class JsonRpcBridge:
         """
 
         thread_id = str(self.collaboration.context().get("thread_id") or "")
-        generation = self.app.voice_generations.begin(thread_id, character_id=str(self.app.character.id))
+        generation = self.app.voice_generations.begin(
+            thread_id,
+            character_id=str(self.app.character.id),
+            # Marks the line as Joi's own initiative, so the speech guard does
+            # not mistake it for a user turn and silence every line after it.
+            run_id=AUTONOMY_VOICE_RUN_ID,
+        )
         self.app.bus.emit(
             AgentEvent(
                 EventType.TOOL_COMPLETED,
                 f"minecraft-autonomy-{uuid.uuid4().hex[:8]}",
-                DisplayCard("Joi", text[:200], status="info"),
+                # "对话" is what marks an assistant event as speech rather than
+                # work: without it a proactive line renders as a task card.
+                DisplayCard("对话", text[:200], status="success"),
                 safe_voice_line(text, fallback=""),
                 {
                     "tool": "minecraft.autonomy",
+                    "proactive": True,
                     "voice_generation": generation.generation_id,
                     "skill_id": "joi.minecraft",
                     "skill_category": "game",
@@ -877,7 +905,7 @@ class JsonRpcBridge:
             )
         )
 
-    def _autonomy_propose(self, prompt: str) -> dict[str, Any]:
+    def _autonomy_propose(self, prompt: str) -> dict[str, Any] | str:
         """One bounded text completion deciding speak/propose/none.
 
         Disabled LLM, mock or unconfigured providers degrade to {"kind":
@@ -3140,6 +3168,21 @@ def _safe_runtime_settings(config: Any) -> dict[str, Any]:
             for skill_id, setting in sorted(config.skills.items())
         },
     }
+
+
+def _configured_ocr_extractor(workspace: Path) -> PytesseractOcrExtractor:
+    """OCR built from the workspace's own settings, defaults when unreadable."""
+
+    try:
+        ocr = load_app_config(workspace / "config.yaml").ocr
+    except Exception:
+        return PytesseractOcrExtractor()
+    return PytesseractOcrExtractor(
+        timeout_seconds=ocr.timeout_seconds,
+        language=ocr.language,
+        tesseract_cmd=ocr.tesseract_cmd,
+        tessdata_dir=ocr.tessdata_dir,
+    )
 
 
 def _friendly_asr_message(error: str) -> str:

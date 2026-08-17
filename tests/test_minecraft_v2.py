@@ -381,6 +381,32 @@ class MinecraftCoreGateTests(unittest.TestCase):
         self.assertEqual(skipped["error"], "minecraft_goal_already_running")
         self.assertTrue(skipped["zero_actions"])
 
+    def test_a_cancelled_goal_is_not_a_failure(self) -> None:
+        """Interrupting Joi must not spend her failure budget.
+
+        A preempted autonomy goal and a cancelled plan step both come back from
+        the bridge as `cancelled`. Counting those as failures meant three
+        interruptions paused the session the user was still playing in.
+        """
+
+        session_id = self._start()
+        runtime = self.service._runtime[session_id]
+        before = runtime["failures"]
+        self.registry.result = {
+            "ok": False,
+            "status": "cancelled",
+            "verified": False,
+            "changes": 0,
+            "effects": 0,
+            "before": {},
+            "after": {},
+        }
+        result = self._submit(session_id, "goal-cancelled", {"action": "inventory"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(self.service._runtime[session_id]["failures"], before)
+        self.assertEqual(str(self.store.session_payload(session_id).get("state")), "running")
+
     def test_autonomy_attack_is_forbidden_at_the_service_layer(self) -> None:
         session_id = self._start()
         goal = self._submit_autonomy(session_id, "goal-autonomy-attack", {"action": "attack", "count": 1, "radius": 8, "dimension": "overworld"})
@@ -458,6 +484,15 @@ class MinecraftCoreGateTests(unittest.TestCase):
         self.assertEqual(stranger["error"], "chat_player_out_of_scope")
         invalid = service.handle_chat(session_id, "坏名字!", "帮我看看")
         self.assertEqual(invalid["error"], "chat_command_invalid")
+
+    def test_chat_flooding_costs_one_model_call_per_interval(self) -> None:
+        # Anyone on the whitelist can type as fast as they like, and every line
+        # would otherwise buy a compile call.
+        service, session_id = self._service_with_planner()
+        self.assertTrue(service.handle_chat(session_id, "Player", "帮我看看周围")["ok"])
+        flooded = service.handle_chat(session_id, "Player", "再看一次")
+        self.assertFalse(flooded["ok"])
+        self.assertEqual(flooded["error"], "chat_command_throttled")
 
     def test_stop_session_remembers_sanitized_world_memory(self) -> None:
         session_id = self._start()
