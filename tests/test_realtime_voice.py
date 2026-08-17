@@ -704,6 +704,21 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         self.assertEqual(caption, spoken)
         session.stop()
 
+    def test_a_caption_written_in_the_spoken_language_is_repaired(self) -> None:
+        # Following the format but ignoring the language is the same failure.
+        def repair(spoken: str, locale: str) -> str:
+            return "我们来看看今天的安排。"
+
+        session, _socket, _connector, events = self._session(
+            voice_locale="ja", chat_locale="zh", caption_repair=repair
+        )
+        self.assertTrue(session.start()["ok"])
+        self._one_text_turn(session, "朗读：今日の予定を見ましょう。\n字幕：今日の予定を見ましょう。")
+        _wait_until(lambda: any(row.get("type") == "assistant_transcript" for row in events))
+        _spoken, caption = self._channels(events)
+        self.assertEqual(caption, "我们来看看今天的安排。")
+        session.stop()
+
     def test_both_parts_on_one_line_are_still_two_channels(self) -> None:
         # Otherwise Joi reads the word "字幕" out loud.
         session, _socket, _connector, events = self._session(voice_locale="ja", chat_locale="zh")

@@ -32,7 +32,11 @@ from agent_companion.core.config import (
     is_safe_qwen_realtime_url,
     load_app_config,
 )
-from agent_companion.core.language_policy import CHAT_LANGUAGE_FOLLOW, voice_language_label
+from agent_companion.core.language_policy import (
+    CHAT_LANGUAGE_FOLLOW,
+    spoken_language_override,
+    voice_language_label,
+)
 from agent_companion.core.minecraft_contract import MinecraftContractError, canonicalize_game_intent
 
 
@@ -512,7 +516,10 @@ class QwenRealtimeSession:
             # this runs on the provider reader thread, which must not block.
             self._emit({"type": "assistant_text", "text": spoken, "epoch": epoch, "output": "local_tts"})
             self._emit({"type": "state", "state": "assistant_speaking", "epoch": epoch})
-            if caption:
+            # A caption written in the spoken language is the same failure as no
+            # caption at all, whether the model skipped the format or followed
+            # it with the wrong language in the second line.
+            if caption and not spoken_language_override(self.chat_locale, caption):
                 self._publish_caption(epoch, spoken, caption)
             else:
                 threading.Thread(
