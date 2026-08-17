@@ -28,12 +28,12 @@ As of 2026-05-17:
 Important local commands:
 
 ```bash
-cd "/Users/liujialuo/Documents/New project 2/Joi"
+cd "<joi-checkout>"
 PYTHONPYCACHEPREFIX=/private/tmp/joi-pycache .venv/bin/python run_agent_companion_tests.py
 ```
 
 ```bash
-cd "/Users/liujialuo/Documents/New project 2/Joi/agent_companion/shell"
+cd "<joi-checkout>/agent_companion/shell"
 npm run build
 npm run tauri -- build --debug
 ```
@@ -128,13 +128,13 @@ Avoid unless necessary:
 On this Mac:
 
 ```bash
-cd "/Users/liujialuo/Documents/New project 2/Joi"
+cd "<joi-checkout>"
 PYTHONPYCACHEPREFIX=/private/tmp/joi-pycache .venv/bin/python -m compileall -q agent_companion run_agent_companion_tests.py tools/smoke_ws_bridge.py
 PYTHONPYCACHEPREFIX=/private/tmp/joi-pycache .venv/bin/python run_agent_companion_tests.py
 ```
 
 ```bash
-cd "/Users/liujialuo/Documents/New project 2/Joi/agent_companion/shell"
+cd "<joi-checkout>/agent_companion/shell"
 npm run build
 npm run tauri -- build --debug
 ```
@@ -142,14 +142,14 @@ npm run tauri -- build --debug
 For WebSocket bridge smoke:
 
 ```bash
-cd "/Users/liujialuo/Documents/New project 2/Joi"
+cd "<joi-checkout>"
 PYTHONPYCACHEPREFIX=/private/tmp/joi-pycache .venv/bin/python -m agent_companion.core.server --workspace .
 ```
 
 In a second terminal:
 
 ```bash
-cd "/Users/liujialuo/Documents/New project 2/Joi"
+cd "<joi-checkout>"
 PYTHONPYCACHEPREFIX=/private/tmp/joi-pycache .venv/bin/python tools/smoke_ws_bridge.py
 ```
 

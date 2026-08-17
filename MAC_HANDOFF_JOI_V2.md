@@ -6,10 +6,10 @@ Welcome to the ultimate Joi v2 platform handoff. This document summarizes all ar
 
 ## 📍 Local Project Information
 
-*   **Local Project Address**: `/Users/liujialuo/.gemini/antigravity/scratch/Joi`
+*   **Local Project Address**: `<joi-checkout>`
 *   **Git Active Branch**: `main` (staged changes checked out from `origin/win-desktop-fixes` for the frontend shell).
 *   **Target Upstream Fixes Branch**: `origin/win-desktop-fixes` (fully merged and integrated).
-*   **Active Python Environment**: `/Users/liujialuo/.gemini/antigravity/scratch/Joi/.venv`
+*   **Active Python Environment**: `<joi-checkout>/.venv`
 *   **Active Backend Server Process**: Spanned via `.venv/bin/python3 -m agent_companion.core.main --serve` in the background (active on port `8765`).
 
 ---
