@@ -159,7 +159,54 @@ def build_plan(user_text: str, chat_language: str = "") -> AgentPlan:
 
 
 def _is_game_task(text: str) -> bool:
-    return any(token in text for token in ("鸣潮", "ok-ww", "OK-WW", "刷副本", "清体力", "梦魇", "游戏日常", "Minecraft", "我的世界"))
+    """Whether this is an OK-WW request. Not "a game is mentioned".
+
+    OK-WW automates Wuthering Waves. Minecraft used to be listed here too, so
+    "帮我在 Minecraft 里挖点石头" launched an entirely different game's skill.
+    Minecraft has its own bridge, scope and receipts, and is routed before the
+    planner is reached -- see ``JsonRpcBridge.minecraft_text_goal_command``.
+    """
+
+    return any(token in text for token in ("鸣潮", "ok-ww", "OK-WW", "刷副本", "清体力", "梦魇", "游戏日常"))
+
+
+_MINECRAFT_WORLD = ("minecraft", "我的世界", "mc 里", "mc里")
+
+# Phrases that make a message *about* Minecraft rather than a request inside it.
+# "我的世界" is also ordinary Chinese, so this guard is what keeps "我的世界里
+# 只有你" and "Minecraft 是什么游戏" out of the game bridge.
+_MINECRAFT_DISCUSSION = (
+    "是什么", "什么意思", "什么游戏", "好玩吗", "好玩不", "怎么样", "为什么", "值得吗",
+    "聊聊", "聊一下", "讨论", "话题", "介绍一下", "解释", "教程", "历史", "推荐",
+    "talk about", "what is", "explain",
+)
+
+# What asking Joi to do something in the world sounds like: an imperative frame,
+# or one of the primitives the bridge can actually carry out.
+_MINECRAFT_REQUEST = (
+    "帮我", "帮忙", "给我", "替我", "能不能", "可以帮", "麻烦", "请你", "去", "来", "让你", "咱们", "我们",
+    "挖", "采", "收集", "捡", "合成", "做个", "做一", "建", "造", "搭", "放", "存", "吃", "装备",
+    "跟着", "跟上", "过来", "过去", "找", "看看", "观察", "巡", "守", "躲", "逃", "跑", "打怪", "攻击",
+    "help me", "let's", "come", "follow", "mine", "collect", "craft", "build", "place", "eat", "guard",
+)
+
+
+def is_minecraft_task(text: str) -> bool:
+    """Whether this turn asks Joi to do something in the Minecraft world.
+
+    The world has to be named, exactly as the OK-WW route requires its own game
+    to be named: a verb alone is not enough, because "挖点石头" is also just how
+    you talk about mining. And naming it is not enough either -- acting on a
+    question about the game is the same failure as dancing when asked to discuss
+    dancing.
+    """
+
+    value = " ".join(str(text or "").strip().split()).casefold()
+    if not value or not any(token in value for token in _MINECRAFT_WORLD):
+        return False
+    if any(marker in value for marker in _MINECRAFT_DISCUSSION):
+        return False
+    return any(marker in value for marker in _MINECRAFT_REQUEST)
 
 
 def _is_watch_task(text: str) -> bool:

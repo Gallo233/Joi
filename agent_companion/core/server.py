@@ -33,7 +33,9 @@ from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.codex_runtime import CodexRuntimeSession
 from agent_companion.core.coercion import bool_or, float_or, optional_int
 from agent_companion.core.config import load_app_config, load_workspace_config
-from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES, voice_language_label
+from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES, chat_language_policy, voice_language_label
+from agent_companion.core.llm_planner import looks_actionable
+from agent_companion.core.planner import build_plan, is_minecraft_task
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update
 from agent_companion.core.rpc import (
     JsonRpcProtocolError,
@@ -51,6 +53,7 @@ from agent_companion.core.scene_session import SceneSession
 from agent_companion.core.game_adapters import GameAdapterRegistry
 from agent_companion.core.minecraft_service import MinecraftGameService
 from agent_companion.core.minecraft_screen import MinecraftScreenCache
+from agent_companion.core.minecraft_skills import MinecraftSkillLibrary
 from agent_companion.core.minecraft_autonomy import MinecraftAutonomyTicker
 from agent_companion.core.platform_factory import get_screen_observer
 from agent_companion.core.model_call import CallBudget
@@ -59,6 +62,7 @@ from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.services import ArtifactService, BackgroundContextService, MemoryService
 from agent_companion.core.skill_manifest import build_native_skill_manifest
 from agent_companion.core.realtime_voice import (
+    MAX_SKILL_REQUEST_CHARS,
     ActionDispatchPermit,
     RealtimeVoiceCoordinator,
     RealtimeVoiceRuntimeState,
@@ -87,6 +91,21 @@ AUTONOMY_VOICE_RUN_ID = "minecraft-autonomy"
 # How long a user turn is assumed to still own the voice channel.
 AUTONOMY_SPEECH_HOLD_SECONDS = 12.0
 MAX_VOICE_INPUT_GENERATIONS = 256
+# The short ASCII labels the Shell and the provider may be told a spoken turn
+# was routed to. Several planner intents collapse into one label on purpose:
+# what the user needs to hear is "this went to computer use", not which slot
+# parser matched.
+_REALTIME_SKILL_LABELS = {
+    "computer_use": "computer_use",
+    "desktop_workflow": "computer_use",
+    "semantic_target": "computer_use",
+    "browser": "browser",
+    "watch_together": "screen",
+    "watch_followup": "screen",
+    "coding": "code",
+    "game_assist": "game",
+    "character_motion": "character_motion",
+}
 
 
 def _next_voice_audio_payload(stream: Any) -> dict[str, Any] | None:
@@ -141,10 +160,12 @@ class JsonRpcBridge:
                 summarizer=self.app._build_vision_summarizer(),
             ),
             plan_compiler=self._compile_plan_text,
+            skills=MinecraftSkillLibrary(self.workspace),
         )
         self.game_adapters.set_minecraft_event_forwarder(self._on_minecraft_bridge_event)
+        self.minecraft.set_plan_progress_sink(self._on_minecraft_plan_progress)
         self.autonomy_enabled = False
-        self.autonomy_interval_seconds = 30.0
+        self.autonomy_interval_seconds = 20.0
         self.autonomy = MinecraftAutonomyTicker(
             propose=self._autonomy_propose,
             submit=self._autonomy_submit,
@@ -181,11 +202,15 @@ class JsonRpcBridge:
                 execute_action=self._execute_realtime_minecraft_action,
                 cancel_action=self._cancel_realtime_minecraft_action,
                 control_action=self._control_realtime_minecraft_action,
+                run_skill=self._realtime_run_skill,
+                compile_game_plan=self._realtime_compile_game_plan,
                 validate_binding=self._realtime_minecraft_binding_ready,
                 voice_locale=self.tts.voice_language,
                 chat_locale=self.app.chat_language,
                 persona=self._realtime_persona_prompt,
                 world_memory=self.minecraft.world_memory,
+                allowed_players=self._minecraft_allowed_players,
+                skill_index=self._minecraft_skill_index,
                 transcript_sink=self._persist_realtime_transcripts,
                 caption_repair=self._realtime_caption,
             )
@@ -202,6 +227,8 @@ class JsonRpcBridge:
         self._client_owners: dict[Any, str] = {}
         self._owner_clients: dict[str, Any] = {}
         self._realtime_epochs: dict[str, int] = {}
+        # approval_id -> the conversation turn its plan card was shown in.
+        self._minecraft_plan_tasks: dict[str, str] = {}
         self._tts_speaker_lock: asyncio.Lock | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.queue: asyncio.Queue[AgentEvent] | None = None
@@ -715,6 +742,13 @@ class JsonRpcBridge:
         )
         if event_type == "assistant_text":
             await self._synthesize_realtime_text(owner_id, payload)
+            return
+        # A session that ended stops owning the voice. Without this, provider
+        # loss left the epoch in place: an in-flight synthesis kept streaming
+        # audio for a dead session and kept holding the speaker lock, and the
+        # marker was never reclaimed because only the explicit stop RPC did it.
+        if event_type == "state" and str(payload.get("state") or "") in {"idle", "error", "recovery_required"}:
+            self._realtime_epochs.pop(session_id, None)
 
     def _execute_realtime_minecraft_action(
         self,
@@ -740,6 +774,246 @@ class JsonRpcBridge:
             "cancel": self.minecraft.cancel,
         }.get(action)
         return operation({"session_id": session_id, "goal_id": goal_id}) if operation else {"ok": False}
+
+    def _realtime_run_skill(self, request: str, category: str) -> dict[str, Any]:
+        """Start one local Joi skill from a realtime voice turn.
+
+        ``request`` is the user's own final transcript for that turn, never the
+        provider's paraphrase, and it is re-planned through exactly the path a
+        typed or dictated message takes: the rule planner, the policy gate, and
+        an approval card for anything that touches this machine. So the cloud
+        model's whole authority here is "this turn was a request, not chat" --
+        it cannot choose the tool, the target, or the arguments.
+
+        Submission is fire-and-forget for the same reason dictation is: a plan
+        can sit on an approval card for minutes, and the voice must keep
+        answering while it does.
+        """
+
+        text = " ".join(str(request or "").split())[:MAX_SKILL_REQUEST_CHARS]
+        if not text:
+            return {"ok": False, "error": "realtime_skill_not_understood"}
+        decision = self._realtime_skill_decision(text)
+        if not decision.get("ok"):
+            return {"ok": False, "error": str(decision.get("error") or "realtime_skill_not_actionable")}
+        threading.Thread(
+            target=self._realtime_submit_skill,
+            args=(text,),
+            name="realtime-skill-submit",
+            daemon=True,
+        ).start()
+        return {
+            "ok": True,
+            "status": "started",
+            "skill": str(decision.get("skill") or "local_skill"),
+            "requires_confirmation": bool(decision.get("requires_confirmation")),
+        }
+
+    def _realtime_skill_decision(self, text: str) -> dict[str, Any]:
+        """Core's own reading of a spoken turn, deciding whether it is work.
+
+        A turn only becomes a skill when one of Joi's deterministic recognizers
+        agrees. If they all read it as conversation, the proposal is refused and
+        the provider simply answers -- which is the same outcome the user would
+        get by typing the sentence, and keeps a model from inventing a task out
+        of small talk.
+        """
+
+        # Minecraft is recognized here rather than by the planner, because
+        # `submit_user_text` routes it to the bridge before the planner is
+        # reached. Reading it the same way keeps the two paths agreeing on what
+        # a spoken Minecraft goal is.
+        if is_minecraft_task(text):
+            return {"ok": True, "skill": "game", "requires_confirmation": True}
+        try:
+            plan = build_plan(text, self.app.chat_language())
+        except Exception:
+            return {"ok": False, "error": "realtime_skill_unavailable"}
+        # Deliberately not `codex_runtime.should_handle`: that is a takeover
+        # switch which answers yes to any text at all, so it would turn every
+        # spoken sentence into work the moment the CLI runtime is enabled.
+        recognized = plan.intent != "companion_chat"
+        if not recognized:
+            try:
+                recognized = looks_actionable(text) or _looks_like_computer_goal(text)
+            except Exception:
+                recognized = False
+        if not recognized:
+            return {"ok": False, "error": "realtime_skill_not_actionable"}
+        confirmation, blocked = self._realtime_skill_gate(plan)
+        if blocked:
+            # A skill the user switched off in settings is not "starting, pending
+            # confirmation" -- there is no card coming. Saying so is the only
+            # honest answer, and "已交给电脑操作" would not have been one.
+            return {"ok": False, "error": "realtime_skill_disabled"}
+        return {
+            "ok": True,
+            "skill": _REALTIME_SKILL_LABELS.get(plan.intent, "local_skill"),
+            "requires_confirmation": confirmation,
+        }
+
+    def _realtime_skill_gate(self, plan: Any) -> tuple[bool, bool]:
+        """(needs confirmation, refused outright) for a plan's first step."""
+
+        steps = list(getattr(plan, "steps", ()) or ())
+        # A rule plan that still reads as chat is only here because the text
+        # looked actionable, so the LLM refinement inside the submit may yet turn
+        # it into a machine action. Promise confirmation rather than letting Joi
+        # say none is needed and be contradicted by a card.
+        if not steps or getattr(plan, "intent", "") == "companion_chat":
+            return True, False
+        try:
+            decision = self.app.policy.classify(steps[0])
+        except Exception:
+            return True, False
+        return bool(decision.requires_approval), not decision.allowed and not decision.requires_approval
+
+    def _realtime_submit_skill(self, text: str) -> None:
+        try:
+            self.submit_user_text(text)
+        except Exception:
+            return
+
+    def minecraft_text_goal_command(self, text: str) -> dict[str, Any]:
+        """Answer a Minecraft request in words with the Minecraft bridge.
+
+        Reached before the planner, because the planner has no route to a game
+        world: it can only name tools in the registry, and Minecraft lives
+        behind its own bridge, confirmed scope, budget and receipts. Without
+        this, "帮我在 Minecraft 里挖点石头" fell into the OK-WW branch and
+        launched an entirely different game's automation.
+
+        The goal is compiled into a step plan and shown for approval; nothing
+        reaches the world until the user answers that card.
+        """
+
+        goal = " ".join(str(text or "").split())[:300]
+        session_id = self._active_minecraft_session_id()
+        if not session_id:
+            return self._minecraft_text_reply(
+                goal,
+                "Joi 还没有连接到 Minecraft。先在游戏面板里连接世界，我就能照着做。",
+                ok=False,
+            )
+        preview = self.minecraft.plan({"session_id": session_id, "goal_text": goal})
+        if not preview.get("ok"):
+            return self._minecraft_text_reply(goal, _minecraft_plan_failure(str(preview.get("error") or "")), ok=False)
+        return self._emit_minecraft_plan_approval(goal, session_id, preview)
+
+    def _active_minecraft_session_id(self) -> str:
+        """The running, bridge-ready Minecraft session, asked of Minecraft itself.
+
+        Deliberately not the conversation's active capability session: that is a
+        single most-recently-updated row, so starting any other session (a
+        Computer Use one, say) would shadow a perfectly live world and Joi would
+        answer "not connected" while standing in it. The game service knows
+        exactly which sessions it started.
+        """
+
+        for session_id in self.minecraft.active_session_ids():
+            if self._realtime_minecraft_binding_ready(session_id):
+                return session_id
+        return ""
+
+    def _emit_minecraft_plan_approval(self, goal: str, session_id: str, preview: dict[str, Any]) -> dict[str, Any]:
+        approval_id = str(preview.get("approval_id") or "")
+        if not approval_id:
+            # A card the user cannot answer is worse than a refusal: the Shell
+            # keys its buttons on the approval id, so an empty one renders a dead
+            # card next to a plan that will never run.
+            return self._minecraft_text_reply(goal, _minecraft_plan_failure("plan_approval_invalid"), ok=False)
+        steps = [str(step.get("action") or "") for step in preview.get("steps") or [] if isinstance(step, dict)]
+        summary = _bounded_plain(preview.get("summary"), 200) or "Minecraft 计划"
+        body = "、".join(action for action in steps if action)[:400]
+        task_id = f"minecraft-goal-{uuid.uuid4().hex[:10]}"
+        self._remember_minecraft_plan_task(approval_id, task_id)
+
+        def emit() -> list[AgentEvent]:
+            self.app.bus.emit(
+                AgentEvent(
+                    EventType.USER_MESSAGE,
+                    task_id,
+                    DisplayCard("用户请求", goal),
+                    safe_voice_line("我看看能不能照着做。", sprite="1"),
+                    {"intent": "minecraft_goal"},
+                )
+            )
+            self.app.bus.emit(
+                AgentEvent(
+                    EventType.APPROVAL_REQUIRED,
+                    task_id,
+                    DisplayCard("需要确认", summary, f"共 {len(steps)} 步：{body}" if steps else "", status="approval"),
+                    safe_voice_line("这个计划需要你确认后我再进游戏里做。", sprite="4"),
+                    {
+                        "risk": RiskLevel.MEDIUM.value,
+                        "approval": {"approval_id": approval_id, "task_id": task_id, "tool": "game.minecraft.plan"},
+                        "skill_id": "joi.minecraft",
+                        "skill_category": "game",
+                        "minecraft_plan": {
+                            "plan_id": str(preview.get("plan_id") or ""),
+                            "steps": len(steps),
+                            "estimated_changes": max(0, int(preview.get("estimated_changes") or 0)),
+                        },
+                    },
+                )
+            )
+            return self.app.bus.drain()
+
+        sequence, events = self._run_serial("minecraft.goal", emit)
+        return {
+            "ok": True,
+            "submitted": True,
+            "requires_approval": True,
+            "sequence": sequence,
+            "events": [event.to_dict() for event in events],
+        }
+
+    def _minecraft_text_reply(self, goal: str, message: str, *, ok: bool) -> dict[str, Any]:
+        task_id = f"minecraft-goal-{uuid.uuid4().hex[:10]}"
+
+        def emit() -> list[AgentEvent]:
+            self.app.bus.emit(
+                AgentEvent(
+                    EventType.USER_MESSAGE,
+                    task_id,
+                    DisplayCard("用户请求", goal),
+                    safe_voice_line("我看看。", sprite="1"),
+                    {"intent": "minecraft_goal"},
+                )
+            )
+            self.app.bus.emit(
+                AgentEvent(
+                    EventType.TOOL_COMPLETED if ok else EventType.TOOL_FAILED,
+                    task_id,
+                    # "对话" so this renders as Joi answering rather than as a
+                    # task card for work that never started.
+                    DisplayCard("对话", message, status="success" if ok else "failed"),
+                    safe_voice_line(message, sprite="1" if ok else "4"),
+                    {"tool": "game.minecraft.plan", "skill_id": "joi.minecraft", "skill_category": "game"},
+                )
+            )
+            return self.app.bus.drain()
+
+        sequence, events = self._run_serial("minecraft.goal", emit)
+        return {"ok": ok, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
+
+    def _realtime_compile_game_plan(self, session_id: str, request: str) -> dict[str, Any]:
+        """Turn a spoken multi-step Minecraft goal into an approval card.
+
+        Same destination as a typed one: ``minecraft.plan`` compiles the user's
+        own words, and nothing reaches the world until they answer the card.
+        """
+
+        goal = " ".join(str(request or "").split())[:MAX_SKILL_REQUEST_CHARS]
+        if not goal or not session_id:
+            return {"ok": False, "error": "realtime_skill_not_understood"}
+        preview = self.minecraft.plan({"session_id": session_id, "goal_text": goal})
+        if not preview.get("ok"):
+            return {"ok": False, "error": "realtime_skill_unavailable"}
+        emitted = self._emit_minecraft_plan_approval(goal, session_id, preview)
+        if not emitted.get("ok"):
+            return {"ok": False, "error": "realtime_skill_unavailable"}
+        return {"ok": True, "status": "started", "requires_confirmation": True}
 
     def _realtime_minecraft_binding_ready(self, session_id: str) -> bool:
         status = self.minecraft.status({"session_id": session_id})
@@ -776,6 +1050,49 @@ class JsonRpcBridge:
             str(payload.get("player") or ""),
             str(payload.get("text") or ""),
         )
+
+    def _on_minecraft_plan_progress(self, session_id: str, payload: dict[str, Any]) -> None:
+        """Show a running plan step by step instead of leaving it a black box.
+
+        Approving a plan used to be the last thing the user saw until it either
+        finished or failed. These are ordinary conversation cards, so progress
+        appears where the plan was approved.
+        """
+
+        state = str(payload.get("state") or "")
+        total = max(0, int(payload.get("steps_total") or 0))
+        done = max(0, int(payload.get("steps_done") or 0))
+        summary = " ".join(str(payload.get("summary") or "").split())[:120]
+        action = str(payload.get("action") or "")[:40]
+        title, body, status = {
+            "running": ("计划开始", f"共 {total} 步：{summary}", "success"),
+            "step": (f"第 {done + 1}/{total} 步", action or summary, "success"),
+            "completed": ("计划完成", summary, "success"),
+            "failed": (f"计划中断（第 {done + 1}/{total} 步）", action or summary, "failed"),
+            "cancelled": ("计划已取消", summary, "failed"),
+        }.get(state, ("", "", "success"))
+        if not title:
+            return
+        task_id = f"minecraft-plan-{session_id[-8:]}"
+
+        def emit() -> list[AgentEvent]:
+            self.app.bus.emit(
+                AgentEvent(
+                    EventType.TOOL_COMPLETED if status == "success" else EventType.TOOL_FAILED,
+                    task_id,
+                    DisplayCard(title, body, status=status),
+                    # Silent: the steps are a progress readout, not Joi narrating
+                    # every move out loud while she works.
+                    safe_voice_line("", fallback=""),
+                    {"tool": "game.minecraft.plan", "skill_id": "joi.minecraft", "skill_category": "game"},
+                )
+            )
+            return self.app.bus.drain()
+
+        try:
+            self._run_serial("minecraft.plan.progress", emit)
+        except Exception:
+            return
 
     def _compile_plan_text(self, prompt: str) -> str:
         """Compile natural-language Minecraft goals into strict JSON plans."""
@@ -816,8 +1133,12 @@ class JsonRpcBridge:
         status = self.minecraft.status({"session_id": session_id})
         session = status.get("session") if isinstance(status.get("session"), dict) else {}
         bridge = self.game_adapters.minecraft_session_status(session_id)
-        if not status.get("ok") or bridge.get("active_goal") or session.get("state") != "running":
+        if not status.get("ok") or session.get("state") != "running":
             return {"ok": False}
+        # A goal in flight used to end the tick outright, so Joi went completely
+        # silent for the whole minutes-long task she was in the middle of. She
+        # can still talk about it -- she just cannot start a second one.
+        busy = bool(bridge.get("active_goal"))
         snapshot = self.game_adapters.minecraft_snapshot(session_id)
         observation = snapshot.get("observation") if isinstance(snapshot.get("observation"), dict) else {}
         screen = self.minecraft.screen_cache.cached() if self.minecraft.screen_cache is not None else {}
@@ -832,7 +1153,39 @@ class JsonRpcBridge:
             "screen_text": str(screen.get("text") or "") if screen.get("ok") else "",
             "persona": self._realtime_persona_prompt(),
             "memory": self.minecraft.world_memory(session_id),
+            "busy": busy,
+            # Autonomy writes straight into the chat and the character voice, so
+            # it needs the same language rule every other authored line has.
+            "language": self._autonomy_language(),
+            "allowed_players": list(self._minecraft_allowed_players(session_id)),
         }
+
+    def _autonomy_language(self) -> str:
+        """The label a proactive line must be written in."""
+
+        try:
+            return voice_language_label(chat_language_policy(self.app.chat_language(), "").code)
+        except Exception:
+            return ""
+
+    def _minecraft_skill_index(self) -> str:
+        """The one-line catalogue of playing notes, cheap enough for every prompt."""
+
+        try:
+            return self.minecraft.skills.index_text() if self.minecraft.skills is not None else ""
+        except Exception:
+            return ""
+
+    def _minecraft_allowed_players(self, session_id: str) -> list[str]:
+        """Who this session is allowed to follow, as the user confirmed it."""
+
+        try:
+            permission = self.collaboration.permission_for_session(session_id)
+        except Exception:
+            return []
+        wrapper = permission.get("scope") if isinstance(permission.get("scope"), dict) else {}
+        scope = wrapper.get("minecraft") if isinstance(wrapper.get("minecraft"), dict) else {}
+        return [str(name)[:32] for name in (scope.get("allowed_players") or [])][:16]
 
     def _persist_realtime_transcripts(self, session_id: str, pairs: list[tuple[str, str]]) -> None:
         """M1: write the sanitized realtime exchange into conversation history.
@@ -1576,7 +1929,15 @@ class JsonRpcBridge:
         payload.pop(path_key, None)
 
     def _active_approval_ids(self) -> list[str]:
-        return sorted({*self.app.pending_steps, *self.codex_runtime.pending_approval_ids()})
+        # Minecraft plan approvals live in the game service's own registry, so a
+        # reloaded conversation would otherwise show their card without buttons.
+        return sorted(
+            {
+                *self.app.pending_steps,
+                *self.codex_runtime.pending_approval_ids(),
+                *self.minecraft.pending_plan_approval_ids(),
+            }
+        )
 
     async def _broadcast_ready(self) -> None:
         ready_payload = await asyncio.to_thread(self._ready_payload)
@@ -1894,6 +2255,14 @@ class JsonRpcBridge:
         thread = self.collaboration.get_thread(context["thread_id"])
         if thread and thread.title == "新对话":
             self.collaboration.update_thread(thread.id, title=text[:36])
+        # Before the Computer Use session starts: a Minecraft goal can contain
+        # "打开" ("帮我在 Minecraft 里打开箱子") and would otherwise leave a
+        # desktop-automation session behind for work that never touches the
+        # desktop. Minecraft is also routed here rather than by the planner,
+        # which can only name tools in the registry -- the game lives behind its
+        # own bridge, confirmed scope and receipts.
+        if is_minecraft_task(text):
+            return self.minecraft_text_goal_command(text)
         if _looks_like_computer_goal(text) and not context.get("session_id"):
             driver = self.capability_orchestrator.driver_inventory("auto").selected
             started = self.collaboration.start_session("computer_use", text, "collaborate", driver=driver)
@@ -2281,12 +2650,61 @@ class JsonRpcBridge:
     def resolve_approval_command(self, approval_id: str, approved: bool) -> dict[str, Any]:
         if self.codex_runtime.has_pending_approval(approval_id):
             return self.runtime_approval_resolve_command(approval_id, approved)
+        if self.minecraft.has_pending_plan_approval(approval_id):
+            return self._resolve_minecraft_plan_approval(approval_id, approved)
         sequence, events = self._run_serial("approval.resolve", lambda: self.app.resolve_approval(approval_id, approved))
         payload: dict[str, Any] = {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
         if any(_event_applied_runtime_config(event) for event in events):
             self._reload_runtime_after_config_change()
             payload["ready"] = self._ready_payload()
         return payload
+
+    def _remember_minecraft_plan_task(self, approval_id: str, task_id: str) -> None:
+        """Keep the turn a plan card belongs to, so answering it retires the card.
+
+        The Shell retires an approval when a later event carries the *same*
+        task_id. A fresh id would leave the buttons on screen forever next to a
+        plan that is already running.
+        """
+
+        if not approval_id:
+            return
+        self._minecraft_plan_tasks[approval_id] = task_id
+        while len(self._minecraft_plan_tasks) > 16:
+            self._minecraft_plan_tasks.pop(next(iter(self._minecraft_plan_tasks)))
+
+    def _resolve_minecraft_plan_approval(self, approval_id: str, approved: bool) -> dict[str, Any]:
+        """Answer a compiled Minecraft plan from the same card as any other step."""
+
+        result = self.minecraft.resolve_plan_approval(approval_id, approved)
+        task_id = self._minecraft_plan_tasks.pop(approval_id, "") or f"minecraft-goal-{uuid.uuid4().hex[:10]}"
+        if not approved:
+            message = "好，这个计划我不做了。"
+        elif result.get("ok"):
+            message = "好，我按计划一步一步来，随时可以让我停。"
+        else:
+            message = _minecraft_plan_failure(str(result.get("error") or ""))
+        ok = bool(result.get("ok"))
+
+        def emit() -> list[AgentEvent]:
+            self.app.bus.emit(
+                AgentEvent(
+                    EventType.TOOL_COMPLETED if ok or not approved else EventType.TOOL_FAILED,
+                    task_id,
+                    DisplayCard("对话", message, status="success" if ok or not approved else "failed"),
+                    safe_voice_line(message, sprite="1" if ok or not approved else "4"),
+                    {"tool": "game.minecraft.plan", "skill_id": "joi.minecraft", "skill_category": "game"},
+                )
+            )
+            return self.app.bus.drain()
+
+        sequence, events = self._run_serial("minecraft.plan.resolve", emit)
+        return {
+            "ok": ok or not approved,
+            "submitted": True,
+            "sequence": sequence,
+            "events": [event.to_dict() for event in events],
+        }
 
     def select_semantic_target_command(self, selection_id: str, rank: int) -> dict[str, Any]:
         sequence, events = self._run_serial("semantic_target.select", lambda: self.app.select_semantic_target(selection_id, rank))
@@ -2467,7 +2885,26 @@ class JsonRpcBridge:
             "timeout_seconds": min(120, max(1, int(self.realtime_voice_state.timeout_seconds or 15))),
             "error": _safe_realtime_error(self.realtime_voice_state.error),
             "modes": ["conversation", "minecraft"],
+            "screen_evidence": self._screen_evidence_route(),
         }
+
+    def _screen_evidence_route(self) -> str:
+        """Where a captured game frame actually goes, so consent can say so.
+
+        The Minecraft disclosure promised the frame is only read locally and
+        never uploaded. That is true only without a vision model: with one
+        configured, ``MinecraftScreenCache`` sends the frame itself to it for the
+        scene summary. Consent has to reflect the configuration the user is
+        actually running, so the Shell reads it from here rather than assuming.
+        """
+
+        try:
+            configured = self.app._build_vision_summarizer() is not None
+        except Exception:
+            configured = False
+        if configured:
+            return "vision_model"
+        return "local_ocr" if self.minecraft.screen_cache is not None else "off"
 
     def _language_payload(self) -> dict[str, Any]:
         """What Joi shows, writes and says, in one place the shell can render.
@@ -3031,6 +3468,27 @@ def _looks_like_watch_loop_start(text: str) -> bool:
     if any(token in value for token in start_tokens):
         return True
     return ("这个视频" in value or "当前视频" in value or "正在播放" in value) and any(token in value for token in ("实时", "持续", "一直", "边看边"))
+
+
+def _bounded_plain(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return "".join(char for char in text if ord(char) >= 32)[:limit]
+
+
+# Why a Minecraft goal in words could not become a plan, said in words. The
+# compiler's own error codes are Core-internal and never shown.
+_MINECRAFT_PLAN_FAILURES = {
+    "minecraft_planning_unavailable": "现在没法把这件事编成计划，语言模型还没配置好。",
+    "minecraft_session_not_runnable": "Minecraft 会话还没在运行，先连接世界我再来做。",
+    "plan_compile_failed": "这个目标我拆不成可执行的步骤，能说得更具体一点吗？",
+    "plan_empty": "这个目标我拆不成可执行的步骤，能说得更具体一点吗？",
+    "plan_approval_invalid": "这个计划已经过期了，再跟我说一次就行。",
+    "plan_already_exists": "这个计划已经在跑了。",
+}
+
+
+def _minecraft_plan_failure(error: str) -> str:
+    return _MINECRAFT_PLAN_FAILURES.get(error, "这次没能开始，稍后再试或者换个说法。")
 
 
 def _looks_like_watch_loop_stop(text: str) -> bool:

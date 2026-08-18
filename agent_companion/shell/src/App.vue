@@ -620,6 +620,11 @@ const lastTranscript = ref('')
 const lastAsrLatency = ref<AsrLatencyBreakdown>({})
 const realtimeVoiceState = ref<RealtimeVoiceState>('idle')
 const realtimeAssistantTranscript = ref('')
+// A realtime turn has its own motion channel rather than a stored agent event:
+// the session is ephemeral, and the synthetic turn cards this view builds for it
+// carry no Core sequence, so they would always out-rank a real event and read as
+// an interruption of the very motion they asked for.
+const realtimeCharacterMotion = ref<CharacterMotionRequest | undefined>(undefined)
 const lastTtsError = ref('')
 const nowSeconds = ref(Date.now() / 1000)
 const runtimeDraft = ref(defaultRuntimeDraft())
@@ -632,6 +637,13 @@ const artifactLoadFailed = ref<Record<string, boolean>>({})
 // Records WAV directly; see voiceRecorder.ts for why not MediaRecorder.
 const voiceRecorder = new VoiceRecorder()
 let realtimeVoiceSession: RealtimeVoiceSession | null = null
+// One silent re-dial per user-initiated call. A provider drop used to end the
+// call outright and leave the user to press the button again; retrying once
+// covers the transient case without looping on a provider that is really down.
+let realtimeReconnectUsed = false
+let realtimeReconnectTimer: number | null = null
+let realtimeVoiceMode: 'conversation' | 'minecraft' | null = null
+let realtimeVoiceMinecraftSessionId = ''
 const realtimeVoiceDisclosuresAccepted = new Set<'conversation' | 'minecraft'>()
 let realtimePlaybackEpoch = 0
 let voiceStopTimer: number | null = null
@@ -1395,6 +1407,7 @@ const activeExpressionEmotion = computed(() => {
 })
 
 const activeCharacterMotion = computed<CharacterMotionRequest | undefined>(() => {
+  if (realtimeCharacterMotion.value) return realtimeCharacterMotion.value
   const motionEvent = [...events.value]
     .reverse()
     .find((event) => normalizeCharacterMotion(asRecord(event.agent_state?.character_motion).name))
@@ -1597,7 +1610,10 @@ const voiceStatusText = computed(() => {
   if (realtimeVoiceState.value === 'connecting') return '实时语音连接中…'
   if (realtimeVoiceState.value === 'user_speaking') return '实时语音：正在听你说'
   if (realtimeVoiceState.value === 'assistant_speaking') return 'Joi 正在回答，可直接开口打断'
-  if (realtimeVoiceState.value === 'listening') return realtimeAssistantTranscript.value || '实时语音已连接，再次点击“结束实时语音”退出。'
+  // Listening, thinking, acting and paused all belong to a live realtime turn,
+  // so show what that turn is doing. Falling through here reported the
+  // dictation microphone instead, which is not the one that is open.
+  if (realtimeVoiceActive.value) return realtimeAssistantTranscript.value || '实时语音已连接，再次点击“结束实时语音”退出。'
   if (!asrConfigured.value) return 'ASR 未配置，请先在 config.yaml 中启用语音识别。'
   if (voiceState.value === 'recording') return `录音中，最长 ${voiceMaxSeconds.value} 秒。`
   if (voiceState.value === 'transcribing') return '转写中...'
@@ -1612,6 +1628,13 @@ const voiceStatusText = computed(() => {
 // microphone session alive with no Joi connection status behind it.
 watch(connected, (isConnected) => {
   if (!isConnected && realtimeVoiceActive.value) stopRealtimeVoice()
+})
+
+// A realtime motion outlives its session only as long as the session does.
+// Provider loss ends a session without going through the stop button, and a
+// motion left behind would shadow the stored conversation's own motions.
+watch(realtimeVoiceActive, (active) => {
+  if (!active) realtimeCharacterMotion.value = undefined
 })
 
 function eventIdentity(event: AgentEvent) {
@@ -4009,6 +4032,17 @@ function handleRealtimeVoiceEvent(event: RealtimeVoiceEvent) {
     realtimePlaybackEpoch = event.epoch
     realtimeAssistantTranscript.value = ''
     stopSpokenAudio()
+    // Speaking up interrupts a motion here for the same reason a typed message
+    // does: whatever Joi was performing belongs to the turn the user just ended.
+    if (realtimeCharacterMotion.value) {
+      realtimeCharacterMotion.value = {
+        motion: 'idle',
+        eventKey: `realtime-motion-stop:${event.epoch}`,
+        durationMs: 0,
+        loop: true,
+        intensity: 0.25,
+      }
+    }
   }
   if (event.kind === 'user_transcript' && event.final) {
     lastTranscript.value = event.text
@@ -4026,8 +4060,99 @@ function handleRealtimeVoiceEvent(event: RealtimeVoiceEvent) {
       ? `Joi 正在执行 ${event.action || 'Minecraft 操作'}…`
       : `Minecraft 操作：${event.status}`
   }
+  if (event.kind === 'character_motion') {
+    realtimeCharacterMotion.value = {
+      motion: event.motion,
+      eventKey: `realtime-motion:${event.epoch}:${event.motion}`,
+      durationMs: event.durationMs,
+      loop: event.loop,
+      intensity: event.intensity,
+    }
+  }
+  if (event.kind === 'skill_action') realtimeAssistantTranscript.value = realtimeSkillLabel(event)
   if (event.kind === 'tts_state') errorText.value = realtimeVoiceErrorLabel(event.error)
-  if (event.kind === 'error') errorText.value = realtimeVoiceErrorLabel(event.error)
+  if (event.kind === 'error') {
+    errorText.value = realtimeVoiceErrorLabel(event.error)
+    scheduleRealtimeReconnect(event.error)
+  }
+  if (event.kind === 'state' && (event.state === 'error' || event.state === 'recovery_required')) {
+    scheduleRealtimeReconnect('realtime_disconnected')
+  }
+}
+
+/** Transport faults worth one silent retry; a refusal or a bad key is not. */
+const REALTIME_RETRYABLE = new Set([
+  'realtime_disconnected',
+  'realtime_provider_error',
+  'realtime_audio_overflow',
+  'realtime_timeout',
+  'realtime_unavailable',
+])
+
+function scheduleRealtimeReconnect(error: string) {
+  if (realtimeReconnectUsed || !REALTIME_RETRYABLE.has(error) || !realtimeVoiceMode) return
+  realtimeReconnectUsed = true
+  if (realtimeReconnectTimer !== null) window.clearTimeout(realtimeReconnectTimer)
+  realtimeReconnectTimer = window.setTimeout(() => {
+    realtimeReconnectTimer = null
+    // Only if the user has not since taken the microphone back themselves.
+    if (!realtimeVoiceMode || realtimeVoiceActive.value || !connected.value) return
+    errorText.value = '实时语音连接中断，正在自动重连…'
+    void startRealtimeVoiceSession(realtimeVoiceMode, realtimeVoiceMinecraftSessionId)
+  }, 1200)
+}
+
+const REALTIME_SKILL_NAMES: Record<string, string> = {
+  character_motion: '角色动作',
+  computer_use: '电脑操作',
+  browser: '浏览器',
+  screen: '看屏幕',
+  code: '写代码',
+  game: '游戏技能',
+  local_skill: '本地技能',
+}
+
+const REALTIME_SKILL_REFUSALS: Record<string, string> = {
+  realtime_skill_unavailable: '本地技能当前不可用。',
+  realtime_skill_unsupported: '这个动作还没有准备好。',
+  realtime_skill_not_understood: '没听清这次要做什么，请再说一遍。',
+  realtime_skill_not_actionable: '这一轮听起来像聊天，没有启动技能；需要执行请说得更具体，或改用文字输入。',
+  realtime_skill_disabled: '这个技能已在设置里停用。',
+  realtime_action_ambiguous: '这一轮提出了不止一个动作，已全部放弃。',
+  realtime_action_invalid: '这个提案没有通过本地检查。',
+}
+
+/**
+ * What the status line says about a skill Joi's voice just proposed.
+ *
+ * "started" is deliberately not "done": Core has only accepted the request, and
+ * anything that touches this machine still waits on the approval card.
+ */
+function realtimeSkillLabel(event: { skill: string; status: string; requiresConfirmation: boolean; error?: string }) {
+  const name = REALTIME_SKILL_NAMES[event.skill] || REALTIME_SKILL_NAMES.local_skill
+  if (event.status === 'started') {
+    return event.requiresConfirmation ? `Joi 已交给${name}，请在下面确认后执行。` : `Joi 已交给${name}。`
+  }
+  return REALTIME_SKILL_REFUSALS[event.error || ''] || `${name}这次没有启动。`
+}
+
+/**
+ * What consent must say about reading the game screen, on this machine.
+ *
+ * It used to promise the frame never leaves this computer. That holds only
+ * without a vision model: with one configured, the frame itself is sent to it
+ * for the scene summary, so the promise was false in the normal setup. Core
+ * reports which of the two is running and this says that, rather than assuming.
+ */
+function screenEvidenceDisclosure() {
+  const route = stringValue(ready.value?.realtime_voice?.screen_evidence) || 'off'
+  if (route === 'vision_model') {
+    return 'Joi 还可能读取当前游戏画面来理解你的意图：这台电脑配置了视觉模型，所以截图本身会发送给它做画面理解，之后立即从本机删除；除此之外原图不会留存。如果不希望画面上传，请在设置里关闭视觉模型，Joi 会只做本机文字识别。\n\n'
+  }
+  if (route === 'local_ocr') {
+    return 'Joi 还可能读取当前游戏画面来理解你的意图：当前没有配置视觉模型，截图只在本机做文字识别，识别后立即删除，云端只收到一段文字摘要，原图不会上传也不会留存。\n\n'
+  }
+  return ''
 }
 
 async function toggleRealtimeVoice(useMinecraft = false) {
@@ -4046,9 +4171,10 @@ async function toggleRealtimeVoice(useMinecraft = false) {
     return
   }
   if (!realtimeVoiceDisclosuresAccepted.has(mode)) {
+    const localSkillDisclosure = '你也可以直接开口让 Joi 做动作或使用本机技能（打开应用、点击输入、上网搜索、看当前屏幕、写代码）。模型只能提出“这一轮是请求”，具体做什么由 Joi Core 用你自己说的原话重新规划；角色动作是纯本机动画，凡是会操作这台电脑的动作都仍然要你在界面上点确认。'
     const disclosure = mode === 'minecraft'
-      ? '实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。模型可以提出一条 Minecraft 操作，但只能在你已确认的服务器、世界、维度、半径、方块和预算范围内执行；Joi Core 会逐条校验并保留回执。\n\nJoi 还可能读取当前游戏画面来理解你的意图：截图只在本机做文字识别，识别后立即删除，云端只收到一段文字摘要，原图不会上传也不会留存。是否开始？'
-      : '实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。云端只返回文本，Joi 仍使用本地 GPT-SoVITS 发声；本模式不执行 Minecraft 操作。是否开始？'
+      ? `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。模型可以提出一条 Minecraft 操作，但只能在你已确认的服务器、世界、维度、半径、方块和预算范围内执行；Joi Core 会逐条校验并保留回执。\n\n${localSkillDisclosure}\n\n${screenEvidenceDisclosure()}是否开始？`
+      : `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。云端只返回文本，Joi 仍使用本地 GPT-SoVITS 发声；本模式不执行 Minecraft 操作。\n\n${localSkillDisclosure}\n\n是否开始？`
     const accepted = await requestAppConfirm({
       title: mode === 'minecraft' ? '启动实时语音 + Minecraft' : '启动实时语音',
       message: disclosure,
@@ -4063,6 +4189,14 @@ async function toggleRealtimeVoice(useMinecraft = false) {
   lastTranscript.value = ''
   realtimeAssistantTranscript.value = ''
   errorText.value = ''
+  realtimeVoiceMode = mode
+  realtimeVoiceMinecraftSessionId = minecraftSessionId
+  realtimeReconnectUsed = false
+  await startRealtimeVoiceSession(mode, minecraftSessionId)
+}
+
+/** Open one realtime session. Shared by the button and the automatic re-dial. */
+async function startRealtimeVoiceSession(mode: 'conversation' | 'minecraft', minecraftSessionId: string) {
   realtimeVoiceSession = new RealtimeVoiceSession({
     mode,
     minecraftSessionId,
@@ -4091,12 +4225,20 @@ async function toggleRealtimeVoice(useMinecraft = false) {
 }
 
 function stopRealtimeVoice() {
+  realtimeVoiceMode = null
+  realtimeVoiceMinecraftSessionId = ''
+  if (realtimeReconnectTimer !== null) {
+    window.clearTimeout(realtimeReconnectTimer)
+    realtimeReconnectTimer = null
+  }
   realtimeVoiceSession?.stop()
   realtimeVoiceSession = null
   realtimePlaybackEpoch += 1
   stopSpokenAudio()
   realtimeVoiceState.value = 'idle'
   realtimeAssistantTranscript.value = ''
+  // Hand the character back to the stored conversation's own motions.
+  realtimeCharacterMotion.value = undefined
 }
 
 async function controlRealtimeMinecraft(action: 'pause' | 'resume' | 'cancel') {

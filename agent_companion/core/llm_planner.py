@@ -326,6 +326,18 @@ def _unsafe_text(value: str) -> bool:
     return False
 
 
+def looks_actionable(text: str) -> bool:
+    """Whether a sentence is asking for work rather than talking about it.
+
+    Shared with the realtime voice gate: the same signal that lets this parser
+    re-read a "just chatting" rule plan is what lets a spoken turn reach the
+    local skills, so the two paths cannot disagree about what counts as a
+    request.
+    """
+
+    return _looks_actionable(text)
+
+
 def _looks_actionable(text: str) -> bool:
     if _looks_like_execution_status_question(text):
         return False
