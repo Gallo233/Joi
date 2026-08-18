@@ -181,6 +181,7 @@ class MinecraftContractTests(unittest.TestCase):
 class _FakeRegistry:
     def __init__(self) -> None:
         self.submit_calls = 0
+        self.block_allowances: list[object] = []
         self.cancel_calls: list[str] = []
         self.started = False
         self.result: dict[str, object] = {
@@ -206,6 +207,7 @@ class _FakeRegistry:
         cancel_requested: object = None,
         on_registered: object = None,
         on_submitted: object = None,
+        block_allowance: int | None = None,
     ) -> dict[str, object]:
         if callable(cancel_requested) and cancel_requested():
             return {"ok": False, "error": "goal_cancelled", "status": "cancelled", "verified": False}
@@ -214,6 +216,7 @@ class _FakeRegistry:
         if callable(on_submitted):
             on_submitted()
         self.submit_calls += 1
+        self.block_allowances.append(block_allowance)
         return dict(self.result)
 
     def pause_minecraft_goal(self, session_id: str, goal_id: str) -> dict[str, object]:
@@ -658,7 +661,7 @@ class MinecraftCoreGateTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.submit_calls = 0
 
-            def submit_goal(self, goal_id: str, intent: dict[str, object]) -> dict[str, object]:
+            def submit_goal(self, goal_id: str, intent: dict[str, object], *, block_allowance: int | None = None) -> dict[str, object]:
                 self.submit_calls += 1
                 return {
                     "ok": True,
@@ -729,6 +732,69 @@ class MinecraftCoreGateTests(unittest.TestCase):
         self.assertEqual(exhausted["error"], "action_budget_exhausted")
         self.assertEqual(self.registry.submit_calls, 1)
         self.assertEqual(len(self.store.list_receipts(session_id)), 1)
+
+    def test_the_block_budget_is_charged_what_the_world_reports_not_what_was_estimated(self) -> None:
+        """A route that digs its way to the work spends the user's ceiling too.
+
+        Only what an action sets out to change can be estimated in advance. The
+        pathfinder breaks and places blocks of its own getting there, so a
+        budget settled against the estimate stopped bounding the larger half of
+        what actually changed.
+        """
+
+        session_id = self._start(max_blocks_changed=10)
+        self.registry.result = {
+            **self.registry.result,
+            "changes": 2,
+            "effects": 2,
+            # Two blocks mined; eight more broken and placed on the way.
+            "world_changes": 10,
+        }
+        first = self._submit(session_id, "goal-mine", {"action": "mine", "block": "oak_log", "count": 2})
+        self.assertTrue(first["ok"], first)
+        receipt = self.store.list_receipts(session_id)[0]
+        self.assertEqual(receipt["verification"]["blocks_changed"], 10)
+        self.assertIn("10 world changes", first["summary"])
+
+        exhausted = self._submit(session_id, "goal-mine-again", {"action": "mine", "block": "oak_log", "count": 1})
+        self.assertEqual(exhausted["error"], "block_budget_exhausted")
+        self.assertEqual(self.registry.submit_calls, 1)
+
+    def test_each_goal_is_handed_what_is_left_of_the_confirmed_block_budget(self) -> None:
+        """The child stops itself at the ceiling instead of reporting it crossed.
+
+        Core refusing the *next* goal is an account of a ceiling already gone
+        past: a single route can tunnel for minutes before its receipt arrives.
+        """
+
+        session_id = self._start(max_blocks_changed=12)
+        self.registry.result = {**self.registry.result, "changes": 3, "effects": 3, "world_changes": 5}
+        self._submit(session_id, "goal-one", {"action": "mine", "block": "oak_log", "count": 3})
+        self.registry.result = {**self.registry.result, "changes": 1, "effects": 1, "world_changes": 1}
+        self._submit(session_id, "goal-two", {"action": "mine", "block": "oak_log", "count": 1})
+        # First goal: the whole ceiling. Second: what the first really spent.
+        self.assertEqual(self.registry.block_allowances, [12, 7])
+
+    def test_a_read_only_goal_neither_reserves_nor_settles_blocks(self) -> None:
+        session_id = self._start(max_blocks_changed=4)
+        self.registry.result = {**self.registry.result, "changes": 0, "effects": 0, "world_changes": 0}
+        self._submit(session_id, "goal-observe", {"action": "observe"})
+        self.registry.result = {**self.registry.result, "changes": 4, "effects": 4, "world_changes": 4}
+        mining = self._submit(session_id, "goal-mine", {"action": "mine", "block": "oak_log", "count": 4})
+        self.assertTrue(mining["ok"], mining)
+        self.assertEqual(self.registry.block_allowances, [4, 4])
+
+    def test_a_bridge_that_reports_no_route_changes_is_charged_its_deliberate_work(self) -> None:
+        """An older child only ever counted deliberate work, so that count is all it knows."""
+
+        session_id = self._start(max_blocks_changed=6)
+        self.registry.result = {**self.registry.result, "changes": 6, "effects": 6}
+        self.registry.result.pop("world_changes", None)
+        first = self._submit(session_id, "goal-mine", {"action": "mine", "block": "oak_log", "count": 6})
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(self.store.list_receipts(session_id)[0]["verification"]["blocks_changed"], 6)
+        exhausted = self._submit(session_id, "goal-more", {"action": "mine", "block": "oak_log", "count": 1})
+        self.assertEqual(exhausted["error"], "block_budget_exhausted")
 
     def test_missing_after_state_is_unverified_and_disconnect_result_is_cached_without_replay(self) -> None:
         session_id = self._start()
@@ -882,7 +948,7 @@ class MinecraftCoreGateTests(unittest.TestCase):
         registry = GameAdapterRegistry(self.workspace, data_home)
 
         class FailedBridge:
-            def submit_goal(self, goal_id: str, intent: dict[str, object]) -> dict[str, object]:
+            def submit_goal(self, goal_id: str, intent: dict[str, object], *, block_allowance: int | None = None) -> dict[str, object]:
                 return {
                     "ok": False,
                     "status": "unverified",
@@ -906,7 +972,7 @@ class MinecraftCoreGateTests(unittest.TestCase):
         registry.minecraft_checkpoint_dir.write_text("not-a-directory", encoding="utf-8")
 
         class FailedBridge:
-            def submit_goal(self, goal_id: str, intent: dict[str, object]) -> dict[str, object]:
+            def submit_goal(self, goal_id: str, intent: dict[str, object], *, block_allowance: int | None = None) -> dict[str, object]:
                 return {
                     "ok": False,
                     "status": "unverified",
@@ -957,6 +1023,53 @@ class MinecraftBridgeIntegrationTests(unittest.TestCase):
         self.assertTrue(first["verified"])
         self.assertTrue(second["verified"])
         self.assertEqual(first["bridge_instance_id"], second["bridge_instance_id"])
+
+    def test_a_route_that_would_outspend_the_block_budget_stops_at_the_ceiling(self) -> None:
+        """The child stops itself, and says why, rather than reporting it overspent."""
+
+        self.client.close()
+        environment = {**self.environment, "JOI_MINECRAFT_FAKE_ROUTE_CHANGES": "6"}
+        self.client = MinecraftBridgeClient(
+            [str(shutil.which("node")), str(self.bridge_script)],
+            session_id="session-route-budget",
+            mode="companion",
+            scope=canonicalize_minecraft_scope(SAFE_SCOPE),
+            budget={"max_steps": 20, "max_seconds": 60},
+            environment=environment,
+        )
+        self.assertTrue(self.client.start()["ok"])
+        stopped = self.client.submit_goal(
+            "goal-route",
+            {"action": "mine", "block": "oak_log", "count": 1, "radius": 8, "dimension": "overworld"},
+            block_allowance=2,
+        )
+        self.assertFalse(stopped["ok"], stopped)
+        self.assertEqual(stopped["error"], "block_budget_exhausted")
+        # The block that crossed the ceiling is the last one it changed.
+        self.assertEqual(stopped["world_changes"], 3)
+        self.assertEqual(stopped["changes"], 0)
+
+    def test_route_changes_are_reported_when_they_stay_inside_the_allowance(self) -> None:
+        self.client.close()
+        environment = {**self.environment, "JOI_MINECRAFT_FAKE_ROUTE_CHANGES": "3"}
+        self.client = MinecraftBridgeClient(
+            [str(shutil.which("node")), str(self.bridge_script)],
+            session_id="session-route-report",
+            mode="companion",
+            scope=canonicalize_minecraft_scope(SAFE_SCOPE),
+            budget={"max_steps": 20, "max_seconds": 60},
+            environment=environment,
+        )
+        self.assertTrue(self.client.start()["ok"])
+        result = self.client.submit_goal(
+            "goal-route-ok",
+            {"action": "mine", "block": "oak_log", "count": 2, "radius": 8, "dimension": "overworld"},
+            block_allowance=32,
+        )
+        self.assertTrue(result["ok"], result)
+        # Two mined, three broken on the way there.
+        self.assertEqual(result["changes"], 2)
+        self.assertEqual(result["world_changes"], 5)
 
     def test_cancel_ack_stops_a_delayed_mutating_goal(self) -> None:
         self.client.close()

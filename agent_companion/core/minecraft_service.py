@@ -258,8 +258,9 @@ class MinecraftGameService:
         if action in SCREEN_ACTIONS:
             return self._submit_screen_goal(key, session_id, goal_id, action)
         started_at = time.monotonic()
+        allowance = self._block_allowance(session_id, intent, live_scope)
         if cancel_requested is None and on_registered is None and on_submitted is None:
-            bridge_result = self.adapters.submit_minecraft_goal(session_id, goal_id, intent)
+            bridge_result = self.adapters.submit_minecraft_goal(session_id, goal_id, intent, block_allowance=allowance)
         else:
             bridge_result = self.adapters.submit_minecraft_goal(
                 session_id,
@@ -268,6 +269,7 @@ class MinecraftGameService:
                 cancel_requested=cancel_requested,
                 on_registered=on_registered,
                 on_submitted=on_submitted,
+                block_allowance=allowance,
             )
         duration_ms = (time.monotonic() - started_at) * 1000
         if bridge_result.get("zero_actions"):
@@ -285,6 +287,7 @@ class MinecraftGameService:
                     "session": _public_session(self.collaboration.session_payload(session_id)),
                 },
             )
+        world_changes = self._settle_budget(session_id, intent, bridge_result)
         if bridge_result.get("verified") is True and not _result_matches_intent(intent, bridge_result):
             bridge_result["verified"] = False
             bridge_result["error"] = "verification_failed"
@@ -301,7 +304,7 @@ class MinecraftGameService:
                 "after_summary": _observation_summary(bridge_result.get("after")),
                 "verification": {
                     "verified": bridge_result.get("verified") is True,
-                    "blocks_changed": max(0, int(bridge_result.get("changes") or 0)),
+                    "blocks_changed": world_changes,
                     "effects_observed": max(0, int(bridge_result.get("effects") or 0)),
                     "after_state_present": isinstance(bridge_result.get("after"), dict) and bool(bridge_result.get("after")),
                     "private_checkpoint_persisted": bridge_result.get("checkpoint_persisted") is True,
@@ -320,7 +323,7 @@ class MinecraftGameService:
             "status": status,
             # A query's whole point is the reading it came back with.
             "observation": str(bridge_result.get("detail") or "")[:600] if action in QUERY_ACTIONS else "",
-            "summary": _public_action_summary(action, status, int(bridge_result.get("changes") or 0)),
+            "summary": _public_action_summary(action, status, world_changes),
             "receipt": receipt_result.get("receipt") if receipt_result.get("ok") else {},
             "session": _public_session(self.collaboration.session_payload(session_id)),
             "recovery_required": bool(bridge_result.get("recovery_required")),
@@ -790,6 +793,41 @@ class MinecraftGameService:
             runtime["actions_reserved"] += 1
             runtime["blocks_reserved"] += changes
         return ""
+
+    def _block_allowance(self, session_id: str, intent: Mapping[str, Any], live_scope: Mapping[str, Any]) -> int:
+        """How many blocks this goal may still change, ceiling minus everything before it.
+
+        The reservation above already added this goal's estimate, and that
+        estimate is only what the action set out to do -- the route to it breaks
+        and places blocks of its own. So the child is handed the whole remaining
+        allowance and stops itself at it, rather than crossing a ceiling that
+        Core would only learn about from the receipt.
+        """
+
+        with self._lock:
+            runtime = self._runtime.get(session_id)
+            reserved = int(runtime["blocks_reserved"]) if runtime else 0
+        ceiling = int(live_scope.get("max_blocks_changed") or 0)
+        return max(0, ceiling - reserved + estimated_world_changes(intent))
+
+    def _settle_budget(self, session_id: str, intent: Mapping[str, Any], bridge_result: Mapping[str, Any]) -> int:
+        """Replace this goal's estimate with what the world actually reports.
+
+        Estimates are a floor: mining ten blocks changes at least ten, and the
+        walk there can change more. Charging the estimate and never reconciling
+        meant the confirmed ceiling silently stopped bounding anything the
+        pathfinder did.
+        """
+
+        actual = max(0, int(bridge_result.get("world_changes") or bridge_result.get("changes") or 0))
+        estimate = estimated_world_changes(intent)
+        if actual == estimate:
+            return actual
+        with self._lock:
+            runtime = self._runtime.get(session_id)
+            if runtime is not None:
+                runtime["blocks_reserved"] = max(0, int(runtime["blocks_reserved"]) - estimate + actual)
+        return actual
 
     def _release_budget_reservation(self, session_id: str, intent: Mapping[str, Any]) -> None:
         """Roll back a reservation only when the bridge proves no submit occurred."""

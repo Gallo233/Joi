@@ -44,6 +44,7 @@ _SAFE_ENVIRONMENT_KEYS = frozenset(
         "JOI_MINECRAFT_FAKE_PUSH_SNAPSHOT_MS",
         "JOI_MINECRAFT_FAKE_COMBAT_MS",
         "JOI_MINECRAFT_FAKE_CHAT_LINES",
+        "JOI_MINECRAFT_FAKE_ROUTE_CHANGES",
         "JOI_MINECRAFT_VIEWER",
         "JOI_MINECRAFT_VIEWER_PORT",
     }
@@ -281,6 +282,7 @@ class MinecraftBridgeClient:
         *,
         cancel_requested: Callable[[], bool] | None = None,
         on_submitted: Callable[[], None] | None = None,
+        block_allowance: int | None = None,
     ) -> dict[str, Any]:
         try:
             with self._goal_dispatch_lock:
@@ -291,10 +293,18 @@ class MinecraftBridgeClient:
                         "status": "cancelled",
                         "verified": False,
                         "changes": 0,
+                        "world_changes": 0,
                         "effects": 0,
                         "zero_actions": True,
                     }
-                request_id = self._send("goal.submit", {"intent": dict(intent)}, goal_id=goal_id)
+                payload: dict[str, Any] = {"intent": dict(intent)}
+                if block_allowance is not None:
+                    # What is left of the block budget the user confirmed. Core
+                    # still charges what comes back, but a route that tunnels
+                    # for minutes would otherwise cross the ceiling long before
+                    # the receipt that reports it arrives.
+                    payload["block_allowance"] = max(0, int(block_allowance))
+                request_id = self._send("goal.submit", payload, goal_id=goal_id)
                 if on_submitted is not None:
                     try:
                         on_submitted()
@@ -343,6 +353,7 @@ class MinecraftBridgeClient:
                 "status": child_status,
                 "verified": False,
                 "changes": _safe_int(payload.get("changes")),
+                "world_changes": _world_changes(payload),
                 "effects": _safe_int(payload.get("effects")),
                 "before": _safe_observation(payload.get("before")),
                 "after": _safe_observation(payload.get("after")),
@@ -362,6 +373,7 @@ class MinecraftBridgeClient:
             "before": before,
             "after": after,
             "changes": _safe_int(payload.get("changes")),
+            "world_changes": _world_changes(payload),
             "effects": _safe_int(payload.get("effects")),
             "checkpoint": _safe_checkpoint(payload.get("checkpoint")),
             "detail": detail,
@@ -619,6 +631,18 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+def _world_changes(payload: Mapping[str, Any]) -> int:
+    """Every block the goal changed, including what its route broke or placed.
+
+    A bridge that does not report the field is one that only ever counted
+    deliberate work, so its deliberate count is the whole truth it has.
+    """
+
+    if "world_changes" not in payload:
+        return _safe_int(payload.get("changes"))
+    return max(_safe_int(payload.get("world_changes")), _safe_int(payload.get("changes")))
+
+
 def _safe_capabilities(payload: Any) -> list[str]:
     if not isinstance(payload, dict) or not isinstance(payload.get("capabilities"), list):
         return []
@@ -860,16 +884,16 @@ def _validate_event_payload(message_type: str, payload: Mapping[str, Any]) -> No
         "session.ready": ({"capabilities", "state"}, set()),
         "session.stopped": ({"state"}, set()),
         "goal.accepted": ({"state"}, set()),
-        "goal.completed": ({"verified", "status", "summary", "changes", "effects", "before", "after", "checkpoint"}, {"replayed", "detail"}),
-        "goal.failed": ({"verified", "status", "changes", "effects", "before", "after", "checkpoint"}, {"error", "summary", "replayed", "detail"}),
+        "goal.completed": ({"verified", "status", "summary", "changes", "effects", "before", "after", "checkpoint"}, {"replayed", "detail", "world_changes"}),
+        "goal.failed": ({"verified", "status", "changes", "effects", "before", "after", "checkpoint"}, {"error", "summary", "replayed", "detail", "world_changes"}),
         "goal.paused": ({"state"}, set()),
         "goal.resumed": ({"state"}, set()),
-        "goal.cancelled": ({"state", "status", "verified", "changes", "effects", "before", "after", "checkpoint"}, {"replayed"}),
+        "goal.cancelled": ({"state", "status", "verified", "changes", "effects", "before", "after", "checkpoint"}, {"replayed", "world_changes"}),
         "state.snapshot": ({"observation", "checkpoint"}, set()),
         "combat.started": ({"state"}, set()),
         "combat.ended": ({"state"}, set()),
         "chat.observed": ({"player", "text"}, set()),
-        "recovery.required": ({"error", "verified", "status", "changes", "effects", "recovery_required", "before", "after", "checkpoint"}, {"replayed"}),
+        "recovery.required": ({"error", "verified", "status", "changes", "effects", "recovery_required", "before", "after", "checkpoint"}, {"replayed", "world_changes"}),
         "error": ({"error"}, set()),
     }
     required, optional = schemas[message_type]

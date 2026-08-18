@@ -186,7 +186,10 @@ function validateEnvelope(request) {
     return 'bridge_session_mismatch'
   }
   if (request.type === 'session.start' && !exactFields(request.payload, ['mode', 'scope', 'budget'])) return 'invalid_session_payload'
-  if (request.type === 'goal.submit' && !exactFields(request.payload, ['intent'])) return 'invalid_goal_payload'
+  // block_allowance is how much of the user's confirmed block budget is left
+  // for this goal to spend. Optional: a Core that does not send one gets the
+  // old behaviour, where only Core's own accounting bounds the route.
+  if (request.type === 'goal.submit' && !exactFields(request.payload, ['intent'], ['block_allowance'])) return 'invalid_goal_payload'
   if (['session.stop', 'goal.pause', 'goal.resume', 'goal.cancel', 'state.snapshot.request'].includes(request.type) && !exactFields(request.payload, [])) return 'invalid_control_payload'
   return ''
 }
@@ -680,12 +683,36 @@ function sleep(ms) {
 
 async function waitControlled(goal, delay = 25) {
   if (goal.cancelled) throw new Error('goal_cancelled')
+  if (goal.budgetExhausted) throw new Error('block_budget_exhausted')
   while (goal.paused) {
     if (goal.cancelled) throw new Error('goal_cancelled')
     await sleep(25)
   }
   if (delay > 0) await sleep(delay)
   if (goal.cancelled) throw new Error('goal_cancelled')
+  if (goal.budgetExhausted) throw new Error('block_budget_exhausted')
+}
+
+function countWorldChange() {
+  const goal = activeGoal
+  if (!goal) return
+  goal.worldChanges = (goal.worldChanges || 0) + 1
+  if (goal.blockAllowance < 0 || goal.worldChanges <= goal.blockAllowance) return
+  // One goal cannot spend more of the world than the user approved for the
+  // whole session. Core charges what comes back and refuses the next goal, but
+  // that is an account of a ceiling already crossed -- so the block that
+  // crosses it is the last one this goal gets to change.
+  goal.budgetExhausted = true
+  stopWorldWork()
+}
+
+function stopWorldWork() {
+  try {
+    if (bot?.pathfinder) bot.pathfinder.stop()
+  } catch {}
+  try {
+    if (bot && typeof bot.stopDigging === 'function') bot.stopDigging()
+  } catch {}
 }
 
 async function runAtomic(goal, operation) {
@@ -826,6 +853,9 @@ async function safeGoto(goal) {
       return
     } catch (error) {
       if (activeGoal?.cancelled) throw new Error('goal_cancelled')
+      // The route was stopped mid-path because it had spent the block budget.
+      // Report that, not whatever the pathfinder says about an abandoned path.
+      if (activeGoal?.budgetExhausted) throw new Error('block_budget_exhausted')
       if (activeGoal?.paused) {
         await waitControlled(activeGoal, 0)
         continue
@@ -841,6 +871,15 @@ async function executeFake(intent, goal) {
   const delay = Math.max(1, Math.min(Number(process.env.JOI_MINECRAFT_FAKE_DELAY_MS || 10), 2000))
   let changes = 0
   let effects = 0
+  // A real route breaks and places blocks on its way to the work. There is no
+  // pathfinder here to emit those events, so this is how a fake world produces
+  // the same accounting: n blocks changed getting there, before anything the
+  // action itself does.
+  for (let index = 0; index < fakeRouteChanges(intent); index += 1) {
+    await waitControlled(goal, 0)
+    countWorldChange()
+    fakeState.blocksChanged += 1
+  }
   if (intent.action === 'follow_player' || intent.action === 'come_to_player') {
     await waitControlled(goal, delay)
     fakeState.position.x += 1
@@ -852,6 +891,7 @@ async function executeFake(intent, goal) {
       fakeState.inventory.set(intent.block, (fakeState.inventory.get(intent.block) || 0) + 1)
       changes += 1
       goal.changes = changes
+      countWorldChange()
       effects += 1
       goal.effects = effects
       fakeState.blocksChanged += 1
@@ -873,6 +913,7 @@ async function executeFake(intent, goal) {
       fakeState.inventory.set(row.block, Math.max(0, (fakeState.inventory.get(row.block) || 1) - 1))
       changes += 1
       goal.changes = changes
+      countWorldChange()
       effects += 1
       goal.effects = effects
       fakeState.blocksChanged += 1
@@ -931,6 +972,12 @@ async function executeFake(intent, goal) {
     await waitControlled(goal, delay)
   }
   return { changes, effects, summary: `${intent.action}_completed`, verified: true }
+}
+
+function fakeRouteChanges(intent) {
+  if (intent.action === 'observe' || intent.action === 'inventory') return 0
+  const configured = Number(process.env.JOI_MINECRAFT_FAKE_ROUTE_CHANGES || 0)
+  return Number.isFinite(configured) ? Math.max(0, Math.min(Math.floor(configured), 4096)) : 0
 }
 
 async function maybeDisconnectAfterEffect(goal, changes) {
@@ -1417,6 +1464,7 @@ function safeError(error) {
     'blueprint_anchor_not_found', 'missing_build_item', 'missing_reference_block',
     'collect_item_not_acquired', 'container_not_found', 'deposit_item_not_found', 'deposit_item_count_insufficient', 'minecraft_connect_failed', 'spawn_timeout',
     'dimension_out_of_scope', 'spatial_scope_exceeded', 'hostile_not_found',
+    'block_budget_exhausted',
   ])
   return allow.has(value) ? value : 'minecraft_goal_failed'
 }
@@ -1451,6 +1499,7 @@ async function runGoal(request, goal) {
         verified: false,
         status: goal.effects > 0 ? 'partial' : 'unverified',
         changes: goal.changes || 0,
+        world_changes: goal.worldChanges || 0,
         effects: goal.effects || 0,
         // No recovery_required field: the goal.failed type already says this is
         // an ordinary failure, and the protocol schema does not carry one here.
@@ -1470,6 +1519,7 @@ async function runGoal(request, goal) {
       status: actionResult.verified === true ? 'completed' : 'unverified',
       summary: actionResult.summary,
       changes: actionResult.changes,
+      world_changes: goal.worldChanges || 0,
       effects: actionResult.effects || 0,
       before: safeObservation(beforeCheckpoint),
       after: safeObservation(afterCheckpoint),
@@ -1488,6 +1538,7 @@ async function runGoal(request, goal) {
       verified: false,
       status: (goal.effects || 0) > 0 ? 'partial' : 'failed',
       changes: goal.changes || 0,
+      world_changes: goal.worldChanges || 0,
       effects: goal.effects || 0,
       before: goal.before,
       after: safeObservation(privateCheckpoint()),
@@ -1523,13 +1574,22 @@ async function handleFresh(request) {
       configureSafeMovements(bot)
       startPresence()
       if (!fakeMode) {
+        // Every block this bot breaks or places, whoever asked for it. Actions
+        // count what they set out to change, which is what verifies them, but
+        // the route digs and pillars on its own -- so counting only deliberate
+        // work left the budget the user confirmed accounting for a fraction of
+        // what actually changed in their world. Both events fire only for this
+        // bot's own dig and place calls, and the pathfinder makes those same
+        // calls, so one pair of listeners sees all of it.
+        bot.on('diggingCompleted', countWorldChange)
+        bot.on('blockPlaced', countWorldChange)
         bot.on('end', () => {
           if (closing) return
           recoveryRequired = true
           const goal = activeGoal
           if (goal) {
             const checkpoint = privateCheckpoint()
-            const payload = { error: 'minecraft_disconnected', verified: false, status: (goal.effects || 0) > 0 ? 'partial' : 'unverified', changes: goal.changes || 0, effects: goal.effects || 0, recovery_required: true, before: goal.before || safeObservation(checkpoint), after: safeObservation(checkpoint), checkpoint }
+            const payload = { error: 'minecraft_disconnected', verified: false, status: (goal.effects || 0) > 0 ? 'partial' : 'unverified', changes: goal.changes || 0, world_changes: goal.worldChanges || 0, effects: goal.effects || 0, recovery_required: true, before: goal.before || safeObservation(checkpoint), after: safeObservation(checkpoint), checkpoint }
             cachedResponses.set(goal.request.message_id, { type: 'recovery.required', payload, goalId: goal.id })
             emit('recovery.required', payload, goal.request, { goalId: goal.id })
             goal.cancelled = true
@@ -1594,7 +1654,7 @@ async function handleFresh(request) {
   if (request.type === 'goal.submit') {
     if (recoveryRequired) {
       const checkpoint = privateCheckpoint()
-      cacheAndEmit(request, 'recovery.required', { error: 'recovery_required', status: 'unverified', verified: false, changes: 0, effects: 0, recovery_required: true, before: safeObservation(checkpoint), after: safeObservation(checkpoint), checkpoint }, { goalId: request.goal_id })
+      cacheAndEmit(request, 'recovery.required', { error: 'recovery_required', status: 'unverified', verified: false, changes: 0, world_changes: 0, effects: 0, recovery_required: true, before: safeObservation(checkpoint), after: safeObservation(checkpoint), checkpoint }, { goalId: request.goal_id })
       return
     }
     if (activeGoal) {
@@ -1606,7 +1666,23 @@ async function handleFresh(request) {
       cacheAndEmit(request, 'error', { error }, { goalId: request.goal_id })
       return
     }
-    const goal = { id: request.goal_id, intent: request.payload.intent, request, paused: false, cancelled: false, changes: 0, effects: 0, inFlight: null }
+    const allowance = Number(request.payload.block_allowance)
+    const goal = {
+      id: request.goal_id,
+      intent: request.payload.intent,
+      request,
+      paused: false,
+      cancelled: false,
+      changes: 0,
+      effects: 0,
+      // Deliberate changes plus everything the route broke or placed to get
+      // there. `changes` still answers "did this action do what it said", so
+      // the two are counted separately rather than one replacing the other.
+      worldChanges: 0,
+      blockAllowance: Number.isFinite(allowance) && allowance >= 0 ? Math.floor(allowance) : -1,
+      budgetExhausted: false,
+      inFlight: null,
+    }
     activeGoal = goal
     cacheAndEmit(request, 'goal.accepted', { state: 'acting' }, { goalId: goal.id })
     void runGoal(request, goal)

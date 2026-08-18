@@ -332,6 +332,7 @@ class GameAdapterRegistry:
         cancel_requested: Callable[[], bool] | None = None,
         on_registered: Callable[[], None] | None = None,
         on_submitted: Callable[[], None] | None = None,
+        block_allowance: int | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             client = self._minecraft_sessions.get(session_id)
@@ -364,13 +365,14 @@ class GameAdapterRegistry:
             return {"ok": False, "error": "goal_cancelled", "status": "cancelled", "verified": False, "changes": 0, "effects": 0, "zero_actions": True}
         try:
             if cancel_requested is None and on_submitted is None:
-                result = client.submit_goal(goal_id, intent)
+                result = client.submit_goal(goal_id, intent, block_allowance=block_allowance)
             else:
                 result = client.submit_goal(
                     goal_id,
                     intent,
                     cancel_requested=cancel_requested,
                     on_submitted=on_submitted,
+                    block_allowance=block_allowance,
                 )
         finally:
             with self._lock:

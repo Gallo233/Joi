@@ -35,7 +35,6 @@ QUERY_ACTIONS = frozenset({"inspect_container", "lookup_recipe", "locate", "load
 # Core-executed read-only action: the bridge never sees it (the bridge cannot
 # see the screen). It shares the same canonicalize/gate/budget/receipt chain.
 SCREEN_ACTIONS = frozenset({"observe_screen"})
-MUTATING_ACTIONS = frozenset({"collect", "mine", "craft", "eat", "place_blueprint", "deposit"})
 DANGEROUS_BLOCKS = frozenset(
     {
         "tnt",
@@ -228,6 +227,13 @@ def check_intent_scope(intent: Mapping[str, Any], scope: Mapping[str, Any]) -> s
 
 
 def estimated_world_changes(intent: Mapping[str, Any]) -> int:
+    """A floor, reserved before the action runs -- never the final account.
+
+    Only what the action sets out to change can be known in advance. Walking to
+    the work can break and place blocks of its own, so the receipt reports what
+    the world actually changed and the session budget is settled against that.
+    """
+
     action = str(intent.get("action") or "")
     if action in {"collect", "mine"}:
         return int(intent.get("count") or 0)
