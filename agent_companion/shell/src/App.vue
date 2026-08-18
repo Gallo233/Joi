@@ -91,7 +91,7 @@ import {
 } from './voiceRuntime'
 import { attachLipSync, detachLipSync, enqueuePcm16Chunk, unlockAudioPlayback } from './voiceLipSync'
 import { VoiceRecorder } from './voiceRecorder'
-import { RealtimeVoiceSession, type RealtimeVoiceEvent, type RealtimeVoiceState } from './realtimeVoice'
+import { RealtimeVoiceSession, realtimeLatencyLabel, type RealtimeVoiceEvent, type RealtimeVoiceState } from './realtimeVoice'
 
 const input = ref('')
 const status = ref<CoreStatus>('offline')
@@ -116,6 +116,8 @@ const workspaceRef = ref<HTMLElement | null>(null)
 let chatPinnedToBottom = true
 let chatHasAutoScrolled = false
 const developerMode = ref(false)
+// The most recent realtime turn's timing label, shown only in developer mode.
+const lastRealtimeLatency = ref('')
 const ready = ref<CoreReadyPayload | null>(null)
 interface CoreConnectionInfo {
   url: string
@@ -1613,7 +1615,11 @@ const voiceStatusText = computed(() => {
   // Listening, thinking, acting and paused all belong to a live realtime turn,
   // so show what that turn is doing. Falling through here reported the
   // dictation microphone instead, which is not the one that is open.
-  if (realtimeVoiceActive.value) return realtimeAssistantTranscript.value || '实时语音已连接，再次点击“结束实时语音”退出。'
+  if (realtimeVoiceActive.value) {
+    const spoken = realtimeAssistantTranscript.value || '实时语音已连接，再次点击“结束实时语音”退出。'
+    const latency = developerMode.value ? lastRealtimeLatency.value : ''
+    return latency ? `${spoken} · ${latency}` : spoken
+  }
   if (!asrConfigured.value) return 'ASR 未配置，请先在 config.yaml 中启用语音识别。'
   if (voiceState.value === 'recording') return `录音中，最长 ${voiceMaxSeconds.value} 秒。`
   if (voiceState.value === 'transcribing') return '转写中...'
@@ -4070,6 +4076,9 @@ function handleRealtimeVoiceEvent(event: RealtimeVoiceEvent) {
     }
   }
   if (event.kind === 'skill_action') realtimeAssistantTranscript.value = realtimeSkillLabel(event)
+  // Timings only, and only where the developer asked to see them: this is the
+  // one place the realtime path can be told apart from a slow provider.
+  if (event.kind === 'latency') lastRealtimeLatency.value = realtimeLatencyLabel(event)
   if (event.kind === 'tts_state') errorText.value = realtimeVoiceErrorLabel(event.error)
   if (event.kind === 'error') {
     errorText.value = realtimeVoiceErrorLabel(event.error)

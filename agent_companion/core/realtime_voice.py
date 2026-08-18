@@ -17,6 +17,7 @@ from collections import deque
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 from pathlib import Path
 import queue
 import re
@@ -124,6 +125,94 @@ def _default_connector(url: str, headers: dict[str, str], timeout: float) -> Rea
     )
 
 
+# How many finished turns the rolling latency window keeps. Enough for a P95
+# that means something over a call, small enough to stay a debug aid.
+_LATENCY_SAMPLES = 64
+# Turns kept open while their marks arrive. Matches the transcript window: a
+# turn older than this has been superseded several times over.
+_LATENCY_TURNS = 8
+
+
+class RealtimeTurnTimings:
+    """Where a spoken turn's seconds actually go.
+
+    Nothing was measured on this path, so every claim about it -- that the wait
+    is the provider, or the local voice, or the microphone -- was a guess. This
+    records four marks per turn and keeps whole milliseconds: no text, no ids,
+    no provider detail, nothing that is not a number.
+
+    The turn is finished by its first audio chunk, because that is the moment
+    the user hears an answer; a muted turn finishes without one.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._open: dict[int, dict[str, float]] = {}
+        self._samples: deque[dict[str, int]] = deque(maxlen=_LATENCY_SAMPLES)
+
+    def mark(self, epoch: int, stage: str) -> dict[str, int]:
+        """Record one mark. Returns the finished turn's timings, or {}."""
+
+        if epoch < 0 or stage not in {"speech_stopped", "response_started", "first_text", "text_done", "first_audio", "muted"}:
+            return {}
+        now = time.monotonic()
+        with self._lock:
+            marks = self._open.get(epoch)
+            if marks is None:
+                # Only a turn that started can be timed: a mark for a turn whose
+                # speech-stopped was never seen has no zero to measure from.
+                if stage != "speech_stopped":
+                    return {}
+                marks = {}
+                self._open[epoch] = marks
+                while len(self._open) > _LATENCY_TURNS:
+                    self._open.pop(min(self._open), None)
+            marks.setdefault(stage, now)
+            if stage not in {"first_audio", "muted"}:
+                return {}
+            self._open.pop(epoch, None)
+            timings = _turn_timings(marks, voiced=stage == "first_audio")
+            if timings:
+                self._samples.append(timings)
+            return timings
+
+    def summary(self) -> dict[str, int]:
+        with self._lock:
+            totals = sorted(sample["total_ms"] for sample in self._samples if "total_ms" in sample)
+            turns = len(self._samples)
+        if not totals:
+            return {"turns": turns, "p50_ms": 0, "p95_ms": 0}
+        return {"turns": turns, "p50_ms": _percentile(totals, 50), "p95_ms": _percentile(totals, 95)}
+
+
+def _turn_timings(marks: Mapping[str, float], *, voiced: bool) -> dict[str, int]:
+    started = marks.get("speech_stopped")
+    if started is None:
+        return {}
+    timings: dict[str, int] = {}
+    for name, stage in (("first_text_ms", "first_text"), ("answer_ms", "text_done")):
+        if stage in marks:
+            timings[name] = _span_ms(started, marks[stage])
+    if voiced and "first_audio" in marks:
+        timings["total_ms"] = _span_ms(started, marks["first_audio"])
+        if "text_done" in marks:
+            timings["voice_ms"] = _span_ms(marks["text_done"], marks["first_audio"])
+    return timings
+
+
+def _span_ms(start: float, end: float) -> int:
+    return max(0, min(int((end - start) * 1000), 600000))
+
+
+def _percentile(sorted_values: list[int], percentile: int) -> int:
+    if not sorted_values:
+        return 0
+    # Nearest-rank: with a handful of samples this reports a real measurement
+    # rather than an interpolation between two of them.
+    rank = max(1, min(len(sorted_values), math.ceil(percentile / 100 * len(sorted_values))))
+    return int(sorted_values[rank - 1])
+
+
 class QwenRealtimeSession:
     """One owner-bound, non-persistent Qwen realtime call."""
 
@@ -177,6 +266,7 @@ class QwenRealtimeSession:
         self._on_transcripts = on_transcripts
         self._transcript_pairs: list[tuple[str, str]] = []
         self._transcripts_delivered = False
+        self.timings = RealtimeTurnTimings()
         self._connector = connector
         self._socket: RealtimeSocket | None = None
         self._lock = threading.RLock()
@@ -409,6 +499,7 @@ class QwenRealtimeSession:
                 if item_key and item_key == self._speech_item_key:
                     self._turn_stopped_epoch = self._epoch
                 epoch = self._epoch
+            self._mark_timing(epoch, "speech_stopped")
             self._emit({"type": "state", "state": "thinking", "epoch": epoch})
             return
         if event_type == "input_audio_buffer.committed":
@@ -446,17 +537,20 @@ class QwenRealtimeSession:
                 self._response_items = {}
                 self._response_text = ""
                 self._response_calls = []
+            self._mark_timing(self._epoch, "response_started")
             self._emit({"type": "state", "state": "thinking", "epoch": self._epoch})
             return
         if event_type == "response.output_item.added":
             self._capture_response_item(event)
             return
         if event_type == "response.text.delta":
+            epoch = self._current_response_epoch(event, "message")
+            if epoch >= 0:
+                self._mark_timing(epoch, "first_text")
             # A split answer is tagged line by line, so a partial caption would
             # show the tags. It arrives whole at response.done instead.
             if self.splits_channels:
                 return
-            epoch = self._current_response_epoch(event, "message")
             text = _bounded_assistant_text(event.get("delta"))
             if text and epoch >= 0:
                 self._emit({"type": "assistant_transcript", "text": text, "final": False, "epoch": epoch})
@@ -594,6 +688,7 @@ class QwenRealtimeSession:
             # Speak first, always. The voice is the low-latency channel; a
             # caption that needs repairing must never hold the audio back, and
             # this runs on the provider reader thread, which must not block.
+            self._mark_timing(epoch, "text_done")
             self._emit({"type": "assistant_text", "text": spoken, "epoch": epoch, "output": "local_tts"})
             self._emit({"type": "state", "state": "assistant_speaking", "epoch": epoch})
             # A caption written in the spoken language is the same failure as no
@@ -1083,6 +1178,21 @@ class QwenRealtimeSession:
             except Exception:
                 pass
 
+    def mark_audio(self, epoch: int, *, voiced: bool) -> None:
+        """Close a turn from Core: its first audio chunk, or the muted verdict.
+
+        Only Core knows this. The provider's own audio is refused on this path,
+        so the moment the user hears an answer is the moment the local voice
+        hands over its first chunk.
+        """
+
+        self._mark_timing(epoch, "first_audio" if voiced else "muted")
+
+    def _mark_timing(self, epoch: int, stage: str) -> None:
+        finished = self.timings.mark(max(0, int(epoch)), stage)
+        if finished:
+            self._emit({"type": "latency", "epoch": max(0, int(epoch)), **finished, **self.timings.summary()})
+
     def _emit(self, payload: dict[str, Any]) -> None:
         # The sink receives only this closed projection. Provider identifiers,
         # raw errors and audio never cross the boundary.
@@ -1238,6 +1348,15 @@ class RealtimeVoiceCoordinator:
         if error:
             return {"ok": False, "error": error, "state": "idle"}
         return {"ok": True, "session_id": resolved, "state": "idle" if session.stopped else "listening", "output": "local_tts"}
+
+    def mark_audio(self, session_id: str, epoch: int, *, voiced: bool) -> None:
+        """Close a turn's timing from the synthesis side. Never raises: this is a debug aid."""
+
+        with self._lock:
+            session = self._sessions.get(str(session_id or ""))
+        if session is None:
+            return
+        session.mark_audio(max(0, int(epoch)), voiced=voiced)
 
     def control(self, owner_id: str, session_id: str, action: str) -> dict[str, Any]:
         session, error = self._owned_session(owner_id, session_id)
@@ -1790,6 +1909,16 @@ def _safe_public_event(payload: Mapping[str, Any]) -> dict[str, Any]:
         if "recovery_required" in payload:
             result["recovery_required"] = bool(payload.get("recovery_required"))
         return result
+    if event_type == "latency":
+        # Whole milliseconds and a turn count. There is nothing else in it, and
+        # nothing else may be added: this is a debug projection of a private
+        # call, so a field that is not a bounded number does not belong.
+        result = {"type": "latency"}
+        for field_name in ("epoch", "first_text_ms", "answer_ms", "voice_ms", "total_ms", "turns", "p50_ms", "p95_ms"):
+            value = payload.get(field_name)
+            if isinstance(value, int) and not isinstance(value, bool):
+                result[field_name] = max(0, min(int(value), 600000))
+        return result if len(result) > 1 else {}
     if event_type == "error":
         error = str(payload.get("error") or "")
         allowed = {"realtime_provider_error", "realtime_disconnected", "realtime_audio_overflow", "realtime_call_conflict"}

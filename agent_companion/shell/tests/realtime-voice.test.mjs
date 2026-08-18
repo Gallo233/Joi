@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { RealtimeVoiceSession, parseRealtimeVoiceEvent } from '../src/realtimeVoice.ts'
+import { RealtimeVoiceSession, parseRealtimeVoiceEvent, realtimeLatencyLabel } from '../src/realtimeVoice.ts'
 
 
 test('core event parsing exposes only the reviewed projection', () => {
@@ -167,4 +167,35 @@ test('provider loss releases microphone capture and closes the Core session', as
   assert.equal(track.stopped, true)
   assert.equal(captureStopped, true)
   assert.deepEqual(stopped, ['realtime-1234567890abcdef'])
+})
+
+test('a realtime latency event carries numbers only, and reads as a debug line', () => {
+  const parsed = parseRealtimeVoiceEvent({
+    type: 'latency',
+    epoch: 3,
+    first_text_ms: 420,
+    answer_ms: 1180,
+    voice_ms: 260,
+    total_ms: 1440,
+    turns: 4,
+    p50_ms: 1400,
+    p95_ms: 2100,
+    // Anything that is not one of the known numbers is dropped on the way in.
+    text: '不该出现的原文',
+  })
+  assert.equal(parsed?.kind, 'latency')
+  assert.equal(parsed.totalMs, 1440)
+  assert.equal(parsed.p95Ms, 2100)
+  assert.equal('text' in parsed, false)
+  const label = realtimeLatencyLabel(parsed)
+  assert.match(label, /出声 1440ms/)
+  assert.match(label, /P95 2100ms/)
+  assert.equal(label.includes('不该出现'), false)
+})
+
+test('a latency event with no measured end still reports what it has', () => {
+  const parsed = parseRealtimeVoiceEvent({ type: 'latency', epoch: 1, answer_ms: 900, turns: 1, p50_ms: 0, p95_ms: 0 })
+  assert.equal(parsed?.kind, 'latency')
+  assert.equal(parsed.totalMs, undefined)
+  assert.equal(realtimeLatencyLabel(parsed), '成文 900ms')
 })

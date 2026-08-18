@@ -2072,6 +2072,7 @@ class JsonRpcBridge:
         line = safe_voice_line(str(event.get("text") or ""), fallback="")
         status = self.tts.status_payload()
         if not line.text or str(status.get("provider") or "").strip().casefold() != "gpt-sovits" or not status.get("configured"):
+            self._mark_realtime_audio(session_id, epoch, voiced=False)
             await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_local_tts_unavailable")
             return
         lock = getattr(self, "_tts_speaker_lock", None)
@@ -2090,6 +2091,7 @@ class JsonRpcBridge:
                     if self._realtime_epochs.get(session_id, -1) != epoch:
                         return
                     if audio.get("voice_audio_error"):
+                        self._mark_realtime_audio(session_id, epoch, voiced=False)
                         await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_local_tts_failed")
                         return
                     payload = {
@@ -2105,6 +2107,9 @@ class JsonRpcBridge:
                     if payload.get("voice_audio_source") not in {"local", None}:
                         await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_local_tts_unavailable")
                         return
+                    # The moment the user hears an answer: this is what the
+                    # turn's end-to-end number is measured to.
+                    self._mark_realtime_audio(session_id, epoch, voiced=True)
                     await self._send_to_owner(
                         owner_id,
                         json.dumps({"jsonrpc": "2.0", "method": "agent.voice_audio", "params": payload}, ensure_ascii=False),
@@ -2116,6 +2121,17 @@ class JsonRpcBridge:
                     stream.close()
                 except (RuntimeError, ValueError):
                     pass
+
+    def _mark_realtime_audio(self, session_id: str, epoch: int, *, voiced: bool) -> None:
+        """Close a realtime turn's timing. A debug aid never gets to break the voice."""
+
+        coordinator = getattr(self, "realtime_voice", None)
+        if coordinator is None:
+            return
+        try:
+            coordinator.mark_audio(session_id, epoch, voiced=voiced)
+        except Exception:
+            return
 
     async def _send_realtime_tts_state(
         self,

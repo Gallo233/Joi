@@ -22,6 +22,7 @@ export type RealtimeVoiceEvent =
   | { kind: 'character_motion'; motion: CharacterMotionName; epoch: number; durationMs: number; loop: boolean; intensity: number }
   | { kind: 'skill_action'; skill: string; status: string; requiresConfirmation: boolean; error?: string }
   | { kind: 'tts_state'; state: 'muted'; error: string; epoch: number }
+  | { kind: 'latency'; epoch: number; firstTextMs?: number; answerMs?: number; voiceMs?: number; totalMs?: number; turns: number; p50Ms: number; p95Ms: number }
   | { kind: 'error'; error: string }
 
 export interface RealtimeStartResult {
@@ -52,6 +53,13 @@ export interface RealtimeCoreEvent {
   motion?: RealtimeCoreMotion
   skill?: string
   requires_confirmation?: boolean
+  first_text_ms?: number
+  answer_ms?: number
+  voice_ms?: number
+  total_ms?: number
+  turns?: number
+  p50_ms?: number
+  p95_ms?: number
 }
 
 interface MediaTrackLike {
@@ -172,8 +180,40 @@ export function parseRealtimeVoiceEvent(raw: unknown): RealtimeVoiceEvent | null
   if (event.type === 'tts_state' && event.state === 'muted') {
     return { kind: 'tts_state', state: 'muted', error: safeError(event.error), epoch }
   }
+  if (event.type === 'latency') {
+    // Developer-mode only, and numbers only: how long the turn took from the
+    // moment the user stopped talking to the moment Joi was heard.
+    return {
+      kind: 'latency',
+      epoch,
+      firstTextMs: boundedMs(event.first_text_ms),
+      answerMs: boundedMs(event.answer_ms),
+      voiceMs: boundedMs(event.voice_ms),
+      totalMs: boundedMs(event.total_ms),
+      turns: boundedMs(event.turns) ?? 0,
+      p50Ms: boundedMs(event.p50_ms) ?? 0,
+      p95Ms: boundedMs(event.p95_ms) ?? 0,
+    }
+  }
   if (event.type === 'error') return { kind: 'error', error: safeError(event.error) }
   return null
+}
+
+function boundedMs(value: unknown) {
+  const number = Number(value)
+  return Number.isFinite(number) && number >= 0 ? Math.min(Math.round(number), 600000) : undefined
+}
+
+/** A deliberately small debug projection of one realtime turn: timings only. */
+export function realtimeLatencyLabel(event: { firstTextMs?: number; answerMs?: number; voiceMs?: number; totalMs?: number; p50Ms: number; p95Ms: number }) {
+  const parts: string[] = []
+  if (event.totalMs !== undefined) parts.push(`出声 ${event.totalMs}ms`)
+  if (event.firstTextMs !== undefined) parts.push(`首字 ${event.firstTextMs}ms`)
+  if (event.answerMs !== undefined) parts.push(`成文 ${event.answerMs}ms`)
+  if (event.voiceMs !== undefined) parts.push(`合成 ${event.voiceMs}ms`)
+  if (event.p50Ms > 0) parts.push(`P50 ${event.p50Ms}ms`)
+  if (event.p95Ms > 0) parts.push(`P95 ${event.p95Ms}ms`)
+  return parts.join(' · ')
 }
 
 export class RealtimeVoiceSession {

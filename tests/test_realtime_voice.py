@@ -615,6 +615,73 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         self.assertEqual(len(actions), 0)
         session.stop()
 
+    def test_a_spoken_turn_is_timed_from_silence_to_the_first_audio(self) -> None:
+        """Nothing on this path was measured, so every claim about it was a guess."""
+
+        session, _socket, _connector, events = self._session()
+        self.assertTrue(session.start()["ok"])
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "response-1"}})
+        _add_output_item(session, "response-1", "text-item", "message")
+        session.handle_provider_event_for_test(
+            {"type": "response.text.delta", "response_id": "response-1", "item_id": "text-item", "delta": "好"}
+        )
+        session.handle_provider_event_for_test(
+            {"type": "response.text.done", "response_id": "response-1", "item_id": "text-item", "text": "好的。"}
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "response-1", "status": "completed"}})
+        # No latency event until the user has actually heard something.
+        self.assertFalse([event for event in events if event.get("type") == "latency"])
+        session.mark_audio(1, voiced=True)
+        latency = [event for event in events if event.get("type") == "latency"]
+        self.assertEqual(len(latency), 1)
+        for field in ("first_text_ms", "answer_ms", "voice_ms", "total_ms"):
+            self.assertIsInstance(latency[0][field], int)
+        # The four marks are ordered, so the spans nest.
+        self.assertLessEqual(latency[0]["first_text_ms"], latency[0]["answer_ms"])
+        self.assertLessEqual(latency[0]["answer_ms"], latency[0]["total_ms"])
+        self.assertEqual(latency[0]["turns"], 1)
+        self.assertEqual(latency[0]["p50_ms"], latency[0]["total_ms"])
+        # Numbers and nothing else: no text, no provider detail, no ids.
+        self.assertEqual(
+            set(latency[0]) - {"session_id"},
+            {"type", "epoch", "first_text_ms", "answer_ms", "voice_ms", "total_ms", "turns", "p50_ms", "p95_ms"},
+        )
+        session.stop()
+
+    def test_a_muted_turn_is_closed_without_a_voice_measurement(self) -> None:
+        session, _socket, _connector, events = self._session()
+        self.assertTrue(session.start()["ok"])
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "response-1"}})
+        _add_output_item(session, "response-1", "text-item", "message")
+        session.handle_provider_event_for_test(
+            {"type": "response.text.done", "response_id": "response-1", "item_id": "text-item", "text": "好的。"}
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "response-1", "status": "completed"}})
+        # The local voice is unavailable, so the turn is closed without one.
+        session.mark_audio(1, voiced=False)
+        latency = [event for event in events if event.get("type") == "latency"]
+        self.assertEqual(len(latency), 1)
+        self.assertNotIn("total_ms", latency[0])
+        self.assertNotIn("voice_ms", latency[0])
+        # A turn with no measured end contributes no percentile.
+        self.assertEqual(latency[0]["p50_ms"], 0)
+        session.stop()
+
+    def test_a_turn_that_never_started_is_not_timed(self) -> None:
+        """A mark with no silence to measure from has no zero, so there is nothing to report."""
+
+        session, _socket, _connector, events = self._session()
+        self.assertTrue(session.start()["ok"])
+        session.mark_audio(7, voiced=True)
+        self.assertFalse([event for event in events if event.get("type") == "latency"])
+        session.stop()
+
     def test_transcript_pairs_reach_the_sink_once_on_stop(self) -> None:
         delivered: list[list[tuple[str, str]]] = []
         session, _socket, _connector, _events = self._session(on_transcripts=lambda _sid, pairs: delivered.append(pairs))
