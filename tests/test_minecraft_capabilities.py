@@ -133,5 +133,40 @@ class MinecraftWorldMemoryTests(unittest.TestCase):
             self.assertNotIn("dirt", memory.summary("srv", "world"))
 
 
+class MinecraftCoverageTests(unittest.TestCase):
+    """The evidence keeps up with the capability, or it stops being evidence.
+
+    Twelve actions were added and neither the offline smoke nor the walkthrough
+    noticed: the smoke reported "primitives=13" while the contract carried 22
+    the bridge executes, which reads as coverage it never had.
+    """
+
+    def test_the_offline_smoke_exercises_every_action_the_bridge_executes(self) -> None:
+        import importlib.util
+
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("_smoke", root / "tools" / "minecraft_p5_smoke.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        covered = {str(intent["action"]) for intent in module.INTENTS}
+        # observe_screen and load_skill are answered inside Core; the bridge
+        # never sees them, so a bridge smoke cannot cover them.
+        expected = (GAME_ACTIONS | QUERY_ACTIONS) - {"load_skill"}
+        self.assertEqual(covered, expected)
+
+    def test_the_walkthrough_checklist_and_its_recorder_list_the_same_scenes(self) -> None:
+        import importlib.util
+        import re
+
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("_walkthrough", root / "tools" / "minecraft_walkthrough_report.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        document = (root / "docs" / "MINECRAFT_REAL_SERVER_WALKTHROUGH.md").read_text(encoding="utf-8")
+        self.assertEqual(set(re.findall(r"### \d+\. `([a-z_]+)`", document)), set(module.SCENES))
+
+
 if __name__ == "__main__":
     unittest.main()

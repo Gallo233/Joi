@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Offline P5 smoke for the reviewed built Minecraft bridge.
+"""Offline smoke for the reviewed built Minecraft bridge.
 
-No Minecraft client or network is opened. The bridge's deterministic fake
-world exercises all ten primitives plus the no-replay recovery path.
+No Minecraft client or network is opened. The bridge's deterministic fake world
+exercises every action the bridge itself executes, the block-budget ceiling, and
+the no-replay recovery path.
+
+Two actions are absent on purpose: ``observe_screen`` and ``load_skill`` are
+answered inside Core and never reach the bridge.
 """
 
 from __future__ import annotations
@@ -50,6 +54,17 @@ INTENTS = (
     {"action": "attack", "count": 1, "radius": 8, "dimension": "overworld"},
     {"action": "flee", "distance": 8, "duration_seconds": 1, "dimension": "overworld"},
     {"action": "guard", "dimension": "overworld"},
+    # Everyday work beyond mining and carrying.
+    {"action": "smelt", "item": "oak_log", "count": 1},
+    {"action": "sort_inventory", "container": "chest", "radius": 8},
+    {"action": "equip", "item": "oak_planks", "destination": "hand"},
+    {"action": "drop", "item": "oak_log", "count": 1},
+    {"action": "fish", "duration_seconds": 1},
+    {"action": "sleep", "radius": 8},
+    # Read-only lookups: they answer with a reading and change nothing.
+    {"action": "inspect_container", "container": "chest", "radius": 8},
+    {"action": "lookup_recipe", "item": "crafting_table"},
+    {"action": "locate", "kind": "structure", "target": "village"},
 )
 
 
@@ -91,6 +106,29 @@ def main() -> int:
     finally:
         client.close()
 
+    budget = MinecraftBridgeClient(
+        built_command(workspace),
+        session_id="session-p5-budget",
+        mode="companion",
+        scope=SCOPE,
+        budget={"max_steps": 4, "max_seconds": 30},
+        # A route that breaks and places blocks on its way to the work.
+        environment={**environment, "JOI_MINECRAFT_FAKE_ROUTE_CHANGES": "6"},
+        response_timeout=10,
+    )
+    try:
+        if not budget.start().get("ok"):
+            raise RuntimeError("minecraft_fake_budget_start_failed")
+        spent = budget.submit_goal(
+            "goal-smoke-budget",
+            {"action": "mine", "block": "oak_log", "count": 1, "radius": 8, "dimension": "overworld"},
+            block_allowance=2,
+        )
+        if spent.get("ok") or spent.get("error") != "block_budget_exhausted" or spent.get("world_changes") != 3:
+            raise RuntimeError("minecraft_fake_block_budget_gate_failed")
+    finally:
+        budget.close()
+
     recovery = MinecraftBridgeClient(
         built_command(workspace),
         session_id="session-p5-recovery",
@@ -114,7 +152,7 @@ def main() -> int:
             raise RuntimeError("minecraft_fake_recovery_gate_failed")
     finally:
         recovery.close()
-    print(f"minecraft_p5_smoke_ok primitives={len(INTENTS)} recovery=no_replay")
+    print(f"minecraft_p5_smoke_ok primitives={len(INTENTS)} block_budget=enforced recovery=no_replay")
     return 0
 
 
