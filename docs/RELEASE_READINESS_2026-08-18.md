@@ -69,3 +69,5 @@ TDD §17 Phase 5 = 性能/可访问性/安全/干净机矩阵 + 许可证/隐私
 5. 剩下的性能基准与升级回滚演练，可在候选阶段补。
 
 在第 3 步之前，GitHub release 只能停留在 draft/prerelease。
+
+需要你亲自动手的每一步（Apple 证书、授权资产打包托管、干净机走查、资产权利）写在 `docs/RELEASE_HANDS_ON.md`。
