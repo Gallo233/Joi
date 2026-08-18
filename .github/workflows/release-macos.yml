@@ -34,7 +34,7 @@ jobs:
           cache: pip
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: agent_companion/shell/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
@@ -68,10 +68,22 @@ jobs:
           python -m pip install -r requirements.txt -r requirements-build.txt
           npm ci --prefix agent_companion/shell
 
+      - name: Build the reviewed Minecraft bridge bundle
+        # The Core sidecar copies adapters/ verbatim, and this bundle is
+        # gitignored -- so without this step a fresh clone produces a package
+        # whose game adapter can never start. It fails closed rather than
+        # misbehaving, but the release would silently ship without it.
+        working-directory: agent_companion/adapters/minecraft-bridge
+        run: |
+          npm ci
+          npm run build
+
       - name: Run release gates
         run: |
           python run_agent_companion_tests.py
+          npm run test:shell --prefix agent_companion/shell
           python tools/packaging_smoke.py
+          python tools/minecraft_p5_smoke.py
           npm run live2d:sync --prefix agent_companion/shell
           npm run assets:verify --prefix agent_companion/shell
           npm run core:bundle --prefix agent_companion/shell

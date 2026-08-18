@@ -28,7 +28,7 @@ jobs:
           cache: pip
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: agent_companion/shell/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
@@ -43,6 +43,9 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Run core regression suite
         run: python run_agent_companion_tests.py
+      - name: Run shell tests
+        working-directory: agent_companion/shell
+        run: npm run test:shell
       - name: Typecheck and build shell
         working-directory: agent_companion/shell
         run: npm run build
@@ -56,8 +59,16 @@ jobs:
         run: python tools/smoke_core_sidecar.py
       - name: Run packaging and release privacy scan
         run: python tools/packaging_smoke.py
-      - name: Check adapter bridge syntax
-        run: node --check agent_companion/adapters/minecraft-bridge/index.js
+      - name: Build the reviewed Minecraft bridge bundle
+        working-directory: agent_companion/adapters/minecraft-bridge
+        run: |
+          node --check index.js
+          npm ci
+          npm run build
+      - name: Run the offline Minecraft bridge smoke
+        # Against the built bundle, which is what a release actually ships:
+        # `node --check` alone proved only that the source parses.
+        run: python tools/minecraft_p5_smoke.py
 
   windows-compatibility:
     name: Windows compatibility lane
@@ -69,7 +80,7 @@ jobs:
           python-version: "3.11"
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: agent_companion/shell/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
@@ -98,6 +109,9 @@ jobs:
         run: python tools/windows_release_check.py --skip-doctor --allow-missing-exe
       - name: Run Windows handoff report
         run: python tools/windows_handoff_report.py --skip-doctor --allow-missing-exe
+      - name: Run shell tests
+        working-directory: agent_companion/shell
+        run: npm run test:shell
       - name: Build frontend
         working-directory: agent_companion/shell
         run: npm run build

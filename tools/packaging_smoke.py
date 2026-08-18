@@ -105,6 +105,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
     if start_bat_path.is_file() and start_ps1_path.is_file():
         _check_launcher(start_bat_path, start_ps1_path, add)
     _check_release_privacy_policy(add)
+    _check_game_adapter_bundle(root, add)
 
     counts = {status: sum(1 for item in items if item["status"] == status) for status in ("ok", "warn", "fail")}
     status = "fail" if counts["fail"] else "warn" if counts["warn"] else "ok"
@@ -225,6 +226,33 @@ def _check_launcher(start_bat_path: Path, start_ps1_path: Path, add: Any) -> Non
     _expect("-Doctor" in ps1 and "joi_doctor.py" in ps1, add, "doctor_launcher", "PowerShell launcher exposes doctor mode.", "Keep start_joi.ps1 wired to tools/joi_doctor.py.")
     _expect("-Setup" in ps1 and "windows_setup_wizard.py" in ps1, add, "setup_launcher", "PowerShell launcher exposes first-run setup mode.", "Keep start_joi.ps1 wired to tools/windows_setup_wizard.py.")
     _expect("joi_core.err.log" in ps1 and "joi_core.out.log" in ps1, add, "core_logs", "Core stdout/stderr logs are configured.", "Keep Core logs under logs/ for shortcut debugging.")
+
+
+def _check_game_adapter_bundle(root: Path, add: Any) -> None:
+    """Whether a package built from this tree would carry a runnable game adapter.
+
+    The Core sidecar copies `adapters/` verbatim, but the bridge's built bundle
+    is gitignored -- so a fresh clone packages an adapter that can never start.
+    Core fails closed and reports it unavailable rather than misbehaving, which
+    is why this warns rather than fails: it is a capability the release would
+    silently omit, not a broken one it would ship.
+    """
+
+    bridge = root / "agent_companion" / "adapters" / "minecraft-bridge"
+    if not (bridge / "index.js").is_file():
+        return
+    bundle = bridge / "dist" / "index.js"
+    vendor = bridge / "dist" / "vendor" / "minecraft-data" / "package.json"
+    runtime = bridge / "dist" / "runtime"
+    if bundle.is_file() and vendor.is_file() and runtime.is_dir():
+        add("ok", "game_adapter_bundle", "Minecraft bridge bundle, pinned data and Node runtime are staged for packaging.")
+        return
+    add(
+        "warn",
+        "game_adapter_bundle",
+        "Minecraft bridge has no built bundle, so a package from this tree would report the game adapter unavailable.",
+        "Run `npm ci && npm run build` in agent_companion/adapters/minecraft-bridge, or state in the release notes that the package ships without game capability.",
+    )
 
 
 def _check_release_privacy_policy(add: Any) -> None:

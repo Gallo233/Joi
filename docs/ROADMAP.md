@@ -173,8 +173,9 @@ macOS（发布路径，`docs/MACOS_RELEASE.md` 是权威流程）：
 - `ci.yml` 已有 required 的 `macos-15` lane 与 Windows 兼容 lane。
 - Tauri 打包 fail-closed：构建独立 Core sidecar、要求完整 Live2D 源、逐文件校验 `release-assets.json` 的 pinned hash。
 - `tools/packaging_smoke.py` 覆盖版本对齐、Tauri 元数据、窗口权限、启动器接线、release 隐私策略。
-- 未完成：干净机验收、真机签名公证证据、多屏/VoiceOver/权限撤销/升级回滚证据。
-- 已知缺口：`agent_companion/adapters/minecraft-bridge/dist/` 是 gitignored，而 sidecar 打包会原样拷贝 `adapters/`。CI 的全新 clone 里没有这个构建产物，因此 release 包中的 Minecraft 适配器会显示未就绪。要么在 workflow 里补一步 bridge 构建，要么在 release notes 里说明该包不含游戏能力。
+- 未完成：干净机验收、真机签名公证证据、多屏/VoiceOver/权限撤销/升级回滚证据。逐项证据与建议顺序见 `docs/RELEASE_READINESS_2026-08-18.md`。
+- CI required lane 现覆盖 Shell 测试（此前从未进 CI）、Node 22（`test:shell` 与 bridge 打包都要求）、桥接构建与离线烟测。
+- ~~已知缺口：`dist/` gitignored 导致 release 包的 Minecraft 适配器未就绪~~ —— 已修：CI 与 release 工作流都会先构建桥接产物，`packaging_smoke` 的 `game_adapter_bundle` 检查在缺产物时 WARN。
 
 Windows（兼容路径，不构成 1.0 承诺）：
 

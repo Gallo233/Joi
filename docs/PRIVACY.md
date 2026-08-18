@@ -14,6 +14,22 @@ Joi does not include a shared cloud account. When the user selects Codex CLI or 
 
 No product analytics or advertising telemetry is intentionally included in the MVP. Crash reporting must remain disabled unless a later release adds an explicit, documented opt-in.
 
+## Realtime voice
+
+Realtime voice is a separate, explicitly started session bound to one window. The Shell captures the microphone and sends ordered 16 kHz PCM16 frames; only Core holds the provider credential, and the provider is configured to return text, never audio. Joi's voice is always the locally configured GPT-SoVITS character voice — when it is unavailable the session keeps captions and stays muted rather than substituting a system or cloud voice.
+
+Raw audio is never written to disk. When a session ends, the sanitized text pairs — what was recognized and what Joi answered — are written to the local conversation history; the disclosure shown before the microphone opens says so.
+
+Developer mode reports per-turn latency for this path. It is whole milliseconds and a turn count only: no transcript, no identifiers, no provider detail.
+
+## Game sessions
+
+A game session requires an explicitly confirmed scope: server, world, dimension, radius, players, blocks, build and container permissions, and action and block budgets. Every action is checked against that scope, costs from the confirmed budget, and produces a receipt. A failed or interrupted action is never replayed automatically.
+
+In-game coordinates never leave the bridge child process. Observations, receipts, captions, spoken lines, memories and anything sent to a model carry names, counts, bearings and distance bands instead.
+
+When the game screen is read, the frame is captured on this machine. Without a configured vision model, only local text recognition runs and no image leaves the device; with one configured, the frame is sent to that model for a scene summary. Core reports which of the two is active, and the microphone disclosure describes it before the session opens. Screenshots are not retained either way.
+
 ## Screen, audio, and Computer Use
 
 Screen Recording, Accessibility, microphone, system-audio, and Apple Events access are requested only when the corresponding user-invoked feature needs them. Computer Use actions remain subject to capability permissions and confirmation for sensitive actions. Watch Together should not retain raw screen video or raw system audio by default; the clean-machine release checklist must verify this behavior.
