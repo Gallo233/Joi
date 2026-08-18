@@ -90,9 +90,46 @@ class MinecraftAutonomyTickerTests(unittest.TestCase):
         self.assertEqual(harness.propose_calls, 0)
         self.assertEqual(harness.ticker.status("session-1")["stats"]["skips"], 1)
 
+    def test_a_proactive_line_is_written_in_the_chat_language(self) -> None:
+        """A Japanese-named character answered a Chinese session in Japanese.
+
+        Autonomy writes straight into the chat and the character voice, and had
+        no language rule anywhere in its prompt or downstream of it.
+        """
+
+        from agent_companion.core.minecraft_autonomy import _build_prompt
+
+        prompt = _build_prompt({"ok": True, "language": "中文", "observation": {}})
+        self.assertIn("台词必须用中文书写", prompt)
+        self.assertNotIn("台词必须用书写", _build_prompt({"ok": True, "observation": {}}))
+
+    def test_joi_can_still_talk_while_she_is_busy_but_not_start_a_second_action(self) -> None:
+        """A minutes-long goal used to make her completely silent for its duration."""
+
+        from agent_companion.core.minecraft_autonomy import _build_prompt
+
+        self.assertIn("只能 speak", _build_prompt({"ok": True, "busy": True, "observation": {}}))
+        harness = _Harness(
+            context={"ok": True, "busy": True, "observation": {}},
+            decisions=[{"kind": "propose", "intent": {"action": "observe"}}, {"kind": "speak", "text": "橡木快挖完了"}],
+        )
+        harness.ticker._tick("session-busy")
+        self.assertEqual(harness.proposed, [])
+        harness.ticker._tick("session-busy")
+        self.assertEqual(harness.spoken, ["橡木快挖完了"])
+
+    def test_what_she_is_carrying_reaches_the_prompt(self) -> None:
+        """Without item names she had nothing constructive to propose."""
+
+        from agent_companion.core.minecraft_autonomy import _build_prompt
+
+        prompt = _build_prompt({"ok": True, "observation": {"inventory_items": [{"name": "oak_log", "count": 7}]}})
+        self.assertIn("背包：oak_log×7", prompt)
+        self.assertIn("背包：空", _build_prompt({"ok": True, "observation": {}}))
+
     def test_interval_is_clamped_and_status_reports_it(self) -> None:
         harness = _Harness(interval_seconds=1)
-        self.assertEqual(harness.ticker.interval_seconds, 15.0)
+        self.assertEqual(harness.ticker.interval_seconds, 10.0)
         harness.ticker.set_interval(3600)
         self.assertEqual(harness.ticker.interval_seconds, 300.0)
 

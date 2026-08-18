@@ -13,8 +13,9 @@ from agent_companion.core.minecraft_contract import (
 MAX_PLAN_STEPS = 8
 _PLAN_BLOCKED_ACTIONS = frozenset({"attack"})
 _PLAN_ALLOWED_HINT = (
-    "observe / inventory / observe_screen / follow_player / come_to_player / collect / "
-    "mine / craft / eat / place_blueprint / deposit / flee / guard"
+    "observe / inventory / observe_screen / lookup_recipe / inspect_container / locate / "
+    "follow_player / come_to_player / collect / mine / craft / smelt / eat / place_blueprint / "
+    "deposit / sort_inventory / equip / drop / fish / sleep / flee / guard"
 )
 
 PlanCompiler = Callable[[str], Any]

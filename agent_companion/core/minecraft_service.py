@@ -12,6 +12,7 @@ from agent_companion.core.collaboration_store import CollaborationStore, RECOVER
 from agent_companion.core.game_adapters import GameAdapterRegistry
 from agent_companion.core.minecraft_contract import (
     MinecraftContractError,
+    QUERY_ACTIONS,
     SCREEN_ACTIONS,
     canonicalize_game_intent,
     canonicalize_minecraft_scope,
@@ -21,11 +22,15 @@ from agent_companion.core.minecraft_contract import (
 from agent_companion.core.minecraft_memory import MinecraftWorldMemory
 from agent_companion.core.minecraft_planner import compile_plan, compile_single_action
 from agent_companion.core.minecraft_screen import MinecraftScreenCache, sanitized_screen_text
+from agent_companion.core.minecraft_skills import MinecraftSkillLibrary
 
 
 _EXTERNAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 _PLAYER = re.compile(r"^[A-Za-z0-9_]{1,32}$")
 _CHAT_COMMAND_INTERVAL_SECONDS = 5.0
+# How many goals stay replay-protected at once. Sized for hours of autonomy, not
+# for the seconds in which a duplicate submit can actually arrive.
+_MAX_TRACKED_GOALS = 512
 
 
 class MinecraftGameService:
@@ -37,19 +42,37 @@ class MinecraftGameService:
         adapters: GameAdapterRegistry,
         screen_cache: MinecraftScreenCache | None = None,
         plan_compiler: Callable[[str], Any] | None = None,
+        skills: MinecraftSkillLibrary | None = None,
     ) -> None:
         self.collaboration = collaboration
         self.adapters = adapters
         self.screen_cache = screen_cache
         self._plan_compiler = plan_compiler
+        self.skills = skills
         self.memory = MinecraftWorldMemory(self.collaboration.data_home)
         self._lock = threading.RLock()
         self._runtime: dict[str, dict[str, Any]] = {}
         self._goals: dict[tuple[str, str], dict[str, Any]] = {}
+        self._goal_order: list[tuple[str, str]] = []
         self._scope_approvals: dict[str, dict[str, Any]] = {}
         self._plan_approvals: dict[str, dict[str, Any]] = {}
         self._plans: dict[tuple[str, str], dict[str, Any]] = {}
         self._chat_last_accepted: dict[str, float | None] = {}
+        self._plan_progress: Callable[[str, dict[str, Any]], None] | None = None
+
+    def set_plan_progress_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
+        """Where step-by-step plan progress is announced, if anywhere."""
+
+        self._plan_progress = sink
+
+    def _announce_plan(self, session_id: str, payload: dict[str, Any]) -> None:
+        sink = self._plan_progress
+        if sink is None:
+            return
+        try:
+            sink(session_id, payload)
+        except Exception:
+            return
 
     def start_session(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
         source = params if isinstance(params, Mapping) else {}
@@ -166,7 +189,7 @@ class MinecraftGameService:
                     return {**previous["result"], "replayed": True}
                 return {"ok": False, "error": "goal_in_progress", "zero_actions": True}
             runtime = self._runtime.get(session_id)
-            self._goals[key] = {"digest": intent_digest, "result": None}
+            self._remember_goal(key, {"digest": intent_digest, "result": None})
             if runtime is not None and runtime.get("active_goal"):
                 if autonomy:
                     # Autonomy never queues behind anything: skip this tick.
@@ -209,7 +232,10 @@ class MinecraftGameService:
         if denial:
             return self._finish_goal(key, {"ok": False, "error": denial, "zero_actions": True})
         action = str(intent["action"])
-        risk = "low" if action in {"observe", "inventory", "observe_screen"} else "medium"
+        # Reading the world is low risk, but it still costs one of the actions the
+        # user approved: max_actions is their ceiling on how much Joi does at all,
+        # and observe/observe_screen have always been counted against it.
+        risk = "low" if action in {"observe", "inventory", "observe_screen"} | QUERY_ACTIONS else "medium"
         gate = self.collaboration.action_allowed(session_id, f"game.minecraft.{action}", risk, effect_kind="")
         if not gate.get("allowed"):
             return self._finish_goal(
@@ -227,6 +253,8 @@ class MinecraftGameService:
             return self._finish_goal(key, {"ok": False, "error": reservation, "zero_actions": True, "session": _public_session(self.collaboration.session_payload(session_id))})
         if _cancelled(cancel_requested):
             return self._finish_goal(key, {"ok": False, "error": "goal_cancelled", "status": "cancelled", "zero_actions": True})
+        if action == "load_skill":
+            return self._submit_skill_goal(key, session_id, str(intent.get("name") or ""))
         if action in SCREEN_ACTIONS:
             return self._submit_screen_goal(key, session_id, goal_id, action)
         started_at = time.monotonic()
@@ -290,12 +318,46 @@ class MinecraftGameService:
             "ok": status == "completed",
             "error": "" if status == "completed" else str(bridge_result.get("error") or status),
             "status": status,
+            # A query's whole point is the reading it came back with.
+            "observation": str(bridge_result.get("detail") or "")[:600] if action in QUERY_ACTIONS else "",
             "summary": _public_action_summary(action, status, int(bridge_result.get("changes") or 0)),
             "receipt": receipt_result.get("receipt") if receipt_result.get("ok") else {},
             "session": _public_session(self.collaboration.session_payload(session_id)),
             "recovery_required": bool(bridge_result.get("recovery_required")),
         }
         return self._finish_goal(key, result)
+
+    def _submit_skill_goal(self, key: tuple[str, str], session_id: str, name: str) -> dict[str, Any]:
+        """Read one knowledge note. Core-side, read-only, same receipt chain."""
+
+        text = self.skills.load(name) if self.skills is not None else ""
+        ok = bool(text)
+        receipt = self.collaboration.add_receipt(
+            session_id,
+            {
+                "action": "minecraft.load_skill",
+                "risk": "low",
+                "before_summary": "skill_note",
+                "after_summary": "skill_note",
+                "verification": {"verified": ok, "blocks_changed": 0, "effects_observed": 0, "after_state_present": ok},
+                "duration_ms": 0,
+                "status": "completed" if ok else "failed",
+            },
+        )
+        if not ok:
+            self._release_budget_reservation(session_id, {"action": "load_skill"})
+        return self._finish_goal(
+            key,
+            {
+                "ok": ok,
+                "error": "" if ok else "skill_note_not_found",
+                "status": "completed" if ok else "failed",
+                "summary": "skill_loaded" if ok else "skill_note_not_found",
+                "observation": text,
+                "receipt": receipt.get("receipt") if receipt.get("ok") else {},
+                "session": _public_session(self.collaboration.session_payload(session_id)),
+            },
+        )
 
     def _submit_screen_goal(self, key: tuple[str, str], session_id: str, goal_id: str, action: str) -> dict[str, Any]:
         """Core-side read-only screen observation, same gate and receipt chain.
@@ -516,13 +578,32 @@ class MinecraftGameService:
         if row is None:
             return
         steps = list(row.get("steps") or [])
-        for step in steps:
+        summary = str(row.get("summary") or "")
+        self._announce_plan(session_id, {"state": "running", "summary": summary, "steps_total": len(steps), "steps_done": 0})
+        for index, step in enumerate(steps):
             with self._lock:
-                if row.get("cancel_requested"):
+                cancelled = bool(row.get("cancel_requested"))
+                if cancelled:
                     row["state"] = "cancelled"
-                    return
-                goal_id = f"plan-goal-{uuid.uuid4().hex}"
-                row["current_goal_id"] = goal_id
+                else:
+                    goal_id = f"plan-goal-{uuid.uuid4().hex}"
+                    row["current_goal_id"] = goal_id
+            if cancelled:
+                self._announce_plan(
+                    session_id,
+                    {"state": "cancelled", "summary": summary, "steps_total": len(steps), "steps_done": index},
+                )
+                return
+            self._announce_plan(
+                session_id,
+                {
+                    "state": "step",
+                    "summary": summary,
+                    "steps_total": len(steps),
+                    "steps_done": index,
+                    "action": str(step.get("action") or ""),
+                },
+            )
             try:
                 result = self.submit_goal(
                     {"session_id": session_id, "goal_id": goal_id, "final": True, "source": "voice", "intent": step}
@@ -540,9 +621,56 @@ class MinecraftGameService:
             if not result.get("ok"):
                 with self._lock:
                     row["state"] = "failed"
+                self._announce_plan(
+                    session_id,
+                    {"state": "failed", "summary": summary, "steps_total": len(steps), "steps_done": index, "action": str(step.get("action") or "")},
+                )
                 return
         with self._lock:
             row["state"] = "completed"
+        self._announce_plan(session_id, {"state": "completed", "summary": summary, "steps_total": len(steps), "steps_done": len(steps)})
+
+    def pending_plan_approval_ids(self) -> list[str]:
+        """Which plan cards are still answerable, for a reloaded conversation."""
+
+        with self._lock:
+            self._prune_plan_approvals()
+            return sorted(self._plan_approvals)
+
+    def has_pending_plan_approval(self, approval_id: str) -> bool:
+        """Whether this id is a plan of ours still waiting to be answered.
+
+        Lets one approval card in the conversation resolve here instead of in
+        the tool-step registry, without either side guessing at the other's ids.
+        """
+
+        with self._lock:
+            self._prune_plan_approvals()
+            return _external_id(approval_id) in self._plan_approvals
+
+    def resolve_plan_approval(self, approval_id: str, approved: bool) -> dict[str, Any]:
+        """Run or drop a compiled plan the user just answered.
+
+        Declining forgets the plan outright: a preview the user said no to must
+        not stay executable, and re-asking costs one compile.
+        """
+
+        approval_id = _external_id(approval_id)
+        with self._lock:
+            self._prune_plan_approvals()
+            approval = self._plan_approvals.get(approval_id)
+            if approval is None:
+                return {"ok": False, "error": "plan_approval_invalid"}
+            if not approved:
+                self._plan_approvals.pop(approval_id, None)
+                return {"ok": True, "state": "cancelled", "plan_id": str(approval.get("plan_id") or "")}
+            session_id = str(approval.get("session_id") or "")
+            plan_id = str(approval.get("plan_id") or "")
+        # execute_plan re-checks the digest and consumes the approval itself, so
+        # the one-time binding still holds even though this read did not pop it.
+        return self.execute_plan(
+            {"session_id": session_id, "plan_id": plan_id, "approval_id": approval_id, "confirmed": True}
+        )
 
     def _prune_plan_approvals(self) -> None:
         now = time.monotonic()
@@ -564,18 +692,23 @@ class MinecraftGameService:
         session_id = _external_id(source.get("session_id"))
         if not session_id:
             return {"ok": False, "error": "session_id_required"}
+        # Before the bridge closes: a running plan loops over its own steps and
+        # would keep submitting them into a session that no longer exists. Each
+        # submit failed closed, so nothing reached the world, but the plan only
+        # noticed by failing a step instead of by being told to stop.
+        self._cancel_session_plans(session_id)
         memory = self._session_memory_input(session_id)
         result = self.adapters.stop_minecraft_session(session_id)
         if result.get("ok") or result.get("forced_terminated"):
             self.collaboration.transition_session(session_id, "cancelled")
-            with self._lock:
-                self._runtime.pop(session_id, None)
+            self._forget_session(session_id)
             if memory is not None:
                 self.memory.remember(
                     memory["server_id"],
                     memory["world"],
                     observation=memory["observation"],
                     recent_goals=memory["recent_goals"],
+                    workstations=memory.get("workstations"),
                 )
         return {**result, "session": _public_session(self.collaboration.session_payload(session_id))}
 
@@ -599,7 +732,16 @@ class MinecraftGameService:
         observation = snapshot.get("observation") if isinstance(snapshot.get("observation"), dict) else {}
         receipts = self.collaboration.list_receipts(session_id, limit=12)
         recent_goals = [str(row.get("action") or "") for row in receipts if isinstance(row, dict)]
-        return {"server_id": server_id, "world": world, "observation": observation, "recent_goals": recent_goals}
+        # What this world actually has, read off what Joi can see right now.
+        blocks = observation.get("nearby_blocks") if isinstance(observation.get("nearby_blocks"), list) else []
+        workstations = [str(row.get("name") or "") for row in blocks if isinstance(row, Mapping)]
+        return {
+            "server_id": server_id,
+            "world": world,
+            "observation": observation,
+            "recent_goals": recent_goals,
+            "workstations": workstations,
+        }
 
     def status(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
         session_id = _external_id((params or {}).get("session_id") if isinstance(params, Mapping) else "")
@@ -657,6 +799,60 @@ class MinecraftGameService:
                 return
             runtime["actions_reserved"] = max(0, int(runtime["actions_reserved"]) - 1)
             runtime["blocks_reserved"] = max(0, int(runtime["blocks_reserved"]) - estimated_world_changes(intent))
+
+    def active_session_ids(self) -> list[str]:
+        """The Minecraft sessions this service currently holds runtime for."""
+
+        with self._lock:
+            return sorted(self._runtime)
+
+    def _cancel_session_plans(self, session_id: str) -> None:
+        """Ask every plan of this session to stop at its next step boundary."""
+
+        with self._lock:
+            rows = [(key, row) for key, row in self._plans.items() if key[0] == session_id]
+            for _key, row in rows:
+                row["cancel_requested"] = True
+            goals = [str(row.get("current_goal_id") or "") for _key, row in rows]
+        for goal_id in goals:
+            if goal_id:
+                self.adapters.cancel_minecraft_goal(session_id, goal_id)
+
+    def _forget_session(self, session_id: str) -> None:
+        """Drop everything keyed to a session that is over.
+
+        Only ``_runtime`` used to be released here, so each finished session left
+        its goals -- each holding a full result payload with a session snapshot
+        and a receipt -- its plans and its chat throttle behind for as long as
+        Core ran. Receipts and world memory are the durable record; these are
+        in-flight bookkeeping and have nothing to say once the world is gone.
+        """
+
+        with self._lock:
+            self._runtime.pop(session_id, None)
+            self._chat_last_accepted.pop(session_id, None)
+            for key in [key for key in self._goals if key[0] == session_id]:
+                self._goals.pop(key, None)
+                self._goal_order = [row for row in self._goal_order if row != key]
+            for key in [key for key in self._plans if key[0] == session_id]:
+                self._plans.pop(key, None)
+
+    def _remember_goal(self, key: tuple[str, str], row: dict[str, Any]) -> None:
+        """Register a goal for no-replay, keeping the registry bounded.
+
+        A session with autonomy running submits a goal every interval for hours,
+        so this cannot grow with the session. The cap is far above any window in
+        which a duplicate submit can arrive -- duplicates come from the dispatch
+        handshake and land within seconds -- so eviction never re-opens a goal
+        that could still be replayed.
+        """
+
+        self._goals[key] = row
+        self._goal_order.append(key)
+        while len(self._goal_order) > _MAX_TRACKED_GOALS:
+            stale = self._goal_order.pop(0)
+            if stale != key:
+                self._goals.pop(stale, None)
 
     def _prune_scope_approvals(self) -> None:
         now = time.monotonic()

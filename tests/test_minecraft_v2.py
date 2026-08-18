@@ -472,6 +472,109 @@ class MinecraftCoreGateTests(unittest.TestCase):
         )
         self.assertFalse(wrong_plan["ok"])
 
+    def test_a_finished_session_leaves_no_per_session_bookkeeping_behind(self) -> None:
+        """Receipts are the record; in-flight bookkeeping is not.
+
+        Only ``_runtime`` used to be released on stop, so every finished session
+        left its goals -- each holding a full result payload with a session
+        snapshot and a receipt -- its plans and its chat throttle in memory for
+        as long as Core ran.
+        """
+
+        service, session_id = self._service_with_planner()
+        preview = service.plan({"session_id": session_id, "goal_text": "先观察再整理"})
+        service.execute_plan(
+            {"session_id": session_id, "plan_id": preview["plan_id"], "approval_id": preview["approval_id"], "confirmed": True}
+        )
+        service.handle_chat(session_id, "Player", "帮我看看周围")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            state = str(service.plan_status({"session_id": session_id, "plan_id": preview["plan_id"]})["state"])
+            if state in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.02)
+        self.assertTrue(service._goals)
+        self.assertTrue(service._plans)
+        self.assertTrue(service._chat_last_accepted)
+        service.stop_session({"session_id": session_id})
+        self.assertEqual([key for key in service._goals if key[0] == session_id], [])
+        self.assertEqual([key for key in service._plans if key[0] == session_id], [])
+        self.assertNotIn(session_id, service._chat_last_accepted)
+        self.assertNotIn(session_id, service._runtime)
+        self.assertEqual(len(service._goal_order), len(service._goals))
+        # The durable record survives the cleanup.
+        self.assertTrue(self.store.list_receipts(session_id))
+
+    def test_stopping_the_session_stops_a_running_plan(self) -> None:
+        """A plan is not allowed to keep stepping into a world that is gone."""
+
+        service, session_id = self._service_with_planner()
+        preview = service.plan({"session_id": session_id, "goal_text": "先观察再整理"})
+        with self.subTest("cancelled at the next step boundary"):
+            service.execute_plan(
+                {"session_id": session_id, "plan_id": preview["plan_id"], "approval_id": preview["approval_id"], "confirmed": True}
+            )
+            service.stop_session({"session_id": session_id})
+            deadline = time.monotonic() + 3
+            state = "running"
+            while time.monotonic() < deadline:
+                row = service._plans.get((session_id, preview["plan_id"]))
+                if row is None:
+                    state = "forgotten"
+                    break
+                state = str(row["state"])
+                if state in {"completed", "failed", "cancelled"}:
+                    break
+                time.sleep(0.02)
+            self.assertIn(state, {"forgotten", "cancelled", "failed", "completed"})
+        # Whatever it managed before the stop, nothing was submitted afterwards.
+        submitted_after_stop = self.registry.submit_calls
+        time.sleep(0.15)
+        self.assertEqual(self.registry.submit_calls, submitted_after_stop)
+
+    def test_goal_replay_protection_is_bounded_for_a_long_autonomous_session(self) -> None:
+        service, session_id = self._service_with_planner()
+        for index in range(600):
+            service._remember_goal((session_id, f"goal-{index}"), {"digest": str(index), "result": None})
+        self.assertLessEqual(len(service._goals), 512)
+        self.assertEqual(len(service._goal_order), len(service._goals))
+        # Duplicates arrive within seconds of the original, so the recent goals
+        # are the ones that must stay protected.
+        self.assertIn((session_id, "goal-599"), service._goals)
+        self.assertNotIn((session_id, "goal-0"), service._goals)
+
+    def test_the_service_can_name_its_own_live_sessions(self) -> None:
+        service, session_id = self._service_with_planner()
+        self.assertEqual(service.active_session_ids(), [session_id])
+        service.stop_session({"session_id": session_id})
+        self.assertEqual(service.active_session_ids(), [])
+
+    def test_one_conversation_card_can_answer_a_compiled_plan(self) -> None:
+        service, session_id = self._service_with_planner()
+        preview = service.plan({"session_id": session_id, "goal_text": "先观察再整理"})
+        approval_id = str(preview["approval_id"])
+        self.assertTrue(service.has_pending_plan_approval(approval_id))
+        self.assertFalse(service.has_pending_plan_approval("minecraft-plan-approval-unknown"))
+        accepted = service.resolve_plan_approval(approval_id, True)
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertEqual(accepted["state"], "running")
+        # The one-time binding still holds: answering twice cannot replay it.
+        self.assertFalse(service.has_pending_plan_approval(approval_id))
+        self.assertFalse(service.resolve_plan_approval(approval_id, True)["ok"])
+
+    def test_a_declined_plan_stops_being_executable(self) -> None:
+        service, session_id = self._service_with_planner()
+        preview = service.plan({"session_id": session_id, "goal_text": "先观察再整理"})
+        declined = service.resolve_plan_approval(str(preview["approval_id"]), False)
+        self.assertTrue(declined["ok"], declined)
+        self.assertEqual(declined["state"], "cancelled")
+        self.assertFalse(service.has_pending_plan_approval(str(preview["approval_id"])))
+        replay = service.execute_plan(
+            {"session_id": session_id, "plan_id": preview["plan_id"], "approval_id": preview["approval_id"], "confirmed": True}
+        )
+        self.assertFalse(replay["ok"])
+        self.assertEqual(self.registry.submit_calls, 0)
+
     def test_chat_from_whitelisted_player_compiles_one_action_and_skips_strangers(self) -> None:
         service, session_id = self._service_with_planner()
         queued = service.handle_chat(session_id, "Player", "帮我看看周围")
@@ -936,7 +1039,15 @@ class MinecraftBridgeIntegrationTests(unittest.TestCase):
         self.assertTrue(rejected["forced_terminated"])
         self.assertFalse(self.client.alive)
 
-    def test_core_response_timeout_kills_child_instead_of_leaving_late_effects(self) -> None:
+    def test_core_giving_up_on_a_slow_goal_cancels_it_and_keeps_the_world(self) -> None:
+        """Core's ack window is a backstop, not a kill switch.
+
+        It used to terminate the child, so any task that took longer than the
+        window disconnected the bot and took the whole session with it. The
+        safety property it was protecting -- no effects landing after Core has
+        reported failure -- is now kept by cancelling the goal instead.
+        """
+
         self.client.close()
         self.client = MinecraftBridgeClient(
             [str(shutil.which("node")), str(self.bridge_script)],
@@ -953,10 +1064,16 @@ class MinecraftBridgeIntegrationTests(unittest.TestCase):
             {"action": "mine", "block": "oak_log", "count": 3, "radius": 8, "dimension": "overworld"},
         )
         self.assertFalse(result["ok"])
-        self.assertTrue(result["recovery_required"])
-        self.assertFalse(self.client.alive)
+        self.assertEqual(result["error"], "goal_timeout")
+        self.assertFalse(result["recovery_required"])
+        self.assertTrue(self.client.alive)
+        # The cancelled goal never lands late, and the world is still Joi's to use.
+        time.sleep(0.9)
+        self.assertTrue(self.client.alive)
+        follow_up = self.client.submit_goal("goal-after-timeout", {"action": "inventory"})
+        self.assertTrue(follow_up["ok"], follow_up)
 
-    def test_bridge_action_timeout_is_partial_recovery_and_process_exits(self) -> None:
+    def test_a_slow_action_reports_partial_without_leaving_the_world(self) -> None:
         self.client.close()
         self.client = MinecraftBridgeClient(
             [str(shutil.which("node")), str(self.bridge_script)],
@@ -977,12 +1094,16 @@ class MinecraftBridgeIntegrationTests(unittest.TestCase):
             {"action": "mine", "block": "oak_log", "count": 3, "radius": 8, "dimension": "overworld"},
         )
         self.assertFalse(result["ok"])
-        self.assertTrue(result["recovery_required"])
-        self.assertEqual(result["status"], "partial")
-        deadline = time.monotonic() + 1
-        while self.client.alive and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertFalse(self.client.alive)
+        # A long task is a long task: the bot stays in the world and the session
+        # stays usable. It used to quit Minecraft and exit the process here,
+        # which is what ended the voice session on every real request.
+        self.assertFalse(result["recovery_required"])
+        self.assertIn(result["status"], {"partial", "unverified"})
+        self.assertEqual(result["error"], "goal_timeout")
+        time.sleep(0.3)
+        self.assertTrue(self.client.alive)
+        follow_up = self.client.submit_goal("goal-after-action-timeout", {"action": "inventory"})
+        self.assertTrue(follow_up["ok"], follow_up)
 
     def test_intent_dimension_must_match_the_live_dimension(self) -> None:
         self.client.close()
@@ -1160,7 +1281,7 @@ class MinecraftBridgeIntegrationTests(unittest.TestCase):
         self.assertTrue(snapshot["ok"], snapshot)
         self.assertEqual(
             set(snapshot["observation"]),
-            {"dimension", "health", "food", "inventory_slots", "inventory_total", "world"},
+            {"dimension", "health", "food", "inventory_slots", "inventory_total", "inventory_items", "world"},
         )
         self.assertEqual(snapshot["observation"]["dimension"], "overworld")
         world = snapshot["observation"]["world"]

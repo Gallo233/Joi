@@ -258,7 +258,7 @@ class GameAdapterRegistry:
                 budget=budget,
                 cwd=str(self.workspace),
                 environment=connection,
-                response_timeout=max(5, min(int(os.environ.get("JOI_MINECRAFT_TIMEOUT", "120")), 900)),
+                response_timeout=_minecraft_response_timeout(),
             )
         except (RuntimeError, ValueError, OSError):
             return {"ok": False, "error": "minecraft_bridge_unreachable"}
@@ -683,6 +683,28 @@ def _builtin_manifests() -> tuple[GameAdapterManifest, ...]:
             source="builtin-reviewed-wrapper",
         ),
     )
+
+
+def _minecraft_response_timeout() -> float:
+    """How long Core waits for a goal reply, always outliving the child's own deadline.
+
+    The child owns the action deadline and reports its own timeout as an ordinary
+    failed goal. Core's window is only a backstop for a child that has gone
+    silent, so it must be the longer of the two -- when Core gave up first it
+    cancelled a goal the bot was still successfully working on.
+    """
+
+    try:
+        action_seconds = int(os.environ.get("JOI_MINECRAFT_ACTION_TIMEOUT_MS", "300000")) / 1000
+    except (TypeError, ValueError):
+        action_seconds = 300.0
+    override = os.environ.get("JOI_MINECRAFT_TIMEOUT")
+    if override:
+        try:
+            return max(5.0, min(float(override), 900.0))
+        except (TypeError, ValueError):
+            pass
+    return max(5.0, min(action_seconds + 60.0, 900.0))
 
 
 def _minecraft_bridge_command(workspace: Path) -> list[str]:
