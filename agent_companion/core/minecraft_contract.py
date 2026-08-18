@@ -21,8 +21,17 @@ GAME_ACTIONS = frozenset(
         "attack",
         "flee",
         "guard",
+        "smelt",
+        "sort_inventory",
+        "equip",
+        "drop",
+        "fish",
+        "sleep",
     }
 )
+# Read-only lookups answered from game data. They change nothing, so they are
+# cheap to allow and are what stops the model guessing recipes and directions.
+QUERY_ACTIONS = frozenset({"inspect_container", "lookup_recipe", "locate", "load_skill"})
 # Core-executed read-only action: the bridge never sees it (the bridge cannot
 # see the screen). It shares the same canonicalize/gate/budget/receipt chain.
 SCREEN_ACTIONS = frozenset({"observe_screen"})
@@ -86,7 +95,7 @@ def canonicalize_game_intent(payload: Mapping[str, Any] | None) -> dict[str, Any
     raw = _mapping(wrapper.get("intent"), "invalid_game_intent")
     _reject_code_fields(raw)
     action = str(raw.get("action") or "")
-    if action not in GAME_ACTIONS | SCREEN_ACTIONS:
+    if action not in GAME_ACTIONS | SCREEN_ACTIONS | QUERY_ACTIONS:
         raise MinecraftContractError("unknown_game_action")
 
     builders = {
@@ -104,6 +113,16 @@ def canonicalize_game_intent(payload: Mapping[str, Any] | None) -> dict[str, Any
         "attack": _attack,
         "flee": _flee,
         "guard": _guard,
+        "smelt": _smelt,
+        "sort_inventory": _sort_inventory,
+        "equip": _equip,
+        "drop": _drop,
+        "fish": _fish,
+        "sleep": _sleep,
+        "inspect_container": _inspect_container,
+        "lookup_recipe": _lookup_recipe,
+        "locate": _locate,
+        "load_skill": _load_skill,
     }
     return builders[action](raw)
 
@@ -151,6 +170,18 @@ def canonicalize_minecraft_scope(payload: Mapping[str, Any] | None) -> dict[str,
     }
 
 
+def _player_in_scope(player: Any, scope: Mapping[str, Any]) -> bool:
+    """Match an allowed player the way Minecraft names are actually typed.
+
+    Case-sensitively, this denied "steve" against an allowed "Steve" -- and the
+    in-game chat gate right next to it already compared casefolded, so the two
+    doors into the same permission disagreed about who was through it.
+    """
+
+    name = str(player or "").strip().casefold()
+    return bool(name) and name in {str(row).strip().casefold() for row in (scope.get("allowed_players") or [])}
+
+
 def check_intent_scope(intent: Mapping[str, Any], scope: Mapping[str, Any]) -> str:
     """Return an audit-safe denial code, or an empty string when in scope."""
 
@@ -165,20 +196,32 @@ def check_intent_scope(intent: Mapping[str, Any], scope: Mapping[str, Any]) -> s
     allowed_blocks = set(scope.get("allowed_blocks") or [])
     if action in {"collect", "mine"} and block not in allowed_blocks:
         return "block_out_of_scope"
-    if action in {"follow_player", "come_to_player"} and str(intent.get("player") or "") not in set(scope.get("allowed_players") or []):
+    if action in {"follow_player", "come_to_player"} and not _player_in_scope(intent.get("player"), scope):
         return "player_out_of_scope"
     if action == "place_blueprint":
         if not bool(scope.get("allow_build")):
             return "building_not_allowed"
-        if intent.get("anchor") == "player" and str(intent.get("player") or "") not in set(scope.get("allowed_players") or []):
+        if intent.get("anchor") == "player" and not _player_in_scope(intent.get("player"), scope):
             return "player_out_of_scope"
         for row in intent.get("blocks") or []:
             if str(row.get("block") or "") not in allowed_blocks:
                 return "block_out_of_scope"
             if max(abs(int(value)) for value in row.get("offset") or [0, 0, 0]) > int(scope.get("max_radius") or 0):
                 return "radius_out_of_scope"
-    if action == "deposit" and not bool(scope.get("allow_containers")):
+    # Anything that puts items into, or reads items out of, someone's storage is
+    # the container permission -- the same one deposit has always needed.
+    if action in {"deposit", "sort_inventory", "inspect_container"} and not bool(scope.get("allow_containers")):
         return "containers_not_allowed"
+    # Smelting consumes what the user confirmed Joi may handle, so the input and
+    # any named fuel are held to the same allow-list as mining and collecting.
+    if action == "smelt":
+        for item in (str(intent.get("item") or ""), str(intent.get("fuel") or "")):
+            if item and item not in allowed_blocks:
+                return "block_out_of_scope"
+    # Dropping is the one way items leave Joi's hands for good; only things the
+    # user put in scope may be thrown away.
+    if action == "drop" and str(intent.get("item") or "") not in allowed_blocks:
+        return "block_out_of_scope"
     if estimated_world_changes(intent) > int(scope.get("max_blocks_changed") or 0):
         return "block_budget_exceeded"
     return ""
@@ -259,6 +302,125 @@ def _come(raw: Mapping[str, Any]) -> dict[str, Any]:
         "player": _player(raw.get("player")),
         "distance": _integer(raw.get("distance", 2), 1, 12, "invalid_follow_distance"),
     }
+
+
+def _smelt(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action", "item"}, {"count", "fuel"}, "unexpected_intent_field")
+    return {
+        "action": "smelt",
+        "item": _block_identifier(raw.get("item"), "invalid_item"),
+        "count": _integer(raw.get("count", 1), 1, 64, "invalid_smelt_count"),
+        "fuel": _block_identifier(raw.get("fuel"), "invalid_fuel") if raw.get("fuel") else "",
+    }
+
+
+def _sort_inventory(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action"}, {"container", "radius", "dimension", "keep"}, "unexpected_intent_field")
+    keep_raw = raw.get("keep", [])
+    if not isinstance(keep_raw, list) or len(keep_raw) > 16:
+        raise MinecraftContractError("invalid_keep_items")
+    intent = {
+        "action": "sort_inventory",
+        "container": _enum(raw.get("container", "chest"), {"chest", "barrel", "shulker_box"}, "invalid_container"),
+        "radius": _integer(raw.get("radius", 8), 1, 16, "invalid_scope_radius"),
+        # What Joi keeps on her rather than storing: tools she is using, food.
+        "keep": [_block_identifier(item, "invalid_item") for item in keep_raw],
+    }
+    _apply_dimension(raw, intent)
+    return intent
+
+
+def _equip(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action", "item"}, {"destination"}, "unexpected_intent_field")
+    return {
+        "action": "equip",
+        "item": _block_identifier(raw.get("item"), "invalid_item"),
+        "destination": _enum(
+            raw.get("destination", "hand"),
+            {"hand", "off-hand", "head", "torso", "legs", "feet"},
+            "invalid_equip_destination",
+        ),
+    }
+
+
+def _drop(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action", "item"}, {"count"}, "unexpected_intent_field")
+    return {
+        "action": "drop",
+        "item": _block_identifier(raw.get("item"), "invalid_item"),
+        "count": _integer(raw.get("count", 1), 1, 64, "invalid_drop_count"),
+    }
+
+
+def _fish(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action"}, {"duration_seconds", "dimension"}, "unexpected_intent_field")
+    intent = {
+        "action": "fish",
+        "duration_seconds": _integer(raw.get("duration_seconds", 60), 1, 300, "invalid_fish_duration"),
+    }
+    _apply_dimension(raw, intent)
+    return intent
+
+
+def _sleep(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action"}, {"radius", "dimension"}, "unexpected_intent_field")
+    intent = {"action": "sleep", "radius": _integer(raw.get("radius", 8), 1, 16, "invalid_scope_radius")}
+    _apply_dimension(raw, intent)
+    return intent
+
+
+def _inspect_container(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action"}, {"container", "radius", "dimension"}, "unexpected_intent_field")
+    intent = {
+        "action": "inspect_container",
+        "container": _enum(
+            raw.get("container", "chest"),
+            {"chest", "barrel", "shulker_box", "furnace", "blast_furnace", "smoker"},
+            "invalid_container",
+        ),
+        "radius": _integer(raw.get("radius", 8), 1, 16, "invalid_scope_radius"),
+    }
+    _apply_dimension(raw, intent)
+    return intent
+
+
+def _lookup_recipe(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action", "item"}, set(), "unexpected_intent_field")
+    return {"action": "lookup_recipe", "item": _block_identifier(raw.get("item"), "invalid_item")}
+
+
+def _locate(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action", "target"}, {"kind", "dimension"}, "unexpected_intent_field")
+    intent = {
+        "action": "locate",
+        "kind": _enum(raw.get("kind", "structure"), {"structure", "biome"}, "invalid_locate_kind"),
+        "target": _block_identifier(raw.get("target"), "invalid_locate_target"),
+    }
+    _apply_dimension(raw, intent)
+    return intent
+
+
+def _load_skill(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_fields(raw, {"action", "name"}, set(), "unexpected_intent_field")
+    name = str(raw.get("name") or "").strip().casefold()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", name):
+        raise MinecraftContractError("invalid_skill_name")
+    return {"action": "load_skill", "name": name}
+
+
+def _enum(value: Any, allowed: set[str], code: str) -> str:
+    text = str(value or "")
+    if text not in allowed:
+        raise MinecraftContractError(code)
+    return text
+
+
+def _apply_dimension(raw: Mapping[str, Any], intent: dict[str, Any]) -> None:
+    if raw.get("dimension") is not None:
+        dimension = str(raw.get("dimension") or "")
+        if dimension not in _DIMENSIONS:
+            raise MinecraftContractError("invalid_dimension")
+        intent["dimension"] = dimension
 
 
 def _block_action(raw: Mapping[str, Any], action: str) -> dict[str, Any]:

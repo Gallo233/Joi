@@ -9,10 +9,27 @@ from typing import Any, Mapping
 
 _MAX_RECENT_GOALS = 12
 _MAX_SUMMARY = 500
+_MAX_WORKSTATIONS = 10
 
 
 def _world_key(server_id: str, world: str) -> str:
     return f"{str(server_id).strip().casefold()}\0{str(world).strip().casefold()}"
+
+
+_WORKSTATIONS = frozenset(
+    {"crafting_table", "furnace", "blast_furnace", "smoker", "chest", "barrel", "anvil", "enchanting_table", "brewing_stand", "bed"}
+)
+
+
+def _merge_workstations(existing: Any, seen: list[str] | None) -> list[str]:
+    """Union of what was known and what was just observed, order kept stable."""
+
+    rows = [str(name) for name in (existing or []) if str(name) in _WORKSTATIONS]
+    for name in seen or []:
+        clean = str(name)
+        if clean in _WORKSTATIONS and clean not in rows:
+            rows.append(clean)
+    return rows[:_MAX_WORKSTATIONS]
 
 
 def _bounded(value: Any, limit: int) -> str:
@@ -42,6 +59,7 @@ class MinecraftWorldMemory:
         *,
         observation: Mapping[str, Any] | None,
         recent_goals: list[str] | None,
+        workstations: list[str] | None = None,
     ) -> None:
         key = _world_key(server_id, world)
         observation = observation if isinstance(observation, Mapping) else {}
@@ -59,6 +77,10 @@ class MinecraftWorldMemory:
                     "last_food": int(observation.get("food") or 0),
                     "last_time_of_day": int(world_view.get("time_of_day") or 0),
                     "recent_goals": [_bounded(goal, 80) for goal in (recent_goals or [])][-_MAX_RECENT_GOALS:],
+                    # Which workbenches, furnaces and chests this world has. It
+                    # is why Joi walks back to the furnace she used last time
+                    # instead of asking to build another one.
+                    "workstations": _merge_workstations(row.get("workstations"), workstations),
                     "updated_at": time.time(),
                 }
             )
@@ -72,6 +94,9 @@ class MinecraftWorldMemory:
         parts = [
             f"上次在世界维度 {row.get('last_dimension') or '未知'}，血量 {int(row.get('last_health') or 0)}、饥饿 {int(row.get('last_food') or 0)}"
         ]
+        stations = [str(name) for name in (row.get("workstations") or [])][:8]
+        if stations:
+            parts.append("这个世界里有过：" + "、".join(stations))
         goals = [str(goal) for goal in (row.get("recent_goals") or [])][-5:]
         if goals:
             parts.append("最近完成：" + "、".join(goals))

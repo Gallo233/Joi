@@ -34,6 +34,15 @@ const capabilities = [
   'attack',
   'flee',
   'guard',
+  'smelt',
+  'sort_inventory',
+  'equip',
+  'drop',
+  'fish',
+  'sleep',
+  'inspect_container',
+  'lookup_recipe',
+  'locate',
 ]
 const allowedTypes = new Set([
   'session.start',
@@ -205,6 +214,15 @@ function validateIntent(intent) {
     attack: [['action', 'count', 'radius', 'dimension'], ['action']],
     flee: [['action', 'distance', 'duration_seconds', 'dimension'], ['action']],
     guard: [['action', 'dimension'], ['action']],
+    smelt: [['action', 'item', 'count', 'fuel'], ['action', 'item']],
+    sort_inventory: [['action', 'container', 'radius', 'keep', 'dimension'], ['action']],
+    equip: [['action', 'item', 'destination'], ['action', 'item']],
+    drop: [['action', 'item', 'count'], ['action', 'item']],
+    fish: [['action', 'duration_seconds', 'dimension'], ['action']],
+    sleep: [['action', 'radius', 'dimension'], ['action']],
+    inspect_container: [['action', 'container', 'radius', 'dimension'], ['action']],
+    lookup_recipe: [['action', 'item'], ['action', 'item']],
+    locate: [['action', 'kind', 'target', 'dimension'], ['action', 'target']],
   }[intent.action]
   const keys = Object.keys(intent)
   if (!fields[1].every((key) => keys.includes(key)) || keys.some((key) => !fields[0].includes(key))) return 'unexpected_intent_field'
@@ -376,11 +394,34 @@ function createConnectedBot() {
 function configureSafeMovements(candidate) {
   if (fakeMode || !candidate?.pathfinder) return
   const movements = new Movements(candidate)
-  movements.canDig = false
-  movements.allow1by1towers = false
-  movements.scafoldingBlocks = []
+  const scope = sessionConfig?.scope || {}
+  const allowed = new Set(scope.allowed_blocks || [])
+  const registry = candidate.registry
+
+  // Bridging, pillaring and tunnelling, but only with what the user already
+  // approved. Locked flat this bot could not cross a one-block gap; opened
+  // wide it would carve through someone's base. So the route may only break or
+  // place the same blocks mining and building may, inside the same radius.
+  const scaffolding = [...allowed]
+    .map((name) => registry?.itemsByName?.[name]?.id)
+    .filter((id) => id !== undefined && id !== null)
+  movements.scafoldingBlocks = scope.allow_build ? scaffolding : []
+  movements.allow1by1towers = Boolean(scope.allow_build) && scaffolding.length > 0
+  movements.canDig = allowed.size > 0
+  if (movements.canDig && registry?.blocksArray) {
+    // Everything except the approved blocks is off limits to the route.
+    movements.blocksCantBreak = new Set(
+      registry.blocksArray.filter((block) => !allowed.has(block.name)).map((block) => block.id),
+    )
+  }
   if (scopeAnchor && Array.isArray(movements.exclusionAreasStep)) {
     movements.exclusionAreasStep.push((block) => positionInScope(block?.position) ? 0 : Infinity)
+  }
+  // Breaking and placing on the way still has to stay inside the radius.
+  for (const key of ['exclusionAreasBreak', 'exclusionAreasPlace']) {
+    if (scopeAnchor && Array.isArray(movements[key])) {
+      movements[key].push((block) => positionInScope(block?.position) ? 0 : Infinity)
+    }
   }
   candidate.pathfinder.setMovements(movements)
 }
@@ -532,11 +573,101 @@ function safeObservation(checkpoint) {
     food: Number(checkpoint.food || 0),
     inventory_slots: Array.isArray(checkpoint.inventory) ? checkpoint.inventory.length : 0,
     inventory_total: Array.isArray(checkpoint.inventory) ? checkpoint.inventory.reduce((total, row) => total + Number(row.count || 0), 0) : 0,
+    // Item names, not just how many slots are full. Without them Joi could not
+    // tell she was already carrying the oak she had just mined, so she had
+    // nothing constructive to propose and nothing concrete to say about it.
+    inventory_items: safeInventoryItems(checkpoint.inventory),
+    nearby_blocks: safeNearbyBlocks(),
     world: safeWorld(),
   }
   const hostiles = nearbyHostiles()
   if (hostiles.length) observation.nearby_hostiles = hostiles
   return observation
+}
+
+/**
+ * What is around Joi, said the way a person would say it.
+ *
+ * She could read her own health and her own bag but had no idea what was in
+ * front of her, so "go get some oak" was a guess and "什么都看不见" was the
+ * honest state of it. Reported egocentrically on purpose -- a name, a count, a
+ * direction and a rough distance -- which is both what a companion would
+ * actually say and the only form that keeps absolute coordinates inside the
+ * child, exactly as every other observation field does.
+ */
+function safeNearbyBlocks(radius = 24, limit = 10) {
+  if (fakeMode || !bot?.entity?.position) return []
+  const origin = bot.entity.position
+  let found = []
+  try {
+    found = bot.findBlocks({ matching: () => true, maxDistance: Math.max(4, Math.min(radius, 48)), count: 512 }) || []
+  } catch {
+    return []
+  }
+  const totals = new Map()
+  for (const point of found) {
+    const block = bot.blockAt(point)
+    const name = String(block?.name || '')
+    if (!name || IGNORED_SCENERY.has(name) || !/^[a-z0-9_]{1,40}$/.test(name)) continue
+    const distance = origin.distanceTo(point)
+    const row = totals.get(name)
+    if (!row) {
+      totals.set(name, { name, count: 1, distance, bearing: bearingFrom(origin, point) })
+      continue
+    }
+    row.count += 1
+    if (distance < row.distance) {
+      row.distance = distance
+      row.bearing = bearingFrom(origin, point)
+    }
+  }
+  return [...totals.values()]
+    .sort((left, right) => left.distance - right.distance)
+    .slice(0, limit)
+    .map((row) => ({
+      name: row.name,
+      count: Math.min(row.count, 9999),
+      direction: row.bearing,
+      distance: distanceBucket(row.distance),
+    }))
+}
+
+/** Blocks nobody would mention. Keeping them would bury the useful ones. */
+const IGNORED_SCENERY = new Set([
+  'air', 'cave_air', 'void_air', 'water', 'flowing_water', 'bedrock',
+  'stone', 'deepslate', 'dirt', 'grass_block', 'gravel', 'sand', 'sandstone',
+  'granite', 'diorite', 'andesite', 'tuff', 'netherrack', 'end_stone',
+  'short_grass', 'tall_grass', 'fern', 'seagrass', 'snow', 'ice',
+])
+
+function bearingFrom(origin, point) {
+  const dx = Number(point.x) - Number(origin.x)
+  const dz = Number(point.z) - Number(origin.z)
+  const dy = Number(point.y) - Number(origin.y)
+  if (Math.abs(dy) > Math.max(4, Math.abs(dx) + Math.abs(dz))) return dy > 0 ? 'above' : 'below'
+  const compass = ['south', 'south_west', 'west', 'north_west', 'north', 'north_east', 'east', 'south_east']
+  const index = Math.round(Math.atan2(-dx, dz) / (Math.PI / 4) + 8) % 8
+  return compass[index]
+}
+
+function distanceBucket(distance) {
+  if (distance <= 4) return 'adjacent'
+  if (distance <= 12) return 'near'
+  return 'far'
+}
+
+function safeInventoryItems(rows) {
+  if (!Array.isArray(rows)) return []
+  const totals = new Map()
+  for (const row of rows) {
+    const name = String(row?.name || '').replace('minecraft:', '')
+    if (!/^[a-z0-9_]{1,40}$/.test(name)) continue
+    totals.set(name, (totals.get(name) || 0) + Math.max(0, Number(row?.count || 0)))
+  }
+  return [...totals.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 16)
+    .map(([name, count]) => ({ name, count: Math.min(count, 9999) }))
 }
 
 function inventoryCount(rows, name) {
@@ -585,6 +716,100 @@ async function waitForInventoryIncrease(name, beforeCount, goal, timeoutMs = 300
     await waitControlled(goal, 100)
   }
   return inventoryCount(privateCheckpoint().inventory, name) > beforeCount
+}
+
+// ---------------------------------------------------------------------------
+// Presence: what makes the body read as inhabited rather than parked.
+//
+// Nothing here ever called bot.look(), so Joi stood with her head locked at
+// whatever pitch she spawned with and never moved between goals -- a mannequin
+// standing in the world. This is deliberately not a goal: it changes no blocks,
+// spends no action budget, writes no receipt, and yields the moment a real goal
+// starts. It stays inside the confirmed radius, so idling can never wander her
+// out of the scope the user approved.
+// ---------------------------------------------------------------------------
+
+let presenceTimer = null
+let presenceStep = 0
+
+const PRESENCE_ENABLED = process.env.JOI_MINECRAFT_PRESENCE !== '0'
+const PRESENCE_TICK_MS = Math.max(400, Math.min(Number(process.env.JOI_MINECRAFT_PRESENCE_MS || 900), 5000))
+
+/** Deterministic-ish jitter, so idling never needs a random source. */
+function presenceWobble(scale) {
+  return (Math.sin(presenceStep * 1.7) + Math.sin(presenceStep * 0.43)) * 0.5 * scale
+}
+
+/** The player Joi should pay attention to: the closest one she may follow. */
+function presenceFocus() {
+  const allowed = new Set((sessionConfig?.scope?.allowed_players || []).map((name) => String(name).toLowerCase()))
+  const self = bot?.entity?.position
+  if (!self) return null
+  let best = null
+  let bestDistance = Infinity
+  for (const player of Object.values(bot.players || {})) {
+    const entity = player?.entity
+    if (!entity || entity === bot.entity) continue
+    if (allowed.size && !allowed.has(String(player.username || '').toLowerCase())) continue
+    const distance = self.distanceTo(entity.position)
+    if (distance < bestDistance) {
+      best = entity
+      bestDistance = distance
+    }
+  }
+  return bestDistance <= 24 ? best : null
+}
+
+async function presenceTick() {
+  if (!bot || closing || recoveryRequired || activeGoal || !bot.entity) return
+  presenceStep += 1
+  const focus = presenceFocus()
+  if (focus) {
+    // Meet the player's eyes rather than staring through them.
+    const target = focus.position.offset(0, focus.height ? focus.height * 0.9 : 1.62, 0)
+    await bot.lookAt(target, false)
+  } else {
+    // Look around: level the head first, since the frozen-downward stare was
+    // the single most lifeless thing about her.
+    const yaw = (bot.entity.yaw || 0) + presenceWobble(0.8)
+    const pitch = presenceWobble(0.25)
+    await bot.look(yaw, pitch, false)
+  }
+  // Sparse idle beats. Jumping is free; a step is checked against the scope so
+  // fidgeting can never carry her past the radius the user confirmed.
+  if (presenceStep % 17 === 0) {
+    bot.setControlState('jump', true)
+    setTimeout(() => { if (bot && !closing) bot.setControlState('jump', false) }, 250)
+    return
+  }
+  if (presenceStep % 11 === 0) {
+    const forward = bot.entity.position.offset(-Math.sin(bot.entity.yaw) * 1.5, 0, -Math.cos(bot.entity.yaw) * 1.5)
+    if (!positionInScope(forward)) return
+    const key = presenceStep % 22 === 0 ? 'back' : 'forward'
+    bot.setControlState(key, true)
+    setTimeout(() => { if (bot && !closing) bot.setControlState(key, false) }, 320)
+  }
+}
+
+function startPresence() {
+  if (!PRESENCE_ENABLED || presenceTimer || fakeMode) return
+  presenceTimer = setInterval(() => {
+    presenceTick().catch(() => {})
+  }, PRESENCE_TICK_MS)
+  if (typeof presenceTimer.unref === 'function') presenceTimer.unref()
+}
+
+function stopIdleControls() {
+  if (!bot) return
+  for (const key of ['forward', 'back', 'jump']) {
+    try { bot.setControlState(key, false) } catch { /* the bot is already gone */ }
+  }
+}
+
+function stopPresence() {
+  if (presenceTimer) clearInterval(presenceTimer)
+  presenceTimer = null
+  stopIdleControls()
 }
 
 function findPlayer(name) {
@@ -678,6 +903,30 @@ async function executeFake(intent, goal) {
     await waitControlled(goal, delay)
     effects += 1
     goal.effects = effects
+  } else if (intent.action === 'lookup_recipe') {
+    await waitControlled(goal, delay)
+    return { changes, effects: 0, summary: 'lookup_recipe_completed', verified: true, detail: { item: intent.item, needs_table: true, ingredients: [{ name: 'oak_planks', need: 4, have: 0 }] } }
+  } else if (intent.action === 'inspect_container') {
+    await waitControlled(goal, delay)
+    return { changes, effects: 0, summary: 'inspect_container_completed', verified: true, detail: { container: intent.container, contents: [{ name: 'oak_log', count: 12 }] } }
+  } else if (intent.action === 'locate') {
+    await waitControlled(goal, delay)
+    return { changes, effects: 0, summary: 'locate_completed', verified: true, detail: { target: intent.target, kind: intent.kind, direction: 'north', distance: 'far' } }
+  } else if (intent.action === 'smelt') {
+    await waitControlled(goal, delay)
+    const available = fakeState.inventory.get(intent.item) || 0
+    if (available < intent.count) throw new Error('smelt_input_not_found')
+    fakeState.inventory.set(intent.item, available - intent.count)
+    effects += intent.count
+    goal.effects = effects
+  } else if (intent.action === 'sort_inventory' || intent.action === 'drop') {
+    await waitControlled(goal, delay)
+    effects += 1
+    goal.effects = effects
+  } else if (intent.action === 'equip' || intent.action === 'fish' || intent.action === 'sleep') {
+    await waitControlled(goal, delay)
+    effects += 1
+    goal.effects = effects
   } else {
     await waitControlled(goal, delay)
   }
@@ -692,6 +941,67 @@ async function maybeDisconnectAfterEffect(goal, changes) {
   cachedResponses.set(goal.request.message_id, { type: 'recovery.required', payload, goalId: goal.id })
   await sleep(5)
   process.exit(23)
+}
+
+/** How many of `itemId` the bot is holding right now. */
+function heldCount(itemId) {
+  return bot.inventory.items().filter((row) => row.type === itemId).reduce((total, row) => total + Number(row.count || 0), 0)
+}
+
+/** What a recipe consumes, as [{id, count}], from either recipe shape. */
+function recipeInputs(recipe) {
+  const totals = new Map()
+  const rows = Array.isArray(recipe.delta)
+    ? recipe.delta.filter((row) => Number(row.count) < 0).map((row) => ({ id: row.id, count: -Number(row.count) }))
+    : [...(recipe.ingredients || []), ...((recipe.inShape || []).flat())]
+        .filter((row) => row && row.id !== undefined && row.id !== null && Number(row.id) >= 0)
+        .map((row) => ({ id: row.id, count: Math.max(1, Number(row.count || 1)) }))
+  for (const row of rows) totals.set(row.id, (totals.get(row.id) || 0) + row.count)
+  return [...totals.entries()].map(([id, count]) => ({ id, count }))
+}
+
+/**
+ * Make the direct recipe satisfiable by crafting what it is missing.
+ *
+ * Bounded on purpose: depth caps the chain (logs -> planks -> table is one
+ * level), and only recipes the bot can reach are attempted. Anything it cannot
+ * resolve is left to the caller's recipe_not_found, never mined speculatively.
+ */
+async function ensureCraftIngredients(item, count, table, goal, depth) {
+  if (depth <= 0) return
+  if (bot.recipesFor(item.id, null, count, table).length) return
+  for (const recipe of bot.recipesAll(item.id, null, table).slice(0, 4)) {
+    let progressed = false
+    for (const input of recipeInputs(recipe)) {
+      const missing = input.count - heldCount(input.id)
+      if (missing <= 0) continue
+      const ingredient = bot.registry.items[input.id]
+      if (!ingredient) continue
+      await ensureCraftIngredients(ingredient, missing, table, goal, depth - 1)
+      const sub = bot.recipesFor(ingredient.id, null, missing, table)[0]
+      if (!sub) continue
+      const perCraft = Math.max(1, Number(sub.result?.count || 1))
+      await waitControlled(goal, 0)
+      await runAtomic(goal, async () => {
+        await bot.craft(sub, Math.max(1, Math.ceil(missing / perCraft)), table)
+      })
+      progressed = true
+    }
+    if (progressed && bot.recipesFor(item.id, null, count, table).length) return
+  }
+}
+
+/** Items Joi will burn, and will not tidy away as loot. */
+const FUEL_ITEMS = new Set(['coal', 'charcoal', 'coal_block', 'lava_bucket', 'blaze_rod', 'dried_kelp_block'])
+
+function isTool(name) {
+  return /_(pickaxe|axe|shovel|hoe|sword|helmet|chestplate|leggings|boots)$/.test(String(name || '')) || name === 'shield'
+}
+
+function findNearbyBlock(name, radius) {
+  const type = bot?.registry?.blocksByName?.[name]
+  if (!type) return null
+  return bot.findBlock({ matching: type.id, maxDistance: Math.max(1, Math.min(radius, 32)) })
 }
 
 async function executeReal(intent, goal) {
@@ -758,6 +1068,11 @@ async function executeReal(intent, goal) {
     const tableType = bot.registry.blocksByName.crafting_table
     const table = tableType ? bot.findBlock({ matching: tableType.id, maxDistance: 16 }) : null
     if (table) assertPositionScope(table.position)
+    // Craft the ingredients first when the direct recipe is not yet satisfiable.
+    // "mine oak, then make a crafting table" used to fail outright here: a
+    // crafting table needs planks, and carrying only logs meant no recipe was
+    // craftable, so Joi reported recipe_not_found while holding the wood for it.
+    await ensureCraftIngredients(item, intent.count, table, goal, 2)
     const recipe = bot.recipesFor(item.id, null, intent.count, table)[0]
     if (!recipe) throw new Error('recipe_not_found')
     const recipeOutput = Math.max(1, Number(recipe.result?.count || 1))
@@ -903,6 +1218,185 @@ async function executeReal(intent, goal) {
     const threatened = nearbyHostiles().length > 0
     return { changes, effects: threatened ? 1 : 0, summary: 'guard_completed', verified: true }
   }
+  if (intent.action === 'lookup_recipe') {
+    // Reading the recipe book, not guessing at it. Returned as an observation so
+    // the model can decide what to gather before it tries to craft.
+    const item = bot.registry.itemsByName[intent.item]
+    if (!item) throw new Error('unknown_item')
+    const table = findNearbyBlock('crafting_table', 16)
+    const recipes = bot.recipesAll(item.id, null, table).slice(0, 3)
+    if (!recipes.length) throw new Error('recipe_not_found')
+    const held = (recipe) => recipeInputs(recipe).map((input) => ({
+      name: String(bot.registry.items[input.id]?.name || 'unknown'),
+      need: input.count,
+      have: heldCount(input.id),
+    }))
+    return {
+      changes,
+      effects: 0,
+      summary: 'lookup_recipe_completed',
+      verified: true,
+      detail: {
+        item: intent.item,
+        needs_table: recipes.every((recipe) => recipe.requiresTable),
+        ingredients: held(recipes[0]).slice(0, 9),
+      },
+    }
+  }
+  if (intent.action === 'inspect_container') {
+    const containerBlock = findNearbyBlock(intent.container, intent.radius)
+    if (!containerBlock) throw new Error('container_not_found')
+    assertPositionScope(containerBlock.position)
+    await safeGoto(new goals.GoalNear(containerBlock.position.x, containerBlock.position.y, containerBlock.position.z, 3))
+    const container = await bot.openContainer(containerBlock)
+    let contents = []
+    try {
+      contents = safeInventoryItems(container.containerItems().map((row) => ({ name: row.name, count: row.count })))
+    } finally {
+      container.close()
+    }
+    return {
+      changes,
+      effects: 0,
+      summary: 'inspect_container_completed',
+      verified: true,
+      detail: { container: intent.container, contents },
+    }
+  }
+  if (intent.action === 'locate') {
+    // Direction and distance band only: the same egocentric shape the rest of
+    // the observation uses, so no absolute coordinate leaves the child.
+    let found = null
+    if (intent.kind === 'biome') {
+      const biome = bot.registry.biomesByName?.[intent.target]
+      if (!biome) throw new Error('unknown_locate_target')
+      found = await bot.findBiome?.(biome.id, { maxDistance: 512 }).catch(() => null)
+    } else {
+      found = await bot.findStructure?.(intent.target, { maxDistance: 512 }).catch(() => null)
+    }
+    if (!found) throw new Error('locate_target_not_found')
+    const point = found.position || found
+    const origin = bot.entity.position
+    return {
+      changes,
+      effects: 0,
+      summary: 'locate_completed',
+      verified: true,
+      detail: {
+        target: intent.target,
+        kind: intent.kind,
+        direction: bearingFrom(origin, point),
+        distance: distanceBucket(origin.distanceTo(point)),
+      },
+    }
+  }
+  if (intent.action === 'smelt') {
+    const furnaceBlock = findNearbyBlock('furnace', 16) || findNearbyBlock('blast_furnace', 16) || findNearbyBlock('smoker', 16)
+    if (!furnaceBlock) throw new Error('furnace_not_found')
+    assertPositionScope(furnaceBlock.position)
+    await safeGoto(new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2))
+    const input = bot.inventory.items().find((row) => row.name === intent.item)
+    if (!input) throw new Error('smelt_input_not_found')
+    const fuel = bot.inventory.items().find((row) => (intent.fuel ? row.name === intent.fuel : FUEL_ITEMS.has(row.name)))
+    if (!fuel) throw new Error('fuel_not_found')
+    const furnace = await bot.openFurnace(furnaceBlock)
+    try {
+      await runAtomic(goal, async () => {
+        await furnace.putFuel(fuel.type, null, Math.min(fuel.count, Math.max(1, Math.ceil(intent.count / 8))))
+        await furnace.putInput(input.type, null, Math.min(input.count, intent.count))
+      })
+      // Smelting is not instant; wait for the output, bounded by the goal.
+      const deadline = Date.now() + Math.min(intent.count * 12000, 240000)
+      while (Date.now() < deadline) {
+        await waitControlled(goal, 1000)
+        if (furnace.outputItem() && Number(furnace.outputItem().count || 0) >= intent.count) break
+      }
+      const output = furnace.outputItem()
+      if (output) {
+        await furnace.takeOutput()
+        effects = Number(output.count || 0)
+        goal.effects = effects
+      }
+    } finally {
+      furnace.close()
+    }
+    return { changes, effects, summary: 'smelt_completed', verified: effects >= intent.count }
+  }
+  if (intent.action === 'sort_inventory') {
+    const containerBlock = findNearbyBlock(intent.container, intent.radius)
+    if (!containerBlock) throw new Error('container_not_found')
+    assertPositionScope(containerBlock.position)
+    await safeGoto(new goals.GoalNear(containerBlock.position.x, containerBlock.position.y, containerBlock.position.z, 2))
+    const keep = new Set(intent.keep || [])
+    const container = await bot.openContainer(containerBlock)
+    try {
+      for (const item of bot.inventory.items()) {
+        if (keep.has(item.name) || FUEL_ITEMS.has(item.name) || isTool(item.name)) continue
+        await waitControlled(goal, 0)
+        await runAtomic(goal, async () => {
+          await container.deposit(item.type, null, item.count)
+          effects += item.count
+          goal.effects = effects
+        })
+      }
+    } finally {
+      container.close()
+    }
+    return { changes, effects, summary: 'sort_inventory_completed', verified: effects > 0 }
+  }
+  if (intent.action === 'equip') {
+    const item = bot.inventory.items().find((row) => row.name === intent.item)
+    if (!item) throw new Error('equip_item_not_found')
+    await runAtomic(goal, async () => {
+      await bot.equip(item, intent.destination)
+      effects = 1
+      goal.effects = effects
+    })
+    const equipped = bot.heldItem?.name === intent.item || intent.destination !== 'hand'
+    return { changes, effects, summary: 'equip_completed', verified: equipped }
+  }
+  if (intent.action === 'drop') {
+    const item = bot.inventory.items().find((row) => row.name === intent.item)
+    if (!item) throw new Error('drop_item_not_found')
+    const before = inventoryCount(beforeInventory, intent.item)
+    await runAtomic(goal, async () => {
+      await bot.toss(item.type, null, Math.min(item.count, intent.count))
+      effects = 1
+      goal.effects = effects
+    })
+    const dropped = before - inventoryCount(privateCheckpoint().inventory, intent.item)
+    return { changes, effects, summary: 'drop_completed', verified: dropped >= Math.min(item.count, intent.count) }
+  }
+  if (intent.action === 'fish') {
+    const rod = bot.inventory.items().find((row) => row.name === 'fishing_rod')
+    if (!rod) throw new Error('fishing_rod_not_found')
+    await bot.equip(rod, 'hand')
+    const deadline = Date.now() + intent.duration_seconds * 1000
+    while (Date.now() < deadline) {
+      await waitControlled(goal, 0)
+      try {
+        await bot.fish()
+        effects += 1
+        goal.effects = effects
+      } catch (error) {
+        if (goal.cancelled) throw error
+        break
+      }
+    }
+    return { changes, effects, summary: 'fish_completed', verified: effects > 0 }
+  }
+  if (intent.action === 'sleep') {
+    const bedBlock = bot.findBlock({ matching: (block) => Boolean(block && /_bed$/.test(String(block.name || ''))), maxDistance: intent.radius })
+    if (!bedBlock) throw new Error('bed_not_found')
+    assertPositionScope(bedBlock.position)
+    await safeGoto(new goals.GoalNear(bedBlock.position.x, bedBlock.position.y, bedBlock.position.z, 2))
+    await runAtomic(goal, async () => {
+      await bot.sleep(bedBlock)
+      effects = 1
+      goal.effects = effects
+    })
+    return { changes, effects, summary: 'sleep_completed', verified: Boolean(bot.isSleeping) }
+  }
   throw new Error('unknown_game_action')
 }
 
@@ -928,9 +1422,15 @@ function safeError(error) {
 }
 
 async function runGoal(request, goal) {
+  // Idling never fights a goal: release whatever the presence loop was holding
+  // before the pathfinder takes the controls.
+  stopIdleControls()
   const beforeCheckpoint = privateCheckpoint()
   goal.before = safeObservation(beforeCheckpoint)
-  const timeoutMs = Math.max(1000, Math.min(Number(process.env.JOI_MINECRAFT_ACTION_TIMEOUT_MS || 120000), 900000))
+  // Real tasks are slow: mining enough oak and walking back is minutes, not
+  // seconds. This is the deadline that owns the action; Core's ack window is
+  // only a backstop for a child that has gone silent, and is kept longer.
+  const timeoutMs = Math.max(1000, Math.min(Number(process.env.JOI_MINECRAFT_ACTION_TIMEOUT_MS || 300000), 900000))
   let timer = null
   try {
     const execution = fakeMode ? executeFake(goal.intent, goal) : executeReal(goal.intent, goal)
@@ -939,24 +1439,26 @@ async function runGoal(request, goal) {
       new Promise((resolve) => { timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs) }),
     ])
     if (result.kind === 'timeout') {
+      // A goal that ran long is a goal that ran long. It used to quit Minecraft
+      // and exit this process, so asking for anything that takes real time --
+      // "mine enough oak, then build a crafting table" -- disconnected the bot
+      // and took the voice session down with it. Stop the work, keep the world.
       goal.cancelled = true
-      recoveryRequired = true
       if (bot?.pathfinder) bot.pathfinder.stop()
       if (bot && typeof bot.stopDigging === 'function') bot.stopDigging()
-      if (bot && !fakeMode && typeof bot.quit === 'function') bot.quit('joi_goal_timeout')
       const payload = {
         error: 'goal_timeout',
         verified: false,
         status: goal.effects > 0 ? 'partial' : 'unverified',
         changes: goal.changes || 0,
         effects: goal.effects || 0,
-        recovery_required: true,
+        // No recovery_required field: the goal.failed type already says this is
+        // an ordinary failure, and the protocol schema does not carry one here.
         before: goal.before,
         after: safeObservation(privateCheckpoint()),
         checkpoint: privateCheckpoint(),
       }
-      cacheAndEmit(request, 'recovery.required', payload, { goalId: goal.id })
-      setTimeout(() => process.exit(24), 10)
+      cacheAndEmit(request, 'goal.failed', payload, { goalId: goal.id })
       return
     }
     if (result.kind === 'error') throw result.error
@@ -974,6 +1476,9 @@ async function runGoal(request, goal) {
       checkpoint: afterCheckpoint,
     }
     if (actionResult.verified !== true) payload.error = 'verification_failed'
+    // Query actions answer with a reading rather than a change; this is the one
+    // field that carries it back, and it is bounded on the Core side.
+    if (actionResult.detail) payload.detail = actionResult.detail
     cacheAndEmit(request, actionResult.verified === true ? 'goal.completed' : 'goal.failed', payload, { goalId: goal.id })
   } catch (error) {
     if (goal.cancelled || String(error?.message || error) === 'goal_cancelled') return
@@ -1016,6 +1521,7 @@ async function handleFresh(request) {
       const position = currentPosition()
       scopeAnchor = position ? { x: Number(position.x || 0), y: Number(position.y || 0), z: Number(position.z || 0) } : null
       configureSafeMovements(bot)
+      startPresence()
       if (!fakeMode) {
         bot.on('end', () => {
           if (closing) return
@@ -1160,6 +1666,7 @@ async function handleFresh(request) {
   if (request.type === 'session.stop') {
     if (process.env.JOI_MINECRAFT_FAKE_IGNORE_CONTROL === '1') return
     closing = true
+    stopPresence()
     if (activeGoal) activeGoal.cancelled = true
     if (bot?.pathfinder) bot.pathfinder.stop()
     if (bot && !fakeMode && typeof bot.quit === 'function') bot.quit('joi_session_stop')
@@ -1211,6 +1718,7 @@ const reader = readline.createInterface({ input: process.stdin, crlfDelay: Infin
 reader.on('line', (line) => { void handleLine(line) })
 reader.on('close', () => {
   closing = true
+  stopPresence()
   if (activeGoal) activeGoal.cancelled = true
   if (bot?.pathfinder) bot.pathfinder.stop()
   if (bot && !fakeMode && typeof bot.quit === 'function') bot.quit('joi_parent_closed')

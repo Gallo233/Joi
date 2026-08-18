@@ -44,3 +44,7 @@ agent_companion/shell/tests/baseline/*.digest.txt
 # Config backups. `config.yaml` is ignored because it holds real credentials;
 # a copy of it with a suffix holds the same credentials.
 config.yaml.bak-*
+
+# Playing notes are the user's own world knowledge, not shipped code.
+config/minecraft-skills/*
+!config/minecraft-skills/README.md

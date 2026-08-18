@@ -4,6 +4,7 @@ from collections import OrderedDict, deque
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -155,6 +156,7 @@ class MinecraftBridgeClient:
         environment: Mapping[str, str] | None = None,
         response_timeout: float = 30.0,
         control_timeout: float = 1.5,
+        startup_timeout: float = 20.0,
     ) -> None:
         if not command or not str(command[0]).strip():
             raise ValueError("missing_minecraft_bridge_command")
@@ -166,6 +168,7 @@ class MinecraftBridgeClient:
         self.cwd = cwd
         self.response_timeout = max(1.0, min(float(response_timeout), 900.0))
         self.control_timeout = max(0.1, min(float(control_timeout), 10.0))
+        self.startup_timeout = max(self.control_timeout, min(float(startup_timeout), 120.0))
         self._condition = threading.Condition(threading.RLock())
         self._write_lock = threading.Lock()
         self._goal_dispatch_lock = threading.Lock()
@@ -204,7 +207,11 @@ class MinecraftBridgeClient:
         return not self._closed and self._process.poll() is None and not self._transport_error
 
     def read_ready_for_test(self) -> dict[str, Any]:
-        return self._wait_for(lambda event: event.get("type") == "bridge.ready", timeout=self.control_timeout)
+        # Its own window, not the control one: this waits for a Node process to
+        # spawn and load mineflayer, which on a busy machine is comfortably more
+        # than the 1.5s a control round-trip is allowed. Sharing that budget
+        # surfaced a cold start as "minecraft_bridge_ack_timeout" on connect.
+        return self._wait_for(lambda event: event.get("type") == "bridge.ready", timeout=self.startup_timeout)
 
     def add_event_listener(self, callback: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Subscribe to unsolicited bridge events (``reply_to == ""``).
@@ -301,6 +308,20 @@ class MinecraftBridgeClient:
                 timeout=self.response_timeout,
             )
         except RuntimeError as exc:
+            # A goal that outran its ack window is not a broken bridge: the child
+            # is still connected and still holding the world. Terminating on that
+            # is what turned "this took a while" into "reconnect everything".
+            # Only a transport that has actually failed ends the session.
+            if str(exc) == "minecraft_bridge_ack_timeout" and not self._transport_error:
+                self.cancel(goal_id)
+                return {
+                    "ok": False,
+                    "error": "goal_timeout",
+                    "status": "unverified",
+                    "verified": False,
+                    "recovery_required": False,
+                    "bridge_instance_id": self._bridge_instance_id,
+                }
             self._terminate()
             return {
                 "ok": False,
@@ -311,6 +332,7 @@ class MinecraftBridgeClient:
                 "bridge_instance_id": self._bridge_instance_id,
             }
         payload = response.get("payload") if isinstance(response.get("payload"), dict) else {}
+        detail = _safe_query_detail(payload.get("detail"))
         if response.get("type") != "goal.completed":
             child_status = str(payload.get("status") or "failed")
             if child_status not in {"partial", "unverified", "failed", "cancelled"}:
@@ -342,6 +364,7 @@ class MinecraftBridgeClient:
             "changes": _safe_int(payload.get("changes")),
             "effects": _safe_int(payload.get("effects")),
             "checkpoint": _safe_checkpoint(payload.get("checkpoint")),
+            "detail": detail,
             "bridge_instance_id": self._bridge_instance_id,
         }
 
@@ -608,11 +631,111 @@ def _event_error(event: Mapping[str, Any], fallback: str) -> str:
     return code if code in _BRIDGE_ERROR_CODES else fallback
 
 
+_ITEM_NAME = re.compile(r"^[a-z0-9_]{1,40}$")
+
+
+def _safe_inventory_items(value: Any) -> list[dict[str, Any]]:
+    """Item names and counts, re-validated on the way in.
+
+    Game item names are what let Joi reason about what she is carrying. They are
+    revalidated here rather than trusted: the child is a separate process, and
+    only a bounded list of plain identifiers may enter Core.
+    """
+
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for row in value[:16]:
+        if not isinstance(row, Mapping):
+            continue
+        name = str(row.get("name") or "")
+        if not _ITEM_NAME.fullmatch(name):
+            continue
+        rows.append({"name": name, "count": min(_safe_int(row.get("count")), 9_999)})
+    return rows
+
+
+_DIRECTIONS = frozenset(
+    {"north", "north_east", "east", "south_east", "south", "south_west", "west", "north_west", "above", "below"}
+)
+_DISTANCES = frozenset({"adjacent", "near", "far"})
+
+
+def _safe_nearby_blocks(value: Any) -> list[dict[str, Any]]:
+    """What is around Joi, revalidated as name + count + bearing + distance band.
+
+    Egocentric by construction: there is no field here an absolute coordinate
+    could travel in, which is why this is the shape the observation carries.
+    """
+
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for row in value[:12]:
+        if not isinstance(row, Mapping):
+            continue
+        name = str(row.get("name") or "")
+        direction = str(row.get("direction") or "")
+        distance = str(row.get("distance") or "")
+        if not _ITEM_NAME.fullmatch(name) or direction not in _DIRECTIONS or distance not in _DISTANCES:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "count": min(_safe_int(row.get("count")), 9_999),
+                "direction": direction,
+                "distance": distance,
+            }
+        )
+    return rows
+
+
+def _safe_query_detail(value: Any) -> str:
+    """One plain sentence describing what a read-only action found.
+
+    Queries answer with a reading rather than a change, and this is the only
+    field that carries it. It is rendered here, from validated parts, so the
+    child cannot put arbitrary text -- or a coordinate -- into Core's mouth.
+    """
+
+    if not isinstance(value, Mapping):
+        return ""
+    if "ingredients" in value:
+        item = str(value.get("item") or "")
+        if not _ITEM_NAME.fullmatch(item):
+            return ""
+        parts = []
+        for row in list(value.get("ingredients") or [])[:9]:
+            if not isinstance(row, Mapping):
+                continue
+            name = str(row.get("name") or "")
+            if not _ITEM_NAME.fullmatch(name):
+                continue
+            parts.append(f"{name} 需要{_safe_int(row.get('need'))}、现有{_safe_int(row.get('have'))}")
+        table = "需要工作台" if value.get("needs_table") else "徒手可合成"
+        return f"{item} 配方（{table}）：{'；'.join(parts)}" if parts else ""
+    if "contents" in value:
+        container = str(value.get("container") or "")
+        if not _ITEM_NAME.fullmatch(container):
+            return ""
+        rows = _safe_inventory_items(value.get("contents"))
+        listed = "、".join(f"{row['name']}×{row['count']}" for row in rows) or "空的"
+        return f"{container} 里：{listed}"
+    if "direction" in value:
+        target = str(value.get("target") or "")
+        direction = str(value.get("direction") or "")
+        distance = str(value.get("distance") or "")
+        if not _ITEM_NAME.fullmatch(target) or direction not in _DIRECTIONS or distance not in _DISTANCES:
+            return ""
+        return f"{target} 在{direction}方向，{distance}"
+    return ""
+
+
 def _safe_observation(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     required = {"dimension", "health", "food", "inventory_slots", "inventory_total"}
-    if set(value) - required - {"nearby_hostiles", "world"} or not required.issubset(set(value)):
+    if set(value) - required - {"nearby_hostiles", "world", "inventory_items", "nearby_blocks"} or not required.issubset(set(value)):
         return {}
     dimension = str(value.get("dimension") or "").replace("minecraft:", "")
     if dimension not in _DIMENSIONS:
@@ -624,6 +747,12 @@ def _safe_observation(value: Any) -> dict[str, Any]:
         "inventory_slots": min(_safe_int(value.get("inventory_slots")), 128),
         "inventory_total": min(_safe_int(value.get("inventory_total")), 100_000),
     }
+    items = _safe_inventory_items(value.get("inventory_items"))
+    if items:
+        observation["inventory_items"] = items
+    blocks = _safe_nearby_blocks(value.get("nearby_blocks"))
+    if blocks:
+        observation["nearby_blocks"] = blocks
     hostiles = value.get("nearby_hostiles")
     if isinstance(hostiles, list):
         rows: list[dict[str, Any]] = []
@@ -731,8 +860,8 @@ def _validate_event_payload(message_type: str, payload: Mapping[str, Any]) -> No
         "session.ready": ({"capabilities", "state"}, set()),
         "session.stopped": ({"state"}, set()),
         "goal.accepted": ({"state"}, set()),
-        "goal.completed": ({"verified", "status", "summary", "changes", "effects", "before", "after", "checkpoint"}, {"replayed"}),
-        "goal.failed": ({"verified", "status", "changes", "effects", "before", "after", "checkpoint"}, {"error", "summary", "replayed"}),
+        "goal.completed": ({"verified", "status", "summary", "changes", "effects", "before", "after", "checkpoint"}, {"replayed", "detail"}),
+        "goal.failed": ({"verified", "status", "changes", "effects", "before", "after", "checkpoint"}, {"error", "summary", "replayed", "detail"}),
         "goal.paused": ({"state"}, set()),
         "goal.resumed": ({"state"}, set()),
         "goal.cancelled": ({"state", "status", "verified", "changes", "effects", "before", "after", "checkpoint"}, {"replayed"}),
