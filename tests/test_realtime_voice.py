@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import queue
 from pathlib import Path
 import tempfile
 import threading
@@ -11,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_companion.core.config import RealtimeVoiceConfig, is_safe_qwen_realtime_url
+from agent_companion.core.planner import build_plan, is_minecraft_task
 from agent_companion.core.realtime_voice import (
     QwenRealtimeSession,
     RealtimeVoiceCoordinator,
@@ -304,7 +306,17 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         encoded = json.dumps(config)
         for forbidden in ("session_id", "goal_id", "approval", "confirmed_scope", "api_key", "sk-private"):
             self.assertNotIn(forbidden, encoded)
-        self.assertEqual(len(config["tools"]), 14)  # 10 bridge primitives + observe_screen + attack/flee/guard
+        # Every Minecraft proposal plus the two local ones every mode gets.
+        names = [tool["function"]["name"] for tool in config["tools"]]
+        self.assertEqual(len(names), 27)
+        # The read-only lookups are what stop the model guessing recipes and
+        # directions, so their presence is part of the contract.
+        for expected in ("minecraft_lookup_recipe", "minecraft_inspect_container", "minecraft_locate", "minecraft_smelt"):
+            self.assertIn(expected, names)
+        self.assertEqual(
+            [tool["function"]["name"] for tool in config["tools"]][:2],
+            ["joi_play_motion", "joi_run_skill"],
+        )
         self.assertEqual(
             events[-1],
             {"session_id": "realtime-local-1", "type": "state", "state": "listening"},
@@ -333,12 +345,56 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         audio = base64.b64encode(b"\x00\x00" * 320).decode("ascii")  # 40 ms at 16 kHz.
         self.assertTrue(session.append_audio(1, audio, sample_rate=16000, channels=1, sample_width=2)["ok"])
         _wait_until(lambda: any(row.get("type") == "input_audio_buffer.append" for row in socket.sent))
+        # Forward-only, not exact: frames lost upstream resynchronize, because
+        # refusing them forever left Joi listening and permanently deaf.
+        self.assertTrue(session.append_audio(3, audio, sample_rate=16000, channels=1, sample_width=2)["ok"])
+        # A repeat or a rewind is still refused.
         self.assertEqual(session.append_audio(3, audio, sample_rate=16000, channels=1, sample_width=2)["error"], "realtime_audio_sequence_gap")
-        self.assertEqual(session.append_audio(2, "not-base64", sample_rate=16000, channels=1, sample_width=2)["error"], "realtime_audio_invalid")
-        self.assertEqual(session.append_audio(2, audio, sample_rate=48000, channels=1, sample_width=2)["error"], "realtime_audio_format_invalid")
+        self.assertEqual(session.append_audio(2, audio, sample_rate=16000, channels=1, sample_width=2)["error"], "realtime_audio_sequence_gap")
+        self.assertEqual(session.append_audio(4, "not-base64", sample_rate=16000, channels=1, sample_width=2)["error"], "realtime_audio_invalid")
+        self.assertEqual(session.append_audio(4, audio, sample_rate=48000, channels=1, sample_width=2)["error"], "realtime_audio_format_invalid")
         too_large = base64.b64encode(b"\x00\x00" * 2000).decode("ascii")
-        self.assertEqual(session.append_audio(2, too_large, sample_rate=16000, channels=1, sample_width=2)["error"], "realtime_audio_chunk_invalid")
+        self.assertEqual(session.append_audio(4, too_large, sample_rate=16000, channels=1, sample_width=2)["error"], "realtime_audio_chunk_invalid")
         session.stop()
+
+    def test_a_brief_stall_drops_audio_instead_of_dropping_the_call(self) -> None:
+        """Under a second of buffer used to mean any hiccup ended the session."""
+
+        session, _socket, _connector, events = self._session()
+        self.assertTrue(session.start()["ok"])
+        audio = base64.b64encode(b"\x00\x00" * 320).decode("ascii")
+        # Wedge the sender so nothing drains, then push far past the queue depth.
+        session._audio_queue.maxsize = 4
+        for index in range(1, 40):
+            result = session.append_audio(index, audio, sample_rate=16000, channels=1, sample_width=2)
+            self.assertTrue(result["ok"], result)
+        self.assertFalse(session.stopped)
+        self.assertFalse([event for event in events if event.get("type") == "error"])
+        session.stop()
+
+    def test_a_sender_that_never_drains_is_still_a_lost_transport(self) -> None:
+        class _Wedged:
+            """A queue that is full and never drains: the sender is gone."""
+
+            maxsize = 1
+
+            def put_nowait(self, _item: object) -> None:
+                raise queue.Full
+
+            def get_nowait(self) -> object:
+                raise queue.Empty
+
+        session, _socket, _connector, _events = self._session()
+        self.assertTrue(session.start()["ok"])
+        audio = base64.b64encode(b"\x00\x00" * 320).decode("ascii")
+        session._audio_queue = _Wedged()  # type: ignore[assignment]
+        outcome = {"ok": True}
+        for index in range(1, 200):
+            outcome = session.append_audio(index, audio, sample_rate=16000, channels=1, sample_width=2)
+            if not outcome.get("ok"):
+                break
+        self.assertEqual(outcome["error"], "realtime_audio_overflow")
+        self.assertTrue(session.stopped)
 
     def test_public_events_drop_provider_ids_audio_and_raw_errors(self) -> None:
         session, _socket, _connector, events = self._session()
@@ -967,6 +1023,550 @@ class RealtimeVoiceCoordinatorTests(unittest.TestCase):
         coordinator._sessions[session_id].handle_provider_event_for_test({"type": "error", "error": {}})
         self.assertEqual(coordinator.status("owner-a"), {"ok": False, "error": "realtime_session_not_found", "state": "idle"})
         self.assertTrue(socket.closed)
+
+
+class QwenRealtimeLocalSkillTests(unittest.TestCase):
+    """Natural speech reaching Joi's own body and Joi's own local skills."""
+
+    def _session(
+        self,
+        *,
+        mode: str = "conversation",
+        run_skill: object = None,
+        compile_game_plan: object = None,
+        events: list[dict[str, object]] | None = None,
+    ) -> tuple[QwenRealtimeSession, _FakeSocket, list[dict[str, object]]]:
+        socket = _ready_socket()
+        emitted = events if events is not None else []
+        session = QwenRealtimeSession(
+            _config(),
+            session_id="realtime-local-skill",
+            owner_id="owner-skill",
+            mode=mode,
+            minecraft_session_id="session-minecraft-1" if mode == "minecraft" else "",
+            emit=emitted.append,
+            execute_action=lambda *_: {"ok": True, "status": "completed"},
+            cancel_action=lambda *_: {"ok": True},
+            run_skill=run_skill,  # type: ignore[arg-type]
+            compile_game_plan=compile_game_plan,  # type: ignore[arg-type]
+            allowed_players=("Steve",) if mode == "minecraft" else (),
+            connector=_Connector(socket),
+        )
+        self.assertTrue(session.start()["ok"])
+        return session, socket, emitted
+
+    def _call_turn(
+        self,
+        session: QwenRealtimeSession,
+        name: str,
+        arguments: str,
+        *,
+        transcript: str = "",
+        response_id: str = "skill-response",
+    ) -> None:
+        """One complete microphone turn whose answer is a single tool call."""
+
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": f"item-{response_id}"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": f"item-{response_id}"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": f"item-{response_id}"})
+        if transcript:
+            session.handle_provider_event_for_test(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": f"item-{response_id}",
+                    "transcript": transcript,
+                }
+            )
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": response_id}})
+        _add_output_item(session, response_id, f"call-item-{response_id}", "function_call")
+        session.handle_provider_event_for_test(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": response_id,
+                "item_id": f"call-item-{response_id}",
+                "call_id": f"call-{response_id}",
+                "name": name,
+                "arguments": arguments,
+            }
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": response_id, "status": "completed"}})
+
+    def test_both_modes_offer_the_local_proposals(self) -> None:
+        for mode in ("conversation", "minecraft"):
+            with self.subTest(mode=mode):
+                session, socket, _events = self._session(mode=mode)
+                names = [tool["function"]["name"] for tool in socket.sent[0]["session"]["tools"]]
+                self.assertIn("joi_play_motion", names)
+                self.assertIn("joi_run_skill", names)
+                self.assertEqual(any(name.startswith("minecraft_") for name in names), mode == "minecraft")
+                instructions = str(socket.sent[0]["session"]["instructions"])
+                self.assertNotIn("当前没有任何工具权限", instructions)
+                session.stop()
+
+    def test_a_spoken_motion_request_plays_a_local_clip_and_speaks_once(self) -> None:
+        session, socket, events = self._session()
+        self._call_turn(session, "joi_play_motion", json.dumps({"motion": "dance", "intensity": 0.9}), transcript="给我跳个舞")
+        motions = [event for event in events if event.get("type") == "character_motion"]
+        self.assertEqual(len(motions), 1)
+        self.assertEqual(motions[0]["motion"]["name"], "dance")
+        self.assertEqual(motions[0]["motion"]["intensity"], 0.9)
+        self.assertEqual(motions[0]["motion"]["duration_ms"], 6000)
+        # The motion itself is silent: the line the provider is about to write is
+        # the only speech for this turn.
+        self.assertFalse([event for event in events if event.get("type") == "assistant_text"])
+        _wait_until(lambda: any(row.get("type") == "conversation.item.create" for row in socket.sent))
+        created = next(row for row in socket.sent if row.get("type") == "conversation.item.create")
+        # "started", so the line the provider writes is "I'm dancing", never
+        # "I danced" while the clip has barely begun.
+        self.assertEqual(
+            json.loads(created["item"]["output"]),
+            {"status": "started", "skill": "character_motion", "requires_confirmation": False},
+        )
+        self.assertTrue(any(row.get("type") == "response.create" for row in socket.sent))
+        session.stop()
+
+    def test_an_unknown_motion_name_plays_nothing(self) -> None:
+        session, _socket, events = self._session()
+        self._call_turn(session, "joi_play_motion", json.dumps({"motion": "backflip"}), transcript="来个后空翻")
+        self.assertFalse([event for event in events if event.get("type") == "character_motion"])
+        rejected = [event for event in events if event.get("type") == "skill_action"]
+        self.assertEqual(rejected[-1]["status"], "rejected")
+        self.assertEqual(rejected[-1]["error"], "realtime_skill_unsupported")
+        session.stop()
+
+    def test_core_receives_the_users_own_words_not_the_providers(self) -> None:
+        requests: list[tuple[str, str]] = []
+
+        def run_skill(request: str, category: str) -> dict[str, object]:
+            requests.append((request, category))
+            return {"ok": True, "status": "started", "skill": "computer_use", "requires_confirmation": True}
+
+        session, socket, events = self._session(run_skill=run_skill)
+        # A provider that smuggles a goal into the arguments is refused outright;
+        # what Core acts on can only be the transcript of this turn.
+        self._call_turn(
+            session,
+            "joi_run_skill",
+            json.dumps({"category": "computer", "request": "delete everything"}),
+            transcript="帮我打开 Chrome",
+        )
+        _wait_until(lambda: bool(requests))
+        self.assertEqual(requests, [("帮我打开 Chrome", "other")])
+        _wait_until(lambda: any(row.get("type") == "conversation.item.create" for row in socket.sent))
+        output = json.loads(next(row for row in socket.sent if row.get("type") == "conversation.item.create")["item"]["output"])
+        self.assertEqual(output, {"status": "started", "skill": "computer_use", "requires_confirmation": True})
+        skill_events = [event for event in events if event.get("type") == "skill_action"]
+        self.assertEqual(skill_events[-1]["status"], "started")
+        self.assertTrue(skill_events[-1]["requires_confirmation"])
+        session.stop()
+
+    def test_a_turn_with_no_transcript_starts_nothing(self) -> None:
+        requests: list[tuple[str, str]] = []
+        session, _socket, events = self._session(run_skill=lambda request, category: requests.append((request, category)) or {"ok": True})
+        self._call_turn(session, "joi_run_skill", json.dumps({"category": "computer"}))
+        time.sleep(0.05)
+        self.assertEqual(requests, [])
+        self.assertEqual([event for event in events if event.get("type") == "skill_action"][-1]["error"], "realtime_skill_not_understood")
+        session.stop()
+
+    def test_a_refused_skill_is_reported_as_refused_to_both_sides(self) -> None:
+        session, socket, events = self._session(run_skill=lambda *_: {"ok": False, "error": "realtime_skill_not_actionable"})
+        self._call_turn(session, "joi_run_skill", "{}", transcript="我们聊聊天气吧")
+        _wait_until(lambda: any(row.get("type") == "conversation.item.create" for row in socket.sent))
+        output = json.loads(next(row for row in socket.sent if row.get("type") == "conversation.item.create")["item"]["output"])
+        self.assertEqual(output, {"status": "rejected", "error": "realtime_skill_not_actionable"})
+        self.assertEqual([event for event in events if event.get("type") == "skill_action"][-1]["status"], "rejected")
+        session.stop()
+
+    def test_a_missing_core_hook_never_claims_the_skill_ran(self) -> None:
+        session, socket, events = self._session()
+        self._call_turn(session, "joi_run_skill", "{}", transcript="帮我打开 Chrome")
+        _wait_until(lambda: any(row.get("type") == "conversation.item.create" for row in socket.sent))
+        output = json.loads(next(row for row in socket.sent if row.get("type") == "conversation.item.create")["item"]["output"])
+        self.assertEqual(output["status"], "rejected")
+        self.assertEqual(output["error"], "realtime_skill_unavailable")
+        session.stop()
+
+    def test_one_local_proposal_per_microphone_turn(self) -> None:
+        requests: list[tuple[str, str]] = []
+        session, _socket, events = self._session(
+            run_skill=lambda request, category: requests.append((request, category)) or {"ok": True, "status": "started"},
+        )
+        self._call_turn(session, "joi_play_motion", json.dumps({"motion": "greet"}), transcript="打个招呼再帮我打开 Chrome")
+        # Second call, same turn: the provider follows its own tool result with
+        # another proposal. The turn already spent its one action.
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "second-response"}})
+        _add_output_item(session, "second-response", "second-item", "function_call")
+        session.handle_provider_event_for_test(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": "second-response",
+                "item_id": "second-item",
+                "call_id": "second-call",
+                "name": "joi_run_skill",
+                "arguments": "{}",
+            }
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "second-response", "status": "completed"}})
+        time.sleep(0.05)
+        self.assertEqual(requests, [])
+        self.assertEqual(len([event for event in events if event.get("type") == "character_motion"]), 1)
+        session.stop()
+
+    def test_every_refused_call_is_answered_so_the_turn_still_speaks(self) -> None:
+        """Two proposals in one turn used to produce total silence.
+
+        "挥个手，然后帮我打开 Chrome" is ordinary phrasing, and the provider
+        answers it with two calls. Refusing them without sending outputs left
+        both open, no response followed, and Joi never said why.
+        """
+
+        session, socket, events = self._session()
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "u"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "u"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "u"})
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "r"}})
+        for call_id, name in (("c1", "joi_play_motion"), ("c2", "joi_run_skill")):
+            _add_output_item(session, "r", f"i-{call_id}", "function_call")
+            session.handle_provider_event_for_test(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "response_id": "r",
+                    "item_id": f"i-{call_id}",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": json.dumps({"motion": "greet"}) if name == "joi_play_motion" else "{}",
+                }
+            )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "r", "status": "completed"}})
+        outputs = [row for row in socket.sent if row.get("type") == "conversation.item.create"]
+        self.assertEqual([row["item"]["call_id"] for row in outputs], ["c1", "c2"])
+        for row in outputs:
+            self.assertEqual(json.loads(row["item"]["output"])["error"], "realtime_one_action_per_turn")
+        # One response for the batch: one per output would have Joi say two
+        # separate lines about the same refusal.
+        self.assertEqual(sum(1 for row in socket.sent if row.get("type") == "response.create"), 1)
+        self.assertFalse([event for event in events if event.get("type") == "character_motion"])
+        session.stop()
+
+    def test_a_refused_game_action_is_answered_instead_of_left_hanging(self) -> None:
+        session, socket, events = self._session(mode="minecraft")
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "u"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "u"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "u"})
+        session.handle_provider_event_for_test(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "u",
+                "transcript": "我们去看看周围吧",
+            }
+        )
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "r"}})
+        _add_output_item(session, "r", "i", "function_call")
+        session.handle_provider_event_for_test(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": "r",
+                "item_id": "i",
+                "call_id": "c",
+                # Scheme A refuses this: the turn carries no attack instruction.
+                "name": "minecraft_attack",
+                "arguments": "{}",
+            }
+        )
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "r", "status": "completed"}})
+        rejected = [event for event in events if event.get("type") == "game_action" and event.get("status") == "rejected"]
+        self.assertEqual(rejected[-1]["error"], "attack_requires_explicit_instruction")
+        _wait_until(lambda: any(row.get("type") == "conversation.item.create" for row in socket.sent))
+        output = json.loads(next(row for row in socket.sent if row.get("type") == "conversation.item.create")["item"]["output"])
+        self.assertEqual(output, {"status": "rejected", "error": "realtime_attack_not_authorized"})
+        session.stop()
+
+    def test_call_memory_is_bounded_without_letting_a_replay_through(self) -> None:
+        session, _socket, _events = self._session()
+        for index in range(300):
+            session._remember_handled_call(f"call-{index}", f"digest-{index}")
+        self.assertLessEqual(len(session._handled_calls), 128)
+        self.assertEqual(len(session._handled_calls), len(session._handled_call_order))
+        # The most recent calls -- the only ones a replay can still arrive for --
+        # are the ones kept.
+        self.assertIn("call-299", session._handled_calls)
+        self.assertNotIn("call-0", session._handled_calls)
+        session.stop()
+
+    def test_following_the_user_needs_no_name_from_the_model(self) -> None:
+        """"跟着我" names nobody, and a guessed name is refused as out of scope."""
+
+        from agent_companion.core.realtime_voice import _proposal_from_call
+
+        proposal = _proposal_from_call("minecraft_follow_player", "{}", ("Steve",))
+        self.assertEqual(proposal["intent"]["player"], "Steve")
+        self.assertEqual(_proposal_from_call("minecraft_come_to_player", "{}", ("Steve",))["intent"]["player"], "Steve")
+        # With nobody authorized, or with a choice to make, Core does not pick.
+        self.assertIsNone(_proposal_from_call("minecraft_follow_player", "{}", ()))
+        self.assertIsNone(_proposal_from_call("minecraft_follow_player", "{}", ("Steve", "Alex")))
+
+    def test_the_model_is_told_who_the_user_is_in_game(self) -> None:
+        from agent_companion.core.realtime_voice import _minecraft_instructions
+
+        self.assertIn("Steve", _minecraft_instructions(allowed_players=("Steve",)))
+        self.assertIn("填写自己的 Minecraft 玩家名", _minecraft_instructions(allowed_players=()))
+
+    def test_a_multi_step_goal_is_compiled_instead_of_answered_with_one_action(self) -> None:
+        """"Mine enough oak, then build a crafting table" is two steps, not one."""
+
+        compiled: list[tuple[str, str]] = []
+        session, socket, events = self._session(
+            mode="minecraft",
+            compile_game_plan=lambda session_id, request: compiled.append((session_id, request))
+            or {"ok": True, "status": "started", "requires_confirmation": True},
+        )
+        self._call_turn(session, "minecraft_plan", "{}", transcript="帮我去挖足够的橡木，然后建造工作台")
+        _wait_until(lambda: bool(compiled))
+        self.assertEqual(compiled, [("session-minecraft-1", "帮我去挖足够的橡木，然后建造工作台")])
+        skill = [event for event in events if event.get("type") == "skill_action"][-1]
+        self.assertEqual(skill["status"], "started")
+        self.assertTrue(skill["requires_confirmation"])
+        session.stop()
+
+    def test_a_local_proposal_from_a_stale_turn_is_dropped(self) -> None:
+        requests: list[tuple[str, str]] = []
+        session, _socket, events = self._session(
+            run_skill=lambda request, category: requests.append((request, category)) or {"ok": True, "status": "started"},
+        )
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "stale"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "stale"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "stale"})
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "stale-response"}})
+        _add_output_item(session, "stale-response", "stale-item", "function_call")
+        session.handle_provider_event_for_test(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": "stale-response",
+                "item_id": "stale-item",
+                "call_id": "stale-call",
+                "name": "joi_play_motion",
+                "arguments": json.dumps({"motion": "dance"}),
+            }
+        )
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "fresh"})
+        session.handle_provider_event_for_test({"type": "response.done", "response": {"id": "stale-response", "status": "completed"}})
+        time.sleep(0.05)
+        self.assertEqual(requests, [])
+        self.assertFalse([event for event in events if event.get("type") == "character_motion"])
+        session.stop()
+
+
+class RealtimeSkillGateTests(unittest.TestCase):
+    """Core's own reading of a spoken turn, on real sentences."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temporary.name)
+        (self.workspace / "config.yaml").write_text(
+            "characters:\n  - name: 测试角色\n    setting: 测试\n", encoding="utf-8"
+        )
+        self.bridge = JsonRpcBridge(self.workspace)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_spoken_requests_reach_the_skill_they_would_reach_when_typed(self) -> None:
+        for spoken, skill in (
+            ("帮我打开 Chrome", "computer_use"),
+            ("在B站搜索 崩坏三", "computer_use"),
+            ("点击右上角那个按钮", "computer_use"),
+            ("陪我看这个视频", "screen"),
+            ("你刚才看到了什么", "screen"),
+            ("帮我修复这个项目的报错", "code"),
+        ):
+            with self.subTest(spoken=spoken):
+                decision = self.bridge._realtime_skill_decision(spoken)
+                self.assertTrue(decision.get("ok"), decision)
+                self.assertEqual(decision.get("skill"), skill)
+
+    def test_anything_that_touches_this_machine_still_promises_confirmation(self) -> None:
+        decision = self.bridge._realtime_skill_decision("帮我打开 Chrome")
+        self.assertTrue(decision["requires_confirmation"])
+        # Watching is read-only, so it starts without an approval card.
+        self.assertFalse(self.bridge._realtime_skill_decision("陪我看这个视频")["requires_confirmation"])
+
+    def test_conversation_is_refused_rather_than_turned_into_a_task(self) -> None:
+        submitted: list[str] = []
+        with patch.object(JsonRpcBridge, "submit_user_text", side_effect=lambda text: submitted.append(text) or {"ok": True}):
+            for spoken in ("我们聊聊今天的天气", "你觉得这首歌好听吗", "今天心情不错", "谢谢你陪我", ""):
+                with self.subTest(spoken=spoken):
+                    refusal = self.bridge._realtime_run_skill(spoken, "computer")
+                    self.assertFalse(refusal.get("ok"), refusal)
+                    self.assertIn(refusal["error"], {"realtime_skill_not_actionable", "realtime_skill_not_understood"})
+        self.assertEqual(submitted, [])
+
+    def test_an_accepted_turn_is_submitted_without_the_voice_waiting_for_it(self) -> None:
+        submitted: list[str] = []
+        release = threading.Event()
+
+        def slow_submit(text: str) -> dict[str, object]:
+            submitted.append(text)
+            release.wait(2)
+            return {"ok": True}
+
+        with patch.object(JsonRpcBridge, "submit_user_text", side_effect=slow_submit):
+            started = time.monotonic()
+            result = self.bridge._realtime_run_skill("帮我打开 Chrome", "computer")
+            elapsed = time.monotonic() - started
+        self.assertEqual(result["status"], "started")
+        self.assertLess(elapsed, 0.5)
+        _wait_until(lambda: submitted == ["帮我打开 Chrome"])
+        release.set()
+
+    def test_a_minecraft_goal_goes_to_minecraft_not_to_another_games_skill(self) -> None:
+        """OK-WW automates Wuthering Waves; it must never answer for Minecraft."""
+
+        for spoken in ("帮我在 Minecraft 里挖点石头", "在我的世界里做个梯子", "minecraft 里跟着我"):
+            with self.subTest(spoken=spoken):
+                plan = build_plan(spoken)
+                self.assertNotEqual(plan.intent, "game_assist")
+                self.assertFalse(any(step.name == "game.ok_ww.run" for step in plan.steps))
+                self.assertTrue(is_minecraft_task(spoken))
+                decision = self.bridge._realtime_skill_decision(spoken)
+                self.assertEqual(decision.get("skill"), "game")
+                self.assertTrue(decision["requires_confirmation"])
+        # And the OK-WW route still answers for its own game.
+        self.assertEqual(build_plan("帮我用 OK-WW 清体力").intent, "game_assist")
+        self.assertFalse(is_minecraft_task("帮我用 OK-WW 清体力"))
+
+    def test_talking_about_minecraft_is_not_a_request_inside_it(self) -> None:
+        """"我的世界" is also ordinary Chinese, and a question is not an order."""
+
+        for spoken in (
+            "Minecraft 是什么游戏",
+            "我的世界好玩吗",
+            "跟我聊聊 Minecraft",
+            "我的世界里只有你",
+            "介绍一下 minecraft 的历史",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertFalse(is_minecraft_task(spoken))
+
+    def test_a_minecraft_goal_with_no_world_connected_says_so(self) -> None:
+        result = self.bridge.minecraft_text_goal_command("帮我在 Minecraft 里挖点石头")
+        self.assertFalse(result["ok"])
+        summaries = [str(event["display_card"]["summary"]) for event in result["events"]]
+        self.assertTrue(any("先在游戏面板里连接世界" in summary for summary in summaries), summaries)
+        # Nothing was compiled and nothing reached the world.
+        self.assertFalse(any("需要确认" == str(event["display_card"]["title"]) for event in result["events"]))
+
+    def test_a_typed_minecraft_goal_takes_the_same_route(self) -> None:
+        routed: list[str] = []
+        with patch.object(JsonRpcBridge, "minecraft_text_goal_command", side_effect=lambda text: routed.append(text) or {"ok": True}):
+            self.bridge.submit_user_text("帮我在 Minecraft 里挖点石头")
+            # A game goal that happens to say "打开" must not also leave a
+            # desktop-automation session behind for work that stays in the game.
+            self.bridge.submit_user_text("帮我在 Minecraft 里打开箱子")
+        self.assertEqual(routed, ["帮我在 Minecraft 里挖点石头", "帮我在 Minecraft 里打开箱子"])
+        self.assertFalse(self.bridge.collaboration.context().get("session_id"))
+
+    def test_a_compiled_plan_is_shown_for_approval_and_answered_from_that_card(self) -> None:
+        preview = {
+            "ok": True,
+            "requires_approval": True,
+            "approval_id": "minecraft-plan-approval-abc",
+            "plan_id": "plan-abc",
+            "summary": "先看看周围再收集石头",
+            "steps": [{"action": "observe"}, {"action": "collect", "block": "stone"}],
+            "estimated_actions": 2,
+            "estimated_changes": 2,
+        }
+        resolved: list[tuple[str, bool]] = []
+        with patch.object(JsonRpcBridge, "_active_minecraft_session_id", return_value="session-mc-live"), \
+                patch.object(self.bridge.minecraft, "plan", return_value=preview) as compile_plan:
+            started = self.bridge.minecraft_text_goal_command("帮我在 Minecraft 里挖点石头")
+        self.assertTrue(started["ok"], started)
+        self.assertTrue(started["requires_approval"])
+        self.assertEqual(compile_plan.call_args[0][0]["session_id"], "session-mc-live")
+        card = next(event for event in started["events"] if event["type"] == "approval_required")
+        self.assertEqual(card["agent_state"]["approval"]["approval_id"], "minecraft-plan-approval-abc")
+        self.assertIn("先看看周围再收集石头", card["display_card"]["summary"])
+        self.assertIn("observe", card["display_card"]["body"])
+
+        # The same conversation card resolves it, without the Shell needing to
+        # know that Minecraft keeps its own approval registry.
+        with patch.object(self.bridge.minecraft, "has_pending_plan_approval", return_value=True), \
+                patch.object(
+                    self.bridge.minecraft,
+                    "resolve_plan_approval",
+                    side_effect=lambda approval_id, approved: resolved.append((approval_id, approved)) or {"ok": True, "state": "running"},
+                ):
+            answered = self.bridge.resolve_approval_command("minecraft-plan-approval-abc", True)
+        self.assertTrue(answered["ok"], answered)
+        self.assertEqual(resolved, [("minecraft-plan-approval-abc", True)])
+        # The answer lands in the same turn as the card, which is what retires
+        # the buttons; a fresh task id would leave them on screen forever.
+        self.assertEqual({event["task_id"] for event in answered["events"]}, {card["task_id"]})
+
+    def test_a_skill_switched_off_in_settings_is_refused_not_promised(self) -> None:
+        """No approval card is coming for a disabled skill, so do not imply one."""
+
+        from agent_companion.core.policy import PolicyDecision
+        from agent_companion.core.schemas import RiskLevel
+
+        blocked = PolicyDecision(RiskLevel.MEDIUM, False, False, "skill_disabled")
+        submitted: list[str] = []
+        with patch.object(self.bridge.app.policy, "classify", return_value=blocked), \
+                patch.object(JsonRpcBridge, "submit_user_text", side_effect=lambda text: submitted.append(text) or {"ok": True}):
+            result = self.bridge._realtime_run_skill("帮我打开 Chrome", "computer")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "realtime_skill_disabled")
+        self.assertEqual(submitted, [])
+
+    def test_consent_reports_where_a_captured_frame_actually_goes(self) -> None:
+        """A vision model receives the frame itself, so consent must say so."""
+
+        with patch.object(type(self.bridge.app), "_build_vision_summarizer", return_value=object()):
+            self.assertEqual(self.bridge._realtime_voice_payload()["screen_evidence"], "vision_model")
+        with patch.object(type(self.bridge.app), "_build_vision_summarizer", return_value=None):
+            route = self.bridge._realtime_voice_payload()["screen_evidence"]
+        self.assertEqual(route, "local_ocr" if self.bridge.minecraft.screen_cache is not None else "off")
+        # A broken vision probe must not silently claim the frame stays local.
+        with patch.object(type(self.bridge.app), "_build_vision_summarizer", side_effect=RuntimeError("boom")):
+            self.assertIn(self.bridge._realtime_voice_payload()["screen_evidence"], {"local_ocr", "off"})
+
+    def test_a_live_world_is_found_even_behind_another_capability_session(self) -> None:
+        """The world is asked of Minecraft, not of "whichever session is newest"."""
+
+        with patch.object(self.bridge.minecraft, "active_session_ids", return_value=["session-mc-live"]), \
+                patch.object(JsonRpcBridge, "_realtime_minecraft_binding_ready", return_value=True):
+            self.assertEqual(self.bridge._active_minecraft_session_id(), "session-mc-live")
+        with patch.object(self.bridge.minecraft, "active_session_ids", return_value=["session-mc-dead"]), \
+                patch.object(JsonRpcBridge, "_realtime_minecraft_binding_ready", return_value=False):
+            self.assertEqual(self.bridge._active_minecraft_session_id(), "")
+
+    def test_a_plan_preview_without_an_approval_id_never_becomes_a_dead_card(self) -> None:
+        with patch.object(JsonRpcBridge, "_active_minecraft_session_id", return_value="session-mc-live"), \
+                patch.object(self.bridge.minecraft, "plan", return_value={"ok": True, "plan_id": "p", "summary": "s", "steps": []}):
+            result = self.bridge.minecraft_text_goal_command("帮我在 Minecraft 里挖点石头")
+        self.assertFalse(result["ok"])
+        self.assertFalse([event for event in result["events"] if event["type"] == "approval_required"])
+
+    def test_a_plan_card_stays_answerable_across_a_conversation_reload(self) -> None:
+        with patch.object(self.bridge.minecraft, "pending_plan_approval_ids", return_value=["minecraft-plan-approval-abc"]):
+            self.assertIn("minecraft-plan-approval-abc", self.bridge._active_approval_ids())
+
+    def test_an_uncompilable_goal_is_reported_without_an_internal_error_code(self) -> None:
+        with patch.object(JsonRpcBridge, "_active_minecraft_session_id", return_value="session-mc-live"), \
+                patch.object(self.bridge.minecraft, "plan", return_value={"ok": False, "error": "plan_compile_failed"}):
+            result = self.bridge.minecraft_text_goal_command("帮我在 Minecraft 里搞点什么")
+        self.assertFalse(result["ok"])
+        rendered = json.dumps(result["events"], ensure_ascii=False)
+        self.assertIn("拆不成可执行的步骤", rendered)
+        self.assertNotIn("plan_compile_failed", rendered)
+
+    def test_the_request_is_bounded_before_it_reaches_the_planner(self) -> None:
+        submitted: list[str] = []
+        with patch.object(JsonRpcBridge, "submit_user_text", side_effect=lambda text: submitted.append(text) or {"ok": True}):
+            self.assertTrue(self.bridge._realtime_run_skill("帮我打开 Chrome " + "长" * 900, "computer")["ok"])
+        _wait_until(lambda: bool(submitted))
+        self.assertEqual(len(submitted[0]), 400)
 
 
 class RealtimeOwnerRoutingTests(unittest.IsolatedAsyncioTestCase):

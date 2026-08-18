@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlencode
 import uuid
 
+from agent_companion.core.character_motion import MOTION_SPECS, character_motion_payload
 from agent_companion.core.config import (
     QWEN_REALTIME_MODELS,
     RealtimeVoiceConfig,
@@ -49,8 +50,13 @@ MAX_PROVIDER_MESSAGE_BYTES = 256 * 1024
 MAX_TRANSCRIPT_CHARS = 8_000
 MAX_FUNCTION_ARGUMENT_BYTES = 64 * 1024
 MAX_AUDIO_QUEUE_FRAMES = 20
+# Consecutive frames dropped before the sender counts as gone rather than slow.
+MAX_DROPPED_AUDIO_FRAMES = 50
+MAX_SKILL_REQUEST_CHARS = 400
 _LOCAL_SESSION = re.compile(r"^realtime-[a-f0-9]{16,64}$")
 _MINECRAFT_SESSION = re.compile(r"^session-[A-Za-z0-9_.:-]{1,95}$")
+_SKILL_LABEL = re.compile(r"^[a-z0-9_]{1,32}$")
+_PLAYER_NAME = re.compile(r"^[A-Za-z0-9_]{1,32}$")
 _SPOKEN_TAG = re.compile(r"^\s*(?:朗读|朗讀|speak)\s*[:：]\s*")
 _CAPTION_TAG = re.compile(r"^\s*(?:字幕|caption)\s*[:：]\s*")
 _CAPTION_TAG_INLINE = re.compile(r"\s*(?:字幕|caption)\s*[:：]\s*")
@@ -85,6 +91,11 @@ ActionCanceller = Callable[[str, str], dict[str, Any]]
 ActionController = Callable[[str, str, str], dict[str, Any]]
 BindingValidator = Callable[[str], bool]
 TerminalSink = Callable[[str, str], None]
+# (the user's own words for this turn, the category the provider guessed) ->
+# what Core decided to do with them. Core re-plans and gates independently.
+SkillRunner = Callable[[str, str], dict[str, Any]]
+# (minecraft session, the user's own words) -> a compiled plan awaiting approval.
+GamePlanCompiler = Callable[[str, str], dict[str, Any]]
 # (spoken line, chat locale) -> the same line written in the chat language.
 CaptionRepair = Callable[[str, str], str]
 
@@ -128,6 +139,8 @@ class QwenRealtimeSession:
         execute_action: ActionExecutor,
         cancel_action: ActionCanceller,
         control_action: ActionController | None = None,
+        run_skill: SkillRunner | None = None,
+        compile_game_plan: GamePlanCompiler | None = None,
         on_terminal: TerminalSink | None = None,
         on_transcripts: Callable[[str, list[tuple[str, str]]], None] | None = None,
         connector: Connector = _default_connector,
@@ -135,6 +148,8 @@ class QwenRealtimeSession:
         chat_locale: str = "",
         persona: str = "",
         world_memory_text: str = "",
+        allowed_players: tuple[str, ...] = (),
+        skill_index: str = "",
         caption_repair: CaptionRepair | None = None,
     ) -> None:
         self.config = config
@@ -146,12 +161,18 @@ class QwenRealtimeSession:
         self.chat_locale = str(chat_locale or "")
         self.persona = str(persona or "")
         self.world_memory_text = str(world_memory_text or "")
+        self.skill_index = str(skill_index or "")
+        self.allowed_players = tuple(str(name)[:32] for name in (allowed_players or ()) if str(name).strip())[:16]
         self._caption_repair = caption_repair or (lambda _spoken, _locale: "")
         self.splits_channels = _splits_channels(self.voice_locale, self.chat_locale)
         self._emit_sink = emit
         self._execute_action = execute_action
         self._cancel_action = cancel_action
         self._control_action = control_action or (lambda action, session_id, goal_id: self._cancel_action(session_id, goal_id) if action == "cancel" else {"ok": False})
+        # No Core hook means Joi has no local skills to offer this session; the
+        # proposal is then refused rather than silently answered as if it ran.
+        self._run_skill = run_skill or (lambda _request, _category: {"ok": False, "error": "realtime_skill_unavailable"})
+        self._compile_game_plan = compile_game_plan or (lambda _session, _request: {"ok": False, "error": "realtime_skill_unavailable"})
         self._on_terminal = on_terminal
         self._on_transcripts = on_transcripts
         self._transcript_pairs: list[tuple[str, str]] = []
@@ -165,6 +186,7 @@ class QwenRealtimeSession:
         self._sender: threading.Thread | None = None
         self._stopped = False
         self._expected_audio_sequence = 1
+        self._dropped_audio_frames = 0
         self._epoch = 0
         self._turn_stopped_epoch = -1
         self._turn_committed_epoch = -1
@@ -181,6 +203,7 @@ class QwenRealtimeSession:
         self._handled_responses: deque[str] = deque(maxlen=128)
         self._handled_response_set: set[str] = set()
         self._handled_calls: dict[str, str] = {}
+        self._handled_call_order: deque[str] = deque(maxlen=128)
         self._active_goal_id = ""
         self._active_goal_epoch = -1
         self._active_permit: ActionDispatchPermit | None = None
@@ -244,7 +267,15 @@ class QwenRealtimeSession:
                 return {"ok": False, "error": "realtime_session_not_running"}
             if sample_rate != PCM_SAMPLE_RATE or channels != PCM_CHANNELS or sample_width != PCM_SAMPLE_WIDTH:
                 return {"ok": False, "error": "realtime_audio_format_invalid"}
-            if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence != self._expected_audio_sequence:
+            if isinstance(sequence, bool) or not isinstance(sequence, int):
+                return {"ok": False, "error": "realtime_audio_sequence_gap"}
+            # Forward-only, not exact. The Shell counts every frame it hands over
+            # while Core only counted the ones it accepted, so a single rejected
+            # frame desynced the two forever and every later frame was refused --
+            # Joi stayed "listening" and never heard another word. A skip means
+            # frames were lost upstream, which is recoverable; a repeat or a
+            # rewind is not, and is still refused.
+            if sequence < self._expected_audio_sequence:
                 return {"ok": False, "error": "realtime_audio_sequence_gap"}
         try:
             audio = base64.b64decode(str(audio_base64 or ""), validate=True)
@@ -252,14 +283,40 @@ class QwenRealtimeSession:
             return {"ok": False, "error": "realtime_audio_invalid"}
         if len(audio) < MIN_PCM_CHUNK_BYTES or len(audio) > MAX_PCM_CHUNK_BYTES or len(audio) % 2:
             return {"ok": False, "error": "realtime_audio_chunk_invalid"}
-        try:
-            self._audio_queue.put_nowait(audio)
-        except queue.Full:
+        if not self._enqueue_audio(audio):
             self._provider_lost("realtime_audio_overflow")
             return {"ok": False, "error": "realtime_audio_overflow", "recovery_required": self.mode == "minecraft"}
         with self._lock:
-            self._expected_audio_sequence += 1
+            self._expected_audio_sequence = sequence + 1
         return {"ok": True, "accepted_sequence": sequence}
+
+    def _enqueue_audio(self, audio: bytes) -> bool:
+        """Queue a frame, dropping the oldest rather than dropping the call.
+
+        The queue holds under a second of speech, so any brief stall on the
+        provider socket used to end the session outright. Live audio is lossy by
+        nature: a short gap in what the provider hears is recoverable, a dropped
+        call is not. Only a sender that has stopped draining entirely -- a full
+        queue over and over -- is treated as a lost transport.
+        """
+
+        while True:
+            try:
+                self._audio_queue.put_nowait(audio)
+            except queue.Full:
+                try:
+                    self._audio_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                with self._lock:
+                    self._dropped_audio_frames += 1
+                    exhausted = self._dropped_audio_frames > MAX_DROPPED_AUDIO_FRAMES
+                if exhausted:
+                    return False
+                continue
+            with self._lock:
+                self._dropped_audio_frames = 0
+            return True
 
     def stop(self, reason: str = "user_stop") -> dict[str, Any]:
         active, permit = self._mark_stopped()
@@ -279,7 +336,7 @@ class QwenRealtimeSession:
             "input_audio_format": "pcm",
             "max_history_turns": int(self.config.max_history_turns),
             "instructions": (
-                _minecraft_instructions(self.voice_locale, self.chat_locale, self.persona, self.world_memory_text)
+                _minecraft_instructions(self.voice_locale, self.chat_locale, self.persona, self.world_memory_text, self.allowed_players, self.skill_index)
                 if self.mode == "minecraft"
                 else _conversation_instructions(self.voice_locale, self.chat_locale, self.persona)
             ),
@@ -292,8 +349,13 @@ class QwenRealtimeSession:
                     "silence_duration_ms": int(self.config.silence_duration_ms),
                 }
             )
+        # Joi's own body and local skills are reachable in every mode: asking
+        # her to wave or to open an app is the same request whether or not a
+        # game session happens to be bound. Only the game primitives are
+        # mode-scoped, because only they need a confirmed world binding.
+        config["tools"] = joi_skill_proposal_tools()
         if self.mode == "minecraft":
-            config["tools"] = minecraft_proposal_tools()
+            config["tools"] = config["tools"] + minecraft_proposal_tools()
         return config
 
     def _send_audio_loop(self) -> None:
@@ -500,11 +562,29 @@ class QwenRealtimeSession:
             self._emit({"type": "state", "state": "listening"})
             return
         if calls:
-            if not committed or len(calls) != 1 or self.mode != "minecraft" or self._last_action_epoch == epoch:
-                self._emit({"type": "game_action", "status": "rejected", "error": "realtime_action_ambiguous"})
+            if not committed or len(calls) != 1 or self._last_action_epoch == epoch:
+                self._reject_proposal(calls[0]["name"], "realtime_action_ambiguous")
+                self._refuse_calls(epoch, calls, "realtime_one_action_per_turn")
                 self._emit({"type": "state", "state": "listening"})
                 return
-            self._dispatch_call(epoch, calls[0])
+            call = calls[0]
+            if str(call["name"]) == "minecraft_plan":
+                if self.mode != "minecraft":
+                    self._emit({"type": "game_action", "status": "rejected", "error": "realtime_action_ambiguous"})
+                    self._refuse_calls(epoch, calls, "realtime_skill_unsupported")
+                    self._emit({"type": "state", "state": "listening"})
+                    return
+                self._dispatch_local_call(epoch, call)
+                return
+            if str(call["name"]).startswith("minecraft_"):
+                if self.mode != "minecraft":
+                    self._emit({"type": "game_action", "status": "rejected", "error": "realtime_action_ambiguous"})
+                    self._refuse_calls(epoch, calls, "realtime_skill_unsupported")
+                    self._emit({"type": "state", "state": "listening"})
+                    return
+                self._dispatch_call(epoch, call)
+                return
+            self._dispatch_local_call(epoch, call)
             return
         if text and committed:
             if self.splits_channels:
@@ -594,24 +674,25 @@ class QwenRealtimeSession:
         return {"ok": True, "state": {"pause": "paused", "resume": "acting", "cancel": "cancelled"}[action]}
 
     def _dispatch_call(self, epoch: int, call: dict[str, str]) -> None:
-        proposal = _proposal_from_call(call["name"], call["arguments"])
+        proposal = _proposal_from_call(call["name"], call["arguments"], self.allowed_players)
         digest = hashlib.sha256(f"{call['name']}\0{call['arguments']}".encode("utf-8")).hexdigest()
+        refusal = ""
         with self._lock:
             previous = self._handled_calls.get(call["call_id"])
             if previous is not None:
                 if previous != digest:
                     self._emit({"type": "error", "error": "realtime_call_conflict"})
                 return
-            self._handled_calls[call["call_id"]] = digest
+            self._remember_handled_call(call["call_id"], digest)
+            proposed_action = str((proposal.get("intent") or {}).get("action") or "") if proposal else ""
             if proposal is None or self._active_goal_id or self._last_action_epoch == epoch or self._stopped:
                 self._emit({"type": "game_action", "status": "rejected", "error": "realtime_action_invalid"})
-                return
-            proposed_action = str((proposal.get("intent") or {}).get("action") or "")
+                refusal = "realtime_skill_unsupported"
             # Scheme A: an attack is the one primitive that actively harms an
             # entity, so it never runs on the model's own initiative. The same
             # turn's final user transcript must contain an explicit attack
             # instruction; autonomy can only ever propose flee/guard.
-            if proposed_action == "attack" and not _transcript_authorizes_attack(self._user_final_by_epoch.get(epoch, "")):
+            elif proposed_action == "attack" and not _transcript_authorizes_attack(self._user_final_by_epoch.get(epoch, "")):
                 self._emit(
                     {
                         "type": "game_action",
@@ -620,14 +701,21 @@ class QwenRealtimeSession:
                         "error": "attack_requires_explicit_instruction",
                     }
                 )
-                return
-            goal_id = f"voice-goal-{uuid.uuid4().hex}"
-            permit = ActionDispatchPermit()
-            self._active_goal_id = goal_id
-            self._active_goal_epoch = epoch
-            self._active_permit = permit
-            self._last_action_epoch = epoch
-        action = str((proposal.get("intent") or {}).get("action") or "")
+                refusal = "realtime_attack_not_authorized"
+            else:
+                goal_id = f"voice-goal-{uuid.uuid4().hex}"
+                permit = ActionDispatchPermit()
+                self._active_goal_id = goal_id
+                self._active_goal_epoch = epoch
+                self._active_permit = permit
+                self._last_action_epoch = epoch
+        if refusal:
+            # Refused, but still answered: an unanswered call leaves the
+            # provider waiting and the turn silent, so Joi could not even say
+            # why she is not attacking.
+            self._refuse_calls(epoch, [call], refusal)
+            return
+        action = proposed_action
         self._emit({"type": "game_action", "action": action, "status": "acting"})
         thread = threading.Thread(
             target=self._execute_call,
@@ -689,6 +777,191 @@ class QwenRealtimeSession:
             return
         self._send_json({"type": "response.create", "response": {"modalities": ["text"]}})
 
+    def _dispatch_local_call(self, epoch: int, call: dict[str, str]) -> None:
+        """Accept one local-skill proposal for this microphone turn.
+
+        Same shape as the game dispatch: a call is a proposal, it is replayed
+        at most once, and it only counts when the turn that produced it is
+        still the current one.
+        """
+
+        name = str(call["name"])
+        digest = hashlib.sha256(f"{name}\0{call['arguments']}".encode("utf-8")).hexdigest()
+        with self._lock:
+            previous = self._handled_calls.get(call["call_id"])
+            if previous is not None:
+                if previous != digest:
+                    self._emit({"type": "error", "error": "realtime_call_conflict"})
+                return
+            self._remember_handled_call(call["call_id"], digest)
+            if self._stopped or self._epoch != epoch or self._last_action_epoch == epoch:
+                self._reject_proposal(name, "realtime_action_invalid")
+                self._refuse_calls(epoch, [call], "realtime_one_action_per_turn")
+                return
+            # The provider never supplies the request text: what Joi acts on is
+            # what the user actually said this turn, so a proposal can only ever
+            # re-submit the user's own words.
+            transcript = self._user_final_by_epoch.get(epoch, "")
+            self._last_action_epoch = epoch
+        if name == "joi_play_motion":
+            self._perform_motion(epoch, call)
+            return
+        if name == "joi_run_skill":
+            self._start_skill(epoch, call, transcript)
+            return
+        if name == "minecraft_plan":
+            self._start_game_plan(epoch, call, transcript)
+            return
+        # A name outside the offered surface. Answer it anyway, or the provider
+        # waits forever for an output it will never get and Joi says nothing.
+        self._reject_proposal(name, "realtime_action_invalid")
+        self._refuse_calls(epoch, [call], "realtime_skill_unsupported")
+
+    def _perform_motion(self, epoch: int, call: dict[str, str]) -> None:
+        """Play one local character motion. Nothing leaves this machine.
+
+        A motion is rendering, not work: the Shell owns the clip, the vocabulary
+        is a closed table, and the answer the provider is about to speak is the
+        only speech for this turn -- so no voice line is attached here.
+        """
+
+        motion = _motion_from_call(call["arguments"])
+        if motion is None:
+            result = {"ok": False, "skill": "character_motion", "error": "realtime_skill_unsupported"}
+        else:
+            self._emit({"type": "character_motion", "motion": motion, "epoch": epoch})
+            # "started", not "completed": the clip is only beginning to play, and
+            # the provider is about to write the line that goes with it.
+            result = {"ok": True, "status": "started", "skill": "character_motion"}
+        safe = _safe_skill_result(result)
+        self._emit({"type": "skill_action", **safe})
+        self._reply_after_call(epoch, call["call_id"], safe)
+
+    def _start_skill(self, epoch: int, call: dict[str, str], transcript: str) -> None:
+        request = _bounded_text(transcript, MAX_SKILL_REQUEST_CHARS).strip()
+        if not request:
+            # Nothing was transcribed, so there are no user words to act on.
+            refused = _safe_skill_result({"ok": False, "error": "realtime_skill_not_understood"})
+            self._emit({"type": "skill_action", **refused})
+            self._reply_after_call(epoch, call["call_id"], refused)
+            return
+        threading.Thread(
+            target=self._run_skill_call,
+            args=(epoch, call, request, _skill_category(call["arguments"])),
+            name=f"qwen-skill-{self.session_id[-8:]}",
+            daemon=True,
+        ).start()
+
+    def _start_game_plan(self, epoch: int, call: dict[str, str], transcript: str) -> None:
+        """Compile a multi-step Minecraft goal from the user's own words.
+
+        A single primitive per turn cannot answer "mine enough oak, then build a
+        crafting table", so Joi did one thing and reported the whole request
+        done. The plan goes to the same approval card a typed goal produces --
+        and, as everywhere else here, the words compiled are the user's.
+        """
+
+        request = _bounded_text(transcript, MAX_SKILL_REQUEST_CHARS).strip()
+        if not request:
+            refused = _safe_skill_result({"ok": False, "skill": "game", "error": "realtime_skill_not_understood"})
+            self._emit({"type": "skill_action", **refused})
+            self._reply_after_call(epoch, call["call_id"], refused)
+            return
+        threading.Thread(
+            target=self._run_game_plan_call,
+            args=(epoch, call, request),
+            name=f"qwen-mcplan-{self.session_id[-8:]}",
+            daemon=True,
+        ).start()
+
+    def _run_game_plan_call(self, epoch: int, call: dict[str, str], request: str) -> None:
+        with self._lock:
+            current = not self._stopped and self._epoch == epoch
+        if current:
+            self._emit({"type": "state", "state": "acting", "epoch": epoch})
+        try:
+            result = self._compile_game_plan(self.minecraft_session_id, request)
+        except Exception:
+            result = {"ok": False, "status": "failed"}
+        safe = _safe_skill_result({**result, "skill": "game"})
+        self._emit({"type": "skill_action", **safe})
+        self._reply_after_call(epoch, call["call_id"], safe)
+
+    def _run_skill_call(self, epoch: int, call: dict[str, str], request: str, category: str) -> None:
+        """Hand the turn to Core off the provider reader thread.
+
+        Core answers as soon as it has decided what the request is; the plan
+        itself may then sit on an approval card for as long as the user needs,
+        which is exactly why this must not be waited on here.
+        """
+
+        with self._lock:
+            current = not self._stopped and self._epoch == epoch
+        if current:
+            # Only while this is still the turn on screen: a barge-in has already
+            # moved the state to user_speaking, and "acting" would strand it.
+            self._emit({"type": "state", "state": "acting", "epoch": epoch})
+        try:
+            result = self._run_skill(request, category)
+        except Exception:
+            result = {"ok": False, "status": "failed"}
+        safe = _safe_skill_result(result)
+        self._emit({"type": "skill_action", **safe})
+        self._reply_after_call(epoch, call["call_id"], safe)
+
+    def _reply_after_call(self, epoch: int, call_id: str, output: Mapping[str, Any]) -> None:
+        """Give the provider the outcome and let it speak one line about it."""
+
+        self._answer_calls(epoch, [(call_id, dict(output))])
+
+    def _refuse_calls(self, epoch: int, calls: list[dict[str, str]], error: str) -> None:
+        """Answer every call Joi refused, so the turn still gets a spoken line.
+
+        A provider that proposed two things at once ("挥个手，然后帮我打开
+        Chrome") used to receive nothing back: both calls stayed open, no
+        response followed, and the user got silence instead of being told only
+        one action per turn is accepted. Every call the model makes is answered,
+        refusal included.
+        """
+
+        self._answer_calls(epoch, [(call["call_id"], {"status": "rejected", "error": error}) for call in calls])
+
+    def _answer_calls(self, epoch: int, outputs: list[tuple[str, dict[str, Any]]]) -> None:
+        """Send one output per call, then exactly one response for all of them.
+
+        One ``response.create`` for the whole batch: one per output would have
+        the provider write -- and Joi speak -- a separate line for each.
+        """
+
+        with self._lock:
+            current = not self._stopped and self._epoch == epoch
+        if not current or not outputs:
+            return
+        for call_id, output in outputs:
+            if not call_id:
+                continue
+            if not self._send_json(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(dict(output), ensure_ascii=False, separators=(",", ":")),
+                    },
+                }
+            ):
+                self._provider_lost("realtime_disconnected")
+                return
+        self._send_json({"type": "response.create", "response": {"modalities": ["text"]}})
+
+    def _reject_proposal(self, name: str, error: str) -> None:
+        """Refuse a proposal on the channel the Shell watches for that kind."""
+
+        if str(name or "").startswith("joi_"):
+            self._emit({"type": "skill_action", "status": "rejected", "error": error})
+            return
+        self._emit({"type": "game_action", "status": "rejected", "error": error})
+
     def _send_json(self, payload: Mapping[str, Any]) -> bool:
         with self._lock:
             socket = self._socket
@@ -701,6 +974,23 @@ class QwenRealtimeSession:
             return True
         except Exception:
             return False
+
+    def _remember_handled_call(self, call_id: str, digest: str) -> None:
+        """Remember a call so it can never run twice, without growing forever.
+
+        Bounded like the response memory beside it: a long call would otherwise
+        keep every call id it ever saw. The cap is far above the number of calls
+        a single microphone turn can produce, so a replay always still finds its
+        entry.
+        """
+
+        if call_id in self._handled_calls:
+            self._handled_calls[call_id] = digest
+            return
+        if len(self._handled_call_order) == self._handled_call_order.maxlen:
+            self._handled_calls.pop(self._handled_call_order[0], None)
+        self._handled_call_order.append(call_id)
+        self._handled_calls[call_id] = digest
 
     def _remember_response(self, key: str) -> None:
         if not key:
@@ -814,12 +1104,16 @@ class RealtimeVoiceCoordinator:
         execute_action: ActionExecutor | None = None,
         cancel_action: ActionCanceller | None = None,
         control_action: ActionController | None = None,
+        run_skill: SkillRunner | None = None,
+        compile_game_plan: GamePlanCompiler | None = None,
         validate_binding: BindingValidator | None = None,
         connector: Connector = _default_connector,
         voice_locale: Callable[[], str] | None = None,
         chat_locale: Callable[[], str] | None = None,
         persona: Callable[[], str] | None = None,
         world_memory: Callable[[str], str] | None = None,
+        allowed_players: Callable[[str], list[str]] | None = None,
+        skill_index: Callable[[], str] | None = None,
         transcript_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
         caption_repair: CaptionRepair | None = None,
     ) -> None:
@@ -827,6 +1121,8 @@ class RealtimeVoiceCoordinator:
         self._execute_action = execute_action or (lambda *_: {"ok": False, "status": "failed"})
         self._cancel_action = cancel_action or (lambda *_: {"ok": False})
         self._control_action = control_action
+        self._run_skill = run_skill
+        self._compile_game_plan = compile_game_plan
         self._validate_binding = validate_binding or (lambda _session_id: True)
         self._connector = connector
         # Read per session, not once at build time: the user can switch
@@ -835,6 +1131,8 @@ class RealtimeVoiceCoordinator:
         self._chat_locale = chat_locale or (lambda: "")
         self._persona = persona or (lambda: "")
         self._world_memory = world_memory or (lambda _session_id: "")
+        self._allowed_players = allowed_players or (lambda _session_id: [])
+        self._skill_index = skill_index or (lambda: "")
         self._transcript_sink = transcript_sink
         self._caption_repair = caption_repair
         self._lock = threading.RLock()
@@ -872,6 +1170,8 @@ class RealtimeVoiceCoordinator:
             execute_action=self._execute_action,
             cancel_action=self._cancel_action,
             control_action=self._control_action,
+            run_skill=self._run_skill,
+            compile_game_plan=self._compile_game_plan,
             on_terminal=self._retire_session,
             on_transcripts=self._transcript_sink,
             connector=self._connector,
@@ -879,6 +1179,8 @@ class RealtimeVoiceCoordinator:
             chat_locale=_safe_voice_locale(self._chat_locale),
             persona=_safe_persona(self._persona),
             world_memory_text=_safe_world_memory(self._world_memory, minecraft_session_id),
+            allowed_players=_safe_allowed_players(self._allowed_players, minecraft_session_id),
+            skill_index=_safe_persona(self._skill_index),
             caption_repair=self._caption_repair,
         )
         with self._lock:
@@ -1008,18 +1310,32 @@ def _safe_world_memory(source: Callable[[str], str], session_id: str) -> str:
     return _bounded_text(text, 500).strip()
 
 
+def _safe_allowed_players(source: Callable[[str], list[str]], session_id: str) -> tuple[str, ...]:
+    """Who this session may follow, read per session and bounded."""
+
+    try:
+        rows = source(session_id) or []
+    except Exception:
+        return ()
+    return tuple(str(name).strip()[:32] for name in list(rows)[:16] if _PLAYER_NAME.fullmatch(str(name).strip()))
+
+
 def build_realtime_voice_coordinator(
     workspace: Path,
     *,
     execute_action: ActionExecutor | None = None,
     cancel_action: ActionCanceller | None = None,
     control_action: ActionController | None = None,
+    run_skill: SkillRunner | None = None,
+    compile_game_plan: GamePlanCompiler | None = None,
     validate_binding: BindingValidator | None = None,
     connector: Connector = _default_connector,
     voice_locale: Callable[[], str] | None = None,
     chat_locale: Callable[[], str] | None = None,
     persona: Callable[[], str] | None = None,
     world_memory: Callable[[str], str] | None = None,
+    allowed_players: Callable[[str], list[str]] | None = None,
+    skill_index: Callable[[], str] | None = None,
     transcript_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
     caption_repair: CaptionRepair | None = None,
 ) -> tuple[RealtimeVoiceCoordinator, RealtimeVoiceRuntimeState]:
@@ -1047,17 +1363,87 @@ def build_realtime_voice_coordinator(
             execute_action=execute_action,
             cancel_action=cancel_action,
             control_action=control_action,
+            run_skill=run_skill,
+            compile_game_plan=compile_game_plan,
             validate_binding=validate_binding,
             connector=connector,
             voice_locale=voice_locale,
             chat_locale=chat_locale,
             persona=persona,
             world_memory=world_memory,
+            allowed_players=allowed_players,
+            skill_index=skill_index,
             transcript_sink=transcript_sink,
             caption_repair=caption_repair,
         ),
         state,
     )
+
+
+SKILL_CATEGORIES = ("computer", "browser", "screen", "code", "game", "other")
+# Every refusal the Shell and the provider may be told about, by name.
+SAFE_SKILL_ERRORS = frozenset(
+    {
+        "realtime_skill_unavailable",
+        "realtime_skill_unsupported",
+        "realtime_skill_not_understood",
+        "realtime_skill_not_actionable",
+        "realtime_skill_disabled",
+        "realtime_one_action_per_turn",
+        "realtime_attack_not_authorized",
+    }
+)
+
+
+def _function_tool(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def joi_skill_proposal_tools() -> list[dict[str, Any]]:
+    """Two proposals: Joi's own body, and Joi's own local skills.
+
+    Neither carries the request text. ``joi_run_skill`` deliberately takes no
+    free-form goal: Core re-reads the turn's own transcript, so the provider can
+    say "this turn was work" but never *what* the work is. That keeps the one
+    thing a cloud model must not own -- what runs on this machine -- on this
+    machine, while still letting ordinary speech reach the skills.
+    """
+
+    return [
+        _function_tool(
+            "joi_play_motion",
+            "Play one local character motion (animation) when the user asks Joi to move, "
+            "wave, dance, celebrate, pose, or stand still. Local rendering only; it changes "
+            "nothing outside the character view.",
+            {
+                "motion": {"type": "string", "enum": sorted(MOTION_SPECS)},
+                "intensity": {"type": "number", "minimum": 0.25, "maximum": 1.0},
+            },
+            ["motion"],
+        ),
+        _function_tool(
+            "joi_run_skill",
+            "Hand this turn to Joi's local skills when the user asked for something to be "
+            "done on this computer -- open an app, click or type, search the web, look at the "
+            "current screen or video, or write and fix code. Core re-plans the user's own "
+            "words, checks policy, and asks the user to confirm anything that touches the "
+            "machine. Never call this for ordinary conversation.",
+            {"category": {"type": "string", "enum": list(SKILL_CATEGORIES)}},
+            [],
+        ),
+    ]
 
 
 def minecraft_proposal_tools() -> list[dict[str, Any]]:
@@ -1068,19 +1454,7 @@ def minecraft_proposal_tools() -> list[dict[str, Any]]:
     player = {"type": "string", "pattern": r"^[A-Za-z0-9_]{1,32}$"}
 
     def tool(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": f"minecraft_{name}",
-                "description": description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                    "additionalProperties": False,
-                },
-            },
-        }
+        return _function_tool(f"minecraft_{name}", description, properties, required)
 
     block_props = {
         "block": identifier,
@@ -1091,8 +1465,11 @@ def minecraft_proposal_tools() -> list[dict[str, Any]]:
     return [
         tool("observe", "Observe nearby Minecraft state without changing it.", {"dimension": dimension, "radius": {"type": "integer", "minimum": 1, "maximum": 32}}, []),
         tool("inventory", "Read Joi's Minecraft inventory without changing it.", {}, []),
-        tool("follow_player", "Follow an allowed player for a bounded duration.", {"player": player, "distance": {"type": "integer", "minimum": 2, "maximum": 12}, "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 300}}, ["player"]),
-        tool("come_to_player", "Move near an allowed player.", {"player": player, "distance": {"type": "integer", "minimum": 1, "maximum": 12}}, ["player"]),
+        # player is optional on purpose: "跟着我" names nobody, and Core fills
+        # in the allowed player rather than letting the model guess a name
+        # that would then be refused as out of scope.
+        tool("follow_player", "Follow the user (or a named allowed player) for a bounded duration. Omit player to follow the user.", {"player": player, "distance": {"type": "integer", "minimum": 2, "maximum": 12}, "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 300}}, []),
+        tool("come_to_player", "Move near the user (or a named allowed player). Omit player to come to the user.", {"player": player, "distance": {"type": "integer", "minimum": 1, "maximum": 12}}, []),
         tool("collect", "Collect an allowed block and verify it reached inventory.", block_props, ["block"]),
         tool("mine", "Mine an allowed block and verify the world changed.", block_props, ["block"]),
         tool("craft", "Craft an item from available inventory.", {"item": identifier, "count": {"type": "integer", "minimum": 1, "maximum": 64}}, ["item"]),
@@ -1174,10 +1551,28 @@ def minecraft_proposal_tools() -> list[dict[str, Any]]:
             {"dimension": dimension},
             [],
         ),
+        tool("lookup_recipe", "Read what an item is crafted from and what Joi already has. Changes nothing; use it before crafting instead of guessing.", {"item": identifier}, ["item"]),
+        tool("inspect_container", "Read what is inside a nearby chest, barrel or furnace without taking anything.", {"container": {"type": "string", "enum": ["chest", "barrel", "shulker_box", "furnace", "blast_furnace", "smoker"]}, "radius": {"type": "integer", "minimum": 1, "maximum": 16}, "dimension": dimension}, []),
+        tool("locate", "Find which direction a structure or biome lies in. Answers with a direction and a rough distance, never coordinates.", {"kind": {"type": "string", "enum": ["structure", "biome"]}, "target": identifier, "dimension": dimension}, ["target"]),
+        tool("smelt", "Smelt an allowed item in a nearby furnace, using carried fuel.", {"item": identifier, "count": {"type": "integer", "minimum": 1, "maximum": 64}, "fuel": identifier}, ["item"]),
+        tool("sort_inventory", "Put loot away into a nearby container, keeping tools, food and fuel.", {"container": {"type": "string", "enum": ["chest", "barrel", "shulker_box"]}, "radius": {"type": "integer", "minimum": 1, "maximum": 16}, "keep": {"type": "array", "maxItems": 16, "items": identifier}, "dimension": dimension}, []),
+        tool("equip", "Hold or wear an item Joi is carrying.", {"item": identifier, "destination": {"type": "string", "enum": ["hand", "off-hand", "head", "torso", "legs", "feet"]}}, ["item"]),
+        tool("drop", "Throw away an allowed item Joi is carrying.", {"item": identifier, "count": {"type": "integer", "minimum": 1, "maximum": 64}}, ["item"]),
+        tool("fish", "Fish for a bounded time with a carried fishing rod.", {"duration_seconds": {"type": "integer", "minimum": 1, "maximum": 300}, "dimension": dimension}, []),
+        tool("sleep", "Sleep in a nearby bed.", {"radius": {"type": "integer", "minimum": 1, "maximum": 16}, "dimension": dimension}, []),
+        tool("load_skill", "Read one of the notes about how to play this world before acting on a rule you are unsure of.", {"name": {"type": "string", "pattern": r"^[a-z0-9][a-z0-9_-]{0,39}$"}}, ["name"]),
+        tool(
+            "plan",
+            "Use for a goal that needs several actions in order -- \"mine enough oak, "
+            "then build a crafting table\". Core compiles the user's own words into a "
+            "step plan and asks the user to confirm it. Do not call this for a single action.",
+            {},
+            [],
+        ),
     ]
 
 
-def _proposal_from_call(name: str, arguments: str) -> dict[str, Any] | None:
+def _proposal_from_call(name: str, arguments: str, allowed_players: tuple[str, ...] = ()) -> dict[str, Any] | None:
     prefix = "minecraft_"
     if not name.startswith(prefix):
         return None
@@ -1188,6 +1583,13 @@ def _proposal_from_call(name: str, arguments: str) -> dict[str, Any] | None:
         return None
     if not isinstance(parsed, dict):
         return None
+    if action in {"follow_player", "come_to_player"} and not str(parsed.get("player") or "").strip():
+        # "跟着我" names nobody. Core supplies the player the user already
+        # confirmed rather than having the model invent one; with more than one
+        # allowed player there is no "me" to resolve, so the model must say who.
+        if len(allowed_players) != 1:
+            return None
+        parsed = {**parsed, "player": allowed_players[0]}
     # Identity and authority always come from Core, never model arguments.
     forbidden = {"session_id", "goal_id", "scope", "budget", "approval_id", "confirmed_scope", "permission", "receipt_id"}
     if forbidden.intersection(parsed):
@@ -1197,6 +1599,60 @@ def _proposal_from_call(name: str, arguments: str) -> dict[str, Any] | None:
     except MinecraftContractError:
         return None
     return {"final": True, "source": "voice", "intent": intent}
+
+
+def _local_call_arguments(arguments: str) -> dict[str, Any] | None:
+    """Parse a local proposal's arguments, refusing anything authority-shaped."""
+
+    try:
+        parsed = json.loads(arguments or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict) or len(parsed) > 4:
+        return None
+    forbidden = {"session_id", "goal_id", "scope", "budget", "approval_id", "confirmed_scope", "permission", "receipt_id", "request", "text", "command"}
+    if forbidden.intersection(parsed):
+        return None
+    return parsed
+
+
+def _motion_from_call(arguments: str) -> dict[str, Any] | None:
+    """Canonicalize a motion proposal through the shared local vocabulary."""
+
+    parsed = _local_call_arguments(arguments)
+    if parsed is None:
+        return None
+    return character_motion_payload(parsed.get("motion"), intensity=parsed.get("intensity"))
+
+
+def _skill_category(arguments: str) -> str:
+    """A hint for the status line only; it never decides what runs."""
+
+    parsed = _local_call_arguments(arguments) or {}
+    category = str(parsed.get("category") or "").strip().casefold()
+    return category if category in SKILL_CATEGORIES else "other"
+
+
+def _safe_skill_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """The closed projection of what Core did with one local-skill proposal."""
+
+    status = str(result.get("status") or ("started" if result.get("ok") else "rejected"))
+    if status not in {"started", "rejected", "failed"}:
+        status = "failed"
+    if not result.get("ok"):
+        status = "rejected" if status == "started" else status
+    safe: dict[str, Any] = {"status": status}
+    skill = str(result.get("skill") or "").strip().casefold()
+    if _SKILL_LABEL.fullmatch(skill):
+        safe["skill"] = skill
+    if status == "started":
+        safe["requires_confirmation"] = bool(result.get("requires_confirmation"))
+    error = str(result.get("error") or "")
+    if error in SAFE_SKILL_ERRORS:
+        safe["error"] = error
+    elif status != "started":
+        safe["error"] = "realtime_skill_unavailable"
+    return safe
 
 
 def _safe_action_result(action: str, result: Mapping[str, Any]) -> dict[str, Any]:
@@ -1209,9 +1665,9 @@ def _safe_action_result(action: str, result: Mapping[str, Any]) -> dict[str, Any
         "summary": "completed" if status == "completed" else "not_completed",
         "recovery_required": bool(result.get("recovery_required")),
     }
-    # Only the read-only screen action may carry observation text back to the
-    # provider, and only the bounded sanitized projection the cache produced.
-    if action == "observe_screen" and status == "completed":
+    # Only read-only actions may carry text back to the provider, and only the
+    # bounded sanitized projection Core rendered for them.
+    if action in {"observe_screen", "inspect_container", "lookup_recipe", "locate", "load_skill"} and status == "completed":
         observation = _bounded_text(result.get("observation"), 1_200)
         if observation:
             safe["observation"] = observation
@@ -1299,6 +1755,30 @@ def _safe_public_event(payload: Mapping[str, Any]) -> dict[str, Any]:
     if event_type == "assistant_text":
         text = _bounded_assistant_text(payload.get("text"))
         return {"type": event_type, "text": text, "epoch": max(0, int(payload.get("epoch") or 0)), "output": "local_tts"} if text else {}
+    if event_type == "character_motion":
+        # Re-canonicalized on the way out, so the Shell can only ever receive a
+        # name from the closed local table and bounded playback numbers.
+        motion = payload.get("motion") if isinstance(payload.get("motion"), Mapping) else {}
+        safe_motion = character_motion_payload(
+            motion.get("name"),
+            duration_ms=motion.get("duration_ms"),
+            loop=motion.get("loop"),
+            intensity=motion.get("intensity"),
+        )
+        if safe_motion is None:
+            return {}
+        return {"type": "character_motion", "motion": safe_motion, "epoch": max(0, int(payload.get("epoch") or 0))}
+    if event_type == "skill_action":
+        status = str(payload.get("status") or "")
+        result = {"type": "skill_action", "status": status if status in {"started", "rejected", "failed"} else "failed"}
+        skill = str(payload.get("skill") or "").strip().casefold()
+        if _SKILL_LABEL.fullmatch(skill):
+            result["skill"] = skill
+        if payload.get("error") in SAFE_SKILL_ERRORS or payload.get("error") in {"realtime_action_ambiguous", "realtime_action_invalid"}:
+            result["error"] = payload["error"]
+        if "requires_confirmation" in payload:
+            result["requires_confirmation"] = bool(payload.get("requires_confirmation"))
+        return result
     if event_type == "game_action":
         action = str(payload.get("action") or "")
         status = str(payload.get("status") or "")
@@ -1382,19 +1862,51 @@ def _conversation_instructions(voice_locale: str = "", chat_locale: str = "", pe
             "你是 Joi，正在与用户进行低延迟语音对话。回答简洁、自然、友好。",
             _persona_block(persona),
             "输出必须是适合直接朗读的纯文本；不要说模型、供应商、路径、标识符、日志、JSON、命令或秘密。",
-            "当前没有任何工具权限，不要声称执行了外部操作。",
+            _local_skill_block(),
             _language_rule(voice_locale, chat_locale),
         ]
     )
 
 
-def _minecraft_instructions(voice_locale: str = "", chat_locale: str = "", persona: str = "", world_memory: str = "") -> str:
+def _local_skill_block() -> str:
+    """How the two local proposals are described to the provider.
+
+    Written as "propose, don't perform": the provider decides that this turn
+    wants Joi's body or Joi's skills, and Core decides what that means. Saying
+    so plainly here is what stops a model from narrating a finished action it
+    never took.
+    """
+
+    return (
+        "你有两个本地提案工具，只在用户确实提出请求时调用，一轮最多调用一个，纯聊天绝不调用：\n"
+        "joi_play_motion：用户想看你做动作时调用（打招呼、说话动作、开心庆祝、手指枪、跳舞、回到待机），"
+        "只能从枚举里选一个名字；这只是本机角色动画。\n"
+        "joi_run_skill：用户要在这台电脑上做事时调用（打开应用、点击输入、上网搜索、看当前屏幕或视频、写代码改代码）。"
+        "你不需要也不能转述请求内容：Joi Core 会用用户这一轮自己说的原话重新规划。\n"
+        "工具只是提案：Core 独立判断风险，需要授权的动作会在界面上等用户确认。\n"
+        "拿到工具结果后：status 是 started 就说你已经着手，并在 requires_confirmation 为真时提醒用户在界面上点确认；"
+        "status 是 rejected 或 failed 就直说这次没能开始，可以请用户换个说法或改用文字输入；"
+        "任何情况下都不要声称动作已经完成，也不要念出工具名、参数、状态码或标识符。\n"
+    )
+
+
+def _minecraft_instructions(
+    voice_locale: str = "",
+    chat_locale: str = "",
+    persona: str = "",
+    world_memory: str = "",
+    allowed_players: tuple[str, ...] = (),
+    skill_index: str = "",
+) -> str:
     return "".join(
         [
             _format_lead(voice_locale, chat_locale),
             "你是 Joi，正在和用户一起玩 Minecraft。简短自然地对话。",
             _persona_block(persona),
             _world_memory_block(world_memory),
+            _allowed_players_block(allowed_players),
+            _bounded_text(skill_index, 1_200),
+            _local_skill_block(),
             "你可以在确有必要时调用一个 minecraft_* 工具提出单个游戏动作；工具只是提案，Core 会独立检查权限、范围和预算。",
             "每一轮最多提出一个动作，不要猜测坐标、权限、会话标识或完成结果。",
             "战斗规则：除非用户在同一轮里明确要求攻击，否则永远不要提出 minecraft_attack；害怕或躲避时可以提出 minecraft_flee 或 minecraft_guard。任何动作都不得以玩家为目标。",
@@ -1402,6 +1914,22 @@ def _minecraft_instructions(voice_locale: str = "", chat_locale: str = "", perso
             _language_rule(voice_locale, chat_locale),
         ]
     )
+
+
+def _allowed_players_block(allowed_players: tuple[str, ...]) -> str:
+    """Who "me" is, so following the user is not a guess.
+
+    The model was never told any player name, so "跟着我" produced an invented
+    one and Core refused it as out of scope. With exactly one confirmed player
+    the name can be left out entirely and Core fills it in.
+    """
+
+    names = [str(name) for name in allowed_players if str(name).strip()]
+    if not names:
+        return "当前没有任何被授权跟随的玩家；用户要你跟随时，请告诉他先在游戏设置里填写自己的 Minecraft 玩家名。\n"
+    if len(names) == 1:
+        return f"用户的 Minecraft 玩家名是 {names[0]}。要跟随或靠近用户时，直接调用 minecraft_follow_player / minecraft_come_to_player 即可，可以不填 player。\n"
+    return f"被授权的玩家：{'、'.join(names[:8])}。跟随或靠近时必须在 player 里写出其中一个名字。\n"
 
 
 def _world_memory_block(world_memory: str) -> str:

@@ -23,6 +23,31 @@ test('core event parsing exposes only the reviewed projection', () => {
 })
 
 
+test('a spoken motion request arrives as a playable clip, and only a known one', () => {
+  assert.deepEqual(
+    parseRealtimeVoiceEvent({
+      type: 'character_motion',
+      epoch: 7,
+      motion: { name: 'dance', label: '跳舞', duration_ms: 6000, loop: false, intensity: 0.9 },
+    }),
+    { kind: 'character_motion', motion: 'dance', epoch: 7, durationMs: 6000, loop: false, intensity: 0.9 },
+  )
+  assert.equal(parseRealtimeVoiceEvent({ type: 'character_motion', motion: { name: 'backflip' } }), null)
+})
+
+
+test('a local skill proposal reports acceptance without claiming completion', () => {
+  assert.deepEqual(
+    parseRealtimeVoiceEvent({ type: 'skill_action', skill: 'computer_use', status: 'started', requires_confirmation: true }),
+    { kind: 'skill_action', skill: 'computer_use', status: 'started', requiresConfirmation: true, error: undefined },
+  )
+  assert.deepEqual(
+    parseRealtimeVoiceEvent({ type: 'skill_action', status: 'rejected', error: 'realtime_skill_not_actionable' }),
+    { kind: 'skill_action', skill: '', status: 'rejected', requiresConfirmation: false, error: 'realtime_skill_not_actionable' },
+  )
+})
+
+
 test('PCM session opens only after microphone consent and sends exact 16 kHz frames', async () => {
   const order = []
   const track = { stopped: false, stop() { this.stopped = true } }

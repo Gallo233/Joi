@@ -1,3 +1,6 @@
+// Explicit extension: the shell test runner strips types without resolving them.
+import { normalizeCharacterMotion, type CharacterMotionName } from './characterMotion.ts'
+
 export type RealtimeVoiceState =
   | 'idle'
   | 'connecting'
@@ -16,6 +19,8 @@ export type RealtimeVoiceEvent =
   | { kind: 'user_transcript'; text: string; final: boolean; epoch?: number }
   | { kind: 'assistant_transcript'; text: string; final: boolean; epoch?: number }
   | { kind: 'game_action'; action?: string; status: string; recoveryRequired?: boolean }
+  | { kind: 'character_motion'; motion: CharacterMotionName; epoch: number; durationMs: number; loop: boolean; intensity: number }
+  | { kind: 'skill_action'; skill: string; status: string; requiresConfirmation: boolean; error?: string }
   | { kind: 'tts_state'; state: 'muted'; error: string; epoch: number }
   | { kind: 'error'; error: string }
 
@@ -24,6 +29,13 @@ export interface RealtimeStartResult {
   session_id?: string
   state?: string
   error?: string
+}
+
+export interface RealtimeCoreMotion {
+  name?: string
+  duration_ms?: number
+  loop?: boolean
+  intensity?: number
 }
 
 export interface RealtimeCoreEvent {
@@ -37,6 +49,9 @@ export interface RealtimeCoreEvent {
   status?: string
   error?: string
   recovery_required?: boolean
+  motion?: RealtimeCoreMotion
+  skill?: string
+  requires_confirmation?: boolean
 }
 
 interface MediaTrackLike {
@@ -129,6 +144,29 @@ export function parseRealtimeVoiceEvent(raw: unknown): RealtimeVoiceEvent | null
       action: boundedText(event.action).slice(0, 40) || undefined,
       status: boundedText(event.status).slice(0, 24) || 'failed',
       recoveryRequired: Boolean(event.recovery_required),
+    }
+  }
+  if (event.type === 'character_motion') {
+    // Core already canonicalized this against its own table; the Shell only
+    // renders a name it knows, so an unknown one is dropped rather than mapped.
+    const motion = normalizeCharacterMotion(event.motion?.name)
+    if (!motion) return null
+    return {
+      kind: 'character_motion',
+      motion,
+      epoch,
+      durationMs: Math.max(0, Number(event.motion?.duration_ms || 0)),
+      loop: Boolean(event.motion?.loop),
+      intensity: Number(event.motion?.intensity || 0.8),
+    }
+  }
+  if (event.type === 'skill_action') {
+    return {
+      kind: 'skill_action',
+      skill: boundedText(event.skill).slice(0, 32),
+      status: boundedText(event.status).slice(0, 24) || 'failed',
+      requiresConfirmation: Boolean(event.requires_confirmation),
+      error: boundedText(event.error).slice(0, 48) || undefined,
     }
   }
   if (event.type === 'tts_state' && event.state === 'muted') {

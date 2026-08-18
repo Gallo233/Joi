@@ -889,6 +889,9 @@ export interface CoreReadyPayload {
     timeout_seconds?: number
     error?: string
     modes?: Array<'conversation' | 'minecraft' | string>
+    // Where a captured game frame actually goes, so the microphone disclosure
+    // can describe this machine's configuration instead of assuming one.
+    screen_evidence?: 'vision_model' | 'local_ocr' | 'off' | string
   }
   language?: LanguageSettings
   tts?: {
