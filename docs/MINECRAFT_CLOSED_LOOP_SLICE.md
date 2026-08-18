@@ -116,4 +116,8 @@
 - **A3 完成**：MineflayerViewer 软降级（`JOI_MINECRAFT_VIEWER=1` 时尝试加载 prismarine-viewer，缺失则 stderr 提示并继续，ncc 已 external）；dev RPC `game.adapter.minecraft.snapshot`；MCP 工具 `joi_minecraft_status/snapshot/plan`（走既有 Core RPC，无新信任面）。
 - **M1 完成**：realtime 会话按 epoch 收集 sanitized 文本对（用户最终转写 + Joi 字幕），stop/terminal 时经 `transcript_sink` 一次性写入协作历史（`record_event`，type user_message/assistant_message + source=voice.realtime）；原始音频/坐标/provider ID 永不落库。
 - **M2 完成**：`core/minecraft_memory.py::MinecraftWorldMemory`——私有 0600 存储（维度/血量/饥饿/时间/最近 goal 标签，坐标永不在摘要内）；service `world_memory()` 注入 realtime `_minecraft_instructions`（会话级）与自主 ticker 提示；stop_session 前抓取 snapshot+回执写入记忆；registry 停止会话**不再删除 checkpoint**（改为显式清理）。
-- **待做**：S4（真实服 smoke 清单、合并分支、句子级流式 TTS/时延实测等打磨项）。
+- **能力补齐完成**（2026-08-18）：新增 10 个动作（smelt/sort_inventory/equip/drop/fish/sleep 与只读的 inspect_container/lookup_recipe/locate/load_skill），寻路可在 allowed_blocks 与半径内破坏/放置，计划逐步回报，玩法笔记（`config/minecraft-skills/`）按名加载，世界记忆记住工作站。动作面共 24 个：桥接执行 22 个，`load_skill` 与 `observe_screen` 由 Core 应答。
+- **方块预算结算完成**（2026-08-18）：寻路破坏/放置此前既不进预留也不进回执，用户确认的 `max_blocks_changed` 只约束了「挖什么、在哪挖」。现在桥接统计本 bot 的全部破坏与放置（`diggingCompleted`/`blockPlaced`，寻路走同样的调用），随回执上报 `world_changes`；Core 用实报替换估算结算会话额度，回执报实数，并把剩余额度随 goal 下发，越界那一块即停（`block_budget_exhausted`）。验收测试：service 4、bridge 2。
+- **时延埋点完成**（2026-08-18，AIRI V2）：每轮记录静音→首字→成文→出声四个标记，滚动 64 轮报 P50/P95（nearest-rank）；只有毫秒与轮数，开发者模式可见，记录失败不影响发声。验收测试：Core 3、Shell 2。
+- **走查清单完成**（2026-08-18）：`docs/MINECRAFT_REAL_SERVER_WALKTHROUGH.md` 把 §1 验收拆成 18 个可勾选场景，`tools/minecraft_walkthrough_report.py` 记录 sanitized 结果（拒绝像坐标/地址的备注）；离线 smoke 从 13 个动作扩到 22 个并加测预算上限。一个测试守住「清单、记录器、离线覆盖」三者同步。
+- **待做**：真实服走查本身（只有最早的 10 个原语在真实世界跑过）、V1 句子级流式 TTS、V3 AudioWorklet、时延实测数据、合并分支。

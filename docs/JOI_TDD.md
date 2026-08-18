@@ -100,7 +100,7 @@ observe → understand → propose → approve/scope → act → verify → audi
 | 记忆 | SQLite、候选、召回、编辑删除、Markdown vault、subconscious | project/thread/character 作用域、冲突治理、删除传播评估 |
 | 语音 | ASR/TTS bridge、安全 `voice_line`、可说事件白名单 | 全链路 generation ID、barge-in、迟到音频回归 |
 | 角色 | 角色包 CRUD、Live2D/VRM runtime、静态降级 | 合法默认资产、状态规范、资源/可访问性基准 |
-| Scene/Game | 安静共看、Scene 摘要；OK-WW/Minecraft adapter | 真实媒体/游戏 smoke、checkpoint 与明确 setup path |
+| Scene/Game | 安静共看、Scene 摘要；OK-WW/Minecraft adapter（24 个动作、计划、自主、世界记忆，离线全覆盖） | 真实媒体 smoke；真实服只走查过最早的 10 个原语，其余按 `docs/MINECRAFT_REAL_SERVER_WALKTHROUGH.md` 补证据 |
 | Skill | inspect/install/update/run/draft；ZIP/脚本/哈希防护；Seatbelt | 签名/信任来源、沙箱回归、依赖与网络声明 UX |
 | 测试/发布 | Python tests、Vue build、Cargo check、macOS release workflow 草案 | 协议 contract、持久化恢复、安全负例、干净机发布矩阵 |
 
@@ -811,7 +811,7 @@ OpenHuman 的本地 Memory Tree 和 Obsidian 可读性只作为“可见记忆�
 - 迟到 ASR/TTS/provider 结果在 generation 不匹配时丢弃，但记录 redacted 诊断。
 - 仅 `SPEAKABLE_EVENTS` 可触发 TTS；`safe_voice_line` 二次清洗。
 - TTS 不可用时保留 display，不阻塞 run；麦克风拒绝时保留键盘输入。
-- 实时语音是独立、显式启停且按窗口 owner 绑定的 debug session：Shell 只发有序 16 kHz PCM16，长期 Qwen key 和 provider 事件只留在 Core，云端只回文本，本地 GPT-SoVITS 是唯一声音。普通模式无工具；Minecraft 模式只能在已确认的 persistent game session 上提出一条 strict GameIntent，并继续经过 Core 权限、实时 scope、预算和回执门禁。VAD/插话/停止/transport loss 必须淘汰旧文本与音频；停止时取消在途游戏目标，ACK 超时强杀 Bridge 且禁止重放。
+- 实时语音是独立、显式启停且按窗口 owner 绑定的 debug session：Shell 只发有序 16 kHz PCM16，长期 Qwen key 和 provider 事件只留在 Core，云端只回文本，本地 GPT-SoVITS 是唯一声音。两种模式都只能**提议**：动作本身由 Core 选择、编译和执行。Minecraft 模式在已确认的 persistent game session 上可提出一条 strict GameIntent 或一份计划；两种模式都可提出一个本地动作与一条「这一轮是请求」——后者不携带请求原文，Core 用本轮用户转写重新过规则 planner、policy 与审批卡片，因此云端模型能启动一个技能，但永远不能选择工具、目标或参数。全部继续经过 Core 权限、实时 scope、预算和回执门禁。VAD/插话/停止/transport loss 必须淘汰旧文本与音频；停止时取消在途游戏目标，ACK 超时强杀 Bridge 且禁止重放。
 
 ### 10.4 Scene Session
 
@@ -885,6 +885,28 @@ license/provenance, hashes, minimum_runtime, permissions=[]
 - runtime 失败时回退静态合法角色，不影响审批/任务/设置；
 - motion 有最大时长、打断规则和 reduced-motion 替代；
 - approval、failed、paused 等状态的视觉层级高于装饰动效。
+
+### 11.3 Game adapter（Beta 轨道）
+
+游戏适配器不阻塞 1.0（PRD §5.2），但它与 Skill、Computer Use 共用同一套边界，所以设计约束写在这里而不是只留在方案文档里。
+
+分层与信任边界：
+
+```text
+用户/语音/游戏内聊天 → 自然语言
+→ Core: canonicalize_game_intent（严格 schema，未知字段即拒）
+→ Core: scope / action_allowed / 预算预留 / no-replay
+→ Bridge 子进程（Node + mineflayer，独立进程、最小权限）
+→ Core: 回执 + 预算结算 + 隐私投影
+```
+
+- **动作面**：19 个 GameIntent 原语 + 4 个只读查询 + 1 个 Core 侧屏幕观察，共 24 个。`load_skill` 与 `observe_screen` 由 Core 应答，桥接看不到；其余 22 个由桥接执行。
+- **模型只能提议**：权限、scope、approval、budget、session/goal id 一律由 Core 持有并绑定；模型给不出，也覆盖不了。
+- **PvP 双端禁止**：契约层 `attack` 没有目标字段（schema 层不可表达），桥接层 `nearestEntity` 只认 hostile mob。缺任一层都不成立。
+- **攻击需明确指令**（方案 A）：自主循环与计划编译器永禁 `attack`；实时语音要求同一轮用户转写命中保守词表。
+- **预算是结算制**：预留用估算（只有动作自身要改的方块可以预先知道），回执用世界实报（含寻路破坏与放置），会话额度按实报结算；每个 goal 还会拿到剩余额度并在越界那一块自停。
+- **隐私投影**：坐标永不离开桥接子进程——观察、回执、字幕、语音、记忆、云端 instructions 全部只有名称、数量、方位与距离档。屏幕证据在 Core 内摘要后只送文本；未配视觉模型时退化为纯 OCR，并如实披露。
+- **失败即停**：断线、ACK 超时、动作超时都不自动重放；恢复需要新的显式确认。
 
 ## 12. 安全、隐私与威胁边界
 

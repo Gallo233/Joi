@@ -3,12 +3,13 @@
 > 状态：方案级设计评审（未实施）。依据 2026-08 debug/shell-refactor 工作树代码实审。
 > 关联文档：`docs/AIRI_COMPARISON.md`（已过期，仅历史参考，不作现状证据）、`docs/MINECRAFT_REALTIME_P0_P2.md`、`docs/MINECRAFT_REALTIME_P3_P6.md`、`docs/REALTIME_VOICE_DEBUG.md`、`docs/VOICE_LATENCY_INVESTIGATION_2026-08-13.md`、`docs/KNOWN_ISSUES.md`。
 > 修订：2026-08-15 按 `docs/MINECRAFT_PLAN_REVIEW_2026-08-15.md` 修正 A1（instructions 是会话级）、A3（观察字段数 5 键 + 三处白名单）、A4（认知层数说法）。
+> 进度（2026-08-18）：A1–A4、M1/M2 与 V2（时延埋点）已落地，现状列写的是**立项时**的基线，不是当前代码；当前能力以 `docs/ROADMAP.md` B1 与 `docs/MINECRAFT_CLOSED_LOOP_SLICE.md` §8 为准。V1 句子级流式 TTS 与 V3 AudioWorklet 仍未做。
 
 ## 0. 现状摘要（对照 AIRI）
 
 | 维度 | AIRI（moeru-ai/airi） | Joi 最新 debug | 差距定性 |
 |---|---|---|---|
-| 游戏能力 | 分层认知架构（Reflex/Conscious，另有材料描述为四层），战斗、自主采集/合成/建造，游戏内聊天下指令，MineflayerViewer 网页 POV，Debug Dashboard，MCP + Query DSL | 10 个严格 GameIntent 原语，无战斗/自由规划/游戏内聊天输入/POV 查看器 | 自主性弱，生态缺 |
+| 游戏能力 | 分层认知架构（Reflex/Conscious，另有材料描述为四层），战斗、自主采集/合成/建造，游戏内聊天下指令，MineflayerViewer 网页 POV，Debug Dashboard，MCP + Query DSL | 写这份计划时：10 个严格 GameIntent 原语，无战斗/自由规划/游戏内聊天输入/POV 查看器 | 自主性弱，生态缺 |
 | 语音架构 | 链式 VAD(Silero)→ASR→LLM→TTS 四跳，语音在 stage UI | 单模型 speech-to-speech（Qwen Audio Realtime，server VAD，只收文本）+ 本地 GPT-SoVITS | Joi 时延架构占优；但 TTS 起播晚、未实测 |
 | 权限/安全 | 聊天即命令，无逐动作审批/预算/回执 | digest 审批、scope/预算、Core 权威回执、no-replay、owner-bound | Joi 显著更强（不可回退） |
 | 记忆 | 向量语义记忆持久化 | realtime 会话临时；checkpoint 停会话即删 | 无跨会话连续性 |
@@ -110,7 +111,7 @@
 
 | 阶段 | 内容 | 门禁 |
 |---|---|---|
-| P1 语音（1 轮） | V1 句子级流式 TTS + V2 时延计时 + V3 worklet | Quality & Release：真实麦克风 P50/P95 数据 |
+| P1 语音（1 轮） | ~~V2 时延计时~~（已落地）+ V1 句子级流式 TTS + V3 worklet | Quality & Release：真实麦克风 P50/P95 数据 |
 | P2 自主性 | A4 观测扩充 + A1 计划编译器 + A2 游戏内聊天通道 | Trust & Safety scheme gate（聊天伪造、计划越界、战斗排除声明）；扩展 `tests/test_minecraft_v2.py` |
 | P3 生态+记忆 | A3 dev 查看器/MCP + M1 会话落库 + M2 世界记忆 | 隐私 gate：落库内容清单与“坐标/音频不落盘”证明 |
 | 暂缓 | 战斗原语、SVC 游戏内语音、向量记忆 | 单独立项，各自 gate |

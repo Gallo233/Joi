@@ -97,7 +97,7 @@
 
 点击录音的输入路径也按代次拆开。Shell 记录 WAV 准备与 base64 编码耗时，Core 只在线程中等待 ASR provider；`voice.transcribe` 一拿到 transcript 就返回，并把普通 Joi turn 排入后台，因此 UI 的 ASR 状态不再包含 planner、LLM、工具或 TTS 时间。新输入通过 `voice.cancel` 退休旧 `generation_id`；迟到 transcript 可以完成诊断，但不能再提交。Core 只返回 decode/provider/total 的毫秒数，不返回端点、音频路径、原始错误或凭据。
 
-实时语音走 owner-bound 的 `voice.realtime.session.*` 能力边界。Shell 获取麦克风后发送有序、定长的 16 kHz PCM16 帧；Core 才能持有 Qwen Audio Realtime 凭据和 provider protocol，并只接收文本。文本通过 `safe_voice_line` 后交给本地 GPT-SoVITS，Realtime 与普通 Joi TTS 共享 speaker lock 和代次门禁；插话递增 epoch，旧 provider response、TTS PCM 和口型都不能复活。普通模式无工具；Minecraft 模式仅在已确认的 persistent game session 上开放十个 strict proposal，最终权限、实时 scope、预算、goal id、Bridge 和回执全部由 Core 持有。窗口/transport/provider 停止时取消在途目标，ACK 失败强杀 Bridge 且不重放。
+实时语音走 owner-bound 的 `voice.realtime.session.*` 能力边界。Shell 获取麦克风后发送有序、定长的 16 kHz PCM16 帧；Core 才能持有 Qwen Audio Realtime 凭据和 provider protocol，并只接收文本。文本通过 `safe_voice_line` 后交给本地 GPT-SoVITS，Realtime 与普通 Joi TTS 共享 speaker lock 和代次门禁；插话递增 epoch，旧 provider response、TTS PCM 和口型都不能复活。普通模式无工具；Minecraft 模式仅在已确认的 persistent game session 上开放 strict proposal（24 个动作之一，或一份编译计划），另有本地动作与「这一轮是请求」两个提议——后者不带请求原文，由 Core 用本轮转写重新规划。最终权限、实时 scope、预算、goal id、Bridge 和回执全部由 Core 持有。窗口/transport/provider 停止时取消在途目标，ACK 失败强杀 Bridge 且不重放。
 
 `VoiceLine.delivery` 是有界的表演计划，只允许强度、节奏、能量、停顿、重音和关系语气的固定词表；模型不能把自由文本提示直接交给 TTS。角色包里的短情绪说明只补充完整导演提示，不再覆盖它。MiMo 预设音色与 GPT-SoVITS API v2 都按 PCM16 分块传给 Shell，口型只读取正在播放的真实音频；事件返回文本不会启动第二次口型。Core 记录文本模型耗时、TTS 首音和总耗时，并始终保持系统语音兜底关闭。
 
@@ -254,7 +254,7 @@ Core 不加载任何随程序一起发布之外的代码：没有插件目录、
 GameAdapter manifest 声明检测、观察源、动作集、暂停、验证、存档点和平台。安装、启停与卸载状态独立于角色包。
 
 - OK-WW 已包装为经过审查的可安装适配器，保留 dry-run 和显式授权。runner 路径只能来自 `OK_WW_RUNNER` 环境变量，没有内置默认值；未配置、路径无效或非 Windows 平台都会返回 `setup_required` 并给出对应的 setup hint。解析逻辑集中在 `agent_companion/core/ok_ww.py`，适配器检测、技能清单与工具执行共用同一份。
-- Minecraft bridge v2 为每个 session 保持一个持久 Mineflayer 进程，只接收十个 strict `GameIntent` 原语；ASR partial、自由文本、额外字段、代码/命令字段都会在 Core 边界被拒绝。
+- Minecraft bridge v2 为每个 session 保持一个持久 Mineflayer 进程，只接收 strict `GameIntent`（桥接执行 22 个动作，`load_skill` 与 `observe_screen` 由 Core 应答）；ASR partial、自由文本、额外字段、代码/命令字段都会在 Core 边界被拒绝。
 - Core 在发送每个原语前统一执行 permission、server/world/dimension/radius/block scope 与预算预扣，并持久化 receipt；bridge 的坐标 checkpoint 仅作 Core 私有恢复证据。
 - pause/resume/cancel 绑定 `session_id + goal_id` 且必须收到 bridge ACK；超时强制终止。断线进入 `recovery_required`，不会自动重连或重放不确定的挖掘/放置。
 - v2 的产品模式为 companion 与 delegate；原有 takeover 不进入 P0-P2 的结构化世界动作链路。

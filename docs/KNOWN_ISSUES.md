@@ -11,6 +11,8 @@
 - LLM planner requires configured text model; falls back to rule-based planner when unconfigured.
 - Realtime Voice requires Qwen Audio Realtime network access and a configured local GPT-SoVITS service; when the local voice is unavailable, captions remain available but Joi stays muted.
 - Minecraft real-server smoke requires a Java Edition world opened to LAN and the displayed ephemeral LAN port. Disconnect recovery is fail-closed and requires a new explicitly confirmed session rather than automatic replay.
+- Only the earliest ten Minecraft primitives have ever run against a real world. The other fourteen actions, combat, screen evidence, plans, autonomy and the in-game chat channel are verified offline against the deterministic fake world, which has no pathfinder, no hostiles, no other players and no real latency. `docs/MINECRAFT_REAL_SERVER_WALKTHROUGH.md` is the checklist that closes this.
+- Realtime voice latency is now instrumented but not yet measured: developer mode reports each turn's silence-to-audio breakdown and a running P50/P95, and no real-microphone figures have been recorded. Sentence-level streaming TTS and the AudioWorklet capture path remain undone.
 - Minecraft version support trails the game: the bridge accepts mineflayer's tested versions plus the releases listed in `compatibleVersions` in `agent_companion/adapters/minecraft-bridge/index.js` (currently `26.1`). A newer release needs a shim for whatever packets it reshaped and a verified real join before that list grows.
 
 ## Fixed

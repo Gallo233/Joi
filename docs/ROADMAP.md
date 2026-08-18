@@ -196,15 +196,17 @@ Status: in progress — 独立验收，不阻塞 1.0
 
 这条轨道过去没有在 roadmap 里登记，但已经有实现和测试，写在这里以免它看起来像 1.0 范围。
 
-- Minecraft GameAdapter v2：13 个严格 GameIntent 原语（含 attack/flee/guard），逐动作权限、scope、预算、回执与 no-replay。
+- Minecraft GameAdapter v2：24 个动作——19 个严格 GameIntent 原语（含 attack/flee/guard、熔炼/整理/装备/丢弃/钓鱼/睡觉）、4 个只读查询（配方/容器/方位/玩法笔记）、1 个 Core 侧屏幕观察——逐动作权限、scope、预算、回执与 no-replay。
 - 26.1 版本兼容：mineflayer 的 tested-version 门只对本桥接带有验证 shim 的版本放行，更新的版本仍 fail closed。
 - 桥接推送通道：combat/chat/snapshot 等非应答事件能到达 Core，缓冲有上限。
 - Core 侧屏幕证据：截图只在本机做摘要和 OCR，读完即删，云端只收文字。
 - 自主 ticker：可开关、有频率上限、用户指令抢占；attack 在实时语音、autonomy 与 service 三层都要求用户明确指令（Scheme A）。
 - 计划编译器与游戏内聊天：都编译成同一套 GameIntent，走同一套门禁。
 - 实时语音：Qwen Audio Realtime 只收文本，本地 GPT-SoVITS 发声；朗读语言跟角色包，字幕语言跟聊天语言设置。
-- 未完成：真实服的战斗场景走查、实时语音时延实测、句子级流式 TTS、AudioWorklet 采集。
-- 参考：`docs/MINECRAFT_CLOSED_LOOP_SLICE.md`、`docs/AIRI_ABSORPTION_PLAN.md`、`docs/MINECRAFT_PLAN_REVIEW_2026-08-15.md`、`docs/REALTIME_VOICE_DEBUG.md`。
+- 方块预算按世界实报结算：寻路破坏与放置也计入用户确认的额度，goal 在越界那一块自停。
+- 实时语音时延已可测：每轮记录静音→首字→成文→出声四个标记，开发者模式显示本轮明细与本次通话 P50/P95。
+- 未完成：**真实服走查**（只有最早的 10 个原语在真实世界跑过，其余 14 个动作、战斗、屏幕证据、计划、自主与游戏内聊天都只在 fake 世界验证过，清单见 `docs/MINECRAFT_REAL_SERVER_WALKTHROUGH.md`）、时延实测数据、句子级流式 TTS、AudioWorklet 采集。
+- 参考：`docs/MINECRAFT_CLOSED_LOOP_SLICE.md`、`docs/MINECRAFT_REAL_SERVER_WALKTHROUGH.md`、`docs/AIRI_ABSORPTION_PLAN.md`、`docs/MINECRAFT_PLAN_REVIEW_2026-08-15.md`、`docs/REALTIME_VOICE_DEBUG.md`。
 
 ## 发布阻塞项
 

@@ -11,6 +11,8 @@ Realtime 不复用点击录音 ASR，也不把 Qwen 的音频作为 Joi 声音�
 
 界面语言和聊天语言在「设置 → 语言」里选，存在 config.yaml 的 `language` 段；说话语言来自角色包，在角色库里跟音色一起选。
 
+开发者模式会显示每一轮的时延明细（静音→首字→成文→出声）与本次通话的 P50/P95；只有毫秒数和轮数，没有原文、ID 或 provider 细节。
+
 普通对话本来就有两条文本通道：屏幕文字用聊天语言，朗读文本由 expression 通道按角色配音语言另写一份。Realtime 只有一条通道，所以两种语言不同时，Core 在 `session.update` 的 instructions 里要求 provider 每轮输出两行：
 
 ```
@@ -52,7 +54,7 @@ realtime_voice:
 4. 建立持久 Minecraft session；
 5. 再显式选择“实时语音 + Minecraft”；
 
-Qwen 才能提出十种严格 `GameIntent` 之一。Core 自行绑定 session、generation 和 goal，模型不能提供权限、scope、approval、budget 或任何 Core ID。只有完整 mic turn 与完成的 provider response 能提交动作；同一 turn 最多一条。所有动作继续经过 Core 的权限、实时 scope、预算、Bridge 和回执门禁。
+Qwen 才能提出一条严格 `GameIntent`（19 个原语加 4 个只读查询）或一份计划。Core 自行绑定 session、generation 和 goal，模型不能提供权限、scope、approval、budget 或任何 Core ID。只有完整 mic turn 与完成的 provider response 能提交动作；同一 turn 最多一条。所有动作继续经过 Core 的权限、实时 scope、预算、Bridge 和回执门禁。
 
 插话只取消旧回答和旧 TTS，不自动取消已提交的游戏动作；UI 提供暂停、继续、取消。结束 Realtime、窗口/Core transport 丢失或 provider 断开会取消当前游戏目标；ACK 超时强制结束 Bridge 并进入恢复等待，绝不自动重放。
 
@@ -62,7 +64,7 @@ Qwen 才能提出十种严格 `GameIntent` 之一。Core 自行绑定 session、
 2. 开始普通实时语音，接受在线麦克风披露，说一句短句，确认字幕和本地角色声线。
 3. Joi 发声时插话，确认旧 PCM/口型立即停止且不复活。
 4. 拒绝麦克风、断网和关闭窗口，确认 provider/Bridge 都没有遗留会话，UI 不出现原始 provider event/id/error。
-5. Minecraft 真实服 smoke 需 HMCL 启动一个 Java 世界并“对局域网开放”，把屏幕显示的端口填入 Skill；逐项测试 observe/inventory/follow/come/collect/mine/craft/eat/place/deposit 与 disconnect recovery。
+5. Minecraft 真实服走查见 `docs/MINECRAFT_REAL_SERVER_WALKTHROUGH.md`：18 个场景覆盖全部动作、路径改方块与预算、战斗人格、屏幕证据、计划、自主、游戏内聊天与断线恢复。离线可先跑 `tools/minecraft_p5_smoke.py`。
 
 ## 官方参考
 
