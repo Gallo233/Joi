@@ -116,7 +116,7 @@ class CharacterEmotionLookupTests(unittest.TestCase):
     def _character(self, emotion_map: dict[str, object]):
         return _parse_character(
             {
-                "name": "星野澪",
+                "name": "Joi",
                 "voice_profiles": [{"id": "default", "label": "默认音色", "emotion_map": emotion_map}],
             }
         )
@@ -138,7 +138,7 @@ class CharacterEmotionLookupTests(unittest.TestCase):
         """The overwhelmingly common case has to stay exactly as it was."""
 
         self.assertIsNone(self._character({}).voice_emotion("happy"))
-        self.assertIsNone(_parse_character({"name": "星野澪"}).voice_emotion("happy"))
+        self.assertIsNone(_parse_character({"name": "Joi"}).voice_emotion("happy"))
 
     def test_a_mood_the_package_never_declared_falls_back(self) -> None:
         character = self._character({"happy": {"prompt_text": "太好了"}})
@@ -237,7 +237,7 @@ class SovitsEmotionTests(unittest.TestCase):
 
         character = _parse_character(
             {
-                "name": "星野澪",
+                "name": "Joi",
                 "refer_audio_path": "/voice/base.wav",
                 "prompt_text": "我在",
                 "voice_profiles": [{"id": "default", "label": "默认音色", "emotion_map": emotion_map}],

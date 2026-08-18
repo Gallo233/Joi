@@ -2,6 +2,7 @@
   "name": "joi-shell",
   "private": true,
   "version": "0.1.0",
+  "license": "UNLICENSED",
   "type": "module",
   "scripts": {
     "core:bundle": "node scripts/build-core-sidecar.mjs",

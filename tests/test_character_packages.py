@@ -20,11 +20,11 @@ class CharacterPackageManagerTests(unittest.TestCase):
         self.workspace = Path(self.temp.name)
         (self.workspace / "agent_companion" / "config").mkdir(parents=True)
         (self.workspace / "agent_companion" / "config" / "default_character.yaml").write_text(
-            "id: builtin-hikari\nname: 星野澪\npersona: 默认角色\nstyle:\n  tone: 温和\n",
+            "id: builtin-hikari\nname: Joi\npersona: 默认角色\nstyle:\n  tone: 温和\n",
             encoding="utf-8",
         )
         (self.workspace / "config.yaml").write_text(
-            "characters:\n  - name: 星野澪\n    color: '#5b7ff5'\n    setting: 默认角色\n",
+            "characters:\n  - name: Joi\n    color: '#5b7ff5'\n    setting: 默认角色\n",
             encoding="utf-8",
         )
         self.manager = CharacterPackageManager(self.workspace)
@@ -35,7 +35,7 @@ class CharacterPackageManagerTests(unittest.TestCase):
     def test_bootstraps_builtin_and_keeps_existing_memory_shared(self) -> None:
         result = self.manager.list()
         self.assertEqual(result["active_id"], "builtin-hikari")
-        self.assertEqual(result["characters"][0]["name"], "星野澪")
+        self.assertEqual(result["characters"][0]["name"], "Joi")
         self.assertEqual(self.manager.memory_namespace(), "shared")
 
     def test_create_activate_and_isolate_memory(self) -> None:

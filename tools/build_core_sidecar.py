@@ -94,7 +94,7 @@ def build_sidecar(workspace: Path, *, target: str = "", if_missing: bool = False
         (workspace / "agent_companion" / "config", "agent_companion/config"),
         (workspace / "agent_companion" / "skills", "agent_companion/skills"),
         (workspace / "agent_companion" / "web_widget" / "assets", "agent_companion/web_widget/assets"),
-        (workspace / "agent_companion" / "shell" / "public" / "live2d" / "joi", "agent_companion/shell/public/live2d/joi"),
+        (workspace / "agent_companion" / "shell" / "public" / "live2d" / "hiyori", "agent_companion/shell/public/live2d/hiyori"),
     )
     for source, bundled_path in seed_paths:
         if source.exists():

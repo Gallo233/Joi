@@ -3,6 +3,9 @@ name = "joi-shell"
 version = "0.1.0"
 description = "Joi desktop shell"
 edition = "2021"
+# Not open source and never published to a registry; see the repository LICENSE.
+publish = false
+license-file = "../../../LICENSE"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

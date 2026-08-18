@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "description": "Persistent, typed Mineflayer bridge for Joi GameAdapter v2",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "engines": {
     "node": ">=22"
   },

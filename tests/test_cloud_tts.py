@@ -37,7 +37,7 @@ class _Config:
         }
         settings.update(tts)
         self.tts = TtsConfig(**settings)  # type: ignore[arg-type]
-        self.characters = [_parse_character({"name": "星野澪", "voice_profiles": [{"id": "default", "label": "默认"}]})]
+        self.characters = [_parse_character({"name": "Joi", "voice_profiles": [{"id": "default", "label": "默认"}]})]
 
     @property
     def primary_character(self):

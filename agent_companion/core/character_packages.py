@@ -1296,11 +1296,11 @@ class CharacterPackageManager:
             (target / "assets" / "avatar").mkdir(parents=True, exist_ok=True)
             shutil.copy2(avatar_source, target / "assets" / "avatar" / avatar_source.name)
             avatar = "assets/avatar/joi-front-head.png"
-        model_source = self.workspace / "agent_companion" / "shell" / "public" / "live2d" / "joi"
+        model_source = self.workspace / "agent_companion" / "shell" / "public" / "live2d" / "hiyori"
         model = ""
-        if (model_source / "joi.model3.json").is_file():
+        if (model_source / "hiyori.model3.json").is_file():
             shutil.copytree(model_source, target / "assets" / "live2d", dirs_exist_ok=True)
-            model = "assets/live2d/joi.model3.json"
+            model = "assets/live2d/hiyori.model3.json"
         style = character_raw.get("style") if isinstance(character_raw, dict) else {}
         voice = character_raw.get("voice") if isinstance(character_raw, dict) else {}
         manifest = self._normalize_manifest(
@@ -1309,7 +1309,7 @@ class CharacterPackageManager:
                 "id": "builtin-hikari",
                 "version": "1.0.0",
                 "identity": {
-                    "name": str(character_raw.get("name") or config_character.get("name") or "星野澪"),
+                    "name": str(character_raw.get("name") or config_character.get("name") or "Joi"),
                     "avatar": avatar,
                     "persona": str(character_raw.get("persona") or config_character.get("setting") or ""),
                     "tone": str((style or {}).get("tone") or "温和、清醒、自然"),

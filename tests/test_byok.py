@@ -64,7 +64,7 @@ class ByokServiceTests(unittest.TestCase):
             raw_text = (workspace / "config.yaml").read_text(encoding="utf-8")
             self.assertNotIn("sk-test-value", raw_text)
             self.assertEqual(yaml.safe_load(raw_text)["llm"]["api_key"], "${JOI_LLM_API_KEY}")
-            self.assertEqual(yaml.safe_load(raw_text)["characters"][0]["name"], "星野澪")
+            self.assertEqual(yaml.safe_load(raw_text)["characters"][0]["name"], "Joi")
             self.assertEqual((workspace / "config.yaml").stat().st_mode & 0o777, 0o600)
 
     def test_rejects_plain_http_remote_endpoint(self) -> None:
@@ -97,7 +97,7 @@ class ByokServiceTests(unittest.TestCase):
                             "model": "gpt-5.6-luna",
                             "api_key": "sk-legacy-plaintext",
                         },
-                        "characters": [{"name": "星野澪", "color": "#d76f8f", "setting": "测试角色"}],
+                        "characters": [{"name": "Joi", "color": "#d76f8f", "setting": "测试角色"}],
                     }
                 ),
                 encoding="utf-8",
@@ -239,7 +239,7 @@ class ByokConfigTests(unittest.TestCase):
                             "model": "gpt-5.6-luna",
                             "api_key": "test-api-key",
                         },
-                        "characters": [{"name": "星野澪", "color": "#d76f8f", "setting": "测试角色"}],
+                        "characters": [{"name": "Joi", "color": "#d76f8f", "setting": "测试角色"}],
                     }
                 ),
                 encoding="utf-8",

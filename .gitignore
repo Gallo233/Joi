@@ -19,7 +19,11 @@ logs/
 --output-last-message
 agent_companion/shell/node_modules
 agent_companion/shell/dist/
-agent_companion/shell/public/live2d/joi/
+# Licensed character artwork and the Live2D Cubism runtime. Neither may be
+# committed to a public repository: the model is Live2D's own sample data and
+# the runtime is proprietary. Ignore the whole directories, not one model's
+# name -- renaming a model must never be able to un-ignore it.
+agent_companion/shell/public/live2d/
 agent_companion/shell/public/vendor/live2d/
 agent_companion/shell/src-tauri/target/
 agent_companion/shell/src-tauri/gen/

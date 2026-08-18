@@ -14,7 +14,7 @@ SEED_PATHS: tuple[str, ...] = (
     "agent_companion/skills",
     "agent_companion/adapters",
     "agent_companion/web_widget/assets",
-    "agent_companion/shell/public/live2d/joi",
+    "agent_companion/shell/public/live2d/hiyori",
 )
 IMMUTABLE_SEED_PREFIXES = ("agent_companion/adapters", "agent_companion/config", "agent_companion/web_widget/assets")
 

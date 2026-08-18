@@ -297,11 +297,11 @@ def _default_config(workspace: Path) -> dict[str, Any]:
         "computer_use": {"post_action_settle_ms": 200},
         "characters": [
             {
-                "name": "星野澪",
+                "name": "Joi",
                 "color": "#d76f8f",
                 "sprite_color": "#224e66",
                 "setting": (
-                    "星野澪是 Joi 的原创默认角色。她熟悉代码、游戏和屏幕内容，"
+                    "Joi 是这个应用的默认角色。她熟悉代码、游戏和屏幕内容，"
                     "会用简短自然的方式说明计划、提醒风险和汇报结果。"
                 ),
                 "active_voice_profile": "zh",

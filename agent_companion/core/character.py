@@ -30,7 +30,7 @@ def load_character(path: Path) -> CharacterHarness:
     style: dict[str, Any] = raw.get("style") or {}
     return CharacterHarness(
         id=str(raw.get("id") or "builtin-hikari"),
-        name=str(raw.get("name") or "星野澪"),
+        name=str(raw.get("name") or "Joi"),
         persona=str(raw.get("persona") or ""),
         tone=str(style.get("tone") or ""),
         boundaries=[str(item) for item in style.get("boundaries") or []],

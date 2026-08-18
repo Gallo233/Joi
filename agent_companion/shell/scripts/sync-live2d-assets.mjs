@@ -12,10 +12,10 @@ const sourceCandidates = [
 ].filter(Boolean)
 
 const requiredFiles = [
-  'live2d/joi/joi.model3.json',
-  'live2d/joi/joi.moc3',
-  'live2d/joi/joi.cdi3.json',
-  'live2d/joi/joi.2048/texture_00.png',
+  'live2d/hiyori/hiyori.model3.json',
+  'live2d/hiyori/hiyori.moc3',
+  'live2d/hiyori/hiyori.cdi3.json',
+  'live2d/hiyori/hiyori.2048/texture_00.png',
   'vendor/live2d/live2dcubismcore.min.js',
   'vendor/live2d/pixi.min.js',
   'vendor/live2d/cubism.min.js',
@@ -26,7 +26,7 @@ const sourceRoot = sourceCandidates.find((candidate) =>
 )
 
 if (!sourceRoot) {
-  const message = 'Joi Live2D assets were not found. Set JOI_LIVE2D_SOURCE to a public directory containing live2d/joi and vendor/live2d.'
+  const message = 'Joi Live2D assets were not found. Set JOI_LIVE2D_SOURCE to a public directory containing live2d/hiyori and vendor/live2d.'
   if (optional) {
     console.warn(`${message} The shell will use its static character fallback.`)
     process.exit(0)
