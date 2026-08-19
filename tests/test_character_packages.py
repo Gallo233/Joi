@@ -662,6 +662,39 @@ class CharacterImportUsabilityTests(unittest.TestCase):
 
 
 
+class CharacterAnimationClipTests(unittest.TestCase):
+    """Authored clips: `.vrma` for a VRM rig, `.vmd` for an MMD one."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temporary.name)
+        self.manager = CharacterPackageManager(self.workspace / "packages")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _mappings(self, filename: str) -> list[dict]:
+        root = self.workspace / f"pkg-{filename}"
+        (root / "assets" / "motions").mkdir(parents=True)
+        (root / "assets" / "motions" / filename).write_bytes(b"clip")
+        manifest = {
+            "appearance": {
+                "motions": [{"motion": "greet", "animation": f"assets/motions/{filename}"}],
+            }
+        }
+        return self.manager._motion_mappings_with_assets(manifest, root)
+
+    def test_a_vmd_clip_is_published_the_same_way_a_vrma_is(self) -> None:
+        for filename in ("wave.vmd", "wave.vrma"):
+            rows = self._mappings(filename)
+            self.assertEqual(len(rows), 1, filename)
+            self.assertTrue(rows[0].get("animation_path"), filename)
+
+    def test_a_clip_format_nothing_can_play_is_dropped(self) -> None:
+        rows = self._mappings("wave.bvh")
+        self.assertFalse(rows[0].get("animation_path"))
+
+
 class CharacterModelStagingTests(unittest.TestCase):
     """A model that references siblings must arrive with them."""
 

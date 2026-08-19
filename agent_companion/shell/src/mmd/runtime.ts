@@ -61,12 +61,21 @@ const ELBOW_REST = 0.18
 /** The blink morph, most common spelling first. */
 const BLINK_MORPHS = ['まばたき', 'ウィンク', 'blink'] as const
 
+/**
+ * The clip name a package binds to loop as the character's resting state.
+ *
+ * Everything else in `mapping.animations` is a semantic motion played once when
+ * Core asks for it; this one replaces the procedural idle below, because an
+ * authored idle is always better than a sine wave on three bones.
+ */
+const IDLE_CLIP = 'idle'
+
 export async function mountMMD(
   canvas: HTMLCanvasElement,
   modelUrl: string,
   mapping: StageRuntimeMapping = {},
 ): Promise<StageController> {
-  const { MMDLoader } = await import('@moeru/three-mmd')
+  const { MMDLoader, VMDLoader, buildAnimation } = await import('@moeru/three-mmd')
 
   const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, powerPreference: 'high-performance' })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
@@ -179,6 +188,44 @@ export async function mountMMD(
   let frame = 0
   const clock = new THREE.Clock()
 
+  // Authored VMD clips the package bound to semantic motions. Loaded lazily and
+  // cached: a character may ship several, and none of them are needed until the
+  // motion they belong to is actually asked for.
+  const mixer = new THREE.AnimationMixer(mesh)
+  const clips = new Map<string, THREE.AnimationClip>()
+  let activeAction: THREE.AnimationAction | null = null
+  let idleAction: THREE.AnimationAction | null = null
+
+  const loadClip = async (name: string): Promise<THREE.AnimationClip | null> => {
+    const cached = clips.get(name)
+    if (cached) return cached
+    const url = mapping.animations?.[name]
+    if (!url) return null
+    try {
+      const vmd = await new VMDLoader().loadAsync(url)
+      const clip = buildAnimation(vmd, mesh)
+      clips.set(name, clip)
+      return clip
+    } catch {
+      // A clip that will not parse leaves the character on procedural motion
+      // rather than failing the whole stage.
+      return null
+    }
+  }
+
+  const playClip = (clip: THREE.AnimationClip, loop: boolean) => {
+    const action = mixer.clipAction(clip)
+    action.reset()
+    action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1)
+    action.clampWhenFinished = !loop
+    action.fadeIn(0.25).play()
+    return action
+  }
+
+  void loadClip(IDLE_CLIP).then((clip) => {
+    if (clip) idleAction = playClip(clip, true)
+  })
+
   const applyEmotion = (now: number) => {
     // Clear every morph the table can drive first, or a previous mood stays
     // blended into the new one.
@@ -217,6 +264,13 @@ export async function mountMMD(
   let nextBlinkAt = 0
 
   const applyIdle = (now: number) => {
+    // An authored idle clip drives the whole skeleton, so the procedural one
+    // stands down rather than fighting it bone by bone. The blink still runs:
+    // most idle VMDs animate the body and leave the face alone.
+    if (idleAction || activeAction) {
+      applyBlink(now)
+      return
+    }
     // Breathing through the spine, a slow look around, and a blink. Small
     // amounts on purpose: this is a character standing in a chat window, not a
     // performance, and anything larger reads as swaying.
@@ -234,6 +288,10 @@ export async function mountMMD(
       if (!rest) continue
       target.rotation[axis] = rest[axis] + value
     }
+    applyBlink(now)
+  }
+
+  const applyBlink = (now: number) => {
     if (!blinkMorph) return
     if (now >= nextBlinkAt) {
       blinkUntil = now + 110
@@ -251,7 +309,10 @@ export async function mountMMD(
     applyMouth(now)
     applyIdle(now)
     applyMotion(now)
-    model?.update(delta)
+    // updateWithMixer applies IK and append transforms *after* the mixer poses
+    // the bones, which is the ordering MMD rigs are authored against.
+    if (idleAction || activeAction) model?.updateWithMixer(delta, mixer)
+    else model?.update(delta)
     renderer.render(scene, camera)
   }
 
@@ -285,8 +346,24 @@ export async function mountMMD(
     playMotion(request: CharacterMotionRequest) {
       const resolved = resolveCharacterMotion(request, mapping.motions)
       if (!resolved) return
-      motion = resolved
-      motionStartedAt = performance.now()
+      // An authored clip wins over the procedural swing, and only for the
+      // motion it was bound to: a package that ships a wave keeps procedural
+      // motion for everything else.
+      void loadClip(resolved.name).then((clip) => {
+        if (!clip) {
+          motion = resolved
+          motionStartedAt = performance.now()
+          return
+        }
+        motion = null
+        activeAction?.fadeOut(0.2)
+        activeAction = playClip(clip, false)
+        mixer.addEventListener('finished', function done() {
+          mixer.removeEventListener('finished', done)
+          activeAction = null
+          idleAction?.reset().fadeIn(0.25).play()
+        })
+      })
     },
     destroy() {
       cancelAnimationFrame(frame)

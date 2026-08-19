@@ -33,9 +33,11 @@ MAX_UNPACKED_BYTES = 512 * 1024 * 1024
 MAX_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_FILES = 2_000
 
-# VRM Animation clips. Declarative bone/expression tracks retargeted onto the
-# humanoid rig -- data, not code, so they carry no execution risk.
-ANIMATION_SUFFIXES = {".vrma"}
+# Authored motion clips: `.vrma` for VRM, `.vmd` for MMD. Both are declarative
+# bone and morph tracks played against the model's own rig -- data, not code, so
+# they carry no execution risk. A package binds them to semantic motion names,
+# the same slot for either format.
+ANIMATION_SUFFIXES = {".vrma", ".vmd"}
 
 # How a character may be drawn. `procedural3d` carries no model file: it is the
 # built-in renderer for a character with no authored body. `spine` is named so a
@@ -368,10 +370,11 @@ class CharacterPackageManager:
     def _motion_mappings_with_assets(self, manifest: dict[str, Any], root: Path) -> list[dict[str, Any]]:
         """Resolve each motion's authored animation file to an absolute path.
 
-        A VRM motion may name a `.vrma` clip inside the package. The clip is
-        the authored version of a semantic motion; a package without one still
-        works, because the shell falls back to procedural motion. Anything that
-        does not resolve inside the package is dropped rather than passed on.
+        A motion may name an authored clip inside the package -- `.vrma` for a
+        VRM rig, `.vmd` for an MMD one. The clip is the authored version of a
+        semantic motion; a package without one still works, because the shell
+        falls back to procedural motion. Anything that does not resolve inside
+        the package is dropped rather than passed on.
         """
 
         rows: list[dict[str, Any]] = []
