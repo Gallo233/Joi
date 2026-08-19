@@ -36,6 +36,7 @@ import type {
   CharacterSummary,
   CoreReadyPayload,
 } from '../protocol'
+import { STAGE_FORMAT_LABEL, isStageModelFormat, type StageModelFormat } from '../character/stage'
 
 const props = defineProps<{ client: CoreClient; connected: boolean }>()
 const emit = defineEmits<{
@@ -73,7 +74,7 @@ interface CharacterDraft {
   exampleDialogue: string
   systemPrompt: string
   postHistoryInstructions: string
-  modelType: 'static' | 'live2d' | 'vrm'
+  modelType: StageModelFormat
   avatarPath: string
   portraitPath: string
   modelPath: string
@@ -198,9 +199,38 @@ function portraitSource(row: CharacterSummary | CharacterDetail | null | undefin
 }
 
 function modelLabel(type?: string) {
-  if (type === 'live2d') return 'Live2D'
-  if (type === 'vrm') return 'VRM'
-  return '静态立绘'
+  return isStageModelFormat(type) ? STAGE_FORMAT_LABEL[type] : '静态立绘'
+}
+
+/**
+ * Thumbnails rendered from the model, for packages that ship no artwork.
+ *
+ * Keyed by character id and rendered once per session. A package with an author
+ * portrait already has a picture; this is for the ones that would otherwise show
+ * a letter, which are exactly the ones a user is least sure about.
+ */
+const renderedThumbnails = ref<Record<string, string>>({})
+const thumbnailAttempted = new Set<string>()
+
+function cardArtSource(row: CharacterSummary | CharacterDetail | null | undefined) {
+  if (!row) return ''
+  return avatarSource(row) || renderedThumbnails.value[row.id] || ''
+}
+
+async function renderMissingThumbnails() {
+  const { canRenderThumbnail } = await import('../character/stage')
+  for (const row of characters.value) {
+    if (avatarSource(row) || thumbnailAttempted.has(row.id)) continue
+    const format = isStageModelFormat(row.model_type) ? row.model_type : 'static'
+    const modelUrl = row.model_path ? convertFileSrc(row.model_path) : ''
+    if (!canRenderThumbnail(format, modelUrl)) continue
+    thumbnailAttempted.add(row.id)
+    // One at a time: each renderer holds a WebGL context, and a library of
+    // eight characters mounting at once exhausts the browser's supply.
+    const { renderModelThumbnail } = await import('../character/thumbnail')
+    const image = await renderModelThumbnail(format, modelUrl, {}, { size: 160 })
+    if (image) renderedThumbnails.value = { ...renderedThumbnails.value, [row.id]: image }
+  }
 }
 
 function memoryLabel(namespace?: string) {
@@ -224,6 +254,9 @@ async function refresh(preferredId = '') {
     activeId.value = result.active_id || ''
     const nextId = preferredId || selectedId.value || activeId.value || characters.value[0]?.id || ''
     if (nextId) await selectCharacter(nextId)
+    // After the list is on screen, not before: a thumbnail is worth waiting for
+    // but never worth making the library wait.
+    void renderMissingThumbnails()
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : '角色库读取失败。'
   } finally {
@@ -691,7 +724,7 @@ onMounted(() => void refresh())
             @click="selectCharacter(character.id)"
           >
             <span class="card-art" :style="{ '--character-accent': character.accent_color || '#5b7ff5' }">
-              <img v-if="avatarSource(character)" :src="avatarSource(character)" :alt="`${character.name} 角色头像`" />
+              <img v-if="cardArtSource(character)" :src="cardArtSource(character)" :alt="`${character.name} 角色头像`" />
               <span v-else>{{ character.name.slice(0, 1) }}</span>
               <i v-if="character.active"><Check :size="13" /></i>
             </span>

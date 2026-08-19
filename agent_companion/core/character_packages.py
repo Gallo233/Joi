@@ -1370,6 +1370,9 @@ class CharacterPackageManager:
             "creator": copy.deepcopy(manifest.get("creator") or {}),
             "model_type": appearance.get("model_type") or "static",
             "avatar_path": str(avatar) if avatar else "",
+            # The library draws its own thumbnail for a package that ships no
+            # artwork, which needs the model itself rather than a picture of it.
+            "model_path": str(self._resolve_asset(root, appearance.get("model")) or ""),
             "portrait_path": str(portrait) if portrait else "",
             "accent_color": appearance.get("accent_color") or "#5b7ff5",
             "memory_namespace": self.memory_namespace(manifest),

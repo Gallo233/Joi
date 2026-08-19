@@ -661,13 +661,17 @@ export interface ByokConnectResult {
   byok?: ByokStatus
 }
 
+import type { StageModelFormat } from './character/stage'
+
 export interface CharacterSummary {
   id: string
   name: string
   version: string
   active?: boolean
   built_in?: boolean
-  model_type?: 'static' | 'live2d' | 'vrm'
+  model_type?: StageModelFormat
+  /** Present when the package ships a model file; used to draw a thumbnail. */
+  model_path?: string
   avatar_path?: string
   avatar_url?: string
   avatar_data_url?: string
