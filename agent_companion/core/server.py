@@ -33,7 +33,7 @@ from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.codex_runtime import CodexRuntimeSession
 from agent_companion.core.coercion import bool_or, float_or, optional_int
 from agent_companion.core.config import load_app_config, load_workspace_config
-from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES, chat_language_policy, voice_language_label
+from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES, CHAT_LANGUAGE_FOLLOW, chat_language_policy, voice_language_label
 from agent_companion.core.llm_planner import looks_actionable
 from agent_companion.core.planner import build_plan, is_minecraft_task
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update
@@ -3098,6 +3098,17 @@ class JsonRpcBridge:
         }
         try:
             character_payload = self.app.character_packages.active_runtime_payload()
+            # The greeting is shown in the chat, so it follows the chat language
+            # rather than the language this character speaks aloud.
+            language_settings = self.app.language_settings()
+            chat_language = language_settings.chat
+            if chat_language == CHAT_LANGUAGE_FOLLOW:
+                chat_language = language_settings.interface
+            greeting = self.app.character_packages.greeting_for_chat_language(
+                str(character_payload.get("id") or ""), chat_language
+            )
+            if greeting:
+                character_payload["greeting"] = greeting
             character_payload["model_url"] = self._character_asset_url(Path(str(character_payload.get("model_path") or "")))
             self._attach_character_animations(character_payload)
             self._attach_character_expression_images(character_payload)

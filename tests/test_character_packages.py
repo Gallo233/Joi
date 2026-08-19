@@ -472,6 +472,47 @@ def _png_with_character_card(encoded: bytes) -> bytes:
 
 
 
+class CharacterGreetingLanguageTests(unittest.TestCase):
+    """A written greeting follows the chat language, not the spoken one."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.manager = CharacterPackageManager(Path(self.temporary.name) / "packages")
+        self.manager.create(
+            {
+                "id": "bilingual",
+                "identity": {"name": "Bilingual", "greeting": "我在。今天做点什么？"},
+                "locale": "zh",
+                "localizations": {"ja": {"identity": {"greeting": "います。何をしましょうか。"}}},
+            }
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_a_character_who_speaks_japanese_still_greets_a_chinese_chat_in_chinese(self) -> None:
+        """The reported bug: a Japanese voice opened a Chinese conversation in Japanese."""
+
+        self.manager.set_locale("bilingual", "ja")
+        self.assertEqual(self.manager.active_locale("bilingual"), "ja")
+        self.assertIn("我在", self.manager.greeting_for_chat_language("bilingual", "zh"))
+
+    def test_the_greeting_follows_the_chat_language_when_the_package_has_it(self) -> None:
+        self.assertIn("います", self.manager.greeting_for_chat_language("bilingual", "ja"))
+
+    def test_an_unresolved_chat_language_uses_the_authored_language_not_the_spoken_one(self) -> None:
+        # "Follow my input" has nothing to follow before the first message.
+        self.manager.set_locale("bilingual", "ja")
+        for value in ("follow", ""):
+            self.assertIn("我在", self.manager.greeting_for_chat_language("bilingual", value), value)
+
+    def test_a_chat_language_the_package_cannot_write_falls_back_rather_than_emptying(self) -> None:
+        self.assertTrue(self.manager.greeting_for_chat_language("bilingual", "ko"))
+
+    def test_an_unknown_character_yields_no_greeting_instead_of_raising(self) -> None:
+        self.assertEqual(self.manager.greeting_for_chat_language("nobody", "zh"), "")
+
+
 class CharacterModelFormatTests(unittest.TestCase):
     """The formats the stage grew into, checked where a package declares them."""
 

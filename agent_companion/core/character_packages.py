@@ -20,6 +20,7 @@ from typing import Any, Iterable
 
 import yaml
 
+from agent_companion.core.language_policy import CHAT_LANGUAGE_FOLLOW
 from agent_companion.core.character import CharacterHarness
 from agent_companion.core.voice import EMOTION_ALIASES
 
@@ -258,6 +259,39 @@ class CharacterPackageManager:
                 "failed": str(voice.get("failed") or "这次没有成功。"),
             },
         )
+
+    def greeting_for_chat_language(self, character_id: str, chat_language: str) -> str:
+        """The opening line as chat text, in the language the chat is written in.
+
+        A character's locale is the language she *speaks*; the chat language is
+        the language Joi *writes*. The greeting is written text in the chat, so
+        it belongs to the second -- a character set to speak Japanese was
+        greeting a Chinese conversation in Japanese, which is the same mismatch
+        the reply path already avoids.
+
+        Falls back to the character's own locale when the package has no
+        translation for the chat language: a greeting in the wrong language
+        still beats no greeting.
+        """
+
+        safe_id = _safe_character_id(character_id or self.active_id())
+        try:
+            manifest, _ = self._load(safe_id)
+        except CharacterPackageError:
+            return ""
+        # "Follow my input" has nothing to follow on an empty conversation: the
+        # greeting is the first thing said. The caller resolves it to the
+        # interface language, which is what the rest of that screen is written
+        # in, and an unresolved value is treated the same way rather than
+        # quietly becoming the character's own language.
+        wanted = _clean_locale(chat_language if chat_language != CHAT_LANGUAGE_FOLLOW else "")
+        offered = available_locales(manifest)
+        # With no usable chat language, fall back to the language the package
+        # was authored in -- not to the one this character speaks aloud, which
+        # is the very thing a written greeting is not supposed to follow.
+        chosen = wanted if wanted in offered else offered[0]
+        localized = _apply_localization(manifest, chosen)
+        return str((localized.get("identity") or {}).get("greeting") or "")
 
     def active_runtime_payload(self) -> dict[str, Any]:
         manifest, location = self._load(self.active_id())
