@@ -94,7 +94,13 @@ def main(argv: list[str] | None = None) -> int:
         sections.append(_render_table(f"npm — {label}（生产依赖，随发布物分发）", rows))
     python_rows = _python_packages()
     total += len(python_rows)
-    sections.append(_render_table("Python — Core sidecar（PyInstaller 冻结进包）", python_rows))
+    excluded = "、".join(excluded_python_modules()) or "无"
+    sections.append(
+        _render_table(
+            f"Python — Core sidecar（PyInstaller 冻结进包；已排除：{excluded}）",
+            python_rows,
+        )
+    )
     cargo_rows = _cargo_packages()
     total += len(cargo_rows)
     sections.append(_render_table("Rust — Tauri 壳（编译进可执行文件）", cargo_rows))
@@ -160,13 +166,22 @@ def _npm_license(project: Path, name: str) -> str:
     return str(license_value or "UNKNOWN")
 
 
+# Distributions that exist only to serve an excluded module. PyInstaller's
+# --exclude-module names a module, not a distribution, so the family has to be
+# named here or the notice claims to ship something the build leaves out.
+_EXCLUDED_COMPANIONS = {"pyside6": ("shiboken6",)}
+
+
 def _python_packages() -> list[dict[str, str]]:
     import importlib.metadata as metadata
 
+    excluded = _excluded_python_distributions()
     rows: dict[str, dict[str, str]] = {}
     for dist in metadata.distributions():
         name = dist.metadata["Name"]
         if not name or name in rows:
+            continue
+        if _normalized(name) in excluded:
             continue
         rows[name] = {
             "name": name,
@@ -174,6 +189,47 @@ def _python_packages() -> list[dict[str, str]]:
             "license": _python_license(dist.metadata),
         }
     return sorted(rows.values(), key=lambda row: row["name"].casefold())
+
+
+def excluded_python_modules() -> list[str]:
+    """The modules the sidecar build refuses to freeze, read from the build itself.
+
+    An installed package is not a shipped package. Reading the exclusions from
+    the build script rather than restating them means the notice cannot drift
+    into claiming a dependency the artifact does not contain -- which for a
+    copyleft dependency is not a cosmetic error.
+    """
+
+    source = (ROOT / "tools" / "build_core_sidecar.py").read_text(encoding="utf-8")
+    modules: list[str] = []
+    parts = source.split('"--exclude-module",')
+    for part in parts[1:]:
+        head = part.split('"', 2)
+        if len(head) >= 2:
+            modules.append(head[1])
+    return modules
+
+
+def _excluded_python_distributions() -> set[str]:
+    excluded: set[str] = set()
+    for module in excluded_python_modules():
+        key = _normalized(module)
+        excluded.add(key)
+        # PySide6 installs itself as several distributions; excluding the module
+        # leaves all of them out of the frozen application.
+        excluded.update(_normalized(name) for name in _EXCLUDED_COMPANIONS.get(key, ()))
+    import importlib.metadata as metadata
+
+    for dist in metadata.distributions():
+        name = dist.metadata["Name"] or ""
+        normalized = _normalized(name)
+        if any(normalized.startswith(f"{key}-") or normalized.startswith(f"{key}_") for key in tuple(excluded)):
+            excluded.add(normalized)
+    return excluded
+
+
+def _normalized(name: str) -> str:
+    return name.strip().casefold().replace("_", "-")
 
 
 def _python_license(meta: Any) -> str:
@@ -250,7 +306,8 @@ Joi 自身的代码按仓库根目录的 `LICENSE` 授权（保留所有权利�
 
 1. **Live2D Cubism Core** 是专有软件，不是开源件。仓库的 LICENSE 完全不适用于它，它的再分发由 Live2D 自己的 SDK 许可证管辖；而**允许用户导入自己的 Live2D 模型的应用属于 Expandable Application**，需要与 Live2D 单独签约。见 `docs/RELEASE_HANDS_ON.md`。
 2. **默认角色的 Live2D 形象是 Live2D 官方示例模型「桃瀬ひより / Hiyori Momose」，版权归 Live2D Inc.**。示例数据条款允许 General User 与小规模企业免费用于商业与非商业用途，但要求**保留版权声明**、**不得改动角色设计**，且**不得作为发布者的原创角色呈现**。
-3. **PyInstaller** 是 GPL-2.0-or-later，**但带 bootloader exception**——用它冻结出来的应用可以按任意许可证分发，包括闭源。这条例外是 Joi 能以非开源形式发布的前提之一。
+3. **PySide6 / Qt 不在发布物里。** 它出现在 `requirements.txt`，但 sidecar 构建用 `--exclude-module PySide6` 明确排除，因此 LGPL/GPL 的 Qt 绑定**不随包分发**。本文件的 Python 段按构建实际排除项过滤，而不是按环境里装了什么。
+4. **PyInstaller** 是 GPL-2.0-or-later，**但带 bootloader exception**——用它冻结出来的应用可以按任意许可证分发，包括闭源。这条例外是 Joi 能以非开源形式发布的前提之一。
 
 ## 许可证全文
 
