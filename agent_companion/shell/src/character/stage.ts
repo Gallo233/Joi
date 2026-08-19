@@ -125,6 +125,19 @@ export const STAGE_EMOTION_TABLE: Record<StageEmotion, StageEmotionRow> = {
   neutral: { vrm: null, mmd: null },
 }
 
+/**
+ * Whether a thumbnail can be drawn for this model at all.
+ *
+ * Pure, and separate from the renderer that would draw it, so the rule can be
+ * checked without a DOM: `spine` has no licensed runtime to mount, and a format
+ * that needs a model file cannot preview one it was not given.
+ */
+export function canRenderThumbnail(format: StageModelFormat, modelUrl: string): boolean {
+  if (format === 'spine') return false
+  if (STAGE_FORMATS_WITHOUT_MODEL_URL.includes(format)) return true
+  return Boolean(modelUrl)
+}
+
 /** The expression channel a format should drive for this mood, if it has one. */
 export function stageEmotionShape(
   format: Extract<StageModelFormat, 'vrm' | 'mmd'>,
