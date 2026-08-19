@@ -471,5 +471,58 @@ def _png_with_character_card(encoded: bytes) -> bytes:
     return header + ihdr + text + pixel + chunk(b"IEND", b"")
 
 
+
+class CharacterModelFormatTests(unittest.TestCase):
+    """The formats the stage grew into, checked where a package declares them."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _validate(self, model_type: str, filename: str = "", *, write: bool = True, case: str = "") -> dict:
+        # One root per call: a file written by an earlier case would otherwise
+        # satisfy a later "the file is missing" case.
+        root = self.workspace / f"{model_type}-{case or filename or 'bare'}-{int(write)}"
+        (root / "assets").mkdir(parents=True, exist_ok=True)
+        if filename and write:
+            (root / "assets" / filename).write_bytes(b"joi")
+        manager = CharacterPackageManager(self.workspace / "packages")
+        appearance: dict = {"model_type": model_type}
+        if filename:
+            appearance["model"] = f"assets/{filename}"
+        return manager._appearance_report({"appearance": appearance}, root)
+
+    def test_an_mmd_package_needs_a_pmx_or_pmd_and_is_told_physics_is_off(self) -> None:
+        ok = self._validate("mmd", "model.pmx")
+        self.assertTrue(ok["installable"], ok["errors"])
+        self.assertEqual(ok["model_type"], "mmd")
+        # Not an error: the model loads, it just stands stiffer than in MMD.
+        self.assertTrue(any("物理" in str(item) for item in ok["warnings"]))
+        wrong = self._validate("mmd", "model.fbx")
+        self.assertFalse(wrong["installable"])
+
+    def test_a_tachie_package_needs_an_image(self) -> None:
+        ok = self._validate("tachie", "base.png")
+        self.assertTrue(ok["installable"], ok["errors"])
+        wrong = self._validate("tachie", "base.psd")
+        self.assertFalse(wrong["installable"])
+        missing = self._validate("tachie", "base.png", write=False)
+        self.assertFalse(missing["installable"])
+
+    def test_a_spine_package_is_refused_because_the_runtime_is_not_licensed(self) -> None:
+        """Declarable so the reason can be shown; never installable."""
+
+        result = self._validate("spine", "model.json")
+        self.assertFalse(result["installable"])
+        self.assertTrue(any("Spine" in str(item) for item in result["errors"]))
+
+    def test_an_unknown_format_falls_back_to_static_rather_than_being_trusted(self) -> None:
+        result = self._validate("hologram", "model.bin")
+        self.assertEqual(result["model_type"], "static")
+
+
 if __name__ == "__main__":
     unittest.main()

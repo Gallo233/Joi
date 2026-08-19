@@ -7,7 +7,7 @@
 Joi 自身的代码按仓库根目录的 `LICENSE` 授权（保留所有权利，非开源）。
 **本文件列出的组件不受该 LICENSE 约束**，它们各自由其作者按下列许可证授权。
 
-当前共 611 项。
+当前共 619 项。
 
 ## 覆盖范围与边界
 
@@ -29,16 +29,18 @@ Joi 自身的代码按仓库根目录的 `LICENSE` 授权（保留所有权利�
 
 ### npm — Joi Shell（生产依赖，随发布物分发）
 
-共 40 项。
+共 48 项。
 
 | 组件 | 版本 | 许可证 |
 | --- | --- | --- |
+| @dimforge/rapier3d-compat | 0.12.0 | Apache-2.0 |
 | @floating-ui/core | 1.8.0 | MIT |
 | @floating-ui/dom | 1.8.0 | MIT |
 | @floating-ui/utils | 0.2.12 | MIT |
 | @floating-ui/vue | 1.1.11 | MIT |
 | @internationalized/date | 3.12.3 | Apache-2.0 |
 | @internationalized/number | 3.6.7 | Apache-2.0 |
+| @moeru/three-mmd | 0.1.1 | MIT |
 | @pixiv/three-vrm | 3.5.5 | MIT |
 | @pixiv/three-vrm-animation | 3.5.5 | MIT |
 | @pixiv/three-vrm-core | 3.5.5 | MIT |
@@ -59,14 +61,20 @@ Joi 自身的代码按仓库根目录的 `LICENSE` 授权（保留所有权利�
 | @tanstack/virtual-core | 3.17.7 | MIT |
 | @tanstack/vue-virtual | 3.13.35 | MIT |
 | @tauri-apps/api | 2.11.0 | Apache-2.0 OR MIT |
+| @tweenjs/tween.js | 23.1.3 | MIT |
+| @types/stats.js | 0.17.4 | MIT |
+| @types/three | 0.185.1 | MIT |
 | @types/web-bluetooth | 0.0.21 | MIT |
+| @types/webxr | 0.5.24 | MIT |
 | @vue/composition-api |  | UNKNOWN |
 | @vueuse/core | 14.4.0 | MIT |
 | @vueuse/metadata | 14.4.0 | MIT |
 | @vueuse/shared | 14.4.0 | MIT |
 | aria-hidden | 1.2.6 | MIT |
 | defu | 6.1.7 | MIT |
+| fflate | 0.8.3 | MIT |
 | lucide-vue-next | 0.577.0 | ISC |
+| meshoptimizer | 1.1.1 | MIT |
 | ohash | 2.0.11 | MIT |
 | reka-ui | 2.10.1 | MIT |
 | three | 0.185.1 | MIT |

@@ -3,8 +3,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { CharacterMotionName, CharacterMotionRequest } from '../characterMotion'
 import { mountLive2D, type Live2DController, type Live2DEmotion, type Live2DRuntimeMapping } from '../live2d/runtime'
 import type { VrmController } from '../vrm/runtime'
+import { STAGE_FORMAT_LABEL, STAGE_FORMATS_WITHOUT_MODEL_URL, type StageModelFormat } from '../character/stage'
 
-type CharacterModelType = 'static' | 'live2d' | 'vrm' | 'procedural3d'
+type CharacterModelType = StageModelFormat
 
 const props = defineProps<{
   modelUrl: string
@@ -40,15 +41,33 @@ let fallbackMotionTimer: number | null = null
 let mountGeneration = 0
 
 const showFallbackImage = computed(() => Boolean(props.fallbackImageSrc && !fallbackFailed.value))
-const modelLabel = computed(() => {
-  if (props.modelType === 'procedural3d') return '3D'
-  if (props.modelType === 'vrm') return 'VRM'
-  return 'Live2D'
-})
+const modelLabel = computed(() => STAGE_FORMAT_LABEL[props.modelType || 'live2d'] || 'Live2D')
+
+async function mountFormat(target: HTMLCanvasElement) {
+  const mapping = props.runtimeMapping || {}
+  switch (props.modelType) {
+    case 'procedural3d':
+      return (await import('../character3d/runtime')).mountProceduralCharacter3D(target, mapping)
+    case 'vrm':
+      return (await import('../vrm/runtime')).mountVRM(target, props.modelUrl, mapping)
+    case 'mmd':
+      return (await import('../mmd/runtime')).mountMMD(target, props.modelUrl, mapping)
+    case 'tachie':
+      return (await import('../tachie/runtime')).mountTachie(target, props.modelUrl, mapping)
+    case 'spine':
+      // The format exists in the stage vocabulary so the library and the import
+      // path can name it, but the Spine runtimes are proprietary and require
+      // their own licence, so nothing here loads one.
+      throw new Error('spine_runtime_not_licensed')
+    default:
+      return mountLive2D(target, props.modelUrl, mapping)
+  }
+}
 
 async function mountModel() {
   const target = canvas.value
-  if (!target || (!props.modelUrl && props.modelType !== 'procedural3d')) {
+  const needsModelUrl = !STAGE_FORMATS_WITHOUT_MODEL_URL.includes(props.modelType || 'live2d')
+  if (!target || (!props.modelUrl && needsModelUrl)) {
     live2dState.value = 'error'
     return
   }
@@ -58,11 +77,10 @@ async function mountModel() {
   controller?.destroy()
   controller = null
   try {
-    const nextController = props.modelType === 'procedural3d'
-      ? await (await import('../character3d/runtime')).mountProceduralCharacter3D(target, props.runtimeMapping || {})
-      : props.modelType === 'vrm'
-        ? await (await import('../vrm/runtime')).mountVRM(target, props.modelUrl, props.runtimeMapping || {})
-        : await mountLive2D(target, props.modelUrl, props.runtimeMapping || {})
+    // One renderer per format, each loaded only when a character actually uses
+    // it: MMD and VRM each pull in three, and a Live2D user should never pay
+    // for either.
+    const nextController = await mountFormat(target)
     if (generation !== mountGeneration) {
       nextController.destroy()
       return

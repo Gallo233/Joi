@@ -36,6 +36,15 @@ MAX_FILES = 2_000
 # humanoid rig -- data, not code, so they carry no execution risk.
 ANIMATION_SUFFIXES = {".vrma"}
 
+# How a character may be drawn. `procedural3d` carries no model file: it is the
+# built-in renderer for a character with no authored body. `spine` is named so a
+# package can declare it and be told why it will not run -- the Spine runtimes
+# are proprietary and need their own licence, so nothing loads one.
+MODEL_TYPES = {"static", "live2d", "vrm", "procedural3d", "tachie", "mmd", "spine"}
+MODEL_TYPES_WITHOUT_MODEL_FILE = {"static", "procedural3d"}
+MMD_SUFFIXES = {".pmx", ".pmd"}
+TACHIE_SUFFIXES = {".png", ".webp", ".jpg", ".jpeg"}
+
 # Language tags a package may declare, as `zh`, `ja`, `zh-CN`, `zh-Hant`.
 LOCALE_PATTERN = re.compile(r"^[a-z]{2}(-[A-Za-z]{2,4})?$")
 DEFAULT_LOCALE = "zh"
@@ -851,7 +860,7 @@ class CharacterPackageManager:
         if memory_namespace not in {"isolated", "shared", "disabled"}:
             memory_namespace = "isolated"
         model_type = str(appearance_raw.get("model_type") or "static").casefold()
-        if model_type not in {"static", "live2d", "vrm"}:
+        if model_type not in MODEL_TYPES:
             model_type = "static"
         manifest = {
             "schema": PACKAGE_SCHEMA,
@@ -1064,6 +1073,11 @@ class CharacterPackageManager:
 
         appearance = manifest.get("appearance") if isinstance(manifest.get("appearance"), dict) else {}
         model_type = str((appearance or {}).get("model_type") or "static").casefold()
+        # A manifest can be hand-edited after install, so an unknown format is
+        # reported as what it will actually be rendered as rather than repeated
+        # back as if the stage knew it.
+        if model_type not in MODEL_TYPES:
+            model_type = "static"
         errors: list[str] = []
         warnings: list[str] = []
         checks: list[dict[str, Any]] = []
@@ -1135,6 +1149,42 @@ class CharacterPackageManager:
                     except OSError:
                         valid_glb = False
                 record("vrm.glb", valid_glb, "VRM 文件不是有效的 glTF 2.0 二进制模型。", required=True)
+
+        elif model_type == "mmd":
+            record("mmd.model", bool(model_ref), "MMD 角色必须选择 .pmx 或 .pmd 模型。", required=True)
+            if model_ref:
+                record("mmd.file", bool(model_path), "MMD 模型文件不存在。", required=True)
+            if model_path is not None:
+                record(
+                    "mmd.format",
+                    model_path.suffix.casefold() in MMD_SUFFIXES,
+                    "MMD 模型必须使用 .pmx 或 .pmd 扩展名。",
+                    required=True,
+                )
+            # Physics is not shipped, so a model authored around skirt or hair
+            # simulation will stand stiffer here than in MMD itself. Saying so
+            # is better than letting it look broken.
+            record("mmd.physics", False, "MMD 物理未启用：裙摆与头发不会摆动。")
+        elif model_type == "tachie":
+            record("tachie.model", bool(model_ref), "立绘角色必须选择一张基础图片。", required=True)
+            if model_ref:
+                record("tachie.file", bool(model_path), "立绘图片文件不存在。", required=True)
+            if model_path is not None:
+                record(
+                    "tachie.format",
+                    model_path.suffix.casefold() in TACHIE_SUFFIXES,
+                    "立绘图片必须是 PNG / WebP / JPEG。",
+                    required=True,
+                )
+        elif model_type == "spine":
+            # Declarable, never runnable: the runtime licence is not ours to
+            # grant, so this fails at validation rather than at mount.
+            record(
+                "spine.licence",
+                False,
+                "Spine 运行时是专有软件，需要单独授权，当前版本不支持加载 Spine 角色。",
+                required=True,
+            )
 
         background_ref = str((appearance or {}).get("background") or "").strip()
         if background_ref and root is not None:

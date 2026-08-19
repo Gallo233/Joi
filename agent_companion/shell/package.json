@@ -16,6 +16,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@moeru/three-mmd": "^0.1.1",
     "@pixiv/three-vrm": "^3.5.5",
     "@pixiv/three-vrm-animation": "^3.5.5",
     "@tauri-apps/api": "^2.0.0",
