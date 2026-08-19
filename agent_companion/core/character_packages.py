@@ -776,6 +776,17 @@ class CharacterPackageManager:
                 raw = str(row.get(field) or "").strip()
                 if raw:
                     extra_assets[f"appearance.expressions.{index}.{field}"] = Path(raw).expanduser().resolve()
+        # Authored motion clips. Without this a character could be given a
+        # `.vrma` or `.vmd` through the form and the file was simply dropped:
+        # the motion stayed in the manifest pointing at nothing, and the stage
+        # fell back to procedural motion with no sign that a clip was meant.
+        motions = appearance.get("motions") if isinstance(appearance.get("motions"), list) else []
+        for index, row in enumerate(motions):
+            if not isinstance(row, dict):
+                continue
+            raw = str(row.get("animation_path") or "").strip()
+            if raw:
+                extra_assets[f"appearance.motions.{index}.animation_path"] = Path(raw).expanduser().resolve()
         return self._install_manifest(manifest, None, replace=replace, extra_assets=extra_assets)
 
     def _install_manifest(
@@ -830,6 +841,20 @@ class CharacterPackageManager:
             if not source.is_file():
                 raise CharacterPackageError("character_asset_not_found", f"没有找到角色素材：{source.name}")
             self._validate_asset_file(source)
+            if dotted_key.startswith("appearance.motions."):
+                _, _, index_text, _ = dotted_key.split(".", 3)
+                try:
+                    index = int(index_text)
+                    row = manifest.setdefault("appearance", {}).setdefault("motions", [])[index]
+                except (ValueError, IndexError, TypeError):
+                    continue
+                destination = staging / "assets" / "motions"
+                destination.mkdir(parents=True, exist_ok=True)
+                target = destination / _safe_filename(source.name)
+                shutil.copy2(source, target)
+                row["animation"] = target.relative_to(staging).as_posix()
+                row.pop("animation_path", None)
+                continue
             if dotted_key.startswith("appearance.expressions."):
                 _, _, index_text, source_field = dotted_key.split(".", 3)
                 try:

@@ -690,6 +690,38 @@ class CharacterAnimationClipTests(unittest.TestCase):
             self.assertEqual(len(rows), 1, filename)
             self.assertTrue(rows[0].get("animation_path"), filename)
 
+    def test_a_clip_chosen_in_the_editor_is_installed_with_the_character(self) -> None:
+        """The form dropped the file and left the motion pointing at nothing.
+
+        A character could be given a clip through the editor, and it was simply
+        not copied: the motion stayed in the manifest with no animation, and the
+        stage fell back to procedural motion with no sign a clip was meant.
+        """
+
+        source = self.workspace / "clips"
+        source.mkdir(parents=True, exist_ok=True)
+        (source / "dance.vmd").write_bytes(b"Vocaloid Motion Data 0002")
+        (source / "girl.pmx").write_bytes(b"PMX ")
+        result = self.manager.create(
+            {
+                "identity": {"name": "clip tester"},
+                "appearance": {
+                    "model_type": "mmd",
+                    "model_path": str(source / "girl.pmx"),
+                    "motions": [{"motion": "dance", "animation_path": str(source / "dance.vmd")}],
+                },
+            }
+        )
+        self.assertTrue(result.get("ok"), result)
+        root = self.manager.packages_dir / str(result["character"]["id"])
+        import json as _json
+
+        motions = _json.loads((root / "manifest.json").read_text(encoding="utf-8"))["appearance"]["motions"]
+        self.assertEqual(motions[0]["animation"], "assets/motions/dance.vmd")
+        self.assertTrue((root / "assets" / "motions" / "dance.vmd").is_file())
+        # The absolute path from the picker must not survive into the package.
+        self.assertNotIn("animation_path", motions[0])
+
     def test_a_clip_format_nothing_can_play_is_dropped(self) -> None:
         rows = self._mappings("wave.bvh")
         self.assertFalse(rows[0].get("animation_path"))

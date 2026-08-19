@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_companion.core.character_motion import MOTION_SPECS, character_motion_from_text
+from agent_companion.core.character_motion import _ALIASES, MOTION_SPECS, character_motion_from_text
 
 
 class NaturalPhrasingTests(unittest.TestCase):
@@ -68,7 +68,26 @@ class NaturalPhrasingTests(unittest.TestCase):
             character_motion_from_text(text)
             for text in ("跳个舞", "挥挥手", "做个说话动作", "庆祝一下", "比个手枪", "回到待机")
         }
-        self.assertEqual(reachable, set(MOTION_SPECS))
+        self.assertTrue(reachable.issubset(set(MOTION_SPECS)))
+
+    def test_no_motion_is_shadowed_by_another_motion_s_phrasing(self) -> None:
+        """Every alias must route to the motion it was written for.
+
+        The table is ordered most specific first, so a loose phrase added above
+        a later motion silently swallows it -- the motion stays in the
+        vocabulary and becomes unreachable. Checking every alias rather than one
+        sample phrase per motion is what catches that, including for motions
+        added after this test was written.
+        """
+
+        for motion, aliases in _ALIASES:
+            for alias in aliases:
+                with self.subTest(motion=motion, alias=alias):
+                    self.assertEqual(character_motion_from_text(alias), motion)
+
+    def test_every_motion_in_the_vocabulary_has_phrases(self) -> None:
+        named = {motion for motion, _ in _ALIASES}
+        self.assertEqual(named, set(MOTION_SPECS))
 
 
 if __name__ == "__main__":

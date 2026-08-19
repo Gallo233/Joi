@@ -1,4 +1,4 @@
-export const CHARACTER_MOTIONS = ['idle', 'greet', 'talk', 'happy', 'finger_gun', 'dance'] as const
+export const CHARACTER_MOTIONS = ['idle', 'greet', 'talk', 'happy', 'finger_gun', 'dance', 'show_full_body', 'model_pose', 'squat'] as const
 
 export type CharacterMotionName = typeof CHARACTER_MOTIONS[number]
 
@@ -38,6 +38,9 @@ const DEFAULT_DURATION_MS: Record<CharacterMotionName, number> = {
   happy: 2200,
   finger_gun: 1900,
   dance: 6000,
+  show_full_body: 4000,
+  model_pose: 3200,
+  squat: 2600,
 }
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value))

@@ -29,6 +29,12 @@ MOTION_SPECS: dict[str, CharacterMotionSpec] = {
     "happy": CharacterMotionSpec("happy", "开心庆祝", 2200, False, "happy", "好耶。"),
     "finger_gun": CharacterMotionSpec("finger_gun", "手指枪", 1900, False, "happy", "接住这个帅气动作。"),
     "dance": CharacterMotionSpec("dance", "跳舞", 6000, False, "happy", "来啦。"),
+    # The rest of the official VRM Animation set. Each clip in that pack had no
+    # semantic name to be bound to, so a package could ship it and never be able
+    # to play it: the vocabulary is what a request can reach, not the file list.
+    "show_full_body": CharacterMotionSpec("show_full_body", "展示全身", 4000, False, "neutral", "转过来给你看看。"),
+    "model_pose": CharacterMotionSpec("model_pose", "模特姿势", 3200, False, "happy", "这样怎么样？"),
+    "squat": CharacterMotionSpec("squat", "蹲下", 2600, False, "neutral", "蹲一下。"),
 }
 
 # Ordered most specific first: "比个手枪" also contains "手枪", and a bare
@@ -74,6 +80,29 @@ _ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "talk",
         ("做个说话动作", "说话动作", "talk motion", "talk pose"),
+    ),
+    (
+        "show_full_body",
+        (
+            "展示全身", "看看全身", "全身展示", "转一圈给我看", "让我看看你", "看看你自己",
+            "show yourself", "show full body", "full body",
+            "全身を見せて", "見せて",
+        ),
+    ),
+    (
+        "model_pose",
+        (
+            "摆个姿势", "摆姿势", "模特姿势", "凹个造型", "来个造型", "拍照姿势",
+            "model pose", "pose for me", "strike a pose",
+            "ポーズをとって", "ポーズして",
+        ),
+    ),
+    (
+        "squat",
+        (
+            "蹲下", "蹲一个", "蹲一下", "蹲着", "squat", "crouch",
+            "しゃがんで", "座って",
+        ),
     ),
     (
         "idle",
