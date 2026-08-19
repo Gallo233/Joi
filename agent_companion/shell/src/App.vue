@@ -371,7 +371,15 @@ function openCabin(cabin: CabinId) {
 }
 
 async function handleCharacterActivated(_characterId: string, readyPayload?: CoreReadyPayload) {
-  if (readyPayload) ready.value = readyPayload
+  if (readyPayload) {
+    ready.value = readyPayload
+    // Core moved the conversation to this character's own thread, and said so
+    // in the same payload. Assigning `ready` without taking the collaboration
+    // snapshot with it left `activeContext.thread_id` pointing at the previous
+    // character's thread -- and the history fetch below asks for a thread *by
+    // id*, so it faithfully returned the conversation we had just left.
+    syncCollaborationSnapshot(readyPayload.collaboration)
+  }
   events.value = []
   eventCursor.value = 0
   activeApprovalIds.value = new Set()
