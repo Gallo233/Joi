@@ -142,14 +142,21 @@ export async function mountTachie(
     // emotion weight so a mood change does not jump.
     offsetY -= voice * height * 0.004 * (0.6 + settled * 0.4)
 
-    const scale =
-      ((compact ? height * 0.72 : height * ART_FRACTION) / Math.max(current.naturalHeight || current.height || 1, 1)) *
-      Math.max(zoom, 0.2)
-    const drawWidth = (current.naturalWidth || current.width || 1) * scale
-    const drawHeight = (current.naturalHeight || current.height || 1) * scale
+    // Contain, not height-fill. Tachie art is authored at whatever aspect the
+    // artist framed it: a bust is usually wider than tall, and scaling that to
+    // the canvas height made it almost twice the canvas width, so the sides --
+    // including most of the character -- were cropped away.
+    const artWidth = Math.max(current.naturalWidth || current.width || 1, 1)
+    const artHeight = Math.max(current.naturalHeight || current.height || 1, 1)
+    const fill = compact ? 0.78 : ART_FRACTION
+    const scale = Math.min((width * fill) / artWidth, (height * fill) / artHeight) * Math.max(zoom, 0.2)
+    const drawWidth = artWidth * scale
+    const drawHeight = artHeight * scale
 
     context.save()
-    context.translate(width / 2 + offsetX, height - offsetY)
+    // Bottom-anchored, but never below the canvas: a contained image shorter
+    // than the stage sits on the floor rather than floating.
+    context.translate(width / 2 + offsetX, Math.min(height, (height + drawHeight) / 2) - offsetY)
     context.rotate(tilt)
     context.drawImage(current, -drawWidth / 2, -drawHeight, drawWidth, drawHeight)
     context.restore()

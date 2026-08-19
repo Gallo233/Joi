@@ -512,6 +512,34 @@ class CharacterModelFormatTests(unittest.TestCase):
         missing = self._validate("tachie", "base.png", write=False)
         self.assertFalse(missing["installable"])
 
+    def test_opaque_tachie_art_is_flagged_without_being_refused(self) -> None:
+        """Sprite packs ship a contact sheet beside the real cut-outs.
+
+        Picking the wrong one loads fine and then draws the backdrop as part of
+        the character, which reads as a renderer fault rather than a chosen file.
+        """
+
+        import zlib
+
+        def png(colour_type: int) -> bytes:
+            header = b"\x89PNG\r\n\x1a\n"
+            ihdr = struct.pack(">IIBBBBB", 8, 8, 8, colour_type, 0, 0, 0)
+            chunk = struct.pack(">I", len(ihdr)) + b"IHDR" + ihdr + struct.pack(">I", zlib.crc32(b"IHDR" + ihdr))
+            return header + chunk
+
+        root = self.workspace / "tachie-alpha"
+        (root / "assets").mkdir(parents=True)
+        (root / "assets" / "opaque.png").write_bytes(png(2))  # RGB
+        (root / "assets" / "cutout.png").write_bytes(png(6))  # RGBA
+        manager = CharacterPackageManager(self.workspace / "packages-alpha")
+
+        opaque = manager._appearance_report({"appearance": {"model_type": "tachie", "model": "assets/opaque.png"}}, root)
+        self.assertTrue(opaque["installable"], opaque["errors"])
+        self.assertTrue(any("透明" in str(item) for item in opaque["warnings"]), opaque["warnings"])
+
+        cutout = manager._appearance_report({"appearance": {"model_type": "tachie", "model": "assets/cutout.png"}}, root)
+        self.assertFalse(any("透明" in str(item) for item in cutout["warnings"]), cutout["warnings"])
+
     def test_a_spine_package_is_refused_because_the_runtime_is_not_licensed(self) -> None:
         """Declarable so the reason can be shown; never installable."""
 

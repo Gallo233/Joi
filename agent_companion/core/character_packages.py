@@ -1295,6 +1295,15 @@ class CharacterPackageManager:
                     "立绘图片必须是 PNG / WebP / JPEG。",
                     required=True,
                 )
+                # Sprite packs usually ship both a contact sheet on a flat
+                # backdrop and the real cut-outs. Picking the wrong one loads
+                # fine and then draws the backdrop as part of the character,
+                # which looks like a renderer fault rather than a chosen file.
+                record(
+                    "tachie.transparency",
+                    _png_has_alpha(model_path),
+                    "这张立绘没有透明通道，它的背景会连角色一起画在舞台上；同一素材包里通常还有一份带透明的版本。",
+                )
         elif model_type == "spine":
             # Declarable, never runnable: the runtime licence is not ours to
             # grant, so this fails at validation rather than at mount.
@@ -1659,6 +1668,35 @@ class CharacterPackageManager:
                 "declared_source": copy.deepcopy(manifest.get("source") or {}),
             },
         }
+
+
+def _png_has_alpha(path: Path) -> bool:
+    """Whether the artwork carries transparency, read from the file header.
+
+    Only PNG is inspected: it is what sprite packs ship, and its IHDR states the
+    colour type in the first 26 bytes. Anything else is assumed fine rather than
+    guessed at -- this decides a warning, not a refusal.
+    """
+
+    if path.suffix.casefold() != ".png":
+        return True
+    try:
+        header = path.read_bytes()[:33]
+    except OSError:
+        return True
+    if len(header) < 26 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        return True
+    colour_type = header[25]
+    # 4 = grey+alpha, 6 = RGBA. 3 is a palette, which carries transparency only
+    # through a tRNS chunk further in.
+    if colour_type in {4, 6}:
+        return True
+    if colour_type == 3:
+        try:
+            return b"tRNS" in path.read_bytes()[:8192]
+        except OSError:
+            return True
+    return False
 
 
 def _is_archive_junk(name: str) -> bool:

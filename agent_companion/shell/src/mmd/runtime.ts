@@ -29,6 +29,38 @@ const MOUTH_MORPHS = ['あ', 'a', 'A'] as const
 /** How much of the canvas height the framed model fills. */
 const MODEL_FRACTION = 0.62
 
+/**
+ * The standard MMD skeleton, by the names Japanese models ship.
+ *
+ * An MMD model is authored in its bind pose -- arms straight out -- and relies
+ * entirely on motion data to look like anything else. No VMD is loaded here, so
+ * without this the character stands with its arms out like a mannequin, which
+ * is what "MMD support" looked like before: loaded, textured, and obviously
+ * lifeless.
+ */
+const BONES = {
+  upperBody: '上半身',
+  neck: '首',
+  head: '頭',
+  leftArm: '左腕',
+  rightArm: '右腕',
+  leftElbow: '左ひじ',
+  rightElbow: '右ひじ',
+} as const
+
+/**
+ * How far the arms come down from the bind pose, in radians.
+ *
+ * Mirrored between the sides. MMD's convention rotates the left arm negatively
+ * about Z to lower it; if a model lifts its arms instead, this is the sign to
+ * flip.
+ */
+const ARM_REST = 0.52
+const ELBOW_REST = 0.18
+
+/** The blink morph, most common spelling first. */
+const BLINK_MORPHS = ['まばたき', 'ウィンク', 'blink'] as const
+
 export async function mountMMD(
   canvas: HTMLCanvasElement,
   modelUrl: string,
@@ -112,6 +144,33 @@ export async function mountMMD(
   }
 
   const mouthMorph = MOUTH_MORPHS.find((name) => morphIndex(name) >= 0) || ''
+  const blinkMorph = BLINK_MORPHS.find((name) => morphIndex(name) >= 0) || ''
+
+  const bones = new Map<string, THREE.Bone>()
+  for (const bone of mesh.skeleton?.bones || []) {
+    if (!bones.has(bone.name)) bones.set(bone.name, bone)
+  }
+  const bone = (name: string) => bones.get(name) || null
+
+  // Lower the arms out of the bind pose once. Everything after this is a small
+  // offset from the rest pose rather than a fight with it.
+  const restPose: Array<[THREE.Bone, THREE.Euler]> = []
+  for (const [name, z] of [
+    [BONES.leftArm, -ARM_REST],
+    [BONES.rightArm, ARM_REST],
+    [BONES.leftElbow, -ELBOW_REST],
+    [BONES.rightElbow, ELBOW_REST],
+  ] as const) {
+    const target = bone(name)
+    if (!target) continue
+    target.rotation.z += z
+    restPose.push([target, target.rotation.clone()])
+  }
+  for (const name of [BONES.upperBody, BONES.neck, BONES.head] as const) {
+    const target = bone(name)
+    if (target) restPose.push([target, target.rotation.clone()])
+  }
+  const restOf = (target: THREE.Bone | null) => restPose.find(([candidate]) => candidate === target)?.[1] || null
 
   let emotion: StageEmotion = 'neutral'
   let emotionStartedAt = 0
@@ -154,15 +213,44 @@ export async function mountMMD(
     mesh.position.y = Math.abs(swing) * 0.06 * height
   }
 
+  let blinkUntil = 0
+  let nextBlinkAt = 0
+
+  const applyIdle = (now: number) => {
+    // Breathing through the spine, a slow look around, and a blink. Small
+    // amounts on purpose: this is a character standing in a chat window, not a
+    // performance, and anything larger reads as swaying.
+    const breath = Math.sin(now / 2600)
+    const sway = Math.sin(now / 5200)
+    const nod = Math.sin(now / 3900)
+    for (const [target, axis, value] of [
+      [bone(BONES.upperBody), 'x', breath * 0.018],
+      [bone(BONES.neck), 'y', sway * 0.06],
+      [bone(BONES.head), 'y', sway * 0.05],
+      [bone(BONES.head), 'x', nod * 0.03],
+    ] as const) {
+      if (!target) continue
+      const rest = restOf(target)
+      if (!rest) continue
+      target.rotation[axis] = rest[axis] + value
+    }
+    if (!blinkMorph) return
+    if (now >= nextBlinkAt) {
+      blinkUntil = now + 110
+      // Irregular on purpose: a blink on a fixed beat reads as a metronome.
+      nextBlinkAt = now + 2400 + ((now * 7919) % 3600)
+    }
+    setMorph(blinkMorph, now < blinkUntil ? 1 : 0)
+  }
+
   const render = () => {
     frame = requestAnimationFrame(render)
     const delta = clock.getDelta()
     const now = performance.now()
     applyEmotion(now)
     applyMouth(now)
+    applyIdle(now)
     applyMotion(now)
-    // Breathing, so a still model does not read as a frozen one.
-    mesh.position.z = Math.sin(now / 2600) * 0.004 * height
     model?.update(delta)
     renderer.render(scene, camera)
   }

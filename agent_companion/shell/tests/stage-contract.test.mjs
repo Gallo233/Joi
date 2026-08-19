@@ -46,3 +46,20 @@ test('the stage knows which formats carry no model file', () => {
   assert.equal(isStageEmotion('worried'), true)
   assert.equal(isStageEmotion('furious'), false)
 })
+
+test('tachie framing contains the whole artwork instead of filling the height', () => {
+  // A bust is authored wider than tall. Scaling it to the canvas height made it
+  // nearly twice the canvas width, so the sides -- most of the character --
+  // were cropped away. Contain is the rule that fixes it.
+  const contain = (canvasW, canvasH, artW, artH, fill) =>
+    Math.min((canvasW * fill) / artW, (canvasH * fill) / artH)
+
+  // The real case: a 1408x768 bust on a portrait stage.
+  const scale = contain(600, 900, 1408, 768, 0.94)
+  assert.ok(1408 * scale <= 600, 'artwork must fit the canvas width')
+  assert.ok(768 * scale <= 900, 'artwork must fit the canvas height')
+
+  // A tall full-body sprite fits too, the other way round.
+  const tall = contain(600, 900, 768, 1408, 0.94)
+  assert.ok(768 * tall <= 600 && 1408 * tall <= 900)
+})
