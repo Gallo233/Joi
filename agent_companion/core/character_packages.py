@@ -531,11 +531,13 @@ class CharacterPackageManager:
         if suffix in {".joi-character", ".zip"}:
             with tempfile.TemporaryDirectory(prefix="joi-character-preview-") as temp_dir:
                 root = Path(temp_dir)
+                usability: list[str] = []
                 with zipfile.ZipFile(path) as archive:
                     members = archive.infolist()
                     self._validate_archive_members(members)
+                    usability = self._archive_usability_report(members)
                     for member in members:
-                        if member.is_dir():
+                        if member.is_dir() or _is_archive_junk(member.filename):
                             continue
                         target = root / PurePosixPath(member.filename)
                         target.parent.mkdir(parents=True, exist_ok=True)
@@ -550,7 +552,7 @@ class CharacterPackageManager:
                     raise CharacterPackageError("missing_character_manifest", "角色包中缺少 manifest.json。")
                 manifest = self._normalize_manifest(self._read_json(manifest_path, fallback={}))
                 self._scan_package_tree(manifest_path.parent)
-                return self._inspect_result(manifest, manifest_path.parent, path)
+                return self._inspect_result(manifest, manifest_path.parent, path, usability=usability)
         if suffix == ".json":
             raw = self._read_json(path, fallback=None)
             if not isinstance(raw, dict):
@@ -1054,6 +1056,47 @@ class CharacterPackageManager:
                 raise CharacterPackageError("package_unpacked_limit", "角色包解压后超过安全大小限制。")
             self._validate_asset_name(path.name)
 
+    @staticmethod
+    def _archive_usability_report(members: list[zipfile.ZipInfo]) -> list[str]:
+        """Why a structurally safe package would still look broken once installed.
+
+        The trust checks above decide whether a package may be opened at all.
+        These decide whether it will work, and they exist because real archives
+        fail in ways that look like a renderer bug to whoever imported one:
+
+        - macOS zips carry `__MACOSX/` and `._` resource forks;
+        - two files with the same basename in different folders collide in the
+          loaders that key assets by name, and one silently wins;
+        - a model file referencing `Texture.png` while the archive holds
+          `texture.png` loads on a case-insensitive filesystem and fails
+          everywhere else.
+
+        These are reported, never raised: a package that is merely awkward is
+        still the user's to install.
+        """
+
+        notes: list[str] = []
+        names = [member.filename for member in members if not member.is_dir()]
+        junk = sum(1 for name in names if _is_archive_junk(name))
+        if junk:
+            notes.append(f"包内有 {junk} 个 macOS 打包残留文件（__MACOSX / ._），导入时会被忽略。")
+
+        by_basename: dict[str, list[str]] = {}
+        for name in names:
+            if _is_archive_junk(name):
+                continue
+            by_basename.setdefault(PurePosixPath(name).name.casefold(), []).append(name)
+        collisions = sorted(base for base, paths in by_basename.items() if len(paths) > 1)
+        if collisions:
+            shown = "、".join(collisions[:3])
+            notes.append(f"有 {len(collisions)} 组同名文件分散在不同目录（例如 {shown}），按文件名加载素材时只有一个会生效。")
+
+        # A name that decoded as mojibake usually means a legacy-codepage zip,
+        # which is what VTube Studio and older tools produce.
+        if any(_looks_like_mojibake(name) for name in names):
+            notes.append("包内有文件名疑似使用非 UTF-8 编码（常见于 VTube Studio 导出），素材可能找不到。")
+        return notes
+
     def _scan_package_tree(self, root: Path) -> None:
         files = [path for path in root.rglob("*") if path.is_file()]
         if len(files) > MAX_FILES:
@@ -1061,6 +1104,57 @@ class CharacterPackageManager:
         for path in files:
             if path.name != "manifest.json":
                 self._validate_asset_file(path)
+
+    def _infer_live2d_settings(self, root: Path) -> str:
+        """Write a minimal model3.json for a package that shipped only a .moc3.
+
+        Returns the package-relative path to the settings file, or "" when there
+        is nothing to infer from. Exactly one .moc3 is required: with several,
+        guessing which one is the character would be worse than saying no.
+        """
+
+        existing = sorted(root.rglob("*.model3.json"))
+        if existing:
+            try:
+                return existing[0].relative_to(root).as_posix()
+            except ValueError:
+                return ""
+        moc_files = [path for path in sorted(root.rglob("*.moc3")) if path.is_file()]
+        if len(moc_files) != 1:
+            return ""
+        moc = moc_files[0]
+        try:
+            header = moc.read_bytes()[:4]
+        except OSError:
+            return ""
+        # A file named .moc3 that does not start with MOC3 is not a model, and
+        # writing settings for it would turn a clear failure into a puzzling one.
+        if header != b"MOC3":
+            return ""
+        textures = [
+            path.relative_to(moc.parent).as_posix()
+            for path in sorted(moc.parent.rglob("*.png"))
+            if path.is_file()
+        ]
+        settings = {
+            "Version": 3,
+            "FileReferences": {"Moc": moc.name, "Textures": textures},
+            "Groups": [
+                {"Target": "Parameter", "Name": "EyeBlink", "Ids": ["ParamEyeLOpen", "ParamEyeROpen"]},
+                {"Target": "Parameter", "Name": "LipSync", "Ids": ["ParamMouthOpenY"]},
+            ],
+        }
+        target = moc.with_suffix("").with_suffix(".model3.json")
+        if target.exists():
+            return ""
+        try:
+            target.write_text(json.dumps(settings, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            return ""
+        try:
+            return target.relative_to(root).as_posix()
+        except ValueError:
+            return ""
 
     def _appearance_report(
         self,
@@ -1107,6 +1201,18 @@ class CharacterPackageManager:
 
         model_ref = str((appearance or {}).get("model") or "").strip()
         model_path = self._resolve_asset(root, model_ref) if root is not None and model_ref else None
+        if model_type == "live2d" and not model_path and root is not None:
+            # A settings file is how a Live2D package is supposed to describe
+            # itself, but plenty of them are shared as a bare .moc3 plus a
+            # texture folder. Inferring settings from what is actually there
+            # beats refusing a model the renderer could have drawn.
+            inferred = self._infer_live2d_settings(root)
+            if inferred:
+                model_ref = inferred
+                model_path = self._resolve_asset(root, inferred)
+                appearance = {**(appearance or {}), "model": inferred}
+                manifest.setdefault("appearance", {})["model"] = inferred
+                record("live2d.inferred", True, "包内没有 .model3.json，已按目录里的 .moc3 推断出模型设置。")
         if model_type == "live2d":
             record("live2d.model", bool(model_ref), "Live2D 角色必须选择 .model3.json。", required=True)
             if model_ref:
@@ -1495,6 +1601,7 @@ class CharacterPackageManager:
         source: Path,
         *,
         portrait: Path | None = None,
+        usability: list[str] | None = None,
     ) -> dict[str, Any]:
         if portrait is None and root is not None:
             portrait = self._resolve_asset(root, (manifest.get("appearance") or {}).get("portrait"))
@@ -1511,6 +1618,9 @@ class CharacterPackageManager:
             warnings.append("该角色请求技能权限；安装后仍保持关闭，需要你逐项授权。")
         asset_report = self._appearance_report(manifest, root, portrait_override=portrait)
         warnings.extend(str(item) for item in asset_report.get("warnings") or [] if str(item) not in warnings)
+        # Whether it will work, reported beside whether it may be trusted. Both
+        # belong on the card the user confirms against.
+        warnings.extend(str(item) for item in usability or [] if str(item) not in warnings)
         public = self._public_manifest(manifest, root or source.parent, include_content=True)
         public["portrait_data_url"] = preview_image
         return {
@@ -1533,6 +1643,27 @@ class CharacterPackageManager:
                 "declared_source": copy.deepcopy(manifest.get("source") or {}),
             },
         }
+
+
+def _is_archive_junk(name: str) -> bool:
+    """macOS packaging leftovers, which every loader has to skip."""
+
+    parts = PurePosixPath(name).parts
+    return any(part == "__MACOSX" or part.startswith("._") for part in parts)
+
+
+def _looks_like_mojibake(name: str) -> bool:
+    """Whether a zip entry name decoded as replacement characters or CP437 noise.
+
+    Python decodes a zip entry without the UTF-8 flag as CP437, so a Japanese or
+    Chinese filename arrives as accented Latin. Detecting it exactly is not
+    possible; detecting that it is not plausible text is enough to warn.
+    """
+
+    if "\ufffd" in name:
+        return True
+    suspicious = sum(1 for char in name if "\u0080" <= char <= "\u00ff")
+    return suspicious >= 4
 
 
 def _safe_character_id(value: Any) -> str:

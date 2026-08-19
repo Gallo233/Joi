@@ -524,5 +524,73 @@ class CharacterModelFormatTests(unittest.TestCase):
         self.assertEqual(result["model_type"], "static")
 
 
+
+class CharacterImportUsabilityTests(unittest.TestCase):
+    """Whether a package will work, reported beside whether it may be trusted."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temporary.name)
+        self.manager = CharacterPackageManager(self.workspace / "packages")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _members(self, names: list[str]) -> list[zipfile.ZipInfo]:
+        return [zipfile.ZipInfo(name) for name in names]
+
+    def test_macos_packaging_leftovers_are_reported_and_skipped(self) -> None:
+        notes = self.manager._archive_usability_report(
+            self._members(["model/joi.moc3", "__MACOSX/model/._joi.moc3", "model/._texture.png"])
+        )
+        self.assertTrue(any("__MACOSX" in note for note in notes), notes)
+
+    def test_same_basename_in_two_folders_is_reported_as_a_silent_loser(self) -> None:
+        """The loaders key assets by name, so one of the two never loads."""
+
+        notes = self.manager._archive_usability_report(
+            self._members(["a/texture.png", "b/texture.png", "c/other.png"])
+        )
+        self.assertTrue(any("同名文件" in note for note in notes), notes)
+
+    def test_a_legacy_codepage_filename_is_reported_rather_than_silently_missing(self) -> None:
+        # What CP437 decoding turns a Japanese expression filename into.
+        notes = self.manager._archive_usability_report(self._members(["expressions/ÆËÐÑÒÓ.exp3.json"]))
+        self.assertTrue(any("UTF-8" in note for note in notes), notes)
+
+    def test_a_clean_archive_reports_nothing(self) -> None:
+        self.assertEqual(self.manager._archive_usability_report(self._members(["model/joi.moc3", "model/t.png"])), [])
+
+    def test_a_bare_moc3_gets_inferred_settings_instead_of_being_refused(self) -> None:
+        root = self.workspace / "bare"
+        (root / "assets").mkdir(parents=True)
+        (root / "assets" / "girl.moc3").write_bytes(b"MOC3" + b"\x00" * 32)
+        (root / "assets" / "texture_00.png").write_bytes(b"\x89PNG")
+        report = self.manager._appearance_report({"appearance": {"model_type": "live2d"}}, root)
+        self.assertTrue(report["installable"], report["errors"])
+        self.assertTrue((root / "assets" / "girl.model3.json").is_file())
+        settings = json.loads((root / "assets" / "girl.model3.json").read_text(encoding="utf-8"))
+        self.assertEqual(settings["FileReferences"]["Moc"], "girl.moc3")
+        self.assertIn("texture_00.png", settings["FileReferences"]["Textures"])
+
+    def test_a_file_named_moc3_that_is_not_one_is_still_refused(self) -> None:
+        """Writing settings for it would turn a clear failure into a puzzling one."""
+
+        root = self.workspace / "fake"
+        (root / "assets").mkdir(parents=True)
+        (root / "assets" / "girl.moc3").write_bytes(b"NOPE")
+        report = self.manager._appearance_report({"appearance": {"model_type": "live2d"}}, root)
+        self.assertFalse(report["installable"])
+        self.assertFalse((root / "assets" / "girl.model3.json").exists())
+
+    def test_two_moc3_files_are_not_guessed_between(self) -> None:
+        root = self.workspace / "two"
+        (root / "assets").mkdir(parents=True)
+        for name in ("a.moc3", "b.moc3"):
+            (root / "assets" / name).write_bytes(b"MOC3")
+        report = self.manager._appearance_report({"appearance": {"model_type": "live2d"}}, root)
+        self.assertFalse(report["installable"])
+
+
 if __name__ == "__main__":
     unittest.main()
