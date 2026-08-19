@@ -592,5 +592,53 @@ class CharacterImportUsabilityTests(unittest.TestCase):
         self.assertFalse(report["installable"])
 
 
+
+class CharacterModelStagingTests(unittest.TestCase):
+    """A model that references siblings must arrive with them."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temporary.name)
+        self.manager = CharacterPackageManager(self.workspace / "packages")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _create(self, model_type: str, model_name: str, siblings: list[str]) -> dict:
+        source = self.workspace / "source"
+        source.mkdir(parents=True, exist_ok=True)
+        if model_name.endswith(".vrm"):
+            # A real glTF 2.0 binary header, or install refuses it before staging.
+            (source / model_name).write_bytes(b"glTF" + struct.pack("<II", 2, 12))
+        else:
+            (source / model_name).write_bytes(b"MOC3" if model_name.endswith(".moc3") else b"model")
+        for name in siblings:
+            (source / name).write_bytes(b"texture")
+        # The same shape the Shell sends: identity and appearance are nested.
+        return self.manager.create(
+            {
+                "identity": {"name": f"{model_type} tester"},
+                "appearance": {"model_type": model_type, "model_path": str(source / model_name)},
+            }
+        )
+
+    def test_an_mmd_model_is_installed_with_its_textures(self) -> None:
+        result = self._create("mmd", "girl.pmx", ["body.png", "face.png"])
+        self.assertTrue(result.get("ok"), result)
+        root = self.manager.packages_dir / str(result["character"]["id"])
+        staged = root / "assets" / "mmd"
+        self.assertTrue((staged / "girl.pmx").is_file())
+        # Without these the model loads and renders untextured, which reads as a
+        # broken import rather than a missing file.
+        self.assertTrue((staged / "body.png").is_file())
+        self.assertTrue((staged / "face.png").is_file())
+
+    def test_a_vrm_model_is_a_single_file_and_stays_one(self) -> None:
+        result = self._create("vrm", "girl.vrm", ["unrelated.txt"])
+        self.assertTrue(result.get("ok"), result)
+        root = self.manager.packages_dir / str(result["character"]["id"])
+        self.assertFalse((root / "assets" / "vrm" / "unrelated.txt").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,7 +36,7 @@ import type {
   CharacterSummary,
   CoreReadyPayload,
 } from '../protocol'
-import { STAGE_FORMAT_LABEL, isStageModelFormat, type StageModelFormat } from '../character/stage'
+import { STAGE_FORMAT_LABEL, STAGE_MODEL_FORMATS, isStageModelFormat, type StageModelFormat } from '../character/stage'
 
 const props = defineProps<{ client: CoreClient; connected: boolean }>()
 const emit = defineEmits<{
@@ -200,6 +200,30 @@ function portraitSource(row: CharacterSummary | CharacterDetail | null | undefin
 
 function modelLabel(type?: string) {
   return isStageModelFormat(type) ? STAGE_FORMAT_LABEL[type] : '静态立绘'
+}
+
+/**
+ * What a new character may be built as.
+ *
+ * `procedural3d` is the built-in renderer for the default character rather than
+ * something to author a package as, and `spine` has no licensed runtime, so
+ * neither is offered here.
+ */
+const selectableFormats = STAGE_MODEL_FORMATS.filter((format) => format !== 'procedural3d' && format !== 'spine')
+
+function modelFieldLabel(format: StageModelFormat) {
+  switch (format) {
+    case 'live2d':
+      return 'model3.json（或包内唯一的 .moc3）'
+    case 'vrm':
+      return 'VRM 模型'
+    case 'mmd':
+      return 'MMD 模型（.pmx / .pmd）'
+    case 'tachie':
+      return '立绘底图（PNG / WebP / JPEG）'
+    default:
+      return '可选模型文件'
+  }
 }
 
 /**
@@ -900,11 +924,11 @@ onMounted(() => void refresh())
       <section class="editor-section">
         <header><span>02</span><div><h2>外观与动作</h2><p>支持静态立绘、Live2D 和 VRM；Live2D 会连同模型目录安全复制。</p></div></header>
         <div class="form-grid">
-          <label><span>显示类型</span><select v-model="draft.modelType"><option value="static">静态立绘</option><option value="live2d">Live2D</option><option value="vrm">VRM</option></select></label>
+          <label><span>显示类型</span><select v-model="draft.modelType"><option v-for="format in selectableFormats" :key="format" :value="format">{{ STAGE_FORMAT_LABEL[format] }}</option></select></label>
           <label><span>主题色</span><div class="color-field"><input v-model="draft.accentColor" type="color" /><input v-model="draft.accentColor" maxlength="7" /></div></label>
           <label class="asset-field"><span>角色头像</span><div><input :value="draft.avatarPath" readonly placeholder="用于角色库，建议方图或半身头像" /><button type="button" @click="pickAsset('avatarPath')"><ImageIcon :size="16" />选择</button></div></label>
           <label class="asset-field"><span>角色立绘</span><div><input :value="draft.portraitPath" readonly placeholder="PNG / JPG / WebP" /><button type="button" @click="pickAsset('portraitPath')"><ImageIcon :size="16" />选择</button></div></label>
-          <label class="asset-field"><span>{{ draft.modelType === 'live2d' ? 'model3.json' : draft.modelType === 'vrm' ? 'VRM 模型' : '可选模型文件' }}</span><div><input :value="draft.modelPath" readonly /><button type="button" @click="pickAsset('modelPath')"><Box :size="16" />选择</button></div></label>
+          <label class="asset-field"><span>{{ modelFieldLabel(draft.modelType) }}</span><div><input :value="draft.modelPath" readonly /><button type="button" @click="pickAsset('modelPath')"><Box :size="16" />选择</button></div></label>
           <label class="asset-field span-2"><span>背景</span><div><input :value="draft.backgroundPath" readonly placeholder="可选角色专属背景" /><button type="button" @click="pickAsset('backgroundPath')"><ImageIcon :size="16" />选择</button></div></label>
         </div>
         <div class="expression-editor">

@@ -42,6 +42,9 @@ ANIMATION_SUFFIXES = {".vrma"}
 # are proprietary and need their own licence, so nothing loads one.
 MODEL_TYPES = {"static", "live2d", "vrm", "procedural3d", "tachie", "mmd", "spine"}
 MODEL_TYPES_WITHOUT_MODEL_FILE = {"static", "procedural3d"}
+# Live2D settings name their moc and textures relatively; a PMX/PMD names its
+# texture files the same way. Both need the directory, not just the file.
+MODEL_TYPES_WITH_SIBLING_ASSETS = {"live2d", "mmd"}
 MMD_SUFFIXES = {".pmx", ".pmd"}
 TACHIE_SUFFIXES = {".png", ".webp", ".jpg", ".jpeg"}
 
@@ -800,12 +803,16 @@ class CharacterPackageManager:
                 continue
             section_name, field_name = dotted_key.split(".", 1)
             section = manifest.setdefault(section_name, {})
-            if dotted_key == "appearance.model" and str(section.get("model_type") or "").casefold() == "live2d":
-                destination = staging / "assets" / "live2d"
+            model_type = str(section.get("model_type") or "").casefold()
+            # Formats whose model file references siblings by relative path:
+            # copying the chosen file alone would install a model with no
+            # textures, which loads and then renders untextured.
+            if dotted_key == "appearance.model" and model_type in MODEL_TYPES_WITH_SIBLING_ASSETS:
+                destination = staging / "assets" / model_type
                 if destination.exists():
                     shutil.rmtree(destination)
                 self._copy_package_tree(source.parent, destination)
-                section[field_name] = (Path("assets") / "live2d" / source.name).as_posix()
+                section[field_name] = (Path("assets") / model_type / source.name).as_posix()
                 continue
             folder = {
                 "identity.avatar": "avatar",
