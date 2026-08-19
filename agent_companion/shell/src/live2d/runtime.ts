@@ -18,8 +18,19 @@ import {
   type CharacterMotionRequest,
   type ResolvedCharacterMotion,
 } from '../characterMotion'
+import type {
+  StageController,
+  StageEmotion,
+  StageExpressionMapping,
+  StageRuntimeMapping,
+} from '../character/stage'
 
-export type Live2DEmotion = 'happy' | 'thinking' | 'alert' | 'worried' | 'serious' | 'neutral'
+// The stage owns the vocabulary; these aliases keep the Live2D module's own
+// names readable while every renderer shares one definition.
+export type Live2DEmotion = StageEmotion
+export type Live2DController = StageController
+export type Live2DExpressionMapping = StageExpressionMapping
+export type Live2DRuntimeMapping = StageRuntimeMapping
 
 // How much of a Live2D model's height the bust framing tries to fill the stage
 // with. Live2D artwork is authored head-at-the-top, so the top of the canvas is
@@ -176,33 +187,6 @@ function idToString(handle: unknown) {
   if (typeof value === 'string') return value
   if (value && typeof value === 'object' && 's' in value && typeof value.s === 'string') return value.s
   return ''
-}
-
-export interface Live2DController {
-  resize: () => void
-  setCompact: (compact: boolean) => void
-  setEmotion: (emotion: Live2DEmotion) => void
-  playMotion: (request: CharacterMotionRequest) => void
-  destroy: () => void
-}
-
-export interface Live2DExpressionMapping {
-  emotion?: string
-  expression_id?: string
-  motion_group?: string
-  motion_index?: number | string
-}
-
-export interface Live2DRuntimeMapping {
-  expressions?: Live2DExpressionMapping[]
-  motions?: CharacterMotionMapping[]
-  lipSync?: { parameter?: string }
-  /**
-   * Semantic motion name -> `.vrma` URL, for VRM characters whose package
-   * ships authored clips. Live2D ignores this; its motions come from the
-   * model's own motion groups.
-   */
-  animations?: Record<string, string>
 }
 
 export async function mountLive2D(canvas: HTMLCanvasElement, modelUrl: string, mapping: Live2DRuntimeMapping = {}): Promise<Live2DController> {

@@ -14,6 +14,7 @@ import {
   type ResolvedCharacterMotion,
 } from '../characterMotion'
 import { emotionWeight } from '../characterExpression'
+import { STAGE_EMOTION_TABLE, stageEmotionShape } from '../character/stage'
 import { mouthSignal, voiceDrivenMouthLevel, VRM_MOUTH_FLOOR, VRM_MOUTH_SCALE } from '../voiceLipSync'
 import { VISEMES } from '../voiceVisemes'
 
@@ -284,17 +285,14 @@ export async function mountVRM(
   // shared envelope releases it. `happy` is deliberately mild: on VRoid rigs it
   // morphs the eyes shut, and a value in the middle leaves the lids half down,
   // which reads as a squint rather than a smile.
-  const EMOTION_SHAPES: Partial<Record<Live2DEmotion, [string, number]>> = {
-    happy: ['happy', 0.42],
-    thinking: ['relaxed', 0.34],
-    alert: ['surprised', 0.5],
-    worried: ['sad', 0.45],
-    serious: ['angry', 0.18],
-  }
   const applyEmotion = (now: number) => {
     const manager = vrm.expressionManager
-    for (const [shape] of Object.values(EMOTION_SHAPES)) setExpression(manager, shape, 0)
-    const shape = EMOTION_SHAPES[emotion]
+    // Clear every shape the table can drive before setting this mood's, or a
+    // previous emotion's expression stays blended into the new one.
+    for (const row of Object.values(STAGE_EMOTION_TABLE)) {
+      if (row.vrm) setExpression(manager, row.vrm[0], 0)
+    }
+    const shape = stageEmotionShape('vrm', emotion)
     if (shape) setExpression(manager, shape[0], shape[1] * emotionWeight(emotionStartedAt, now))
     // Only a voice that is actually playing can drive visemes. Text events and
     // synthesis failures deliberately leave the mouth closed.
