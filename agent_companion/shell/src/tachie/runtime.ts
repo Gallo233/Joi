@@ -23,17 +23,27 @@ const ART_FRACTION = 0.94
 /**
  * Resolve `emotion -> image URL` from the package mapping.
  *
- * A tachie package reuses the expression mapping every other format uses:
- * `expression_id` names the image file, relative to the base image, so one
- * mapping shape serves Live2D expressions and tachie art alike.
+ * A tachie package reuses the expression mapping every other format uses. Core
+ * publishes each mood's artwork as `image_url`, because only Core knows where
+ * the package lives; a row carrying just a relative `image` is resolved against
+ * the base image so a hand-written mapping still works.
  */
 function resolveImageSources(baseUrl: string, mapping: StageRuntimeMapping): Map<StageEmotion, string> {
   const sources = new Map<StageEmotion, string>()
   for (const row of mapping.expressions || []) {
     const emotion = String(row?.emotion || '').trim() as StageEmotion
-    const file = String(row?.expression_id || '').trim()
+    const url = String(row?.image_url || '').trim()
+    if (emotion && url) {
+      sources.set(emotion, url)
+      continue
+    }
+    const file = String(row?.image || '').trim()
     if (!emotion || !file) continue
-    sources.set(emotion, new URL(file, baseUrl).href)
+    try {
+      sources.set(emotion, new URL(file, baseUrl).href)
+    } catch {
+      /* a name that is not resolvable leaves this mood on the base image */
+    }
   }
   return sources
 }

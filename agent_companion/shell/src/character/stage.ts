@@ -59,9 +59,14 @@ export const STAGE_FORMATS_WITHOUT_MODEL_URL: readonly StageModelFormat[] = ['pr
 
 export interface StageExpressionMapping {
   emotion?: string
+  /** Live2D: the model's own expression id. */
   expression_id?: string
   motion_group?: string
   motion_index?: number | string
+  /** Tachie: this mood's artwork, package-relative. */
+  image?: string
+  /** Tachie: the same artwork as a URL the Shell can fetch, published by Core. */
+  image_url?: string
 }
 
 export interface StageRuntimeMapping {

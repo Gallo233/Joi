@@ -1888,6 +1888,28 @@ class JsonRpcBridge:
         self._attach_character_image(character, "portrait_path", "portrait_url", "portrait_data_url")
         return result
 
+    def _attach_character_expression_images(self, payload: dict[str, Any]) -> None:
+        """Publish per-emotion artwork as asset URLs and drop their paths.
+
+        A tachie character is a picture per mood, so the Shell needs somewhere
+        to fetch each one from. Live2D and VRM ignore these rows -- their
+        expressions are named inside the model -- which is why this is attached
+        rather than required.
+        """
+
+        rows = payload.get("expression_mappings")
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            path = Path(str(row.pop("image_path", "") or ""))
+            if not str(path) or path == Path("."):
+                continue
+            url = self._character_asset_url(path)
+            if url:
+                row["image_url"] = url
+
     def _attach_character_animations(self, payload: dict[str, Any]) -> None:
         """Publish authored `.vrma` clips as asset URLs and drop their paths.
 
@@ -3078,6 +3100,7 @@ class JsonRpcBridge:
             character_payload = self.app.character_packages.active_runtime_payload()
             character_payload["model_url"] = self._character_asset_url(Path(str(character_payload.get("model_path") or "")))
             self._attach_character_animations(character_payload)
+            self._attach_character_expression_images(character_payload)
             self._attach_character_image(character_payload, "avatar_path", "avatar_url", "avatar_data_url")
             self._attach_character_image(character_payload, "portrait_path", "portrait_url", "portrait_data_url")
             self._attach_character_image(character_payload, "background_path", "background_url", "background_data_url")

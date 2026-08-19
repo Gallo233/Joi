@@ -92,6 +92,7 @@ import {
 import { attachLipSync, detachLipSync, enqueuePcm16Chunk, unlockAudioPlayback } from './voiceLipSync'
 import { VoiceRecorder } from './voiceRecorder'
 import { RealtimeVoiceSession, realtimeLatencyLabel, type RealtimeVoiceEvent, type RealtimeVoiceState } from './realtimeVoice'
+import { isStageModelFormat } from './character/stage'
 
 const input = ref('')
 const status = ref<CoreStatus>('offline')
@@ -276,8 +277,13 @@ const live2DModelUrl = computed(() => {
   if (!character) return ''
   if (character?.id === 'builtin-hikari' && character?.model_type === 'live2d') return fallbackLive2DModelUrl
   if (character?.model_url) return character.model_url
-  if ((character?.model_type === 'live2d' || character?.model_type === 'vrm') && character.model_path) return convertFileSrc(character.model_path)
-  return character?.model_type === 'static' || character?.model_type === 'vrm' ? '' : fallbackLive2DModelUrl
+  if (character?.model_type && character.model_path && isStageModelFormat(character.model_type)) {
+    return convertFileSrc(character.model_path)
+  }
+  // Only a Live2D character falls back to the bundled Live2D model. Every other
+  // format renders nothing rather than someone else's body: a tachie or MMD
+  // character with no file is a broken package, not a Live2D one.
+  return character?.model_type && character.model_type !== 'live2d' ? '' : fallbackLive2DModelUrl
 })
 const live2DRuntimeMapping = computed<Live2DRuntimeMapping>(() => ({
   expressions: ready.value?.character?.expression_mappings || [],

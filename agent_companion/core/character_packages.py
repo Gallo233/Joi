@@ -272,7 +272,13 @@ class CharacterPackageManager:
         payload["background_path"] = str(self._resolve_asset(location.root, appearance.get("background")) or "")
         payload["model_path"] = str(self._resolve_asset(location.root, appearance.get("model")) or "")
         payload["model_type"] = str(appearance.get("model_type") or "static")
-        payload["expression_mappings"] = copy.deepcopy(appearance.get("expressions") or [])
+        expression_mappings = copy.deepcopy(appearance.get("expressions") or [])
+        for row in expression_mappings:
+            if isinstance(row, dict) and str(row.get("image") or "").strip():
+                # Resolved here because only this side knows where the package
+                # lives; the Shell turns it into a URL it can actually fetch.
+                row["image_path"] = str(self._resolve_asset(location.root, row.get("image")) or "")
+        payload["expression_mappings"] = expression_mappings
         payload["motion_mappings"] = self._motion_mappings_with_assets(manifest, location.root)
         payload["lip_sync"] = copy.deepcopy(appearance.get("lip_sync") or {})
         payload["sprites"] = self.active_character_row().get("sprites") or []
