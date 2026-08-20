@@ -36,7 +36,11 @@ function walk(dir, out = []) {
 }
 
 const sourceFiles = walk(SRC)
-const relative = (file) => path.relative(SRC, file)
+// Tests identify a stylesheet by this path, so it has to read the same on every
+// platform: `path.relative` yields `styles\\tokens.css` on Windows, and a test
+// looking for `styles/tokens.css` then finds nothing and reports the token it
+// was checking as undefined rather than as a mismatch.
+const relative = (file) => path.relative(SRC, file).split(path.sep).join('/')
 
 /** Every stylesheet: the global files plus each <style> block inside an SFC. */
 export function stylesheets() {

@@ -190,9 +190,21 @@ class SystemVoiceProsodyTests(unittest.TestCase):
     def test_the_prosody_is_performed_rather_than_read_aloud(self) -> None:
         """If `say` spoke the commands, the excited line would be the longer one."""
 
+        line = "我把结果整理好了"
         with tempfile.TemporaryDirectory() as workspace:
-            quick = system_tts.synthesize("我把结果整理好了", output_dir=Path(workspace), emotion="alert")
-            slow = system_tts.synthesize("我把结果整理好了", output_dir=Path(workspace), emotion="worried")
+            output_dir = Path(workspace)
+            # The emotion table is measured *through* a rate change, so this host
+            # has to be able to show one at all. A machine with no voice that can
+            # speak the line renders the same few bytes whatever it is told --
+            # `say` still exits 0, so the assertion below would be comparing two
+            # identical non-recordings and calling that a failed contract.
+            fast = system_tts.synthesize(line, output_dir=output_dir, rate=1.6)
+            measured = system_tts.synthesize(line, output_dir=output_dir, rate=0.6)
+            if fast is None or measured is None or fast.stat().st_size == measured.stat().st_size:
+                self.skipTest("this host's `say` does not vary its rendering with rate")
+
+            quick = system_tts.synthesize(line, output_dir=output_dir, emotion="alert")
+            slow = system_tts.synthesize(line, output_dir=output_dir, emotion="worried")
             self.assertIsNotNone(quick)
             self.assertIsNotNone(slow)
             assert quick is not None and slow is not None

@@ -58,7 +58,7 @@ test('compact scale and stage zoom are separate, and both are kept', () => {
   // Compact mode returns before touching the stage zoom: scaling the desktop
   // companion must not silently rescale the full window she is restored to.
   const handler = source.match(/function handleStageWheel\([\s\S]*?\n}/)[0]
-  assert.match(handler, /if \(isCompactMode\.value\) \{[\s\S]*?return\n\s*\}/)
+  assert.match(handler, /if \(isCompactMode\.value\) \{[\s\S]*?return\s*\}/)
 })
 
 test('the scale is bounded, so she cannot be spun to nothing or off the screen', () => {
@@ -167,11 +167,11 @@ test('moving her ourselves is never mistaken for the user placing her', () => {
   assert.match(source, /suppressCompactPositionSave/)
   assert.match(
     source,
-    /onMoved\(\(\{ payload \}\) => \{\s*\n\s*if \(!isCompactMode\.value \|\| suppressCompactPositionSave\) return/,
+    /onMoved\(\(\{ payload \}\) => \{\s*if \(!isCompactMode\.value \|\| suppressCompactPositionSave\) return/,
   )
   assert.match(
     source,
-    /stopWatchingCompactPosition\(\)\n\s*suppressCompactPositionSave = true/,
+    /stopWatchingCompactPosition\(\)\s*suppressCompactPositionSave = true/,
     'the restore path must suppress before it moves the window back',
   )
 })
