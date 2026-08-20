@@ -61,12 +61,16 @@ jobs:
       - name: Typecheck and build shell
         working-directory: agent_companion/shell
         run: npm run build
+      - name: Build standalone Core sidecar
+        # Before `cargo check`, not after: `tauri.conf.json` declares
+        # `binaries/joi-core-runtime/` as a bundle resource, and Tauri's build
+        # script validates resource paths on a plain check too -- an unbuilt
+        # sidecar fails the compile rather than the packaging step.
+        working-directory: agent_companion/shell
+        run: npm run core:bundle
       - name: Check Tauri shell
         working-directory: agent_companion/shell/src-tauri
         run: cargo check
-      - name: Build standalone Core sidecar
-        working-directory: agent_companion/shell
-        run: npm run core:bundle
       - name: Smoke-test sidecar ready handshake and auth
         run: python tools/smoke_core_sidecar.py
       - name: Run packaging and release privacy scan
