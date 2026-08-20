@@ -2,6 +2,9 @@
 
 ## Active
 
+- `run_agent_companion_tests.py` runs against the repository root as its workspace, so the documented Core regression command writes real events, audit records and SQLite rows into `data/agent_companion/` on the machine running it. It is why the local event log reached 90MB. The suite needs a temporary workspace; until it has one, the command is not safe to run against an install whose data matters.
+- `data/agent_companion/codex_runs/` and `codex_runtime/` grow without bound — three files per Codex run, about 11MB after roughly 1500 runs here, and nothing prunes them. They also hold the goal text and model output of runs whose conversation has since been deleted, so deletion does not reach them.
+- `data/agent_companion/events.jsonl.pre-sqlite-backup` is the one-time copy taken before the SQLite migration. It still holds the conversation text of anything logged before that migration, and a later deletion does not reach it. Removing it is a maintainer decision, not an automatic one.
 - macOS accessibility observer requires Accessibility permission in System Settings → Privacy & Security.
 - Multi-monitor Retina configurations may have coordinate offset for windows on secondary displays.
 - Watch Together commentary depends on configured vision model; without it, only OCR-based context is available.

@@ -4,6 +4,33 @@
 > 判据：`docs/JOI_PRD.md` §5.2 首发 Hero Journey 与 §18 验收标准、`docs/JOI_TDD.md` §17 Phase 5 退出条件、`docs/ROADMAP.md` 发布阻塞项。
 > 边界提醒：PRD §5.2 明确 **Watch/Scene、第三方 Skill 安装、游戏适配器、完整角色 CRUD、Coding Agent takeover 不阻塞首发**。B1 轨道（Minecraft + 实时语音）做得再厚也不会让 1.0 更近一步。
 
+## 2026-08-20 更新
+
+这份审计写于 8-18，之后有三项落地、一项判错。
+
+**已落地**（不再是阻塞项）：
+
+| 项 | 证据 |
+|---|---|
+| 软件许可证 | 仓库有 `LICENSE`：保留所有权利，明确授予阅读与引用 |
+| 第三方权利通知 | 按 lockfile 生成，`tools/generate_third_party_notices.py --check` 报「up to date (619 entries)」 |
+| 应用图标 | 已换成定稿资产（commit 5a51597） |
+
+**判错的一项**：上表把「长期数据的来源/作用域/查看/删除」记成 ✅，依据是 memory 的 scope/deletion 测试。那些测试是对的，但它们只覆盖 memory。会话删除另有一条路径，而它漏了：
+
+- `delete_thread` / `delete_project` 只删 SQLite。`data/agent_companion/events.jsonl` 保留该会话的每一张 display card 和每一句 voice line，永久。用户确认过的删除，实际只是隐藏。
+- 同一个文件从不回收。本机已长到 90MB，而读它的代码最多只看最后 400 行。
+
+已修：删除现在同时清理该日志（含被删项目连带的 thread、以及旧到只带 thread id 的行），日志只保留有界尾部，且清理不会让重启后的 sequence 倒退。回归见 `tests/test_event_bus.py`（13 项，其中 3 项覆盖 RPC 接线本身——漏的正是接线）。
+
+**新记入 `docs/KNOWN_ISSUES.md`**：`run_agent_companion_tests.py` 以仓库根目录为 workspace，所以文档里那条 Core 回归命令会往真实数据目录写事件——90MB 就是这么来的；`codex_runs/` 无上限；迁移前的 `.pre-sqlite-backup` 同样不受删除影响。
+
+**顺带得到的证据**：控制面 RPC 在本机实测 `core.ping` 0.3ms、`runtime.status` 7.1ms、`conversation.history` 7.3ms、`audit.recent` 14.4ms，对 TDD §13 的 p95 ≤ 100ms 有很大余量。这是单次往返、非 p95，不能替代基准，但足以说明该项不是风险。
+
+下面是 8-18 原文。
+
+---
+
 ## 本机实测（2026-08-18）
 
 | 门禁 | 命令 | 结果 |

@@ -1372,7 +1372,14 @@ class JsonRpcBridge:
 
     def project_delete_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params if isinstance(params, dict) else {}
-        return self.collaboration.delete_project(str(params.get("project_id") or ""), bool(params.get("confirmed")))
+        project_id = str(params.get("project_id") or "")
+        # Read the threads before the delete cascades them away: rows logged
+        # before events carried a project id are reachable only by thread.
+        thread_ids = [str(row.get("id") or "") for row in self.collaboration.list_threads(project_id, include_archived=True)]
+        result = self.collaboration.delete_project(project_id, bool(params.get("confirmed")))
+        if result.get("ok"):
+            self.app.bus.forget(thread_ids=thread_ids, project_ids=[project_id])
+        return result
 
     def thread_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params if isinstance(params, dict) else {}
@@ -1409,7 +1416,11 @@ class JsonRpcBridge:
 
     def thread_delete_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params if isinstance(params, dict) else {}
-        return self.collaboration.delete_thread(str(params.get("thread_id") or ""), bool(params.get("confirmed")))
+        thread_id = str(params.get("thread_id") or "")
+        result = self.collaboration.delete_thread(thread_id, bool(params.get("confirmed")))
+        if result.get("ok"):
+            self.app.bus.forget(thread_ids=[thread_id])
+        return result
 
     def resource_binding_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         project_id = str((params or {}).get("project_id") or self.collaboration.context()["project_id"])
