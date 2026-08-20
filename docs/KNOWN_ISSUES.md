@@ -3,7 +3,6 @@
 ## Active
 
 - Pillow is declared only in `requirements-ocr.txt`, which neither the CI lanes nor `release-macos.yml` install, while `vision/mac.py` imports it at module scope. macOS screen capture therefore degrades to `UnavailableScreenObserver` in a release build — honestly, as the platform contract requires, but permanently. CI now installs it so the capture path is exercised; whether the shipped sidecar should carry it is a release decision, and taking it would mean regenerating the third-party notices.
-- `data/agent_companion/codex_runs/` and `codex_runtime/` grow without bound — three files per Codex run, about 11MB after roughly 1500 runs here, and nothing prunes them. They also hold the goal text and model output of runs whose conversation has since been deleted, so deletion does not reach them.
 - `data/agent_companion/events.jsonl.pre-sqlite-backup` is the one-time copy taken before the SQLite migration. It still holds the conversation text of anything logged before that migration, and a later deletion does not reach it. Removing it is a maintainer decision, not an automatic one.
 - macOS accessibility observer requires Accessibility permission in System Settings → Privacy & Security.
 - Multi-monitor Retina configurations may have coordinate offset for windows on secondary displays.

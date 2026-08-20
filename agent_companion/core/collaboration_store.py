@@ -579,6 +579,42 @@ class CollaborationStore:
             )
             self._connection.execute("UPDATE conversation_threads SET updated_at=? WHERE id=?", (time.time(), thread_id))
 
+    def artifact_paths(self, *, thread_ids: Iterable[str] = (), project_ids: Iterable[str] = ()) -> list[str]:
+        """Every artifact path the given conversations ever referenced.
+
+        A tool's output files carry no conversation of their own -- the link
+        lives in the card that names them. Deleting a conversation therefore has
+        to read that link before the rows holding it go, or the files it left on
+        disk have nothing left pointing at them.
+
+        Unlike `history`, this is not capped: a deletion has to reach every one.
+        """
+
+        threads = [str(value) for value in thread_ids if str(value or "")]
+        projects = [str(value) for value in project_ids if str(value or "")]
+        if not threads and not projects:
+            return []
+        clauses, values = [], []
+        if threads:
+            clauses.append(f"thread_id IN ({','.join('?' * len(threads))})")
+            values.extend(threads)
+        if projects:
+            clauses.append(f"project_id IN ({','.join('?' * len(projects))})")
+            values.extend(projects)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload_json FROM events WHERE " + " OR ".join(clauses),
+                tuple(values),
+            ).fetchall()
+        paths: list[str] = []
+        for row in rows:
+            payload = _object(row["payload_json"])
+            card = payload.get("display_card") if isinstance(payload.get("display_card"), dict) else {}
+            for artifact in card.get("artifacts") or []:
+                if isinstance(artifact, str) and artifact.strip():
+                    paths.append(artifact.strip())
+        return sorted(set(paths))
+
     def history(self, thread_id: str, limit: int = 160, after_sequence: int = 0) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 400))
         sequence_clause = " AND sequence>?" if after_sequence > 0 else ""

@@ -251,6 +251,7 @@ class DeletionReachesTheEventLogTests(unittest.TestCase):
         self.bus = EventBus(self.path)
         self.bridge = object.__new__(JsonRpcBridge)
         self.bridge.collaboration = self.store
+        self.bridge.workspace = workspace
         self.bridge.app = SimpleNamespace(bus=self.bus)
 
     def _say(self, summary: str, project_id: str, thread_id: str) -> None:

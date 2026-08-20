@@ -1376,9 +1376,11 @@ class JsonRpcBridge:
         # Read the threads before the delete cascades them away: rows logged
         # before events carried a project id are reachable only by thread.
         thread_ids = [str(row.get("id") or "") for row in self.collaboration.list_threads(project_id, include_archived=True)]
+        artifacts = self.collaboration.artifact_paths(thread_ids=thread_ids, project_ids=[project_id])
         result = self.collaboration.delete_project(project_id, bool(params.get("confirmed")))
         if result.get("ok"):
             self.app.bus.forget(thread_ids=thread_ids, project_ids=[project_id])
+            self._delete_run_artifacts(artifacts)
         return result
 
     def thread_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1417,10 +1419,38 @@ class JsonRpcBridge:
     def thread_delete_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params if isinstance(params, dict) else {}
         thread_id = str(params.get("thread_id") or "")
+        # Read the artifacts before the rows that name them are gone.
+        artifacts = self.collaboration.artifact_paths(thread_ids=[thread_id])
         result = self.collaboration.delete_thread(thread_id, bool(params.get("confirmed")))
         if result.get("ok"):
             self.app.bus.forget(thread_ids=[thread_id])
+            self._delete_run_artifacts(artifacts)
         return result
+
+    def _delete_run_artifacts(self, artifacts: list[str]) -> int:
+        """Remove a deleted conversation's tool output files.
+
+        A Codex run leaves its event log, error output and final summary on
+        disk; they hold the goal text and the model's answer, and nothing
+        removed them when the conversation that produced them was deleted.
+
+        The paths come out of stored payloads, so each one is resolved and
+        checked to be inside the run directory before anything is unlinked --
+        a stored string is data, and this one names a file to delete.
+        """
+
+        root = (self.workspace / "data" / "agent_companion" / "codex_runs").resolve()
+        removed = 0
+        for artifact in artifacts:
+            try:
+                candidate = (self.workspace / artifact).resolve()
+                if not candidate.is_relative_to(root) or not candidate.is_file():
+                    continue
+                candidate.unlink()
+                removed += 1
+            except (OSError, ValueError):
+                continue
+        return removed
 
     def resource_binding_list_command(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         project_id = str((params or {}).get("project_id") or self.collaboration.context()["project_id"])

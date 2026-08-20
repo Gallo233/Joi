@@ -17,12 +17,22 @@ from agent_companion.core.tools.base import ToolAdapter
 from agent_companion.core.voice import safe_voice_line
 
 
+# Every run leaves three files -- the event log, the error output and the final
+# summary -- and nothing used to remove them. A development machine reached
+# roughly 1500 runs and 11MB of them, all of it still holding the goal text and
+# model output of tasks long finished. The card that references a run is only
+# useful while its conversation is in front of someone, so the log keeps a
+# recent window rather than the whole history.
+MAX_RETAINED_RUNS = 200
+
+
 class CodexTool(ToolAdapter):
     name = "codex.run"
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, max_retained_runs: int = MAX_RETAINED_RUNS) -> None:
         self.workspace = workspace
         self.run_dir = workspace / "data" / "agent_companion" / "codex_runs"
+        self.max_retained_runs = max(1, int(max_retained_runs or MAX_RETAINED_RUNS))
 
     def run(self, request: ToolRequest) -> ToolResult:
         goal = str(request.arguments.get("goal") or "").strip()
@@ -33,6 +43,7 @@ class CodexTool(ToolAdapter):
             return self._failed("没有找到本地 Codex CLI。", {"error": "codex_not_found"}, status="not_found")
 
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        self._prune_old_runs()
         stamp = str(int(time.time() * 1000))
         stdout_path = self.run_dir / f"{stamp}.stdout.jsonl"
         stderr_path = self.run_dir / f"{stamp}.stderr.log"
@@ -153,6 +164,37 @@ class CodexTool(ToolAdapter):
     @staticmethod
     def _codex_executable() -> str:
         return codex_executable()
+
+    def _prune_old_runs(self) -> int:
+        """Drop the oldest runs so the directory stops growing without end.
+
+        Runs are grouped by the stamp their three files share, so a run is kept
+        or dropped whole -- a summary whose event log has been removed reads as
+        a broken card rather than an expired one.
+        """
+
+        stamps: dict[str, list[Path]] = {}
+        try:
+            for path in self.run_dir.iterdir():
+                if not path.is_file():
+                    continue
+                stamps.setdefault(path.name.split(".", 1)[0], []).append(path)
+        except OSError:
+            return 0
+        if len(stamps) <= self.max_retained_runs:
+            return 0
+        # Stamps are milliseconds, so ordering them as integers keeps a shorter
+        # older stamp from sorting after a longer newer one.
+        ordered = sorted(stamps, key=lambda name: (len(name), name))
+        removed = 0
+        for stamp in ordered[: len(stamps) - self.max_retained_runs]:
+            for path in stamps[stamp]:
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+        return removed
 
     def _rel(self, path: Path) -> str:
         try:
