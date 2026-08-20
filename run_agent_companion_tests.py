@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import json
 import os
@@ -19,6 +20,7 @@ import yaml
 from agent_companion.core.tools.foreground_guard import _restore_hidden_window
 import agent_companion.core.tools.targeting as targeting_tool_module
 from agent_companion.core.app import AgentCompanionApp
+from agent_companion.core.sidecar_entry import seed_installed_workspace
 from agent_companion.core.agent_cli import scan_agent_clis, test_agent_cli
 from agent_companion.core.audit_store import AUDIT_SCHEMA_VERSION, AuditStore
 from agent_companion.core.background_context import BACKGROUND_CONTEXT_VERSION, BackgroundContextStore
@@ -583,7 +585,7 @@ _FORBIDDEN_PRIVATE_CALIBRATION_OUTPUT = [
 ]
 
 
-def _run_private_semantic_calibration_probe(workspace: Path, name: str, payload: object, *, expect_success: bool = False) -> str:
+def _run_private_semantic_calibration_probe(workspace: Path, repository: Path, name: str, payload: object, *, expect_success: bool = False) -> str:
     manifest_dir = workspace / "data" / "local_visual_eval"
     manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest = manifest_dir / name
@@ -595,7 +597,7 @@ def _run_private_semantic_calibration_probe(workspace: Path, name: str, payload:
         probe = subprocess.run(
             [
                 sys.executable,
-                str(workspace / "tools" / "calibrate_semantic_grounding.py"),
+                str(repository / "tools" / "calibrate_semantic_grounding.py"),
                 "--manifest",
                 str(manifest),
             ],
@@ -616,11 +618,16 @@ def _run_private_semantic_calibration_probe(workspace: Path, name: str, payload:
     return output
 
 
-def _run_p4_closeout_report_tool(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run_p4_closeout_report_tool(workspace: Path, repository: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             sys.executable,
-            str(workspace / "tools" / "p4_closeout_report.py"),
+            str(repository / "tools" / "p4_closeout_report.py"),
+            # The tool resolves its report against the checkout unless told
+            # otherwise, so without this the suite writes into the developer's
+            # own data tree from a subprocess.
+            "--root",
+            str(workspace),
             *args,
         ],
         cwd=str(workspace),
@@ -670,7 +677,19 @@ def _assert_vision_summary_empty_retry(workspace: Path) -> None:
 
 
 def main() -> int:
-    workspace = Path(__file__).resolve().parent
+    repository = Path(__file__).resolve().parent
+    # The suite used to run against the checkout itself, so each of the ~30
+    # AgentCompanionApp instances it builds wrote real events, audit records and
+    # SQLite rows into the developer's own Joi data directory. That is how the
+    # local event log reached 90MB, and it means the documented Core regression
+    # command was never safe to run against an install whose data mattered.
+    #
+    # `workspace` is now a throwaway seeded with the same immutable built-ins an
+    # installed build gets; `repository` is the checkout, for the assertions that
+    # read source files rather than run against them.
+    workspace = Path(tempfile.mkdtemp(prefix="joi-regression-"))
+    atexit.register(shutil.rmtree, workspace, True)
+    seed_installed_workspace(workspace, repository)
     os.environ["AGENT_COMPANION_DISABLE_LLM"] = "1"
     os.environ["AGENT_COMPANION_BROWSER_STUB"] = "1"
     _assert_vision_summary_empty_retry(workspace)
@@ -865,7 +884,7 @@ def main() -> int:
     compression_app_dir = Path(tempfile.mkdtemp())
     try:
         (compression_app_dir / "agent_companion" / "config").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(workspace / "agent_companion" / "config" / "default_character.yaml", compression_app_dir / "agent_companion" / "config" / "default_character.yaml")
+        shutil.copy2(repository / "agent_companion" / "config" / "default_character.yaml", compression_app_dir / "agent_companion" / "config" / "default_character.yaml")
         compression_app = AgentCompanionApp(compression_app_dir)
         compression_app._emit_result("compression-test", compression_result)
         compressed_events = compression_app.bus.drain()
@@ -1025,7 +1044,7 @@ def main() -> int:
     memory_app_dir = Path(tempfile.mkdtemp())
     try:
         (memory_app_dir / "agent_companion" / "config").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(workspace / "agent_companion" / "config" / "default_character.yaml", memory_app_dir / "agent_companion" / "config" / "default_character.yaml")
+        shutil.copy2(repository / "agent_companion" / "config" / "default_character.yaml", memory_app_dir / "agent_companion" / "config" / "default_character.yaml")
         memory_app = AgentCompanionApp(memory_app_dir)
         memory_events = memory_app.handle_user_text("记住我更喜欢轻量级原生控件")
         memory_candidates = [event.agent_state.get("memory_candidate") for event in memory_events if event.agent_state.get("memory_candidate")]
@@ -4356,7 +4375,7 @@ llm:
         assert_true(redacted_rows["fast"]["model"] == "redacted", "Local model paths should be redacted from runtime status")
         assert_true("/Users/private" not in str(redacted_runtime) and "joi.gguf" not in str(redacted_runtime), "Runtime status should not expose local model paths")
 
-    shell_api_source = (workspace / "agent_companion" / "shell" / "src" / "api.ts").read_text(encoding="utf-8")
+    shell_api_source = (repository / "agent_companion" / "shell" / "src" / "api.ts").read_text(encoding="utf-8")
     assert_true("transcribeVoice(audioBase64: string, mimeType: string, timeoutMs: number)" in shell_api_source, "voice RPC should accept a method-specific timeout")
     assert_true("语音识别等太久了" in shell_api_source, "voice RPC timeout should be user-friendly")
     assert_true("runtime.config.preview" in shell_api_source and "runtime.config.apply" in shell_api_source, "Shell API should expose runtime config preview/apply RPC methods")
@@ -4364,7 +4383,7 @@ llm:
     assert_true("background.status" in shell_api_source and "background.configure" in shell_api_source and "background.clear" in shell_api_source, "Shell API should expose constrained background context RPCs")
     assert_true("watch.loop.start" in shell_api_source and "watch.loop.stop" in shell_api_source and "watch.loop.configure" in shell_api_source and "watch.loop.refresh" in shell_api_source, "Shell API should expose realtime watch loop RPC methods")
     assert_true("memory.status" in shell_api_source and "memory.recall" in shell_api_source and "memory.browse_vault" in shell_api_source and "memory.save_candidate" in shell_api_source and "memory.reject_candidate" in shell_api_source and "memory.set_enabled" in shell_api_source and "memory.delete" in shell_api_source and "memory.clear" in shell_api_source, "Shell API should expose memory authorization and recall RPC methods")
-    voice_runtime_source = (workspace / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
+    voice_runtime_source = (repository / "agent_companion" / "shell" / "src" / "voiceRuntime.ts").read_text(encoding="utf-8")
     assert_true("shouldPlayVoiceAudio" in voice_runtime_source and "eventEpoch === currentEpoch" in voice_runtime_source, "voice runtime should suppress stale audio by epoch")
     assert_true("event_created_at" in voice_runtime_source, "voice runtime key should include event identity")
     # The shell used to be one 6000-line component, so reading App.vue was the
@@ -4375,7 +4394,7 @@ llm:
     # in, so they read the parts App.vue was split into as well. The negative
     # assertions below get stricter for free: a local path leaking into a
     # composable is now caught too.
-    shell_src = workspace / "agent_companion" / "shell" / "src"
+    shell_src = repository / "agent_companion" / "shell" / "src"
     app_vue_source = "\n".join(
         [(shell_src / "App.vue").read_text(encoding="utf-8")]
         + [path.read_text(encoding="utf-8") for path in sorted(shell_src.glob("composables/*.ts"))]
@@ -4419,9 +4438,9 @@ llm:
     assert_true("auditSignalRows" in app_vue_source and "image_changed" in app_vue_source, "Shell audit view should show sanitized image verification signals")
     assert_true("codexTimeline" in app_vue_source and "codexRunStatusLabel" in app_vue_source and "Codex 运行审计" in app_vue_source, "Shell developer mode should show sanitized Codex run audit state")
     assert_true("fail_closed" in app_vue_source and "权限不可继续" in app_vue_source, "Shell should label Codex fail-closed permission state")
-    visual_fixture_manifest = (workspace / "tests" / "fixtures" / "visual_detector" / "visual_cases.json").read_text(encoding="utf-8")
-    image_fixture_manifest = (workspace / "tests" / "fixtures" / "image_verification" / "image_diff_cases.json").read_text(encoding="utf-8")
-    semantic_fixture_manifest = (workspace / "tests" / "fixtures" / "semantic_grounding" / "semantic_cases.json").read_text(encoding="utf-8")
+    visual_fixture_manifest = (repository / "tests" / "fixtures" / "visual_detector" / "visual_cases.json").read_text(encoding="utf-8")
+    image_fixture_manifest = (repository / "tests" / "fixtures" / "image_verification" / "image_diff_cases.json").read_text(encoding="utf-8")
+    semantic_fixture_manifest = (repository / "tests" / "fixtures" / "semantic_grounding" / "semantic_cases.json").read_text(encoding="utf-8")
     semantic_fixture_cases = json.loads(semantic_fixture_manifest)
     assert_true(isinstance(semantic_fixture_cases, list) and len(semantic_fixture_cases) > 38, "semantic grounding suite should expand beyond the P4.26 baseline")
     assert_true("video_canvas_controls" in visual_fixture_manifest and "canvas_button_cluster" in visual_fixture_manifest, "committed visual detector regression fixtures should be present")
@@ -4449,7 +4468,7 @@ llm:
     assert_true("semantic_cross_monitor_drag_stale_geometry_clarification" in semantic_fixture_manifest, "cross-monitor stale geometry semantic fixture should be present")
     assert_true("semantic_dense_browser_topbar_repeated_actions_selection" in semantic_fixture_manifest and "semantic_game_canvas_hud_sparse_visual_cluster_selection" in semantic_fixture_manifest, "real-layout browser top-bar and game HUD semantic fixtures should be present")
     assert_true("semantic_modal_popover_background_competing_selection" in semantic_fixture_manifest, "modal/popover background competition semantic fixture should be present")
-    eval_source = (workspace / "tools" / "eval_visual_detector.py").read_text(encoding="utf-8")
+    eval_source = (repository / "tools" / "eval_visual_detector.py").read_text(encoding="utf-8")
     assert_true("local private image verification eval: skipped" in eval_source and "image_diff_cases.local.json" in eval_source, "local private image-diff eval should skip when missing")
     assert_true("_print_private_results" in eval_source and "failure_category" in eval_source and "local_private_case_" in eval_source, "local private eval output should be sanitized")
     assert_true("local private semantic grounding eval: skipped" in eval_source and "semantic_cases.local.json" in eval_source, "local private semantic eval should skip when missing")
@@ -4471,13 +4490,13 @@ llm:
         workspace / "data" / "local_visual_eval",
     )
     assert_true(local_semantic_ok and local_semantic_skipped and not local_semantic_results and not local_semantic_categories, "missing local semantic calibration manifest should skip safely")
-    calibration_source = (workspace / "tools" / "calibrate_semantic_grounding.py").read_text(encoding="utf-8")
+    calibration_source = (repository / "tools" / "calibrate_semantic_grounding.py").read_text(encoding="utf-8")
     assert_true("run_local_semantic_calibration" in calibration_source and "SEMANTIC_CALIBRATION_FAILURE_CATEGORIES" in calibration_source, "semantic calibration runner should reuse eval logic and stable categories")
     assert_true("LOCAL_SEMANTIC_CASE_FILE" in calibration_source and "data/local_visual_eval" not in calibration_source, "calibration runner should use shared local manifest constants without printing private paths")
     calibration_probe = subprocess.run(
         [
             sys.executable,
-            str(workspace / "tools" / "calibrate_semantic_grounding.py"),
+            str(repository / "tools" / "calibrate_semantic_grounding.py"),
             "--manifest",
             str(workspace / "data" / "local_visual_eval" / "semantic_cases.test-missing.local.json"),
         ],
@@ -4493,7 +4512,7 @@ llm:
     categories_probe = subprocess.run(
         [
             sys.executable,
-            str(workspace / "tools" / "calibrate_semantic_grounding.py"),
+            str(repository / "tools" / "calibrate_semantic_grounding.py"),
             "--list-categories",
         ],
         cwd=str(workspace),
@@ -4504,12 +4523,11 @@ llm:
     listed_categories = {line.strip() for line in categories_probe.stdout.splitlines() if line.strip()}
     assert_true(categories_probe.returncode == 0 and listed_categories == expected_semantic_categories, "calibration runner should list only stable categories")
     assert_true(not categories_probe.stderr, "calibration category listing should not emit errors")
-    invalid_json_output = _run_private_semantic_calibration_probe(workspace, "semantic_cases.invalid-json.local.json", '{"broken":')
+    invalid_json_output = _run_private_semantic_calibration_probe(workspace, repository, "semantic_cases.invalid-json.local.json", '{"broken":')
     assert_true("local semantic calibration: failed" in invalid_json_output and "private manifest: invalid" in invalid_json_output, "invalid JSON manifest should fail with sanitized invalid report")
-    not_list_output = _run_private_semantic_calibration_probe(workspace, "semantic_cases.not-list.local.json", {"image": "C:\\Users\\Alice\\Desktop\\账号.png", "ocr": "账号 https://private.example"})
+    not_list_output = _run_private_semantic_calibration_probe(workspace, repository, "semantic_cases.not-list.local.json", {"image": "C:\\Users\\Alice\\Desktop\\账号.png", "ocr": "账号 https://private.example"})
     assert_true("private manifest: invalid" in not_list_output, "non-list manifest should fail with sanitized invalid report")
-    missing_image_size_output = _run_private_semantic_calibration_probe(
-        workspace,
+    missing_image_size_output = _run_private_semantic_calibration_probe(workspace, repository,
         "semantic_cases.missing-size.local.json",
         [
             {
@@ -4521,8 +4539,7 @@ llm:
         ],
     )
     assert_true("private manifest: invalid" in missing_image_size_output, "missing image_size case should fail with sanitized invalid report")
-    private_path_output = _run_private_semantic_calibration_probe(
-        workspace,
+    private_path_output = _run_private_semantic_calibration_probe(workspace, repository,
         "semantic_cases.private-path.local.json",
         [
             {
@@ -4537,8 +4554,7 @@ llm:
         ],
     )
     assert_true("failure_categories:" in private_path_output and "capture_rect_untrusted" in private_path_output, "private path failure should report only abstract categories")
-    private_text_output = _run_private_semantic_calibration_probe(
-        workspace,
+    private_text_output = _run_private_semantic_calibration_probe(workspace, repository,
         "semantic_cases.private-text.local.json",
         [
             {
@@ -4553,7 +4569,7 @@ llm:
         ],
     )
     assert_true("failure_categories:" in private_text_output and "ambiguous_repeated_label" in private_text_output, "private OCR text failure should report only abstract categories")
-    closeout_doc = (workspace / "docs" / "P4_CLOSEOUT_EXPERIENCE.md").read_text(encoding="utf-8")
+    closeout_doc = (repository / "docs" / "P4_CLOSEOUT_EXPERIENCE.md").read_text(encoding="utf-8")
     for scene in ("browser_click", "watch_page_video", "canvas_video_controls", "game_hud"):
         assert_true(scene in closeout_doc, f"P4 closeout doc should include scene: {scene}")
     for heading in ("用户要说的自然语言", "预期任务卡表现", "预期候选 evidence chips", "预期语音表现", "通过标准", "失败时记录什么", "隐私注意事项"):
@@ -4562,20 +4578,19 @@ llm:
         all(fragment in closeout_doc for fragment in ("不提交截图", "OCR", "窗口标题", "账号", "URL", "路径", "approval ids")),
         "P4 closeout doc should state privacy boundaries",
     )
-    closeout_tool_source = (workspace / "tools" / "p4_closeout_report.py").read_text(encoding="utf-8")
-    assert_true("p4_closeout_report.local.md" in closeout_tool_source and '"data" / "local_visual_eval"' in closeout_tool_source, "P4 report tool should write under ignored local_visual_eval")
+    closeout_tool_source = (repository / "tools" / "p4_closeout_report.py").read_text(encoding="utf-8")
+    assert_true("p4_closeout_report.local.md" in closeout_tool_source and 'Path("data") / "local_visual_eval"' in closeout_tool_source, "P4 report tool should write under ignored local_visual_eval")
     report_path = workspace / "data" / "local_visual_eval" / "p4_closeout_report.local.md"
     report_path.unlink(missing_ok=True)
-    closeout_init = _run_p4_closeout_report_tool(workspace, "--init")
+    closeout_init = _run_p4_closeout_report_tool(workspace, repository, "--init")
     assert_true(closeout_init.returncode == 0 and report_path.is_file(), "P4 closeout report init should create local report")
-    closeout_add = _run_p4_closeout_report_tool(workspace, "--add", "browser_click", "--status", "pass", "--category", "ok", "--note", "候选说明清楚")
+    closeout_add = _run_p4_closeout_report_tool(workspace, repository, "--add", "browser_click", "--status", "pass", "--category", "ok", "--note", "候选说明清楚")
     assert_true(closeout_add.returncode == 0, "P4 closeout report add should accept sanitized notes")
     report_text = report_path.read_text(encoding="utf-8")
     assert_true("| browser_click | pass | ok | 候选说明清楚 |" in report_text, "P4 closeout report should record scene/status/category/note")
     forbidden_report_text = ["C:\\", "/Users/", "http", "example", "data/", "local_visual_eval", ".png", ".ppm", "task-", "approval-", "账号", "OCR 原文"]
     assert_true(all(fragment not in report_text for fragment in forbidden_report_text), "P4 closeout report leaked private fields")
-    rejected_report = _run_p4_closeout_report_tool(
-        workspace,
+    rejected_report = _run_p4_closeout_report_tool(workspace, repository,
         "--add",
         "browser_click",
         "--status",
@@ -4590,22 +4605,22 @@ llm:
     assert_true(all(fragment not in rejected_output for fragment in forbidden_report_text), "P4 closeout report rejection leaked private input")
     report_path.unlink(missing_ok=True)
     assert_true(run_visual_detector_eval(workspace, verbose=False) == 0, "visual/image verification eval should pass committed suites and skip or run local private suites safely")
-    windows_focus_source = (workspace / "agent_companion" / "core" / "windows_focus.py").read_text(encoding="utf-8")
+    windows_focus_source = (repository / "agent_companion" / "core" / "windows_focus.py").read_text(encoding="utf-8")
     assert_true("WindowFromPoint" in windows_focus_source and "GetAncestor" in windows_focus_source, "Windows focus helper should resolve the window underneath hidden Joi")
     assert_true("joi desktop" in windows_focus_source, "Windows focus helper should recognize the Tauri Joi Desktop title")
-    windows_observer_source = (workspace / "agent_companion" / "core" / "vision" / "windows.py").read_text(encoding="utf-8")
+    windows_observer_source = (repository / "agent_companion" / "core" / "vision" / "windows.py").read_text(encoding="utf-8")
     assert_true("window_from_point" in windows_observer_source and "hide_foreground_companion_window" in windows_observer_source, "Screen observe should hide Joi and capture the underlying content window")
-    foreground_guard_source = (workspace / "agent_companion" / "core" / "tools" / "foreground_guard.py").read_text(encoding="utf-8")
+    foreground_guard_source = (repository / "agent_companion" / "core" / "tools" / "foreground_guard.py").read_text(encoding="utf-8")
     assert_true("_restore_hidden_window" in foreground_guard_source and "inspect.signature" in foreground_guard_source, "Foreground guard should restore platform windows without assuming macOS-only parameters")
-    mac_backend_source = (workspace / "agent_companion" / "core" / "computer_use" / "mac.py").read_text(encoding="utf-8")
+    mac_backend_source = (repository / "agent_companion" / "core" / "computer_use" / "mac.py").read_text(encoding="utf-8")
     assert_true("def perform_sequence" in mac_backend_source and "_perform_unwrapped" in mac_backend_source and "def _open_url" in mac_backend_source and "clipboard verification failed" in mac_backend_source and "hotkey dispatch failed" in mac_backend_source, "Mac Computer Use should keep workflow focus, verify clipboard text entry/hotkey dispatch, and support native URL opening")
-    targeting_source = (workspace / "agent_companion" / "core" / "tools" / "targeting.py").read_text(encoding="utf-8")
+    targeting_source = (repository / "agent_companion" / "core" / "tools" / "targeting.py").read_text(encoding="utf-8")
     assert_true("companion_hidden_for_target_observation" in targeting_source and "_run_with_visible_target" in targeting_source, "Semantic target resolution should keep Joi hidden while reading the target window")
-    joi_mcp_source = (workspace / "agent_companion" / "core" / "joi_mcp_server.py").read_text(encoding="utf-8")
+    joi_mcp_source = (repository / "agent_companion" / "core" / "joi_mcp_server.py").read_text(encoding="utf-8")
     assert_true("joi_computer_click_target" in joi_mcp_source and "semantic_click_call" in joi_mcp_source and "continuation_context" in joi_mcp_source, "Joi MCP should provide a first-class semantic click bridge and structured continuation context for current-screen actions")
-    codex_runtime_source = (workspace / "agent_companion" / "core" / "codex_runtime.py").read_text(encoding="utf-8")
+    codex_runtime_source = (repository / "agent_companion" / "core" / "codex_runtime.py").read_text(encoding="utf-8")
     assert_true("joi_computer_click_target" in codex_runtime_source and "不要新开浏览器" in codex_runtime_source and "continuation_context" in codex_runtime_source, "Codex runtime harness should prefer current context semantic clicks and structured continuations before opening a new browser")
-    server_source = (workspace / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
+    server_source = (repository / "agent_companion" / "core" / "server.py").read_text(encoding="utf-8")
     assert_true('"event_created_at": event.created_at' in server_source, "Core voice audio payload should include event timestamp")
     assert_true('"voice_audio_data_url"' in server_source and "data:audio/wav;base64" in server_source, "Core should send voice audio data URLs so Tauri file asset playback is not required")
     assert_true("winsound.PlaySound" in server_source and "SND_ASYNC" in server_source, "Core should provide Windows local voice playback fallback")
@@ -4615,51 +4630,51 @@ llm:
     assert_true("force_visual_summary" in server_source and '"watch.loop.refresh"' in server_source, "Core watch loop should expose forced visual refresh")
     assert_true("agent_cli_configure_command" in server_source and '"agent_cli.configure"' in server_source and '"agent_cli.status"' in server_source and "_agent_cli_takeover_enabled" in server_source, "Core should expose Agent CLI takeover configuration and route enabled user messages")
     assert_true("memory_status_command" in server_source and "memory_recall_command" in server_source and "memory_browse_vault_command" in server_source and "memory_set_enabled_command" in server_source and "memory_clear_command" in server_source and '"memory.status"' in server_source and '"memory.recall"' in server_source and '"memory.browse_vault"' in server_source and '"memory.save_candidate"' in server_source and '"memory.clear"' in server_source, "Core should expose P5 memory RPC methods")
-    skill_manifest_source = (workspace / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
+    skill_manifest_source = (repository / "agent_companion" / "core" / "skill_manifest.py").read_text(encoding="utf-8")
     assert_true("SKILL_MANIFEST_VERSION" in skill_manifest_source and "build_native_skill_manifest" in skill_manifest_source and "skill_boundary_for_tool" in skill_manifest_source and "KNOWN_SKILL_IDS" in skill_manifest_source and "_apply_skill_setting" in skill_manifest_source and "normalize_skill_id" in skill_manifest_source and "joi.agent_cli" in skill_manifest_source and "joi.computer_use" in skill_manifest_source and "joi.voice_input" in skill_manifest_source, "Core should define P8 native skill manifests and execution boundaries")
     assert_true("_computer_use_action_schema" in skill_manifest_source and "llm_driven_action_schema" in skill_manifest_source and "requires_approval_for" in skill_manifest_source, "Computer Use skill should expose a declarative LLM action schema instead of app-specific routes only")
     assert_true('"background.configure"' in skill_manifest_source and '"background.clear"' in skill_manifest_source, "Watch native skill should advertise background context controls")
     assert_true("skill_manifest_command" in server_source and '"skills.list"' in server_source and '"skills"' in server_source and "skill_settings_payload" in server_source and "audit_recent_command" in server_source and '"audit.recent"' in server_source, "Core should expose P8 native skill manifest and P9 audit RPCs")
-    audit_store_source = (workspace / "agent_companion" / "core" / "audit_store.py").read_text(encoding="utf-8")
+    audit_store_source = (repository / "agent_companion" / "core" / "audit_store.py").read_text(encoding="utf-8")
     assert_true("AUDIT_SCHEMA_VERSION" in audit_store_source and "AuditStore" in audit_store_source and "record_event" in audit_store_source and "audit_record_from_event" in audit_store_source and "safe_for_display" in audit_store_source, "Core should persist sanitized P9 audit records")
-    background_context_source = (workspace / "agent_companion" / "core" / "background_context.py").read_text(encoding="utf-8")
+    background_context_source = (repository / "agent_companion" / "core" / "background_context.py").read_text(encoding="utf-8")
     assert_true("BACKGROUND_CONTEXT_VERSION" in background_context_source and "BackgroundContextStore" in background_context_source and "record_summary" in background_context_source and "video_recording" in background_context_source and "summaries_only" in background_context_source, "Core should keep constrained background context as approved summaries only")
-    runtime_config_writer_source = (workspace / "agent_companion" / "core" / "runtime_config_writer.py").read_text(encoding="utf-8")
-    policy_source = (workspace / "agent_companion" / "core" / "policy.py").read_text(encoding="utf-8")
+    runtime_config_writer_source = (repository / "agent_companion" / "core" / "runtime_config_writer.py").read_text(encoding="utf-8")
+    policy_source = (repository / "agent_companion" / "core" / "policy.py").read_text(encoding="utf-8")
     assert_true("_prepare_skill_update" in runtime_config_writer_source and "unknown_skill" in runtime_config_writer_source and "protected_skill" in runtime_config_writer_source and "joi.local_files" not in runtime_config_writer_source, "Runtime config writer should support dynamic native skill toggles without hardcoding path-sensitive ids")
     assert_true("disabled_skills" in policy_source and "skill_id_for_tool" in policy_source and "skill_disabled" in policy_source, "Policy gate should fail closed for disabled native skills")
     assert_true("WatchCommentaryPlanner" in server_source and '"watch_commentary"' in server_source and '"event_tool"' in server_source, "Core should emit proactive watch comments and tag voice payloads")
-    watch_source = (workspace / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
-    watch_transcript_source = (workspace / "agent_companion" / "core" / "watch_transcript.py").read_text(encoding="utf-8")
+    watch_source = (repository / "agent_companion" / "core" / "watch.py").read_text(encoding="utf-8")
+    watch_transcript_source = (repository / "agent_companion" / "core" / "watch_transcript.py").read_text(encoding="utf-8")
     assert_true("recent_with_transcript" in watch_source and "transcript_state" in watch_source and "transcript_memory" in watch_source, "Watch session should maintain rolling transcript memory")
     assert_true("system_audio_diagnostics" in watch_transcript_source and '"diagnostics"' in watch_transcript_source and "audio_bytes" in watch_transcript_source, "Watch transcript should expose safe system-audio diagnostics")
-    screen_observe_source = (workspace / "agent_companion" / "core" / "tools" / "screen_observe.py").read_text(encoding="utf-8")
+    screen_observe_source = (repository / "agent_companion" / "core" / "tools" / "screen_observe.py").read_text(encoding="utf-8")
     assert_true('source in {"auto", "system_audio", "audio"}' in screen_observe_source and "audio_result.error" in screen_observe_source, "Auto transcript source should try system audio and preserve fallback reason")
-    commentary_source = (workspace / "agent_companion" / "core" / "watch_commentary.py").read_text(encoding="utf-8")
+    commentary_source = (repository / "agent_companion" / "core" / "watch_commentary.py").read_text(encoding="utf-8")
     assert_true("min_interval_seconds" in commentary_source and "maybe_comment" in commentary_source and "safe_voice_line" in commentary_source, "Watch commentary planner should enforce cooldown and safe voice output")
-    tool_compression_source = (workspace / "agent_companion" / "core" / "tool_compression.py").read_text(encoding="utf-8")
+    tool_compression_source = (repository / "agent_companion" / "core" / "tool_compression.py").read_text(encoding="utf-8")
     assert_true("compress_tool_result" in tool_compression_source and "build_event_agent_state" in tool_compression_source and "planner_state" in tool_compression_source and "_explicit_memory_candidate" in tool_compression_source, "P6 JoiJuice should expose safe tool-result channels without auto memory")
-    memory_source = (workspace / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
+    memory_source = (repository / "agent_companion" / "core" / "memory.py").read_text(encoding="utf-8")
     assert_true("memory_candidates" in memory_source and "memory_settings" in memory_source and "memories_fts" in memory_source and "recall" in memory_source and "browse_vault" in memory_source and "context" in memory_source and "profile" in memory_source and "_candidate_priority" in memory_source and "_candidate_duplicate" in memory_source and "_manual_vault_notes" in memory_source and "joi_memory_vault.md" in memory_source and "_rejection_reason" in memory_source, "P5 memory core should use pending candidates, profiles, dedupe, disable switch, semantic recall, local vault browsing/context, and privacy gate")
-    memory_candidates_source = (workspace / "agent_companion" / "core" / "memory_candidates.py").read_text(encoding="utf-8")
+    memory_candidates_source = (repository / "agent_companion" / "core" / "memory_candidates.py").read_text(encoding="utf-8")
     assert_true("chat_memory_candidate" in memory_candidates_source and "tool_result_memory_candidate" in memory_candidates_source and "MEMORY_CANDIDATE_VERSION" in memory_candidates_source and "_looks_transient" in memory_candidates_source, "P5 memory candidate extraction should support safe stable chat preferences and low-sensitive tool outcomes")
-    chat_source = (workspace / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
+    chat_source = (repository / "agent_companion" / "core" / "tools" / "chat.py").read_text(encoding="utf-8")
     assert_true("memory_context" in chat_source and "memory_profile" in chat_source and "chat_memory_candidate" in chat_source and "_memory_prompt" in chat_source and "_fallback_memory_reply" in chat_source, "Chat should consume approved memory context/profile and emit safe memory candidates")
-    config_source = (workspace / "agent_companion" / "core" / "config.py").read_text(encoding="utf-8")
-    runtime_status_source = (workspace / "agent_companion" / "core" / "runtime_status.py").read_text(encoding="utf-8")
-    watch_tool_source = (workspace / "agent_companion" / "core" / "tools" / "watch.py").read_text(encoding="utf-8")
+    config_source = (repository / "agent_companion" / "core" / "config.py").read_text(encoding="utf-8")
+    runtime_status_source = (repository / "agent_companion" / "core" / "runtime_status.py").read_text(encoding="utf-8")
+    watch_tool_source = (repository / "agent_companion" / "core" / "tools" / "watch.py").read_text(encoding="utf-8")
     assert_true("MODEL_ROUTES" in config_source and "ModelRouteConfig" in config_source and "fallback_reason" in config_source and "to_agent_state" in config_source, "P7 model router should expose stable routes and safe model usage metadata")
     assert_true("SkillSettingConfig" in config_source and "_parse_skill_settings" in config_source and "skill_enabled" in config_source, "Config should parse safe native skill enabled flags")
     assert_true("ModelRouter.stable_routes()" in runtime_status_source and "MODEL_ROUTE_LABELS" in runtime_status_source, "Runtime status should render stable model route rows")
     assert_true("model_usage" in chat_source and "model_usage" in watch_tool_source, "Chat and watch tools should attach safe model usage metadata")
-    tts_bridge_source = (workspace / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
+    tts_bridge_source = (repository / "agent_companion" / "core" / "tts_bridge.py").read_text(encoding="utf-8")
     assert_true("status_payload" in tts_bridge_source and "_safe_tts_error" in tts_bridge_source, "TTS bridge should expose sanitized status")
     assert_true("emotion" in tts_bridge_source and "sprite_id" in tts_bridge_source, "TTS bridge should accept expression sync inputs")
     # Same reason as `app_vue_source` above: the shell's behaviour is spread
     # across App.vue and the modules split out of it.
     shell_source = app_vue_source
-    character_source = (workspace / "agent_companion" / "shell" / "src" / "components" / "JoiCharacter.vue").read_text(encoding="utf-8")
-    shell_style_source = (workspace / "agent_companion" / "shell" / "src" / "styles.css").read_text(encoding="utf-8")
+    character_source = (repository / "agent_companion" / "shell" / "src" / "components" / "JoiCharacter.vue").read_text(encoding="utf-8")
+    shell_style_source = (repository / "agent_companion" / "shell" / "src" / "styles.css").read_text(encoding="utf-8")
     assert_true("activeExpressionEmotion" in shell_source and "expression_sync" in shell_source and "emotion-${activeExpressionEmotion}" in shell_source, "Shell should bind expression sync to character emotion class")
     assert_true("stage-emotion-pill" in shell_source and "情绪 {{ activeEmotionStatus.label }}" in shell_source, "Stage should surface current emotion outside the chat cabin")
     assert_true(
@@ -4692,10 +4707,10 @@ llm:
         and "memory-library" in shell_source,
         "Shell should expose a dedicated memory cabin with profile, recall search, and local-vault status",
     )
-    app_source = (workspace / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
+    app_source = (repository / "agent_companion" / "core" / "app.py").read_text(encoding="utf-8")
     assert_true("_step_with_memory_context" in app_source and "build_event_agent_state" in app_source and "tool_result_memory_candidate" in app_source, "App should inject approved memory context, emit safe JoiJuice event channels, and queue safe tool-result memory candidates")
     assert_true("handle_agent_cli_text" in app_source and "_agent_cli_takeover_arguments" in app_source and "should_handle_locally_before_agent_cli" in app_source, "App should expose Agent CLI takeover while keeping local control commands local")
-    desktop_context_source = (workspace / "agent_companion" / "core" / "desktop_context.py").read_text(encoding="utf-8")
+    desktop_context_source = (repository / "agent_companion" / "core" / "desktop_context.py").read_text(encoding="utf-8")
     assert_true("rewrite_plan_for_desktop_context" in desktop_context_source and "record_desktop_context" in desktop_context_source and "DesktopContext" in desktop_context_source, "Desktop context planning should live outside the app orchestrator")
     assert_true("annotate_agent_state_with_skill" in app_source and "skill_steps" in app_source and "source_skill" in app_source and "reload_runtime_policy" in app_source and "skill_settings_payload" in app_source and "block_reason" in app_source, "App execution boundary should attach native skill metadata and enforce disabled skills")
     assert_true("--acc-hat-top" in shell_style_source and "mini-speech-bubble.actionable" in shell_style_source, "Shell styles should include adaptive accessory anchors and actionable compact bubbles")
@@ -4712,18 +4727,18 @@ llm:
     # rendered -- leftovers from the same hidden block. The panel and its status
     # cards are what the Developer tab actually draws.
     assert_true("background-status-grid" in shell_style_source and "background-context-panel" in shell_style_source and "background-status-card" in shell_style_source, "Shell styles should include background context settings and summary rows")
-    doctor_source = (workspace / "tools" / "joi_doctor.py").read_text(encoding="utf-8")
-    demo_check_source = (workspace / "tools" / "mvp_demo_check.py").read_text(encoding="utf-8")
-    setup_wizard_source = (workspace / "tools" / "windows_setup_wizard.py").read_text(encoding="utf-8")
-    release_packager_source = (workspace / "tools" / "package_windows_release.py").read_text(encoding="utf-8")
-    packaging_smoke_source = (workspace / "tools" / "packaging_smoke.py").read_text(encoding="utf-8")
-    provider_preflight_source = (workspace / "tools" / "provider_preflight.py").read_text(encoding="utf-8")
-    handoff_report_source = (workspace / "tools" / "windows_handoff_report.py").read_text(encoding="utf-8")
-    release_check_source = (workspace / "tools" / "windows_release_check.py").read_text(encoding="utf-8")
-    ci_workflow_source = (workspace / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    release_candidate_workflow_source = (workspace / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8")
-    first_run_doc_source = (workspace / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
-    start_joi_source = (workspace / "tools" / "start_joi.ps1").read_text(encoding="utf-8")
+    doctor_source = (repository / "tools" / "joi_doctor.py").read_text(encoding="utf-8")
+    demo_check_source = (repository / "tools" / "mvp_demo_check.py").read_text(encoding="utf-8")
+    setup_wizard_source = (repository / "tools" / "windows_setup_wizard.py").read_text(encoding="utf-8")
+    release_packager_source = (repository / "tools" / "package_windows_release.py").read_text(encoding="utf-8")
+    packaging_smoke_source = (repository / "tools" / "packaging_smoke.py").read_text(encoding="utf-8")
+    provider_preflight_source = (repository / "tools" / "provider_preflight.py").read_text(encoding="utf-8")
+    handoff_report_source = (repository / "tools" / "windows_handoff_report.py").read_text(encoding="utf-8")
+    release_check_source = (repository / "tools" / "windows_release_check.py").read_text(encoding="utf-8")
+    ci_workflow_source = (repository / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    release_candidate_workflow_source = (repository / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8")
+    first_run_doc_source = (repository / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
+    start_joi_source = (repository / "tools" / "start_joi.ps1").read_text(encoding="utf-8")
     assert_true("build_doctor_report" in doctor_source and "safe_for_display" in doctor_source and "next_actions" in doctor_source, "P10 doctor should expose a safe first-run readiness report")
     assert_true("build_mvp_demo_check_report" in demo_check_source and "watch_together" in demo_check_source and "coding_task" in demo_check_source and "game_skill" in demo_check_source and "privacy_boundary" in demo_check_source, "P10 MVP demo check should expose safe watch/coding/game demo scripts")
     assert_true("build_windows_setup_plan" in setup_wizard_source and "windows_setup_exit_code" in setup_wizard_source and "config.example.yaml" in setup_wizard_source and "config.yaml" in setup_wizard_source and "safe_for_display" in setup_wizard_source, "P10 setup wizard should create local config safely without secrets")
