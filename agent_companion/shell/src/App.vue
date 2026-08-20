@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
-import { getCurrentWindow, LogicalSize, type PhysicalPosition, type PhysicalSize } from '@tauri-apps/api/window'
+import { availableMonitors, getCurrentWindow, LogicalSize, PhysicalPosition, type PhysicalSize } from '@tauri-apps/api/window'
 import {
   AlertCircle,
   ArrowLeft,
@@ -191,7 +191,7 @@ const characterFullBody = ref(true)
 // 100% now frames the whole model with a margin, so the old 110% default --
 // which existed to compensate for the character sitting small in frame -- just
 // crops the feet.
-const stageZoom = ref(1)
+const stageZoom = usePersistentRef('stageZoom', 1)
 
 // The stage used to hold roughly 60% of the window whether or not there was a
 // character in it. With Core down, or a character package that ships no model
@@ -271,6 +271,10 @@ const stageZoomLabel = computed(() => `${Math.round(stageZoom.value * 100)}%`)
 // sprites are raster art, so scaling them is still the right tool.
 const stageCharacterStyle = computed(() => ({
   '--stage-character-scale': String(characterDisplayModelType.value === 'vrm' ? 1 : stageZoom.value),
+  // Compact scaling resizes the box every renderer draws into, so it works the
+  // same for a VRM camera, a Live2D canvas and a flat sprite -- unlike the
+  // stage zoom above, which has to treat a VRM differently.
+  '--compact-scale': String(compactScale.value),
 }))
 const live2DModelUrl = computed(() => {
   const character = ready.value?.character
@@ -354,6 +358,22 @@ function settingsIcon(tab: SettingsTabId) {
   return settingsIconMap[tab]
 }
 
+// Memory and Settings need the whole window to be readable, so reaching them
+// from the compact dashboard restores the main shell first rather than drawing
+// a full cabin into a 360px pet. Returning to compact stays one click away.
+async function openCompactCabin(cabin: CabinId) {
+  if (isCompactMode.value) await toggleCompactMode()
+  openCabin(cabin)
+}
+
+// Attachments are reachable from compact mode, but they land in the composer's
+// chip list -- which lives in the chat section compact mode hides. Restoring
+// first is what keeps "I attached something" visible instead of silent.
+async function openCompactAttachments(kind: 'file' | 'folder') {
+  if (isCompactMode.value) await toggleCompactMode()
+  await addAttachments(kind)
+}
+
 function openCabin(cabin: CabinId) {
   activeCabin.value = cabin
   quickMenuOpen.value = false
@@ -389,14 +409,56 @@ async function handleCharacterActivated(_characterId: string, readyPayload?: Cor
   await Promise.all([refreshConversationHistory(), refreshMemoryWorkspace(), refreshCharacterIdentities()])
 }
 
+const STAGE_ZOOM_STEPS = [1, 1.1, 1.2]
+
 function cycleStageZoom() {
-  const zoomSteps = [1, 1.1, 1.2]
-  const currentIndex = zoomSteps.findIndex((value) => value === stageZoom.value)
-  stageZoom.value = zoomSteps[(currentIndex + 1) % zoomSteps.length]
+  // The wheel puts the zoom anywhere between the steps, so the button can no
+  // longer look for its exact value -- it takes the next step above wherever
+  // the wheel left it, and wraps at the top.
+  const next = STAGE_ZOOM_STEPS.find((value) => value > stageZoom.value + 0.001)
+  stageZoom.value = next ?? STAGE_ZOOM_STEPS[0]
+}
+
+// A trackpad reports many small deltas where a mouse reports few large ones, so
+// the gesture follows the direction rather than the magnitude: one notch is one
+// step on both, instead of a trackpad flicking her from tiny to huge.
+const ZOOM_MIN = 0.6
+const ZOOM_MAX = 2
+const ZOOM_STEP = 0.08
+
+function clampZoom(value: number) {
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(value * 100) / 100))
+}
+
+function handleStageWheel(event: WheelEvent) {
+  if (!event.deltaY) return
+  const direction = event.deltaY > 0 ? -1 : 1
+  if (isCompactMode.value) {
+    compactScale.value = clampZoom(compactScale.value + direction * ZOOM_STEP)
+    return
+  }
+  stageZoom.value = clampZoom(stageZoom.value + direction * ZOOM_STEP)
 }
 
 const isCompactMode = ref(false)
 const compactTransitioning = ref(false)
+// In compact mode the character is a fixed box, so the window and the model had
+// no size the user could choose -- AIRI gives the model its own scale beside the
+// window's, and remembers where the window sits. Here one wheel gesture drives
+// both: she grows, and the window grows with her rather than clipping her. The
+// value is kept, because a size someone set deliberately should survive a
+// relaunch.
+const compactScale = usePersistentRef('compactScale', 1)
+// Where she was left. AIRI remembers its window's whole bounds; the size here
+// comes from the scale above, so this is the other half. Putting a desktop
+// companion in a corner is a placement, not a gesture -- having her jump back
+// to the middle of the screen every launch undoes it.
+const compactPosition = usePersistentRef<{ x: number; y: number } | null>('compactPosition', null)
+// Moving the window ourselves -- restoring a position, or handing the normal
+// window back its own -- must not be mistaken for the user placing her.
+let suppressCompactPositionSave = false
+let compactMoveUnlisten: (() => void) | null = null
+let compactMoveTimer: number | null = null
 const equippedAccessories = ref({ hat: false, glasses: false, ears: false })
 const miniSpeechActive = ref(false)
 const miniDashboardActive = ref(false)
@@ -457,8 +519,15 @@ async function applyWindowShellMode(compact: boolean) {
       await safeWindowCall(() => appWindow.setSkipTaskbar(true))
       await safeWindowCall(() => appWindow.setResizable(false))
       await safeWindowCall(() => appWindow.setSize(compactWindowSize()))
+      await restoreCompactPosition()
+      await watchCompactPosition()
       return
     }
+    // Handing the normal window back its own position happens while the shell
+    // still reads as compact, so the move it causes must not overwrite where
+    // the user put her.
+    stopWatchingCompactPosition()
+    suppressCompactPositionSave = true
     await safeWindowCall(() => appWindow.setResizable(true))
     await safeWindowCall(() => appWindow.setSkipTaskbar(false))
     await safeWindowCall(() => appWindow.setAlwaysOnTop(false))
@@ -475,8 +544,10 @@ async function applyWindowShellMode(compact: boolean) {
     await setNativeWindowControlsVisible(true)
     await safeWindowCall(() => appWindow.setShadow(true))
     normalWindowSnapshot = null
+    suppressCompactPositionSave = false
   } catch (e) {
     // Browser preview fallback.
+    suppressCompactPositionSave = false
   }
 }
 
@@ -488,12 +559,104 @@ async function setNativeWindowControlsVisible(visible: boolean) {
   }
 }
 
+// The character's own box at scale 1, and the margin the window keeps around
+// her. The panels below her are read at their own size whatever she is scaled
+// to -- scaling a text input with the model would make it unusable at 0.6 and
+// absurd at 2.
+const COMPACT_CHARACTER_WIDTH = 280
+const COMPACT_CHARACTER_HEIGHT = 320
+const COMPACT_MARGIN = 20
+// Measured, not guessed: the dashboard is 166px tall with the action row in it
+// and sits 16px off the bottom. Reserving less is what put the panel across her
+// legs -- the window has to be tall enough to hold both, at every scale.
+const COMPACT_DASHBOARD_HEIGHT = 182
+const COMPACT_SPEECH_HEIGHT = 90
+const COMPACT_SPEECH_ACTIONS_HEIGHT = 30
+
 function compactWindowSize() {
-  if (miniDashboardActive.value && miniSpeechActive.value && miniBubbleHasActions.value) return new LogicalSize(390, 540)
-  if (miniDashboardActive.value && miniSpeechActive.value) return new LogicalSize(380, 520)
-  if (miniSpeechActive.value && miniBubbleHasActions.value) return new LogicalSize(360, 460)
-  if (miniDashboardActive.value || miniSpeechActive.value) return new LogicalSize(360, 430)
-  return new LogicalSize(300, 340)
+  const scale = compactScale.value
+  let width = COMPACT_CHARACTER_WIDTH * scale + COMPACT_MARGIN
+  let height = COMPACT_CHARACTER_HEIGHT * scale + COMPACT_MARGIN
+  if (miniDashboardActive.value) {
+    height += COMPACT_DASHBOARD_HEIGHT
+    width = Math.max(width, 360)
+  }
+  if (miniSpeechActive.value) {
+    height += COMPACT_SPEECH_HEIGHT
+    width = Math.max(width, 360)
+  }
+  if (miniDashboardActive.value && miniSpeechActive.value) width = Math.max(width, 380)
+  if (miniSpeechActive.value && miniBubbleHasActions.value) {
+    height += COMPACT_SPEECH_ACTIONS_HEIGHT
+    width = Math.max(width, 390)
+  }
+  return new LogicalSize(Math.round(width), Math.round(height))
+}
+
+/**
+ * Whether enough of her would land on a screen to be grabbed again.
+ *
+ * A position is only meaningful against the displays it was recorded on. Unplug
+ * the monitor she was parked on and the saved point names somewhere that no
+ * longer exists -- restoring it puts her off-screen, where she cannot be dragged
+ * back and the only way out is deleting the preference.
+ */
+async function compactPositionIsReachable(position: { x: number; y: number }, size: { width: number; height: number }) {
+  const monitors = await availableMonitors()
+  if (!monitors.length) return false
+  const GRAB_MARGIN = 80
+  return monitors.some((monitor) => {
+    const left = monitor.position.x
+    const top = monitor.position.y
+    const right = left + monitor.size.width
+    const bottom = top + monitor.size.height
+    return position.x + GRAB_MARGIN <= right
+      && position.y + GRAB_MARGIN <= bottom
+      && position.x + size.width - GRAB_MARGIN >= left
+      && position.y + size.height - GRAB_MARGIN >= top
+  })
+}
+
+async function restoreCompactPosition() {
+  const saved = compactPosition.value
+  if (!saved || !Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return
+  try {
+    const appWindow = getCurrentWindow()
+    const size = await appWindow.outerSize()
+    if (!(await compactPositionIsReachable(saved, size))) return
+    suppressCompactPositionSave = true
+    await appWindow.setPosition(new PhysicalPosition(saved.x, saved.y))
+  } catch {
+    // Browser preview and unsupported platforms.
+  } finally {
+    suppressCompactPositionSave = false
+  }
+}
+
+async function watchCompactPosition() {
+  if (compactMoveUnlisten) return
+  try {
+    compactMoveUnlisten = await getCurrentWindow().onMoved(({ payload }) => {
+      if (!isCompactMode.value || suppressCompactPositionSave) return
+      if (compactMoveTimer !== null) window.clearTimeout(compactMoveTimer)
+      // A drag reports every frame; only where she came to rest is worth keeping.
+      compactMoveTimer = window.setTimeout(() => {
+        compactMoveTimer = null
+        compactPosition.value = { x: payload.x, y: payload.y }
+      }, 250)
+    })
+  } catch {
+    // Browser preview and unsupported platforms.
+  }
+}
+
+function stopWatchingCompactPosition() {
+  if (compactMoveTimer !== null) {
+    window.clearTimeout(compactMoveTimer)
+    compactMoveTimer = null
+  }
+  compactMoveUnlisten?.()
+  compactMoveUnlisten = null
 }
 
 async function syncCompactWindowSize() {
@@ -1356,6 +1519,12 @@ watch([executionMode, selectedAgentCliId, selectedAgentCliModel, selectedAgentCl
 
 watch(executionMode, (mode) => {
   if (mode === 'byok') void refreshByokStatus()
+})
+
+// The wheel changes the scale; the window has to follow in the same gesture or
+// the character is drawn outside it.
+watch(compactScale, () => {
+  void syncCompactWindowSize()
 })
 
 const latestSpeech = computed(() => {
@@ -4427,6 +4596,7 @@ onBeforeUnmount(() => {
   stopMascotDragWatch()
   clearMascotClickTimer()
   clearMiniSpeechTimer()
+  stopWatchingCompactPosition()
   if (clockTimer !== null) {
     window.clearInterval(clockTimer)
     clockTimer = null
@@ -5838,10 +6008,11 @@ provide(ProjectsContextKey, {
       <div
         :class="['character', `emotion-${activeExpressionEmotion}`]"
         :style="stageCharacterStyle"
-        :title="isCompactMode ? '拖拽移动，单击输入，双击恢复主界面' : undefined"
+        :title="isCompactMode ? '拖拽移动，滚轮缩放，单击展开控制台，双击恢复主界面' : undefined"
         @mousedown="startMascotDrag"
         @dragstart.capture.prevent
         @selectstart.prevent
+        @wheel.prevent="handleStageWheel"
         @click.stop="handleMascotClick"
         @dblclick.stop.prevent="handleMascotDoubleClick"
       >
@@ -5984,9 +6155,71 @@ provide(ProjectsContextKey, {
             placeholder="给 Joi 下达指令..."
           />
         </form>
-        <div style="font-size: 10px; color:#9ca3af; text-align:center; font-weight:600; margin-top:2px;">
-          点击角色可展开/折叠此控制台
+        <!--
+          Compact mode used to offer typing and click-to-record and nothing
+          else, so starting a realtime call, watching together or reaching the
+          settings all meant leaving it first. Everything the composer's quick
+          menu starts is reachable here now, at icon size.
+        -->
+        <div class="mini-action-row">
+          <button
+            type="button"
+            class="mini-action-btn"
+            :class="{ active: realtimeVoiceActive }"
+            :disabled="!connected || (!realtimeVoiceConfigured && !realtimeVoiceActive)"
+            :title="realtimeVoiceActive ? '结束实时语音' : '开始实时语音'"
+            @click="toggleRealtimeVoice()"
+          >
+            <AudioLines :size="15" :stroke-width="1.9" />
+          </button>
+          <button
+            v-if="activeMinecraftSessionId && !realtimeVoiceActive"
+            type="button"
+            class="mini-action-btn"
+            :disabled="!connected || !realtimeVoiceConfigured"
+            title="实时语音 + Minecraft"
+            @click="toggleRealtimeVoice(true)"
+          >
+            <Gamepad2 :size="15" :stroke-width="1.9" />
+          </button>
+          <button
+            type="button"
+            class="mini-action-btn"
+            :class="{ active: watchLoopActive }"
+            :disabled="!connected"
+            :title="watchLoopActive ? '停止实时陪看' : '开始实时陪看'"
+            @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()"
+          >
+            <MonitorPlay :size="15" :stroke-width="1.9" />
+          </button>
+          <button
+            type="button"
+            class="mini-action-btn"
+            :disabled="attachmentPickerBusy"
+            :aria-busy="attachmentPickerBusy"
+            title="添加文件"
+            @click="openCompactAttachments('file')"
+          >
+            <FilePlus2 :size="15" :stroke-width="1.9" />
+          </button>
+          <button
+            type="button"
+            class="mini-action-btn"
+            title="记忆"
+            @click="openCompactCabin('memory')"
+          >
+            <Brain :size="15" :stroke-width="1.9" />
+          </button>
+          <button
+            type="button"
+            class="mini-action-btn"
+            title="完整设置"
+            @click="openCompactCabin('inspector')"
+          >
+            <Settings :size="15" :stroke-width="1.9" />
+          </button>
         </div>
+        <div class="mini-hint">点击角色展开/折叠，滚轮缩放，双击还原</div>
       </div>
 
       <!-- Bottom Capsule Dock (Navigation Bar) -->

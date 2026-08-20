@@ -3529,8 +3529,10 @@ details pre {
 }
 
 .shell.compact-active .character {
-  width: 280px;
-  height: 320px;
+  /* Scaling the box rather than the art keeps every renderer in step: a VRM
+     canvas, a Live2D canvas and a flat sprite all fill it the same way. */
+  width: calc(280px * var(--compact-scale, 1));
+  height: calc(320px * var(--compact-scale, 1));
   transform: none;
   margin-bottom: 0;
   padding: 0;
@@ -3582,8 +3584,8 @@ details pre {
 }
 
 .shell.compact-active .character-fit {
-  width: 260px;
-  height: 300px;
+  width: calc(260px * var(--compact-scale, 1));
+  height: calc(300px * var(--compact-scale, 1));
 }
 
 .character-fallback-layer,
@@ -4087,6 +4089,61 @@ details pre {
 @keyframes miniMicPulse {
   from { box-shadow: 0 0 2px var(--color-pink); }
   to { box-shadow: 0 0 12px var(--color-pink); }
+}
+
+/* The quick menu's actions at icon size. Compact mode had a text field and a
+   microphone and nothing else, so a realtime call could only be started by
+   leaving it -- which is the kind of gap that makes a small window feel like a
+   cut-down one rather than the same app in less space. */
+.mini-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+
+.mini-action-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  background: rgba(255, 255, 255, 0.9);
+  color: #6a717f;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.mini-action-btn:hover:not(:disabled) {
+  background: rgba(255, 77, 141, 0.1);
+  border-color: rgba(255, 77, 141, 0.24);
+  color: var(--color-pink);
+}
+
+/* A running call or an active watch session has to be visible at a glance --
+   the button that started it is the only place compact mode can say so. */
+.mini-action-btn.active {
+  background: var(--color-pink);
+  border-color: var(--color-pink);
+  color: #ffffff;
+}
+
+.mini-action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.mini-hint {
+  /* The hint moved out of an inline style, where it was 10px and invisible to
+     the type-scale contract. It is the smallest step on the scale now, not a
+     size below the readable floor. */
+  font-size: var(--text-xs);
+  color: #9ca3af;
+  text-align: center;
+  font-weight: 600;
+  margin-top: 2px;
 }
 
 .mini-status-row {
