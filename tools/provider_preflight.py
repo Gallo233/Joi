@@ -144,14 +144,19 @@ def _check_from_row(row: dict[str, Any], *, config_exists: bool) -> dict[str, st
         if state in {"ready", "mock", "off"}:
             status = "ok" if state in {"ready", "mock"} else "warn"
             summary = f"{label} is {state}."
-            return {"status": status, "name": name, "summary": summary, "action": "" if status == "ok" else _action_for(name, config_exists)}
-        return {"status": "warn", "name": name, "summary": f"{label} is unavailable.", "action": _action_for(name, config_exists)}
+            return {"status": status, "name": name, "summary": summary, "action": "" if status == "ok" else _action_for(name, config_exists, row.get("last_error", ""))}
+        return {"status": "warn", "name": name, "summary": f"{label} is unavailable.", "action": _action_for(name, config_exists, row.get("last_error", ""))}
     return {"status": "ok" if state in {"ready", "mock", "off"} else "warn", "name": name, "summary": f"{label} is {state}.", "action": ""}
 
 
-def _action_for(name: str, config_exists: bool) -> str:
+def _action_for(name: str, config_exists: bool, last_error: str = "") -> str:
     if not config_exists:
         return "Create config.yaml from config.example.yaml before real provider demos."
+    # "Install OCR dependencies" is the wrong instruction when the dependencies
+    # are installed and it is the configured languages that are absent -- the
+    # one case where Tesseract degrades quietly instead of failing.
+    if name == "ocr" and "ocr_language_missing" in str(last_error or ""):
+        return "Install the language data for ocr.language (brew install tesseract-lang), or narrow ocr.language to the installed set."
     actions = {
         "fast": "Configure llm.use_mock=true for local demo or provide a real text model.",
         "reasoning": "Configure llm.routes.reasoning or let it fall back to the base text model.",

@@ -3113,6 +3113,10 @@ class JsonRpcBridge:
                 self.asr_state,
                 tts_status,
                 self.realtime_voice_state,
+                # The ready payload is rebuilt on every status refresh and may
+                # not run external tools. OCR readiness is answered from the
+                # cache here; the preflight is where a live probe belongs.
+                live_probe=False,
             ),
             "codex_runtime": self.codex_runtime.status_payload(),
             "joi_mcp": dict(self._joi_mcp_status),

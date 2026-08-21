@@ -24,10 +24,12 @@
   All of that is covered by `tests/test_capture_geometry.py` and
   `tests/test_mac_capture_path.py` against synthetic layouts. None of it has run
   on a second physical monitor.
-- OCR needs the `tesseract` executable, which pip cannot supply. The wrapper and
-  Pillow now ship with every build, so installing Tesseract -- or pointing
-  `ocr.tesseract_cmd` at it -- is all a user needs; until then OCR reports
-  itself unavailable. `tools/joi_doctor.py` names the missing piece.
+- OCR needs the `tesseract` executable and the language data for whatever
+  `ocr.language` asks for; pip can supply neither. The wrapper and Pillow ship
+  with every build, so installing Tesseract -- or pointing `ocr.tesseract_cmd`
+  at it -- is all a user needs, and readiness now checks the configured
+  languages rather than only the binary. `tools/joi_doctor.py` and the provider
+  preflight name whichever piece is missing.
 
 ## Deliberate boundaries
 

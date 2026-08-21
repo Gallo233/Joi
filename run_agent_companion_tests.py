@@ -92,10 +92,12 @@ def _runtime_with_ocr_probe(
     has_pytesseract: bool,
     tesseract_path: str | None,
     version_probe: bool | Exception,
+    installed_languages: tuple[str, ...] = ("chi_sim", "eng", "jpn", "osd"),
 ) -> dict:
     original_find_spec = runtime_status_module.importlib.util.find_spec
     original_which = runtime_status_module.shutil.which
     original_probe = runtime_status_module._probe_tesseract_version
+    original_languages = runtime_status_module._installed_ocr_languages
 
     def fake_find_spec(name: str, *args: object, **kwargs: object) -> object | None:
         if name == "PIL":
@@ -117,6 +119,11 @@ def _runtime_with_ocr_probe(
     runtime_status_module.importlib.util.find_spec = fake_find_spec
     runtime_status_module.shutil.which = fake_which
     runtime_status_module._probe_tesseract_version = fake_probe
+    # Readiness also asks which languages are installed, so the machine running
+    # the suite must not decide it: a developer without the Chinese data would
+    # otherwise fail the "everything present" case.
+    runtime_status_module._installed_ocr_languages = lambda *args, **kwargs: installed_languages
+    runtime_status_module._OCR_PROBE_CACHE.clear()
     try:
         return build_runtime_status(
             workspace,
@@ -127,6 +134,8 @@ def _runtime_with_ocr_probe(
         runtime_status_module.importlib.util.find_spec = original_find_spec
         runtime_status_module.shutil.which = original_which
         runtime_status_module._probe_tesseract_version = original_probe
+        runtime_status_module._installed_ocr_languages = original_languages
+        runtime_status_module._OCR_PROBE_CACHE.clear()
 
 
 def _ocr_status_row(runtime_payload: dict) -> dict:
