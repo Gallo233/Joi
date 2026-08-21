@@ -3,3 +3,8 @@ openai>=1.0
 keyring>=25.0
 pyyaml>=6.0
 websockets>=12.0
+# Screen capture on both platforms: `vision/mac.py` imports it at module
+# scope and `vision/windows.py` grabs through it. It sat in the optional OCR
+# list, which no release installs, so a shipped build could not capture at
+# all -- it reported the observer unavailable and meant it.
+Pillow>=10.0.0

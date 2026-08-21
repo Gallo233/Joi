@@ -65,7 +65,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements-build.txt
+          # requirements-macos.txt is what makes multi-display geometry trusted.
+          # Without it the layout is reported untrusted and Computer Use refuses
+          # to derive a click point, so a signed build shipped a capability the
+          # development environment had and the release did not.
+          python -m pip install -r requirements.txt -r requirements-build.txt -r requirements-macos.txt -r requirements-ocr.txt
           npm ci --prefix agent_companion/shell
 
       - name: Build the reviewed Minecraft bridge bundle

@@ -173,6 +173,31 @@ class EventBusTests(unittest.TestCase):
             self.assertEqual(bus.forget(thread_ids=[""], project_ids=[]), 0)
             self.assertEqual(path.read_text(encoding="utf-8"), before)
 
+    def test_forget_reaches_the_copy_taken_before_the_migration(self) -> None:
+        # The pre-SQLite backup is the same stream in another file. A deletion
+        # that stops at the live log leaves the conversation readable beside it.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            backup = path.with_suffix(".jsonl.pre-sqlite-backup")
+            bus = EventBus(path)
+            bus.emit(_scoped_event("task-1", "私人内容", "project-a", "thread-a"))
+            backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
+            removed = bus.forget(thread_ids=["thread-a"])
+
+            self.assertEqual(removed, 2, "one row from the log and one from the backup")
+            self.assertNotIn("私人内容", path.read_text(encoding="utf-8"))
+            self.assertNotIn("私人内容", backup.read_text(encoding="utf-8"))
+
+    def test_forget_is_untroubled_by_a_missing_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            bus = EventBus(path)
+            bus.emit(_scoped_event("task-1", "私人内容", "project-a", "thread-a"))
+
+            self.assertEqual(bus.forget(thread_ids=["thread-a"]), 1)
+            self.assertFalse(path.with_suffix(".jsonl.pre-sqlite-backup").exists())
+
     def test_forget_keeps_the_sequence_from_moving_backwards(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "events.jsonl"

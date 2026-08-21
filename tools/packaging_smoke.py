@@ -106,6 +106,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
         _check_launcher(start_bat_path, start_ps1_path, add)
     _check_release_privacy_policy(add)
     _check_game_adapter_bundle(root, add)
+    _check_capability_dependencies(root, add)
 
     counts = {status: sum(1 for item in items if item["status"] == status) for status in ("ok", "warn", "fail")}
     status = "fail" if counts["fail"] else "warn" if counts["warn"] else "ok"
@@ -253,6 +254,62 @@ def _check_game_adapter_bundle(root: Path, add: Any) -> None:
         "Minecraft bridge has no built bundle, so a package from this tree would report the game adapter unavailable.",
         "Run `npm ci && npm run build` in agent_companion/adapters/minecraft-bridge, or state in the release notes that the package ships without game capability.",
     )
+
+
+def _check_capability_dependencies(root: Path, add: Any) -> None:
+    """Whether a package built from this tree could see the screen at all.
+
+    Pillow sat in the optional OCR list, which no release installed, while
+    `vision/mac.py` imports it at module scope -- so a signed build reported its
+    screen observer unavailable and meant it, while the development environment
+    captured fine. The same shape hid the macOS display geometry package, whose
+    absence makes Computer Use refuse to derive a click point.
+
+    Both are declared dependencies now; this is what keeps them declared.
+    """
+
+    # This asks what a release would install, so it only speaks about a tree that
+    # configures releases. Packaged and fixture trees carry stub requirements
+    # files that say nothing about the dependency set, and judging those would
+    # report a defect about a file nobody ships.
+    workflow = root / ".github" / "workflows" / "release-macos.yml"
+    requirements = root / "requirements.txt"
+    if not workflow.is_file() or not requirements.is_file():
+        return
+    declared = requirements.read_text(encoding="utf-8").lower()
+    _expect(
+        "pillow" in declared,
+        add,
+        "capture_dependency",
+        "Screen capture's imaging dependency ships with every build.",
+        "Declare Pillow in requirements.txt: vision/mac.py imports it at module scope.",
+    )
+
+    # The install line, not any mention of it: a comment naming the file reads
+    # the same to a substring search, which is how this check first passed a
+    # workflow that had stopped installing it.
+    installs = [line for line in workflow.read_text(encoding="utf-8").splitlines() if "pip install" in line]
+    _expect(
+        any("requirements-macos.txt" in line for line in installs),
+        add,
+        "display_geometry_dependency",
+        "The macOS release installs the display geometry package.",
+        "Install requirements-macos.txt in release-macos.yml, or multi-display coordinates stay untrusted.",
+    )
+
+    bundled = root / "agent_companion" / "shell" / "src-tauri" / "binaries" / "joi-core-runtime" / "_internal"
+    if not bundled.is_dir():
+        return
+    missing = [name for name in ("PIL", "Quartz") if not (bundled / name).exists()]
+    if missing:
+        add(
+            "warn",
+            "capability_bundle",
+            f"The built sidecar is missing {', '.join(missing)}, so a package from it could not capture the screen.",
+            "Rebuild the sidecar after installing requirements.txt and requirements-macos.txt.",
+        )
+        return
+    add("ok", "capability_bundle", "The built sidecar carries the capture and display geometry packages.")
 
 
 def _check_release_privacy_policy(add: Any) -> None:

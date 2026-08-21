@@ -197,22 +197,34 @@ class EventBus:
         if not threads and not projects:
             return 0
         with self._lock:
-            rows = self._read_rows()
-            if rows is None:
-                return 0
-            kept = [row for row in rows if not _belongs_to(row, threads, projects)]
-            removed = len(rows) - len(kept)
-            if not removed:
-                return 0
-            self._write_rows(kept, watermark=self._sequence)
+            removed = self._forget_from(self.event_path, threads, projects, watermark=self._sequence)
+            # The one-time copy taken before the SQLite migration is the same
+            # stream in another file. A deletion that reaches the log and stops
+            # there leaves the same conversation readable beside it.
+            removed += self._forget_from(self._migration_backup_path(), threads, projects)
             return removed
 
-    def _read_rows(self) -> list[dict[str, Any]] | None:
-        if not self.event_path.is_file():
+    def _migration_backup_path(self) -> Path:
+        return self.event_path.with_suffix(".jsonl.pre-sqlite-backup")
+
+    def _forget_from(self, path: Path, threads: set[str], projects: set[str], *, watermark: int = 0) -> int:
+        rows = self._read_rows(path)
+        if rows is None:
+            return 0
+        kept = [row for row in rows if not _belongs_to(row, threads, projects)]
+        removed = len(rows) - len(kept)
+        if not removed:
+            return 0
+        self._write_rows(kept, watermark=watermark, path=path)
+        return removed
+
+    def _read_rows(self, path: Path | None = None) -> list[dict[str, Any]] | None:
+        target = path or self.event_path
+        if not target.is_file():
             return None
         rows: list[dict[str, Any]] = []
         try:
-            with self.event_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            with target.open("r", encoding="utf-8", errors="ignore") as handle:
                 for line in handle:
                     try:
                         row = json.loads(line)
@@ -224,10 +236,11 @@ class EventBus:
             return None
         return rows
 
-    def _write_rows(self, rows: list[dict[str, Any]], *, watermark: int = 0) -> None:
+    def _write_rows(self, rows: list[dict[str, Any]], *, watermark: int = 0, path: Path | None = None) -> None:
+        target = path or self.event_path
         highest = max((_safe_int(row.get("sequence")) for row in rows), default=0)
         try:
-            with self.event_path.open("w", encoding="utf-8") as handle:
+            with target.open("w", encoding="utf-8") as handle:
                 for row in rows:
                     if row.get(_WATERMARK_KEY):
                         continue
