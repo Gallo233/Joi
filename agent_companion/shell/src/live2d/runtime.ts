@@ -100,11 +100,14 @@ declare global {
   }
 }
 
+// The web build is published below `/joi-shell/`; a root-relative `/vendor`
+// silently asks the personal-site origin for the runtimes instead. Desktop's
+// Vite base is `./`, so the same public-base-aware paths work in Tauri too.
 const runtimeScripts = [
-  '/vendor/live2d/live2dcubismcore.min.js',
-  '/vendor/live2d/pixi.min.js',
-  '/vendor/live2d/cubism.min.js',
-]
+  'vendor/live2d/live2dcubismcore.min.js',
+  'vendor/live2d/pixi.min.js',
+  'vendor/live2d/cubism.min.js',
+].map((path) => `${import.meta.env.BASE_URL}${path}`)
 const loadedScripts = new Map<string, Promise<void>>()
 let cubismConfigured = false
 let pluginRegistered = false

@@ -14,7 +14,7 @@ export type RealtimeVoiceState =
   | 'error'
 
 export type RealtimeVoiceEvent =
-  | { kind: 'state'; state: RealtimeVoiceState; epoch?: number }
+  | { kind: 'state'; state: RealtimeVoiceState; epoch?: number; reason?: string }
   | { kind: 'barge_in'; epoch: number }
   | { kind: 'user_transcript'; text: string; final: boolean; epoch?: number }
   | { kind: 'assistant_transcript'; text: string; final: boolean; epoch?: number }
@@ -29,6 +29,7 @@ export interface RealtimeStartResult {
   ok?: boolean
   session_id?: string
   state?: string
+  reason?: string
   error?: string
 }
 
@@ -43,6 +44,7 @@ export interface RealtimeCoreEvent {
   session_id?: string
   type?: string
   state?: string
+  reason?: string
   text?: string
   final?: boolean
   epoch?: number
@@ -131,7 +133,12 @@ export function parseRealtimeVoiceEvent(raw: unknown): RealtimeVoiceEvent | null
     return null
   }
   const epoch = Math.max(0, Number(event.epoch || 0))
-  if (event.type === 'state' && isRealtimeState(event.state)) return { kind: 'state', state: event.state, epoch }
+  if (event.type === 'state' && isRealtimeState(event.state)) {
+    const reason = ['user_stop', 'transport_lost', 'shutdown', 'guest_time_limit'].includes(String(event.reason || ''))
+      ? String(event.reason)
+      : undefined
+    return { kind: 'state', state: event.state, epoch, reason }
+  }
   if (event.type === 'barge_in') return { kind: 'barge_in', epoch }
   if (event.type === 'user_transcript' || event.type === 'assistant_transcript') {
     const text = boundedText(event.text)
@@ -285,6 +292,15 @@ export class RealtimeVoiceSession {
     if (!this.sessionId || source.session_id !== this.sessionId) return
     const event = parseRealtimeVoiceEvent(source)
     if (!event) return
+    if (event.kind === 'state' && event.state === 'idle') {
+      this.sessionId = ''
+      this.generation += 1
+      this.releaseMedia()
+      this.lastError = event.reason === 'guest_time_limit' ? 'guest_time_limit' : ''
+      this.setState('idle')
+      this.options.onEvent?.(event)
+      return
+    }
     if (event.kind === 'state' && (event.state === 'error' || event.state === 'recovery_required')) {
       this.terminateFromCore(event.state, 'realtime_disconnected')
       this.options.onEvent?.(event)

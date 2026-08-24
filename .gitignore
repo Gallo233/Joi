@@ -52,3 +52,6 @@ config.yaml.bak-*
 # Playing notes are the user's own world knowledge, not shipped code.
 config/minecraft-skills/*
 !config/minecraft-skills/README.md
+
+# Instance-specific deploy config, generated for one server.
+deploy-ljl.design/

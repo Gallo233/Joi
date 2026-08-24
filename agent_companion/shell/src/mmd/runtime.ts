@@ -15,6 +15,8 @@
 
 import * as THREE from 'three'
 
+import { mmdFraming } from './framing'
+
 import { emotionWeight } from '../characterExpression'
 import { STAGE_EMOTION_TABLE, stageEmotionShape, type StageController, type StageEmotion, type StageRuntimeMapping } from '../character/stage'
 import { motionEnvelope, motionExpired, resolveCharacterMotion, type CharacterMotionRequest, type ResolvedCharacterMotion } from '../characterMotion'
@@ -25,9 +27,6 @@ import { mouthSignal, voiceDrivenMouthLevel, VRM_MOUTH_FLOOR, VRM_MOUTH_SCALE } 
  * Lip sync drives whichever one the model actually has.
  */
 const MOUTH_MORPHS = ['あ', 'a', 'A'] as const
-
-/** How much of the canvas height the framed model fills. */
-const MODEL_FRACTION = 0.62
 
 /**
  * The standard MMD skeleton, by the names Japanese models ship.
@@ -130,11 +129,16 @@ export async function mountMMD(
   let compact = false
 
   const applyCamera = () => {
-    // Bust framing in compact mode, full body otherwise -- the same rule the
-    // other 3D stage uses, so switching formats does not resize the character.
-    const target = compact ? headY : height * 0.55
-    const span = (compact ? height * 0.42 : height) / MODEL_FRACTION
-    const distance = span / (2 * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(zoom, 0.2)
+    // `compact` is `isCompactMode || characterFullBody`: it means "show the
+    // whole body", which is what `fullBody` says here. See mmd/framing.ts.
+    const { target, distance } = mmdFraming({
+      height,
+      headY,
+      fullBody: compact,
+      zoom,
+      aspect: camera.aspect,
+      fov: camera.fov,
+    })
     camera.position.set(0, target, distance)
     camera.lookAt(0, target, 0)
   }
@@ -181,6 +185,28 @@ export async function mountMMD(
   }
   const restOf = (target: THREE.Bone | null) => restPose.find(([candidate]) => candidate === target)?.[1] || null
 
+  /**
+   * The whole skeleton as it stands once the arms are down.
+   *
+   * `restPose` above covers only the bones the procedural idle drives. That is
+   * enough while a clip is playing, and not enough after one ends: a dance
+   * moves legs, hips and fingers, and three.js leaves every bone wherever the
+   * last evaluated frame put it. Without this the character kept her closing
+   * pose from the waist down for the rest of the session.
+   */
+  const skeletonRest = mesh.skeleton.bones.map((target) => ({
+    target,
+    rotation: target.rotation.clone(),
+    position: target.position.clone(),
+  }))
+
+  const restoreRestPose = () => {
+    for (const entry of skeletonRest) {
+      entry.target.rotation.copy(entry.rotation)
+      entry.target.position.copy(entry.position)
+    }
+  }
+
   let emotion: StageEmotion = 'neutral'
   let emotionStartedAt = 0
   let motion: ResolvedCharacterMotion | null = null
@@ -195,6 +221,11 @@ export async function mountMMD(
   const clips = new Map<string, THREE.AnimationClip>()
   let activeAction: THREE.AnimationAction | null = null
   let idleAction: THREE.AnimationAction | null = null
+  // A finished clip is clamped on its last frame at full weight, so it has to
+  // be faded down and stopped. It stays here until the fade lands, because the
+  // mixer is only advanced while something is driving the skeleton -- clearing
+  // it immediately froze the fade mid-way through.
+  let retiringAction: THREE.AnimationAction | null = null
 
   const loadClip = async (name: string): Promise<THREE.AnimationClip | null> => {
     const cached = clips.get(name)
@@ -220,6 +251,25 @@ export async function mountMMD(
     action.clampWhenFinished = !loop
     action.fadeIn(0.25).play()
     return action
+  }
+
+  /**
+   * Drop a faded-out clip once its weight has actually reached zero.
+   *
+   * Checked from the render loop rather than on a timer: the mixer only
+   * advances while something is driving the skeleton, so wall-clock time and
+   * animation time are not the same thing here -- a tab in the background
+   * would have retired the clip while the fade had not moved at all.
+   */
+  const retireFadedAction = () => {
+    const action = retiringAction
+    if (!action || action.getEffectiveWeight() > 0.01) return
+    retiringAction = null
+    action.stop()
+    mixer.uncacheAction(action.getClip(), mesh)
+    // With no authored idle to take over, the procedural one drives a handful
+    // of bones and nothing restores the rest.
+    if (!idleAction && !activeAction) restoreRestPose()
   }
 
   void loadClip(IDLE_CLIP).then((clip) => {
@@ -267,7 +317,7 @@ export async function mountMMD(
     // An authored idle clip drives the whole skeleton, so the procedural one
     // stands down rather than fighting it bone by bone. The blink still runs:
     // most idle VMDs animate the body and leave the face alone.
-    if (idleAction || activeAction) {
+    if (idleAction || activeAction || retiringAction) {
       applyBlink(now)
       return
     }
@@ -311,8 +361,9 @@ export async function mountMMD(
     applyMotion(now)
     // updateWithMixer applies IK and append transforms *after* the mixer poses
     // the bones, which is the ordering MMD rigs are authored against.
-    if (idleAction || activeAction) model?.updateWithMixer(delta, mixer)
+    if (idleAction || activeAction || retiringAction) model?.updateWithMixer(delta, mixer)
     else model?.update(delta)
+    retireFadedAction()
     renderer.render(scene, camera)
   }
 
@@ -357,10 +408,21 @@ export async function mountMMD(
         }
         motion = null
         activeAction?.fadeOut(0.2)
-        activeAction = playClip(clip, false)
-        mixer.addEventListener('finished', function done() {
+        const action = playClip(clip, false)
+        activeAction = action
+        // `finished` is a mixer-wide event, so a second motion started before
+        // the first one ends would otherwise be retired by the first one's
+        // listener. Only act on the action that actually finished.
+        mixer.addEventListener('finished', function done(event: { action?: THREE.AnimationAction }) {
+          if (event.action !== action) return
           mixer.removeEventListener('finished', done)
-          activeAction = null
+          // `clampWhenFinished` holds the last frame at full weight. Fading the
+          // idle in *underneath* that left the two blended with the dance still
+          // at full strength, which is why she stayed in her closing pose: the
+          // finished clip has to be faded out and stopped, not just covered.
+          if (activeAction === action) activeAction = null
+          action.fadeOut(0.25)
+          retiringAction = action
           idleAction?.reset().fadeIn(0.25).play()
         })
       })

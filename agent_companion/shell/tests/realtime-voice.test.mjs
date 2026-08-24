@@ -169,6 +169,26 @@ test('provider loss releases microphone capture and closes the Core session', as
   assert.deepEqual(stopped, ['realtime-1234567890abcdef'])
 })
 
+test('a Core-owned guest deadline releases capture and reports the safe reason', async () => {
+  let stopped = 0
+  let eventSeen = null
+  const session = new RealtimeVoiceSession({
+    startSession: async () => ({ ok: true, session_id: 'realtime-guest-limit' }),
+    appendAudio: () => undefined,
+    stopSession: () => undefined,
+    getUserMedia: async () => ({ getTracks: () => [{ stop: () => { stopped += 1 } }] }),
+    createCapture: () => ({ stop: () => undefined }),
+    onEvent: (event) => { eventSeen = event },
+  })
+  await session.start()
+  session.handleCoreEvent({ session_id: 'realtime-guest-limit', type: 'state', state: 'idle', reason: 'guest_time_limit' })
+  assert.equal(session.state, 'idle')
+  assert.equal(session.sessionId, '')
+  assert.equal(session.lastError, 'guest_time_limit')
+  assert.equal(stopped, 1)
+  assert.equal(eventSeen.reason, 'guest_time_limit')
+})
+
 test('a realtime latency event carries numbers only, and reads as a debug line', () => {
   const parsed = parseRealtimeVoiceEvent({
     type: 'latency',

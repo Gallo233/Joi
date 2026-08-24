@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Joi · 浏览器体验</title>
+    <link rel="stylesheet" href="./joi-embed.css" />
+    <style>
+      :root { color: #172033; background: #f7f4ee; font: 16px/1.6 Inter, system-ui, sans-serif; }
+      body { margin: 0; }
+      main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+      header { padding: 92px 0 48px; display: grid; gap: 18px; }
+      h1 { max-width: 820px; margin: 0; font: 600 clamp(3rem, 8vw, 7rem)/.94 Georgia, serif; letter-spacing: -.055em; }
+      header p { max-width: 660px; margin: 0; color: #5e6676; font-size: 1.12rem; }
+      .eyebrow { color: #bd5277; font-size: .75rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+      .demo-note { display: flex; gap: 10px; align-items: center; margin: 18px 0 28px; color: #5e6676; }
+      .demo-note::before { content: ''; width: 8px; height: 8px; border-radius: 99px; background: #df6c94; box-shadow: 0 0 0 6px #df6c9420; }
+      .after { min-height: 100vh; padding: 130px 0; display: grid; align-content: start; gap: 16px; }
+      .after h2 { margin: 0; font: 500 clamp(2rem, 5vw, 4rem)/1 Georgia, serif; }
+      .after p { max-width: 620px; color: #5e6676; }
+      .character-credits { margin: 28px 0 0; padding: 22px 24px; border: 1px solid #1720331f; border-radius: 18px; color: #5e6676; font-size: .82rem; }
+      .character-credits h2 { margin: 0 0 8px; color: #172033; font: 600 1rem/1.4 Inter, system-ui, sans-serif; }
+      .character-credits p { margin: 6px 0; }
+      .character-credits a { color: #8b4861; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <span class="eyebrow">Local-first companion · Web preview</span>
+        <h1>先在网页里，认识 Joi。</h1>
+        <p>这里开放对话、角色与这一段体验形成的记忆。看屏、Computer Use、Codex 和 Minecraft 属于桌面版，不会在访客会话中运行。</p>
+      </header>
+      <p class="demo-note">实时语音默认关闭；开启前会再次说明云端处理与剩余时长。</p>
+      <section id="joi-experience" class="joi-experience" aria-label="Joi 浏览器体验"></section>
+      <aside class="character-credits" aria-labelledby="character-credits-title">
+        <h2 id="character-credits-title">角色素材说明</h2>
+        <p>角色库保留各角色包内的模型、动作、表情与许可说明。桃濑日和 Hiyori 使用 Live2D Inc. 官方示例素材；AvatarSample_A 来自 VRoid Project；MMD 与立绘测试素材的具体声明见各角色详情和包内 readme。</p>
+        <p>This content uses sample data owned and copyrighted by Live2D Inc. The sample data are utilized in accordance with terms and conditions set by Live2D Inc. This content itself is created at the author's sole discretion. <a href="https://www.live2d.com/eula/live2d-free-material-license-agreement_cn.html" rel="noreferrer">Live2D 使用协议</a></p>
+      </aside>
+      <section class="after">
+        <span class="eyebrow">Keep scrolling</span>
+        <h2>她会缩到右下角，继续陪着。</h2>
+        <p>回到上面的体验区，完整界面会接替桌宠。两个视图连接同一个隔离的 Core，会自然共享同一段对话。</p>
+      </section>
+    </main>
+    <script type="module">
+      import { mountJoi } from './joi-embed.js'
+      mountJoi({
+        brokerBase: 'https://joi.example.com',
+        shellBase: '/joi-shell',
+        container: '#joi-experience',
+      }).catch((error) => {
+        document.querySelector('#joi-experience').textContent = error.message
+      })
+    </script>
+  </body>
+</html>

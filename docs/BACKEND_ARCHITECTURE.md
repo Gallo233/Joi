@@ -46,6 +46,11 @@ Agent runtime
 
 `joi_mcp_server.py` 是 MCP 到 Joi Core 的适配器。公开的 `TOOL_SCHEMAS` 与工具路由一一对应，新增工具时可以检测“发布了 schema 却没有 handler”的错误。
 
+匿名网站体验增加了一个 loopback session broker，但没有把 Core 改成多租户：
+每个访客仍独占一个 Core 和 workspace。broker 解析动态 WS/资源路由，Caddy 只做
+TLS；Core 在认证后、dispatch 前执行公开 RPC 白名单。隔离、Origin、预算与资源
+URL 契约详见 [WEB_EXPERIENCE_ARCHITECTURE.md](WEB_EXPERIENCE_ARCHITECTURE.md)。
+
 ### Protocol
 
 `core/rpc/protocol.py` 是 JSON-RPC 请求与响应的唯一编码边界；`core/rpc/router.py` 统一同步、异步和线程执行，并显式标记会改变 `core.ready` 的命令。

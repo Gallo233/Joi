@@ -109,6 +109,7 @@ class RealtimeVoiceRuntimeState:
     model: str = ""
     output: str = "local_tts"
     timeout_seconds: int = 15
+    max_session_seconds: int = 0
     error: str = ""
 
 
@@ -1226,6 +1227,8 @@ class RealtimeVoiceCoordinator:
         skill_index: Callable[[], str] | None = None,
         transcript_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
         caption_repair: CaptionRepair | None = None,
+        reserve_session: Callable[[str, int], dict[str, Any]] | None = None,
+        finish_session: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
         self._execute_action = execute_action or (lambda *_: {"ok": False, "status": "failed"})
@@ -1245,9 +1248,12 @@ class RealtimeVoiceCoordinator:
         self._skill_index = skill_index or (lambda: "")
         self._transcript_sink = transcript_sink
         self._caption_repair = caption_repair
+        self._reserve_session = reserve_session
+        self._finish_session = finish_session
         self._lock = threading.RLock()
         self._sessions: dict[str, QwenRealtimeSession] = {}
         self._owner_sessions: dict[str, str] = {}
+        self._session_timers: dict[str, threading.Timer] = {}
 
     def start(
         self,
@@ -1266,6 +1272,12 @@ class RealtimeVoiceCoordinator:
             existing_id = self._owner_sessions.get(owner, "")
         if existing_id:
             self.stop(owner, existing_id)
+        max_seconds = max(0, int(self.config.max_session_seconds or 0))
+        if self._reserve_session is not None:
+            quota = self._reserve_session(owner, max_seconds)
+            if not quota.get("ok"):
+                return {"ok": False, "error": str(quota.get("error") or "guest_realtime_budget_exceeded")}
+            max_seconds = max(1, int(quota.get("max_seconds") or max_seconds or 1))
         session_id = f"realtime-{uuid.uuid4().hex}"
         def session_emit(payload: dict[str, Any]) -> None:
             emit({"session_id": session_id, **payload})
@@ -1300,6 +1312,13 @@ class RealtimeVoiceCoordinator:
         if not result.get("ok"):
             self._retire_session(session_id, owner)
             return result
+        if max_seconds:
+            timer = threading.Timer(max_seconds, self.stop_owner, args=(owner, "guest_time_limit"))
+            timer.daemon = True
+            with self._lock:
+                self._session_timers[session_id] = timer
+            timer.start()
+            result["max_session_seconds"] = max_seconds
         return result
 
     def append_audio(self, owner_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -1324,9 +1343,14 @@ class RealtimeVoiceCoordinator:
             return {"ok": False, "error": error}
         result = session.stop()
         with self._lock:
+            timer = self._session_timers.pop(session_id, None)
             self._sessions.pop(session_id, None)
             if self._owner_sessions.get(owner_id) == session_id:
                 self._owner_sessions.pop(owner_id, None)
+        if timer is not None:
+            timer.cancel()
+        if self._finish_session is not None:
+            self._finish_session(owner_id)
         return result
 
     def stop_owner(self, owner_id: str, reason: str = "transport_lost") -> None:
@@ -1338,8 +1362,13 @@ class RealtimeVoiceCoordinator:
         if not error:
             session.stop(reason)
         with self._lock:
+            timer = self._session_timers.pop(session_id, None)
             self._sessions.pop(session_id, None)
             self._owner_sessions.pop(owner_id, None)
+        if timer is not None:
+            timer.cancel()
+        if self._finish_session is not None:
+            self._finish_session(owner_id)
 
     def status(self, owner_id: str, session_id: str = "") -> dict[str, Any]:
         with self._lock:
@@ -1367,10 +1396,18 @@ class RealtimeVoiceCoordinator:
     def shutdown(self) -> None:
         with self._lock:
             sessions = list(self._sessions.values())
+            owners = list(self._owner_sessions)
+            timers = list(self._session_timers.values())
             self._sessions.clear()
             self._owner_sessions.clear()
+            self._session_timers.clear()
+        for timer in timers:
+            timer.cancel()
         for session in sessions:
             session.stop("shutdown")
+        if self._finish_session is not None:
+            for owner_id in owners:
+                self._finish_session(owner_id)
 
     def _owned_session(self, owner_id: str, session_id: str) -> tuple[QwenRealtimeSession, str]:
         with self._lock:
@@ -1383,9 +1420,14 @@ class RealtimeVoiceCoordinator:
 
     def _retire_session(self, session_id: str, owner_id: str) -> None:
         with self._lock:
+            timer = self._session_timers.pop(session_id, None)
             self._sessions.pop(session_id, None)
             if self._owner_sessions.get(owner_id) == session_id:
                 self._owner_sessions.pop(owner_id, None)
+        if timer is not None:
+            timer.cancel()
+        if self._finish_session is not None:
+            self._finish_session(owner_id)
 
 
 class _NullRealtimeSession:
@@ -1457,6 +1499,8 @@ def build_realtime_voice_coordinator(
     skill_index: Callable[[], str] | None = None,
     transcript_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
     caption_repair: CaptionRepair | None = None,
+    reserve_session: Callable[[str, int], dict[str, Any]] | None = None,
+    finish_session: Callable[[str], None] | None = None,
 ) -> tuple[RealtimeVoiceCoordinator, RealtimeVoiceRuntimeState]:
     config_path = workspace / "config.yaml"
     if not config_path.is_file():
@@ -1474,6 +1518,7 @@ def build_realtime_voice_coordinator(
         model=config.model if config.is_configured else "",
         output="local_tts",
         timeout_seconds=config.timeout_seconds,
+        max_session_seconds=config.max_session_seconds,
         error="" if config.is_configured else "realtime_unconfigured" if not config.enabled else "realtime_config_error",
     )
     return (
@@ -1494,6 +1539,8 @@ def build_realtime_voice_coordinator(
             skill_index=skill_index,
             transcript_sink=transcript_sink,
             caption_repair=caption_repair,
+            reserve_session=reserve_session,
+            finish_session=finish_session,
         ),
         state,
     )
@@ -1858,7 +1905,7 @@ def _safe_public_event(payload: Mapping[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {"type": "state", "state": state}
         if isinstance(payload.get("epoch"), int):
             result["epoch"] = max(0, int(payload["epoch"]))
-        if payload.get("reason") in {"user_stop", "transport_lost", "shutdown"}:
+        if payload.get("reason") in {"user_stop", "transport_lost", "shutdown", "guest_time_limit"}:
             result["reason"] = payload["reason"]
         return result
     if event_type == "barge_in":
@@ -1927,7 +1974,7 @@ def _safe_public_event(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _safe_stop_reason(reason: str) -> str:
-    return reason if reason in {"user_stop", "transport_lost", "shutdown"} else "user_stop"
+    return reason if reason in {"user_stop", "transport_lost", "shutdown", "guest_time_limit"} else "user_stop"
 
 
 def _close_socket(socket: RealtimeSocket | None) -> None:

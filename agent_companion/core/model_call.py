@@ -259,6 +259,12 @@ class CallOutcome:
         }
 
 
+# Failures that prove the request never reached a provider, so nothing was
+# charged for them. Named rather than typed to keep this module free of an
+# openai import; `tools/chat.py` maps the same two names to user-facing text.
+_UNBILLED_ERRORS = frozenset({"APIConnectionError", "APITimeoutError"})
+
+
 def execute_call(
     route: str,
     endpoints: Sequence[Any],
@@ -317,9 +323,44 @@ def execute_call(
             note(status="timeout", fallback_index=index, provider_ref=provider_ref(endpoint, index), elapsed_ms=elapsed_ms, error_code="budget_timeout")
             return CallOutcome(False, None, "timeout", "budget_timeout", tuple(records))
         attempt_started = clock()
+        reservation = None
+        guest_limits = None
+        try:
+            from agent_companion.core.guest_limits import active_guest_limits, estimate_tokens
+
+            guest_limits = active_guest_limits()
+            if guest_limits is not None:
+                estimated_input = max(1, (manifest.total_bytes + 3) // 4)
+                reservation = guest_limits.reserve_tokens(estimated_input + (budget.output_budget or 600))
+                if reservation is None:
+                    note(
+                        status="refused",
+                        fallback_index=index,
+                        provider_ref=provider_ref(endpoint, index),
+                        elapsed_ms=(clock() - attempt_started) * 1000,
+                        error_code="guest_token_budget_exceeded",
+                    )
+                    return CallOutcome(False, None, "refused", "guest_token_budget_exceeded", tuple(records))
+        except Exception:
+            # A configured limiter must fail closed. Import/configuration errors
+            # are not allowed to turn paid anonymous access into unlimited use.
+            note(status="refused", fallback_index=index, error_code="guest_budget_unavailable")
+            return CallOutcome(False, None, "refused", "guest_budget_unavailable", tuple(records))
         try:
             value = invoke(endpoint)
         except Exception as exc:
+            if guest_limits is not None and reservation is not None:
+                # A provider that answered with an error may still have billed
+                # the call, so its reservation stands. A call that never reached
+                # one was never billed, and keeping the reservation across every
+                # fallback endpoint let a single network blip spend a visitor's
+                # whole session budget without a word being generated.
+                unbilled = type(exc).__name__ in _UNBILLED_ERRORS
+                guest_limits.settle_tokens(
+                    reservation,
+                    0 if unbilled else reservation.amount,
+                    failed=not unbilled,
+                )
             note(
                 status="provider_error",
                 fallback_index=index,
@@ -330,6 +371,13 @@ def execute_call(
                 error_code=type(exc).__name__,
             )
             continue
+        if guest_limits is not None and reservation is not None:
+            provider_input = max(0, int(getattr(value, "input_tokens", 0) or 0))
+            provider_output = max(0, int(getattr(value, "output_tokens", 0) or 0))
+            actual = provider_input + provider_output
+            if not actual:
+                actual = max(1, (manifest.total_bytes + 3) // 4) + estimate_tokens(value)
+            guest_limits.settle_tokens(reservation, actual)
         note(status="succeeded", fallback_index=index, provider_ref=provider_ref(endpoint, index), elapsed_ms=(clock() - attempt_started) * 1000)
         return CallOutcome(True, value, "succeeded", "", tuple(records), endpoint)
 

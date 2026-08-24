@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeft,
   BadgeCheck,
@@ -37,8 +36,10 @@ import type {
   CoreReadyPayload,
 } from '../protocol'
 import { STAGE_FORMAT_LABEL, STAGE_MODEL_FORMATS, isStageModelFormat, type StageModelFormat } from '../character/stage'
+import { assetUrl, pickAttachments } from '../platform'
 
-const props = defineProps<{ client: CoreClient; connected: boolean }>()
+const props = defineProps<{ client: CoreClient; connected: boolean; guestMode?: boolean }>()
+const guestMode = computed(() => Boolean(props.guestMode))
 const emit = defineEmits<{
   activated: [characterId: string, ready?: CoreReadyPayload]
   close: []
@@ -187,7 +188,7 @@ function avatarSource(row: CharacterSummary | CharacterDetail | null | undefined
   if (!row) return ''
   if (row.avatar_url) return row.avatar_url
   if (row.avatar_data_url) return row.avatar_data_url
-  if (row.avatar_path) return convertFileSrc(row.avatar_path)
+  if (row.avatar_path) return assetUrl(row.avatar_path)
   return portraitSource(row)
 }
 
@@ -195,7 +196,7 @@ function portraitSource(row: CharacterSummary | CharacterDetail | null | undefin
   if (!row) return ''
   if (row.portrait_url) return row.portrait_url
   if (row.portrait_data_url) return row.portrait_data_url
-  return row.portrait_path ? convertFileSrc(row.portrait_path) : ''
+  return row.portrait_path ? assetUrl(row.portrait_path) : ''
 }
 
 function modelLabel(type?: string) {
@@ -246,7 +247,7 @@ async function renderMissingThumbnails() {
   for (const row of characters.value) {
     if (avatarSource(row) || thumbnailAttempted.has(row.id)) continue
     const format = isStageModelFormat(row.model_type) ? row.model_type : 'static'
-    const modelUrl = row.model_path ? convertFileSrc(row.model_path) : ''
+    const modelUrl = row.model_url || (row.model_path ? assetUrl(row.model_path) : '')
     if (!canRenderThumbnail(format, modelUrl)) continue
     thumbnailAttempted.add(row.id)
     // One at a time: each renderer holds a WebGL context, and a library of
@@ -387,7 +388,7 @@ function draftFromManifest(manifest: CharacterManifest): CharacterDraft {
 
 async function pickAsset(target: 'avatarPath' | 'portraitPath' | 'modelPath' | 'backgroundPath' | 'referenceAudioPath' | 'gptModelPath' | 'sovitsModelPath') {
   try {
-    const paths = await invoke<string[]>('pick_attachments', { kind: 'file' })
+    const paths = await pickAttachments('file')
     if (paths[0]) draft[target] = paths[0]
   } catch {
     error.value = '没有打开文件选择器。'
@@ -396,7 +397,7 @@ async function pickAsset(target: 'avatarPath' | 'portraitPath' | 'modelPath' | '
 
 async function pickExpressionAsset(index: number) {
   try {
-    const paths = await invoke<string[]>('pick_attachments', { kind: 'file' })
+    const paths = await pickAttachments('file')
     if (paths[0]) draft.expressions[index].image_path = paths[0]
   } catch {
     error.value = '没有打开文件选择器。'
@@ -494,7 +495,7 @@ async function chooseImport() {
   error.value = ''
   notice.value = ''
   try {
-    const paths = await invoke<string[]>('pick_attachments', { kind: 'file' })
+    const paths = await pickAttachments('file')
     if (!paths[0]) return
     importSource.value = paths[0]
     actionBusy.value = 'inspect'
@@ -599,7 +600,7 @@ async function duplicateSelected(openEditor = false) {
 async function exportSelected() {
   if (!selectedId.value) return
   try {
-    const folders = await invoke<string[]>('pick_attachments', { kind: 'folder' })
+    const folders = await pickAttachments('folder')
     if (!folders[0]) return
     actionBusy.value = 'export'
     const result = await props.client.characterExport(selectedId.value, folders[0]) as CharacterMutationResult
@@ -708,7 +709,7 @@ onMounted(() => void refresh())
         <h1 id="character-library-title">{{ view === 'editor' ? (editorMode === 'create' ? '制作角色' : '编辑角色') : view === 'import-preview' ? '安装预览' : '角色库' }}</h1>
         <p>{{ view === 'library' ? '每个角色拥有自己的身份、外观、声音与记忆边界。' : view === 'import-preview' ? '确认来源、许可证与权限后再安装。' : '把人格与素材整理成可携带的 Joi 角色包。' }}</p>
       </div>
-      <div class="header-actions" v-if="view === 'library'">
+      <div class="header-actions" v-if="view === 'library' && !guestMode">
         <button type="button" class="secondary-action" :disabled="!connected || Boolean(actionBusy)" @click="chooseImport">
           <LoaderCircle v-if="actionBusy === 'inspect'" class="spin" :size="18" />
           <Upload v-else :size="18" />
@@ -758,7 +759,7 @@ onMounted(() => void refresh())
             </span>
             <ChevronRight :size="17" />
           </button>
-          <button type="button" class="character-card create-card" @click="openCreate">
+          <button v-if="!guestMode" type="button" class="character-card create-card" @click="openCreate">
             <span class="card-art"><Plus :size="22" /></span>
             <span class="card-copy"><strong>制作新角色</strong><small>从身份与素材开始</small></span>
           </button>
@@ -792,7 +793,7 @@ onMounted(() => void refresh())
               <span>把当前对话交给新角色</span>
               <small>默认每个角色的对话和上下文相互独立。</small>
             </label>
-            <div v-if="localeChoices.length > 1" class="character-locale">
+            <div v-if="localeChoices.length > 1 && !guestMode" class="character-locale">
               <span class="character-locale-label">配音语言</span>
               <div class="character-locale-options" role="group" aria-label="角色配音语言">
                 <button
@@ -810,7 +811,7 @@ onMounted(() => void refresh())
               </div>
               <small>人设、开场白和音色描述都会换成这个语言。</small>
             </div>
-            <div class="detail-tools">
+            <div v-if="!guestMode" class="detail-tools">
               <button type="button" :disabled="!selected || Boolean(actionBusy)" @click="editSelected"><Pencil :size="16" />{{ selectedSummary.built_in ? '复制后编辑' : '编辑' }}</button>
               <button type="button" :disabled="Boolean(actionBusy)" @click="duplicateSelected()"><Copy :size="16" />复制</button>
               <button type="button" :disabled="Boolean(actionBusy)" @click="exportSelected"><Download :size="16" />导出</button>

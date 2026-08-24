@@ -63,6 +63,17 @@ export async function mountTachie(
     new Promise<HTMLImageElement>((resolve, reject) => {
       const image = new Image()
       image.decoding = 'async'
+      try {
+        const source = new URL(url, window.location.href)
+        if (source.protocol.startsWith('http') && source.origin !== window.location.origin) {
+          // Core explicitly grants the parent-site origin. Opt into that CORS
+          // response so the character-library thumbnail may safely call
+          // canvas.toDataURL() after drawing the remote sprite.
+          image.crossOrigin = 'anonymous'
+        }
+      } catch {
+        /* An unparseable URL will fail through image.onerror below. */
+      }
       image.onload = () => resolve(image)
       image.onerror = () => reject(new Error('tachie_image_failed'))
       image.src = url

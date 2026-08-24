@@ -1060,6 +1060,43 @@ class QwenRealtimeSessionTests(unittest.TestCase):
 
 
 class RealtimeVoiceCoordinatorTests(unittest.TestCase):
+    def test_core_timer_owns_the_guest_realtime_deadline(self) -> None:
+        timers: list[object] = []
+        finished: list[str] = []
+
+        class Timer:
+            def __init__(self, interval: float, callback: object, args: tuple[object, ...] = ()) -> None:
+                self.interval = interval
+                self.callback = callback
+                self.args = args
+                self.daemon = False
+                self.cancelled = False
+                timers.append(self)
+
+            def start(self) -> None:
+                return None
+
+            def cancel(self) -> None:
+                self.cancelled = True
+
+            def fire(self) -> None:
+                self.callback(*self.args)  # type: ignore[operator]
+
+        socket = _ready_socket()
+        coordinator = RealtimeVoiceCoordinator(
+            _config(max_session_seconds=180),
+            connector=_Connector(socket),
+            reserve_session=lambda owner, seconds: {"ok": True, "max_seconds": min(seconds, 12)},
+            finish_session=finished.append,
+        )
+        with patch("agent_companion.core.realtime_voice.threading.Timer", Timer):
+            started = coordinator.start("owner-limited", lambda _event: None, mode="conversation")
+        self.assertEqual(started["max_session_seconds"], 12)
+        self.assertEqual(timers[0].interval, 12)
+        timers[0].fire()  # type: ignore[attr-defined]
+        self.assertEqual(coordinator.status("owner-limited")["error"], "realtime_session_not_found")
+        self.assertIn("owner-limited", finished)
+
     def test_owner_and_sequence_are_bound_to_one_session(self) -> None:
         socket = _ready_socket()
         coordinator = RealtimeVoiceCoordinator(

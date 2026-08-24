@@ -315,6 +315,8 @@ _OUTCOME_ERROR_CODES = {
     "RateLimitError": "rate_limited",
     "APITimeoutError": "model_timeout",
     "APIConnectionError": "endpoint_unreachable",
+    "guest_token_budget_exceeded": "guest_token_budget_exceeded",
+    "guest_budget_unavailable": "guest_budget_unavailable",
 }
 
 
@@ -351,6 +353,8 @@ def _chat_error_message(error: str) -> str:
         "model_timeout": "模型响应超时了，请检查网络或换用更快的模型。",
         "endpoint_unreachable": "目前连接不到 BYOK 接口，请检查端点和网络。",
         "model_not_configured": "还没有配置可用的文本模型，请先在设置里连接 BYOK 或本地端点。",
+        "guest_token_budget_exceeded": "这次体验的对话额度已经用完，可以重新开始一段 Joi 会话。",
+        "guest_budget_unavailable": "体验额度暂时无法确认，我先停在这里，避免继续产生费用。",
         "model_request_cancelled": "这轮请求已取消。",
         "model_request_refused": "这轮请求包含未获授权发送的数据类型，已经拦下。",
         "model_input_too_large": "这轮请求超出了输入预算，请缩短内容后再试。",

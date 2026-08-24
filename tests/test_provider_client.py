@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from agent_companion.core.model_call import CallOutcome, ModelCallLedger
 from agent_companion.core.provider_client import PLANNER_BUDGET, ROUTE_BUDGETS, budget_for, chat_completion, resolve_endpoints
+from agent_companion.core.guest_limits import GuestLimits, configure_guest_limits
 
 
 class _Endpoint:
@@ -146,6 +147,16 @@ class ChatCompletionTests(unittest.TestCase):
         ):
             outcome = chat_completion(object(), "fast", [{"role": "user", "content": "hi"}], ledger=self.ledger)
         self.assertEqual(outcome.status, "unavailable")
+
+    def test_an_anonymous_chat_completion_always_has_an_output_cap(self) -> None:
+        configure_guest_limits(GuestLimits(session_token_limit=10_000))
+        try:
+            outcome = self._run()
+        finally:
+            configure_guest_limits(None)
+        self.assertTrue(outcome.ok)
+        request = next(call for call in _FakeOpenAI.calls if "messages" in call)
+        self.assertEqual(request["max_tokens"], 600)
 
 
 class ChatToolGoesThroughTheLayerTests(unittest.TestCase):

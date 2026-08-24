@@ -95,6 +95,44 @@ class CharacterAssetServerTests(unittest.TestCase):
             ),
         )
 
+    def test_guest_character_list_uses_model_url_without_local_path(self) -> None:
+        bridge = JsonRpcBridge.__new__(JsonRpcBridge)
+        bridge.host = "127.0.0.1"
+        bridge.asset_port = int(self.server.server_address[1])
+        bridge.session_token = self.session_token
+        bridge.guest_mode = True
+        model_path = self.packages_dir / "momose-hiyori" / "assets" / "live2d" / "hiyori.model3.json"
+        character_packages = SimpleNamespace(
+            packages_dir=self.packages_dir,
+            list=lambda: {
+                "ok": True,
+                "active_id": "momose-hiyori",
+                "characters": [{"id": "momose-hiyori", "model_path": str(model_path)}],
+            },
+        )
+        bridge.app = SimpleNamespace(character_packages=character_packages)
+
+        result = bridge.character_list_command()
+
+        character = result["characters"][0]
+        self.assertNotIn("model_path", character)
+        self.assertIn(f"/characters/{self.session_token}/", character["model_url"])
+
+    def test_public_sprite_prefers_asset_url_over_inline_image(self) -> None:
+        bridge = JsonRpcBridge.__new__(JsonRpcBridge)
+        bridge.host = "127.0.0.1"
+        bridge.asset_port = int(self.server.server_address[1])
+        bridge.session_token = self.session_token
+        bridge.app = SimpleNamespace(
+            character_packages=SimpleNamespace(packages_dir=self.packages_dir),
+        )
+        image_path = self.packages_dir / "momose-hiyori" / "assets" / "live2d" / "texture_00.png"
+
+        sprite = bridge._public_character_sprite({"id": "neutral", "image_path": str(image_path)})
+
+        self.assertIn(f"/characters/{self.session_token}/", sprite["image_url"])
+        self.assertEqual(sprite["image_data_url"], "")
+
     def test_character_asset_server_rejects_traversal(self) -> None:
         self._assert_not_found(
             f"{self.origin}/characters/{self.session_token}/%2E%2E/secret.txt"

@@ -72,6 +72,9 @@ function layoutDigest(): Plugin {
 }
 
 export default defineConfig({
+  // Tauri needs relative assets; the website build is intentionally mounted
+  // at one stable path and opts in through `npm run build:web`.
+  base: process.env.JOI_SHELL_BASE || './',
   plugins: [vue(), vrmLabAssets(), layoutDigest()],
   server: {
     host: '127.0.0.1',

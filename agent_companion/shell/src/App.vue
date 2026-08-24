@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { availableMonitors, getCurrentWindow, LogicalSize, PhysicalPosition, type PhysicalSize } from '@tauri-apps/api/window'
 import {
   AlertCircle,
@@ -93,6 +92,18 @@ import { attachLipSync, detachLipSync, enqueuePcm16Chunk, unlockAudioPlayback } 
 import { VoiceRecorder } from './voiceRecorder'
 import { RealtimeVoiceSession, realtimeLatencyLabel, type RealtimeVoiceEvent, type RealtimeVoiceState } from './realtimeVoice'
 import { isStageModelFormat } from './character/stage'
+import {
+  assetUrl,
+  coreConnectionInfo,
+  isDesktopRuntime,
+  pickAttachments,
+  postCompactPosition,
+  postCompactSize,
+  postEmbedMessage,
+  setMacWindowControlsVisible,
+  shellWebContext,
+  type CoreConnectionInfo,
+} from './platform'
 
 const input = ref('')
 const status = ref<CoreStatus>('offline')
@@ -120,14 +131,6 @@ const developerMode = ref(false)
 // The most recent realtime turn's timing label, shown only in developer mode.
 const lastRealtimeLatency = ref('')
 const ready = ref<CoreReadyPayload | null>(null)
-interface CoreConnectionInfo {
-  url: string
-  token: string
-  protocol_version: number
-  instance_id: string
-  status: string
-  error?: string | null
-}
 let expectedCoreConnection: CoreConnectionInfo | null = null
 let coreConnectionGeneration = 0
 const contextRailOpen = ref(false)
@@ -181,6 +184,9 @@ interface ConversationTurn {
 }
 
 const activeCabin = ref<CabinId>('chat')
+const guestMode = shellWebContext.guestMode
+const compactEmbedMode = !isDesktopRuntime && shellWebContext.mode === 'compact'
+const GUEST_CABINS = new Set<CabinId>(['chat', 'memory', 'characters'])
 const quickMenuOpen = ref(false)
 const characterMenuOpen = ref(false)
 const stageBackdropEnabled = ref(true)
@@ -205,7 +211,7 @@ const stageCollapsed = usePersistentRef('stageCollapsed', false)
 const artifactDialog = ref<HTMLDialogElement | null>(null)
 const activeSettingsTab = ref<SettingsTabId>('execution')
 const settingsSearch = ref('')
-const fallbackLive2DModelUrl = import.meta.env.VITE_JOI_LIVE2D_MODEL_URL || '/live2d/joi/joi.model3.json'
+const fallbackLive2DModelUrl = import.meta.env.VITE_JOI_LIVE2D_MODEL_URL || `${import.meta.env.BASE_URL}live2d/joi/joi.model3.json`
 const skillManifest = ref<NativeSkillManifest | null>(null)
 const skillRefreshLoading = ref(false)
 const gameAdapterRows = ref<GameAdapterManifest[]>([])
@@ -282,7 +288,7 @@ const live2DModelUrl = computed(() => {
   if (character?.id === 'builtin-hikari' && character?.model_type === 'live2d') return fallbackLive2DModelUrl
   if (character?.model_url) return character.model_url
   if (character?.model_type && character.model_path && isStageModelFormat(character.model_type)) {
-    return convertFileSrc(character.model_path)
+    return assetUrl(character.model_path)
   }
   // Only a Live2D character falls back to the bundled Live2D model. Every other
   // format renders nothing rather than someone else's body: a tachie or MMD
@@ -301,6 +307,14 @@ const live2DRuntimeMapping = computed<Live2DRuntimeMapping>(() => ({
       .map((motion) => [String(motion.motion || motion.name), String(motion.animation_url)]),
   ),
 }))
+// What this character can be asked to perform, with the phrase that asks for
+// it. Core builds this from the motion vocabulary and the character's own
+// bindings, so a format that carries no clips -- a tachie, or the procedural
+// fallback -- simply arrives empty and the control never appears.
+const motionCatalog = computed(() => ready.value?.character?.motion_catalog || [])
+const motionShowcaseOpen = ref(false)
+watch(() => ready.value?.character?.id, () => { motionShowcaseOpen.value = false })
+
 const characterDisplayModelType = computed(() => {
   const character = ready.value?.character
   const configuredType = character?.model_type || 'live2d'
@@ -362,6 +376,10 @@ function settingsIcon(tab: SettingsTabId) {
 // from the compact dashboard restores the main shell first rather than drawing
 // a full cabin into a 360px pet. Returning to compact stays one click away.
 async function openCompactCabin(cabin: CabinId) {
+  if (!isDesktopRuntime && compactEmbedMode) {
+    postEmbedMessage('joi.open_cabin', { cabin })
+    return
+  }
   if (isCompactMode.value) await toggleCompactMode()
   openCabin(cabin)
 }
@@ -375,6 +393,7 @@ async function openCompactAttachments(kind: 'file' | 'folder') {
 }
 
 function openCabin(cabin: CabinId) {
+  if (guestMode && !GUEST_CABINS.has(cabin)) cabin = 'chat'
   activeCabin.value = cabin
   quickMenuOpen.value = false
   characterMenuOpen.value = false
@@ -474,6 +493,12 @@ let normalWindowSnapshot: NormalWindowSnapshot | null = null
 
 async function toggleCompactMode() {
   if (compactTransitioning.value) return
+  if (!isDesktopRuntime) {
+    // The host owns the geometry, so ask rather than resize: it scrolls its own
+    // section back into view and then tells this shell to leave compact mode.
+    postEmbedMessage(isCompactMode.value ? 'joi.restore' : 'joi.compact', { compact: !isCompactMode.value })
+    return
+  }
   compactTransitioning.value = true
   const nextCompactMode = !isCompactMode.value
   try {
@@ -495,6 +520,14 @@ async function toggleCompactMode() {
 }
 
 async function applyWindowShellMode(compact: boolean) {
+  if (!isDesktopRuntime) {
+    postEmbedMessage('joi.compact', { compact })
+    if (compact) {
+      postCompactSize(compactWindowDimensions())
+      postCompactPosition(compactPosition.value)
+    }
+    return
+  }
   try {
     const appWindow = getCurrentWindow()
     if (compact) {
@@ -553,7 +586,7 @@ async function applyWindowShellMode(compact: boolean) {
 
 async function setNativeWindowControlsVisible(visible: boolean) {
   try {
-    await invoke('set_macos_window_controls_visible', { visible })
+    await setMacWindowControlsVisible(visible)
   } catch (e) {
     // Browser preview and non-macOS fallback.
   }
@@ -573,7 +606,7 @@ const COMPACT_DASHBOARD_HEIGHT = 182
 const COMPACT_SPEECH_HEIGHT = 90
 const COMPACT_SPEECH_ACTIONS_HEIGHT = 30
 
-function compactWindowSize() {
+function compactWindowDimensions() {
   const scale = compactScale.value
   let width = COMPACT_CHARACTER_WIDTH * scale + COMPACT_MARGIN
   let height = COMPACT_CHARACTER_HEIGHT * scale + COMPACT_MARGIN
@@ -590,7 +623,12 @@ function compactWindowSize() {
     height += COMPACT_SPEECH_ACTIONS_HEIGHT
     width = Math.max(width, 390)
   }
-  return new LogicalSize(Math.round(width), Math.round(height))
+  return { width: Math.round(width), height: Math.round(height) }
+}
+
+function compactWindowSize() {
+  const { width, height } = compactWindowDimensions()
+  return new LogicalSize(width, height)
 }
 
 /**
@@ -602,6 +640,13 @@ function compactWindowSize() {
  * back and the only way out is deleting the preference.
  */
 async function compactPositionIsReachable(position: { x: number; y: number }, size: { width: number; height: number }) {
+  if (!isDesktopRuntime) {
+    const GRAB_MARGIN = 80
+    return position.x + GRAB_MARGIN <= window.innerWidth
+      && position.y + GRAB_MARGIN <= window.innerHeight
+      && position.x + size.width - GRAB_MARGIN >= 0
+      && position.y + size.height - GRAB_MARGIN >= 0
+  }
   const monitors = await availableMonitors()
   if (!monitors.length) return false
   const GRAB_MARGIN = 80
@@ -620,6 +665,10 @@ async function compactPositionIsReachable(position: { x: number; y: number }, si
 async function restoreCompactPosition() {
   const saved = compactPosition.value
   if (!saved || !Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return
+  if (!isDesktopRuntime) {
+    postCompactPosition(saved)
+    return
+  }
   try {
     const appWindow = getCurrentWindow()
     const size = await appWindow.outerSize()
@@ -634,6 +683,7 @@ async function restoreCompactPosition() {
 }
 
 async function watchCompactPosition() {
+  if (!isDesktopRuntime) return
   if (compactMoveUnlisten) return
   try {
     compactMoveUnlisten = await getCurrentWindow().onMoved(({ payload }) => {
@@ -661,6 +711,10 @@ function stopWatchingCompactPosition() {
 
 async function syncCompactWindowSize() {
   if (!isCompactMode.value) return
+  if (!isDesktopRuntime) {
+    postCompactSize(compactWindowDimensions())
+    return
+  }
   await safeWindowCall(() => getCurrentWindow().setSize(compactWindowSize()))
 }
 
@@ -692,6 +746,7 @@ function handleTitlebarDoubleClick(event: MouseEvent) {
 }
 
 async function startWindowDrag(event: MouseEvent) {
+  if (!isDesktopRuntime) return
   if (event.button !== 0) return
   const target = event.target as HTMLElement | null
   if (target?.closest('button, input, select, textarea, a, [role="button"], .topbar-actions')) return
@@ -725,6 +780,13 @@ async function maybeStartMascotDrag(event: MouseEvent) {
   event.preventDefault()
   event.stopPropagation()
   mascotDragMoved = true
+  if (!isDesktopRuntime) {
+    const dx = event.screenX - mascotDragStart.x
+    const dy = event.screenY - mascotDragStart.y
+    mascotDragStart = { x: event.screenX, y: event.screenY }
+    postEmbedMessage('joi.drag', { dx, dy })
+    return
+  }
   stopMascotDragWatch()
   try {
     await getCurrentWindow().startDragging()
@@ -736,6 +798,40 @@ async function maybeStartMascotDrag(event: MouseEvent) {
 function stopMascotDragWatch() {
   mascotDragStart = null
   window.removeEventListener('mousemove', maybeStartMascotDrag)
+}
+
+function handleEmbedMessage(event: MessageEvent) {
+  if (isDesktopRuntime || window.parent === window || event.source !== window.parent) return
+  if (!shellWebContext.parentOrigin || event.origin !== shellWebContext.parentOrigin) return
+  const payload = event.data && typeof event.data === 'object' ? event.data as Record<string, unknown> : {}
+  if (payload.source !== 'joi-embed') return
+  if (payload.type === 'joi.position') {
+    const x = Number(payload.x)
+    const y = Number(payload.y)
+    if (Number.isFinite(x) && Number.isFinite(y)) compactPosition.value = { x, y }
+  } else if (payload.type === 'joi.set_compact') {
+    // One embedded shell serves both the docked stage and the floating pet, so
+    // the host -- which is the thing that knows whether its section is still on
+    // screen -- says which one is showing. Two iframes would have meant two Vue
+    // apps, two sockets and two WebGL contexts for one visitor.
+    setEmbeddedCompactMode(payload.compact === true)
+  } else if (payload.type === 'joi.open_cabin' && typeof payload.cabin === 'string') {
+    const cabin = payload.cabin as CabinId
+    if (['workspace', 'chat', 'memory', 'characters', 'inspector'].includes(cabin)) openCabin(cabin)
+  }
+}
+
+function setEmbeddedCompactMode(compact: boolean) {
+  if (isDesktopRuntime || isCompactMode.value === compact) return
+  isCompactMode.value = compact
+  document.body.classList.toggle('transparent-active', compact)
+  if (!compact) {
+    clearMiniSpeechTimer()
+    miniSpeechActive.value = false
+    miniDashboardActive.value = false
+    return
+  }
+  postCompactSize(compactWindowDimensions())
 }
 
 function handleMascotClick(event: MouseEvent) {
@@ -798,6 +894,7 @@ const voiceState = ref<'idle' | 'recording' | 'transcribing'>('idle')
 const lastTranscript = ref('')
 const lastAsrLatency = ref<AsrLatencyBreakdown>({})
 const realtimeVoiceState = ref<RealtimeVoiceState>('idle')
+const realtimeVoiceStartedAtSeconds = ref(0)
 const realtimeAssistantTranscript = ref('')
 // A realtime turn has its own motion channel rather than a stored agent event:
 // the session is ephemeral, and the synthetic turn cards this view builds for it
@@ -969,7 +1066,7 @@ const {
   toggleMemoryEnabled,
   deleteMemory,
   clearMemory,
-} = useMemory(client, errorText)
+} = useMemory(client, errorText, guestMode)
 
 // AgentSkills lives in composables/useAgentSkills.ts. Destructured back
 // under the same names so every template binding resolves as before.
@@ -1054,19 +1151,22 @@ async function connectToCore(restart = false) {
   status.value = 'connecting'
   errorText.value = ''
   let url = 'ws://127.0.0.1:8765'
-  if (!isTauri()) {
-    expectedCoreConnection = null
-    client.connect(url)
-    return
-  }
   try {
-    if (restart) await invoke<CoreConnectionInfo>('restart_core')
+    if (!isDesktopRuntime) {
+      const connection = await coreConnectionInfo(false)
+      expectedCoreConnection = null
+      const endpoint = new URL(connection.url)
+      if (connection.token) endpoint.searchParams.set('token', connection.token)
+      client.connect(endpoint.toString())
+      return
+    }
+    if (restart) await coreConnectionInfo(true)
     // Keep first-launch platform verification bounded. The packaged Core is an
     // onedir runtime, so normal starts no longer repeat PyInstaller extraction.
     const deadline = Date.now() + 30000
     let connection: CoreConnectionInfo | null = null
     while (Date.now() < deadline && generation === coreConnectionGeneration) {
-      connection = await invoke<CoreConnectionInfo>('core_connection_info')
+      connection = await coreConnectionInfo(false)
       if (connection.status === 'error') {
         throw new Error(connection.error || 'Joi Core 无法启动')
       }
@@ -1095,7 +1195,7 @@ async function retryCoreConnection() {
   if (coreRetrying.value) return
   coreRetrying.value = true
   try {
-    const connection = isTauri() ? await invoke<CoreConnectionInfo>('core_connection_info') : null
+    const connection = await coreConnectionInfo(false)
     await connectToCore(connection?.status === 'error')
   } finally {
     coreRetrying.value = false
@@ -1278,7 +1378,7 @@ async function bindProjectDirectory() {
   if (!projectId || contextRailBusy.value) return
   contextRailBusy.value = true
   try {
-    const selectedPaths = await invoke<string[]>('pick_attachments', { kind: 'folder' })
+    const selectedPaths = await pickAttachments('folder')
     for (const path of selectedPaths || []) {
       const normalized = String(path || '').trim()
       if (!normalized || resourceBindings.value.some((binding) => binding.kind === 'directory' && binding.value === normalized)) continue
@@ -1724,7 +1824,7 @@ function authorAvatar(event?: AgentEvent) {
 const characterImageSrc = computed(() => {
   const sprites = ready.value?.character?.sprites || []
   const active = sprites.find((sprite) => sprite.id === activeSpriteId.value) || sprites[0]
-  return active?.image_data_url || ready.value?.character?.portrait_url || ready.value?.character?.portrait_data_url || ''
+  return active?.image_url || active?.image_data_url || ready.value?.character?.portrait_url || ready.value?.character?.portrait_data_url || ''
 })
 const characterAvatarSrc = computed(() => (
   ready.value?.character?.avatar_url
@@ -1775,6 +1875,17 @@ const currentSemanticSelectionId = computed(() => {
 const asrConfigured = computed(() => Boolean(ready.value?.asr?.configured))
 const realtimeVoiceConfigured = computed(() => Boolean(ready.value?.realtime_voice?.configured))
 const realtimeVoiceActive = computed(() => !['idle', 'error'].includes(realtimeVoiceState.value))
+const realtimeVoiceMaxSessionSeconds = computed(() => Math.max(1, Number(ready.value?.realtime_voice?.max_session_seconds || 300)))
+const realtimeVoiceRemainingSeconds = computed(() => {
+  if (!guestMode || !realtimeVoiceActive.value || !realtimeVoiceStartedAtSeconds.value) return 0
+  const sessionRemaining = realtimeVoiceMaxSessionSeconds.value - Math.floor(nowSeconds.value - realtimeVoiceStartedAtSeconds.value)
+  const totalRemaining = Number(ready.value?.realtime_voice?.remaining_total_seconds || realtimeVoiceMaxSessionSeconds.value)
+  return Math.max(0, Math.min(sessionRemaining, totalRemaining))
+})
+const realtimeVoiceRemainingLabel = computed(() => {
+  const seconds = realtimeVoiceRemainingSeconds.value
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+})
 const activeMinecraftSessionId = computed(() => {
   const session = activeCapabilitySession.value
   return session?.driver === 'minecraft_game_adapter_v2' && session.state === 'running' ? session.id : ''
@@ -1792,16 +1903,17 @@ const voiceButtonLabel = computed(() => {
 })
 const previewArtifactSrc = computed(() => (previewArtifact.value ? artifactSrc(previewArtifact.value) : ''))
 const voiceStatusText = computed(() => {
-  if (realtimeVoiceState.value === 'connecting') return '实时语音连接中…'
-  if (realtimeVoiceState.value === 'user_speaking') return '实时语音：正在听你说'
-  if (realtimeVoiceState.value === 'assistant_speaking') return 'Joi 正在回答，可直接开口打断'
+  const countdown = guestMode && realtimeVoiceActive.value ? ` · 剩余 ${realtimeVoiceRemainingLabel.value}` : ''
+  if (realtimeVoiceState.value === 'connecting') return `实时语音连接中…${countdown}`
+  if (realtimeVoiceState.value === 'user_speaking') return `实时语音：正在听你说${countdown}`
+  if (realtimeVoiceState.value === 'assistant_speaking') return `Joi 正在回答，可直接开口打断${countdown}`
   // Listening, thinking, acting and paused all belong to a live realtime turn,
   // so show what that turn is doing. Falling through here reported the
   // dictation microphone instead, which is not the one that is open.
   if (realtimeVoiceActive.value) {
     const spoken = realtimeAssistantTranscript.value || '实时语音已连接，再次点击“结束实时语音”退出。'
     const latency = developerMode.value ? lastRealtimeLatency.value : ''
-    return latency ? `${spoken} · ${latency}` : spoken
+    return `${latency ? `${spoken} · ${latency}` : spoken}${countdown}`
   }
   if (!asrConfigured.value) return 'ASR 未配置，请先在 config.yaml 中启用语音识别。'
   if (voiceState.value === 'recording') return `录音中，最长 ${voiceMaxSeconds.value} 秒。`
@@ -2571,7 +2683,7 @@ function artifactPath(artifact: string) {
 
 function artifactSrc(artifact: string) {
   if (artifactDataUrls.value[artifact]) return artifactDataUrls.value[artifact]
-  if (/^[a-zA-Z]:[\\/]/.test(artifact) || artifact.startsWith('/')) return convertFileSrc(artifactPath(artifact))
+  if (/^[a-zA-Z]:[\\/]/.test(artifact) || artifact.startsWith('/')) return assetUrl(artifactPath(artifact))
   return ''
 }
 
@@ -2844,7 +2956,7 @@ async function addAttachments(kind: AttachmentKind) {
   attachmentPickerBusy.value = true
   attachmentPickerError.value = ''
   try {
-    const selectedPaths = await invoke<string[]>('pick_attachments', { kind })
+    const selectedPaths = await pickAttachments(kind)
     if (!selectedPaths.length) return
 
     const existingPaths = new Set(composerAttachments.value.map((attachment) => attachment.path))
@@ -3011,7 +3123,7 @@ async function playAudioPath(path?: string, dataUrl?: string) {
   let audio: HTMLAudioElement | null = null
   try {
     stopSpokenAudio()
-    const url = source.startsWith('data:') ? source : convertFileSrc(source)
+    const url = source.startsWith('data:') ? source : assetUrl(source)
     audio = new Audio(url)
     currentAudio = audio
     // The mouth reads this element's signal, so the analyser is attached
@@ -4177,6 +4289,11 @@ function realtimeVoiceErrorLabel(error: string) {
     audio_capture_unavailable: '当前环境无法采集实时 PCM 音频。',
     realtime_disconnected: '实时语音连接已断开。',
     realtime_audio_overflow: '实时音频发送来不及处理，会话已安全停止。',
+    realtime_session_already_active: '另一个 Joi 视图正在使用实时语音，请先在那里结束。',
+    guest_realtime_budget_exceeded: '这次体验的实时语音额度已用完。',
+    guest_realtime_daily_budget_exceeded: '今天的实时语音体验额度已用完。',
+    guest_time_limit: '本次实时语音已到时，麦克风已关闭。',
+    guest_method_forbidden: '访客模式不提供这项本机能力。',
     minecraft_session_not_runnable: 'Minecraft 会话尚未就绪，请先连接游戏并确认范围。',
     realtime_local_tts_unavailable: '本地 GPT-SoVITS 未就绪；字幕可用，Joi 暂时静音。',
     realtime_local_tts_failed: '本地 GPT-SoVITS 合成失败；字幕仍可用。',
@@ -4270,6 +4387,9 @@ function handleRealtimeVoiceEvent(event: RealtimeVoiceEvent) {
   if (event.kind === 'state' && (event.state === 'error' || event.state === 'recovery_required')) {
     scheduleRealtimeReconnect('realtime_disconnected')
   }
+  if (event.kind === 'state' && event.reason === 'guest_time_limit') {
+    errorText.value = realtimeVoiceErrorLabel('guest_time_limit')
+  }
 }
 
 /** Transport faults worth one silent retry; a refusal or a bad key is not. */
@@ -4356,6 +4476,10 @@ async function toggleRealtimeVoice(useMinecraft = false) {
     errorText.value = realtimeVoiceErrorLabel('realtime_unconfigured')
     return
   }
+  if (guestMode && useMinecraft) {
+    errorText.value = '访客模式不提供 Minecraft 或本机操作。'
+    return
+  }
   const mode: 'conversation' | 'minecraft' = useMinecraft ? 'minecraft' : 'conversation'
   const minecraftSessionId = mode === 'minecraft' ? activeMinecraftSessionId.value : ''
   if (mode === 'minecraft' && !minecraftSessionId) {
@@ -4364,7 +4488,9 @@ async function toggleRealtimeVoice(useMinecraft = false) {
   }
   if (!realtimeVoiceDisclosuresAccepted.has(mode)) {
     const localSkillDisclosure = '你也可以直接开口让 Joi 做动作或使用本机技能（打开应用、点击输入、上网搜索、看当前屏幕、写代码）。模型只能提出“这一轮是请求”，具体做什么由 Joi Core 用你自己说的原话重新规划；角色动作是纯本机动画，凡是会操作这台电脑的动作都仍然要你在界面上点确认。'
-    const disclosure = mode === 'minecraft'
+    const disclosure = guestMode
+      ? `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。访客会话只提供对话，不会调用你设备上的工具；Core 会强制限制单次时长和当日总量。\n\n本次最长 ${Math.ceil(realtimeVoiceMaxSessionSeconds.value / 60)} 分钟，是否开始？`
+      : mode === 'minecraft'
       ? `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。模型可以提出一条 Minecraft 操作，但只能在你已确认的服务器、世界、维度、半径、方块和预算范围内执行；Joi Core 会逐条校验并保留回执。\n\n${localSkillDisclosure}\n\n${screenEvidenceDisclosure()}是否开始？`
       : `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。云端只返回文本，Joi 仍使用本地 GPT-SoVITS 发声；本模式不执行 Minecraft 操作。\n\n${localSkillDisclosure}\n\n是否开始？`
     const accepted = await requestAppConfirm({
@@ -4405,6 +4531,9 @@ async function startRealtimeVoiceSession(mode: 'conversation' | 'minecraft', min
     },
     onState: (state) => {
       realtimeVoiceState.value = state
+      if (!['idle', 'error'].includes(state) && !realtimeVoiceStartedAtSeconds.value) {
+        realtimeVoiceStartedAtSeconds.value = Date.now() / 1000
+      }
     },
     onEvent: handleRealtimeVoiceEvent,
   })
@@ -4428,6 +4557,7 @@ function stopRealtimeVoice() {
   realtimePlaybackEpoch += 1
   stopSpokenAudio()
   realtimeVoiceState.value = 'idle'
+  realtimeVoiceStartedAtSeconds.value = 0
   realtimeAssistantTranscript.value = ''
   // Hand the character back to the stored conversation's own motions.
   realtimeCharacterMotion.value = undefined
@@ -4575,12 +4705,24 @@ function blobToBase64(blob: Blob) {
 }
 
 onMounted(() => {
-  void safeWindowCall(() => getCurrentWindow().setTitleBarStyle('overlay'))
-  void setNativeWindowControlsVisible(true)
+  window.addEventListener('message', handleEmbedMessage)
+  if (compactEmbedMode) {
+    isCompactMode.value = true
+    document.body.classList.add('transparent-active')
+    nextTick(() => {
+      postEmbedMessage('joi.ready', { mode: 'compact', guest: guestMode })
+      void applyWindowShellMode(true)
+    })
+  } else if (!isDesktopRuntime) {
+    nextTick(() => postEmbedMessage('joi.ready', { mode: 'full', guest: guestMode }))
+  } else {
+    void safeWindowCall(() => getCurrentWindow().setTitleBarStyle('overlay'))
+    void setNativeWindowControlsVisible(true)
+  }
   void connectToCore()
   clockTimer = window.setInterval(() => {
     nowSeconds.value = Date.now() / 1000
-  }, 5000)
+  }, guestMode ? 1000 : 5000)
   window.addEventListener('dragstart', preventNativeAssetDrag, true)
   window.addEventListener('selectstart', preventCompactSelection, true)
   // The character's replies arrive over a socket, which is never a user
@@ -4591,6 +4733,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   document.body.classList.remove('transparent-active')
+  window.removeEventListener('message', handleEmbedMessage)
   window.removeEventListener('dragstart', preventNativeAssetDrag, true)
   window.removeEventListener('selectstart', preventCompactSelection, true)
   stopMascotDragWatch()
@@ -4653,6 +4796,12 @@ provide(ProjectsContextKey, {
       'mini-dashboard-active': isCompactMode && miniDashboardActive,
       'mini-speech-active': isCompactMode && miniSpeechActive,
       'settings-active': activeCabin === 'inspector',
+      // The library is a full-page manager, not a side panel. Left in the
+      // right-hand column it gets `minmax(420px, 43vw)` -- fine on a maximised
+      // desktop window, 402px inside the website embed, which lands between
+      // the component's own 520px and 400px container breakpoints and squeezes
+      // its two-column rail and five-column toolbar into an unreadable strip.
+      'library-active': activeCabin === 'characters',
       'stage-collapsed': stageIsCollapsed && activeCabin !== 'inspector',
     }"
     @dragstart.capture="preventNativeAssetDrag"
@@ -4678,7 +4827,7 @@ provide(ProjectsContextKey, {
         PRD 9.1 puts Projects inside Workspace; it is not a peer of Settings.
       -->
       <DialogTrigger
-        v-if="!isCompactMode && activeCabin !== 'inspector'"
+        v-if="!isCompactMode && activeCabin !== 'inspector' && !guestMode"
         as-child
         @mousedown.stop
         @click.stop="!contextRailOpen && refreshCollaboration()"
@@ -4692,6 +4841,7 @@ provide(ProjectsContextKey, {
 
       <div class="topbar-actions">
         <button
+          v-if="!guestMode"
           type="button"
           class="luna-title-action"
           :class="{ active: activeCabin === 'inspector' }"
@@ -4730,7 +4880,7 @@ provide(ProjectsContextKey, {
       DialogRoot supplies all of that, and unmounts the content when closed --
       which is the actual fix. See tests/context-rail-modal.test.mjs.
     -->
-      <ContextRail v-if="!isCompactMode" />
+      <ContextRail v-if="!isCompactMode && !guestMode" />
     </DialogRoot>
 
     <section ref="workspaceRef" class="workspace" :class="`cabin-${activeCabin}`">
@@ -4744,10 +4894,10 @@ provide(ProjectsContextKey, {
             <MessageCircle :size="17" :stroke-width="1.8" />
             <span>返回对话</span>
           </button>
-          <button type="button" class="ghost-button watch-loop-action" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()" v-if="activeCabin === 'workspace'">
+          <button type="button" class="ghost-button watch-loop-action" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop()" v-if="activeCabin === 'workspace' && !guestMode">
             {{ watchLoopActive ? '停止陪看' : '实时陪看' }}
           </button>
-          <button type="button" class="ghost-button" @click="developerMode = !developerMode" v-if="activeCabin === 'workspace'">
+          <button type="button" class="ghost-button" @click="developerMode = !developerMode" v-if="activeCabin === 'workspace' && !guestMode">
             {{ developerMode ? '隐藏审计' : '显示审计' }}
           </button>
           <span class="status" :class="{ online: connected }">{{ connectionLabel }}</span>
@@ -5194,12 +5344,44 @@ provide(ProjectsContextKey, {
           <div class="chat-starters" aria-label="对话建议">
             <button type="button" :disabled="!connected" @click="sendChatStarter('陪我聊聊今天发生的事')">聊聊今天</button>
             <button type="button" :disabled="!connected" @click="sendChatStarter('帮我整理一下接下来最重要的三件事')">整理计划</button>
-            <button type="button" :disabled="!connected" @click="sendChatStarter('你看到了什么？')">看看屏幕</button>
+            <button v-if="!guestMode" type="button" :disabled="!connected" @click="sendChatStarter('你看到了什么？')">看看屏幕</button>
+            <button
+              v-if="motionCatalog.length"
+              type="button"
+              class="motion-showcase-toggle"
+              :class="{ active: motionShowcaseOpen }"
+              :aria-expanded="motionShowcaseOpen"
+              aria-controls="motion-showcase"
+              @click="motionShowcaseOpen = !motionShowcaseOpen"
+            >
+              动作展示
+            </button>
+          </div>
+          <!--
+            The trigger words are the point, not a hidden implementation
+            detail: Core matches these phrases from ordinary chat, so showing
+            them teaches a visitor what to say next time rather than giving
+            them a button that only works here.
+          -->
+          <div class="motion-showcase" id="motion-showcase" v-if="motionShowcaseOpen && motionCatalog.length">
+            <p class="motion-showcase-hint">对她说这些话就能触发动作：</p>
+            <div class="motion-showcase-row">
+              <button
+                v-for="entry in motionCatalog"
+                :key="entry.motion"
+                type="button"
+                :disabled="!connected"
+                @click="sendChatStarter(entry.trigger)"
+              >
+                <strong>{{ entry.label }}</strong>
+                <span>“{{ entry.trigger }}”</span>
+              </button>
+            </div>
           </div>
         </div>
 
         <form class="chat-composer-area" @submit.prevent="submit">
-          <div class="composer-attachments" v-if="composerAttachments.length || attachmentPickerError" aria-live="polite">
+          <div class="composer-attachments" v-if="!guestMode && (composerAttachments.length || attachmentPickerError)" aria-live="polite">
             <div class="attachment-list" v-if="composerAttachments.length">
               <div
                 v-for="attachment in composerAttachments"
@@ -5233,11 +5415,11 @@ provide(ProjectsContextKey, {
               <Paperclip :size="20" :stroke-width="1.75" />
             </button>
             <div class="luna-popover quick-popover" v-if="quickMenuOpen">
-              <button type="button" :disabled="attachmentPickerBusy" :aria-busy="attachmentPickerBusy" @click="addAttachments('file')">
+              <button v-if="!guestMode" type="button" :disabled="attachmentPickerBusy" :aria-busy="attachmentPickerBusy" @click="addAttachments('file')">
                 <FilePlus2 :size="18" :stroke-width="1.75" />
                 <span>{{ attachmentPickerBusy ? '正在打开选择器…' : '添加文件' }}</span>
               </button>
-              <button type="button" :disabled="attachmentPickerBusy" :aria-busy="attachmentPickerBusy" @click="addAttachments('folder')">
+              <button v-if="!guestMode" type="button" :disabled="attachmentPickerBusy" :aria-busy="attachmentPickerBusy" @click="addAttachments('folder')">
                 <FolderPlus :size="18" :stroke-width="1.75" />
                 <span>添加文件夹</span>
               </button>
@@ -5246,7 +5428,7 @@ provide(ProjectsContextKey, {
                 <Brain :size="18" :stroke-width="1.75" />
                 <span>记忆</span>
               </button>
-              <button type="button" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop(); quickMenuOpen = false">
+              <button v-if="!guestMode" type="button" @click="watchLoopActive ? stopWatchLoop() : startWatchLoop(); quickMenuOpen = false">
                 <MonitorPlay :size="18" :stroke-width="1.75" />
                 <span>{{ watchLoopActive ? '停止实时陪看' : '开始实时陪看' }}</span>
               </button>
@@ -5254,15 +5436,15 @@ provide(ProjectsContextKey, {
                 <AudioLines :size="18" :stroke-width="1.75" />
                 <span>{{ realtimeVoiceActive ? '结束实时语音' : '开始实时语音' }}</span>
               </button>
-              <button v-if="activeMinecraftSessionId && !realtimeVoiceActive" type="button" :disabled="!connected || !realtimeVoiceConfigured" @click="toggleRealtimeVoice(true); quickMenuOpen = false">
+              <button v-if="!guestMode && activeMinecraftSessionId && !realtimeVoiceActive" type="button" :disabled="!connected || !realtimeVoiceConfigured" @click="toggleRealtimeVoice(true); quickMenuOpen = false">
                 <Gamepad2 :size="18" :stroke-width="1.75" />
                 <span>实时语音 + Minecraft</span>
               </button>
-              <button type="button" :disabled="compactTransitioning" @click="toggleCompactMode(); quickMenuOpen = false">
+              <button v-if="isDesktopRuntime" type="button" :disabled="compactTransitioning" @click="toggleCompactMode(); quickMenuOpen = false">
                 <Minimize2 :size="18" :stroke-width="1.75" />
                 <span>切换微缩模式</span>
               </button>
-              <button type="button" @click="openCabin('inspector')">
+              <button v-if="!guestMode" type="button" @click="openCabin('inspector')">
                 <Settings :size="18" :stroke-width="1.75" />
                 <span>完整设置</span>
               </button>
@@ -5291,7 +5473,7 @@ provide(ProjectsContextKey, {
       </section>
 
       <section class="character-library-section" v-if="activeCabin === 'characters'">
-        <CharacterLibrary :client="client" :connected="connected" @activated="handleCharacterActivated" @close="openCabin('chat')" />
+        <CharacterLibrary :client="client" :connected="connected" :guest-mode="guestMode" @activated="handleCharacterActivated" @close="openCabin('chat')" />
       </section>
 
       <section class="memory-section" v-if="activeCabin === 'memory'">
@@ -5304,7 +5486,7 @@ provide(ProjectsContextKey, {
             </div>
           </div>
           <div class="memory-workspace-actions">
-            <label class="memory-switch" title="长期记忆开关">
+            <label v-if="!guestMode" class="memory-switch" title="长期记忆开关">
               <input type="checkbox" :checked="memoryEnabled" @change="toggleMemoryEnabled" />
               <span aria-hidden="true"></span>
               <em>{{ memoryEnabled ? '记忆开启' : '记忆关闭' }}</em>
@@ -5312,7 +5494,7 @@ provide(ProjectsContextKey, {
             <button type="button" class="memory-icon-button" :disabled="memorySearchLoading" :aria-busy="memorySearchLoading" title="刷新记忆" @click="refreshMemoryWorkspace">
               <RefreshCw :size="18" :class="{ spinning: memorySearchLoading }" />
             </button>
-            <details class="memory-more-menu">
+            <details v-if="!guestMode" class="memory-more-menu">
               <summary title="更多记忆操作"><ChevronDown :size="18" /></summary>
               <button type="button" :disabled="!memorySavedCount && !memoryPendingCount" @click="clearMemory">
                 <Trash2 :size="16" />清空全部记忆
@@ -5357,7 +5539,7 @@ provide(ProjectsContextKey, {
                   </div>
                   <p>{{ memory.text }}</p>
                 </div>
-                <div class="memory-record-actions">
+                <div v-if="!guestMode" class="memory-record-actions">
                   <button type="button" title="编辑记忆" @click="beginMemoryEdit(memory)"><Pencil :size="16" /></button>
                   <button type="button" class="danger" title="删除记忆" @click="deleteMemory(memory.id)"><Trash2 :size="16" /></button>
                 </div>
@@ -5384,7 +5566,7 @@ provide(ProjectsContextKey, {
                 <p>{{ candidate.text }}</p>
                 <small class="memory-record-reason">{{ candidate.priority_reason || '由对话中提取，保存前需要你的确认' }}</small>
               </div>
-              <div class="memory-candidate-actions">
+              <div v-if="!guestMode" class="memory-candidate-actions">
                 <button type="button" @click="rejectMemoryCandidate(candidate.id)">忽略</button>
                 <button type="button" class="primary" @click="saveMemoryCandidate(candidate.id)">记住</button>
               </div>
@@ -5993,7 +6175,7 @@ provide(ProjectsContextKey, {
       </div>
       <div class="scene-line"></div>
 
-      <div class="memory-authorize-bubble" v-if="topPendingMemory">
+      <div class="memory-authorize-bubble" v-if="topPendingMemory && !guestMode">
         <div>
           <strong>待确认记忆</strong>
           <p>{{ memoryAuthorizeText }}</p>
@@ -6173,7 +6355,7 @@ provide(ProjectsContextKey, {
             <AudioLines :size="15" :stroke-width="1.9" />
           </button>
           <button
-            v-if="activeMinecraftSessionId && !realtimeVoiceActive"
+            v-if="!guestMode && activeMinecraftSessionId && !realtimeVoiceActive"
             type="button"
             class="mini-action-btn"
             :disabled="!connected || !realtimeVoiceConfigured"
@@ -6183,6 +6365,7 @@ provide(ProjectsContextKey, {
             <Gamepad2 :size="15" :stroke-width="1.9" />
           </button>
           <button
+            v-if="!guestMode"
             type="button"
             class="mini-action-btn"
             :class="{ active: watchLoopActive }"
@@ -6193,6 +6376,7 @@ provide(ProjectsContextKey, {
             <MonitorPlay :size="15" :stroke-width="1.9" />
           </button>
           <button
+            v-if="!guestMode"
             type="button"
             class="mini-action-btn"
             :disabled="attachmentPickerBusy"
@@ -6211,6 +6395,7 @@ provide(ProjectsContextKey, {
             <Brain :size="15" :stroke-width="1.9" />
           </button>
           <button
+            v-if="!guestMode"
             type="button"
             class="mini-action-btn"
             title="完整设置"
@@ -6231,7 +6416,7 @@ provide(ProjectsContextKey, {
             </svg>
             <span>对话舱</span>
           </button>
-          <button type="button" class="dock-btn" :class="{ active: activeCabin === 'workspace' }" @click="activeCabin = 'workspace'">
+          <button v-if="!guestMode" type="button" class="dock-btn" :class="{ active: activeCabin === 'workspace' }" @click="activeCabin = 'workspace'">
             <svg viewBox="0 0 24 24">
               <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
             </svg>
@@ -6243,7 +6428,7 @@ provide(ProjectsContextKey, {
             </svg>
             <span>记忆舱</span>
           </button>
-          <button type="button" class="dock-btn" @click="openCabin('inspector')">
+          <button v-if="!guestMode" type="button" class="dock-btn" @click="openCabin('inspector')">
             <svg viewBox="0 0 24 24">
               <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
             </svg>

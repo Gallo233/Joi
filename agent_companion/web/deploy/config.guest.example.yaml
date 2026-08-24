@@ -1,0 +1,93 @@
+app:
+  title: Joi Web Guest
+
+llm:
+  provider: openai_compatible
+  use_mock: false
+  mock_when_unconfigured: false
+  base_url: ${JOI_LLM_BASE_URL}
+  model: ${JOI_LLM_MODEL}
+  api_key: ${JOI_LLM_API_KEY}
+  temperature: 0.7
+  vision_enabled: false
+  expression_enabled: false
+
+tts:
+  enabled: true
+  provider: openai_compatible
+  base_url: ${JOI_TTS_BASE_URL}
+  api_key: ${JOI_TTS_API_KEY}
+  model: ${JOI_TTS_MODEL}
+  voice: ${JOI_TTS_VOICE}
+  audio_format: wav
+  timeout_seconds: 30
+
+asr:
+  enabled: true
+  provider: openai_compatible
+  base_url: ${JOI_ASR_BASE_URL}
+  model: ${JOI_ASR_MODEL}
+  api_key: ${JOI_ASR_API_KEY}
+  language: zh
+  max_seconds: 30
+  max_bytes: 12582912
+  timeout_seconds: 30
+
+realtime_voice:
+  enabled: true
+  provider: qwen_audio
+  url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
+  model: qwen-audio-3.0-realtime-flash
+  api_key: ${JOI_QWEN_REALTIME_API_KEY}
+  turn_detection: server_vad
+  threshold: 0.5
+  silence_duration_ms: 500
+  max_history_turns: 8
+  timeout_seconds: 15
+  max_session_seconds: 180
+
+language:
+  interface: zh
+  chat: follow
+
+# Only conversational, memory and voice capabilities remain enabled. The RPC
+# allowlist in Core is a separate hard boundary and cannot be relaxed here.
+skills:
+  joi.companion.chat:
+    enabled: true
+  joi.memory:
+    enabled: true
+  joi.voice_input:
+    enabled: true
+  joi.voice_output:
+    enabled: true
+  joi.agent_cli:
+    enabled: false
+  joi.codex:
+    enabled: false
+  joi.browser:
+    enabled: false
+  joi.computer_use:
+    enabled: false
+  joi.watch:
+    enabled: false
+  joi.ok_ww:
+    enabled: false
+  joi.runtime_config:
+    enabled: false
+  joi.local_files:
+    enabled: false
+  joi.mcp:
+    enabled: false
+
+characters:
+  - name: Joi
+    color: "#d76f8f"
+    sprite_color: "#224e66"
+    setting: |
+      Joi 是这个网站的访客角色。她可以自然对话并使用这次隔离体验中的记忆，
+      但不能查看或操作访客的设备，也不能运行文件、浏览器、代码或游戏工具。
+    active_voice_profile: zh
+    prompt_lang: zh
+    speech_speed: 1.2
+    speech_volume: 1.0

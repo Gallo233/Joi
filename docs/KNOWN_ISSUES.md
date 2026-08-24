@@ -7,6 +7,17 @@
 
 ## Open
 
+- Joi Web has passed local broker/Core/dual-WebSocket integration and browser
+  builds, but has not run behind Caddy on a real VPS/domain or inside the actual
+  personal-site repository. TLS, systemd hardening, real-provider billing,
+  microphone behavior, 50-session load and the final site layout remain
+  deployment-owner checks; none is claimed by the local evidence.
+- The curated JoiDebug seed preserves the asset set selected for Web, but its
+  own manifests do not yet establish public-deployment rights for every file:
+  AvatarSample_A says the bundled official VRMA samples must not be exported or
+  shared while present, and the Miku package labels itself local-test-only. The
+  seed report proves what was copied; it is not a licence grant. Resolve or
+  replace those rights before publishing the generated seed from a public VPS.
 - Only the earliest ten Minecraft primitives have ever run against a real world.
   The other fourteen actions, combat, screen evidence, plans, autonomy and the
   in-game chat channel are verified offline against the deterministic fake
@@ -46,6 +57,11 @@ These are the designed behaviour, recorded so they are not rediscovered as bugs.
   configured it falls back to OCR-based context rather than guessing.
 - The LLM planner requires a configured text model and falls back to the
   rule-based planner when there is none.
+- Anonymous Joi Web deliberately exposes only chat, character read/activation,
+  read-only memory and bounded voice. It does not expose screen observation,
+  Computer Use, browser, files, Codex, Minecraft, settings or BYOK. Its IP and
+  shared budget windows reset on a UTC day, and an expired session workspace is
+  deleted rather than restored.
 - Realtime Voice requires provider network access and a configured local
   GPT-SoVITS service. With the local voice unavailable, captions continue and
   Joi stays muted rather than substituting a system voice.

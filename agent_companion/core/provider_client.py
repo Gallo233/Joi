@@ -45,6 +45,16 @@ _LEDGER_LOCK = threading.Lock()
 _DEFAULT_LEDGER: ModelCallLedger | None = None
 
 
+class _CompletionText(str):
+    """String-compatible completion carrying private provider usage metadata."""
+
+    def __new__(cls, value: str, input_tokens: int = 0, output_tokens: int = 0) -> "_CompletionText":
+        instance = super().__new__(cls, value)
+        instance.input_tokens = max(0, int(input_tokens))
+        instance.output_tokens = max(0, int(output_tokens))
+        return instance
+
+
 def default_ledger() -> ModelCallLedger:
     """Process-wide ledger, so diagnostics can see calls from every component.
 
@@ -127,16 +137,35 @@ def chat_completion(
                 max_output_tokens=active_budget.output_budget or 600,
                 store=False,
             )
-            return str(getattr(response, "output_text", "") or "")
+            usage = getattr(response, "usage", None)
+            return _CompletionText(
+                str(getattr(response, "output_text", "") or ""),
+                getattr(usage, "input_tokens", 0),
+                getattr(usage, "output_tokens", 0),
+            )
         request: dict[str, Any] = {"model": getattr(endpoint, "model", ""), "messages": list(messages)}
         if temperature is not None:
             request["temperature"] = temperature
         if response_format is not None:
             request["response_format"] = response_format
-        if active_budget.output_budget:
-            request["max_tokens"] = active_budget.output_budget
+        output_budget = active_budget.output_budget
+        if not output_budget:
+            # Desktop keeps its existing provider behavior. Anonymous web
+            # sessions always cap the one provider path that otherwise has no
+            # output ceiling, matching the amount reserved by execute_call.
+            from agent_companion.core.guest_limits import active_guest_limits
+
+            if active_guest_limits() is not None:
+                output_budget = 600
+        if output_budget:
+            request["max_tokens"] = output_budget
         response = client.chat.completions.create(**request)
-        return response.choices[0].message.content or ""
+        usage = getattr(response, "usage", None)
+        return _CompletionText(
+            response.choices[0].message.content or "",
+            getattr(usage, "prompt_tokens", 0),
+            getattr(usage, "completion_tokens", 0),
+        )
 
     return execute_call(
         route,

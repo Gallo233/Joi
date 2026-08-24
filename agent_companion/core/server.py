@@ -57,6 +57,8 @@ from agent_companion.core.minecraft_skills import MinecraftSkillLibrary
 from agent_companion.core.minecraft_autonomy import MinecraftAutonomyTicker
 from agent_companion.core.platform_factory import get_screen_observer
 from agent_companion.core.model_call import CallBudget
+from agent_companion.core.character_motion import motion_catalog
+from agent_companion.core.guest_limits import GuestLimits, configure_guest_limits
 from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.services import ArtifactService, BackgroundContextService, MemoryService
@@ -132,6 +134,10 @@ class JsonRpcBridge:
         instance_id: str = "",
         ready_file: Path | None = None,
         parent_pid: int = 0,
+        public_asset_base: str = "",
+        allowed_origins: tuple[str, ...] = (),
+        allowed_methods: tuple[str, ...] = (),
+        guest_limits: GuestLimits | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.host = host
@@ -141,6 +147,12 @@ class JsonRpcBridge:
         self.instance_id = instance_id.strip() or f"core-{uuid.uuid4().hex}"
         self.ready_file = ready_file.expanduser().resolve() if ready_file else None
         self.parent_pid = max(0, int(parent_pid or 0))
+        self.public_asset_base = _safe_public_http_base(public_asset_base)
+        self.allowed_origins = tuple(dict.fromkeys(filter(None, (_safe_origin(origin) for origin in allowed_origins))))
+        self.allowed_methods = frozenset(method.strip() for method in allowed_methods if method.strip())
+        self.guest_mode = bool(self.allowed_methods)
+        self.guest_limits = guest_limits if guest_limits is not None and guest_limits.enabled else None
+        configure_guest_limits(self.guest_limits)
         self._asset_server: http.server.ThreadingHTTPServer | None = None
         self._asset_thread: threading.Thread | None = None
         self.app = AgentCompanionApp(self.workspace)
@@ -213,6 +225,8 @@ class JsonRpcBridge:
                 skill_index=self._minecraft_skill_index,
                 transcript_sink=self._persist_realtime_transcripts,
                 caption_repair=self._realtime_caption,
+                reserve_session=self.guest_limits.reserve_realtime if self.guest_limits else None,
+                finish_session=self.guest_limits.finish_realtime if self.guest_limits else None,
             )
         else:
             self.realtime_voice = realtime_voice_coordinator
@@ -264,7 +278,12 @@ class JsonRpcBridge:
         self.app.bus.subscribe(self._on_event)
         self._start_character_asset_server()
         try:
-            async with websockets.serve(self._client_handler, self.host, self.port):
+            async with websockets.serve(
+                self._client_handler,
+                self.host,
+                self.port,
+                origins=list(self.allowed_origins) if self.allowed_origins else None,
+            ):
                 print(f"Joi Core listening on ws://{self.host}:{self.port}")
                 self._write_ready_file()
                 pump = asyncio.create_task(self._event_pump())
@@ -411,6 +430,10 @@ class JsonRpcBridge:
         try:
             request = parse_request(raw)
             request_id = request.request_id
+            if not self._rpc_method_allowed(request.method):
+                # Match an unknown method so the public boundary doesn't expose
+                # which local-only capabilities exist behind it.
+                raise RpcMethodNotFound(request.method)
             owner_id = self._client_owners.get(websocket, "")
             if request.method.startswith("voice.realtime."):
                 result = await self._dispatch_realtime_voice(owner_id, request.method, request.params)
@@ -425,7 +448,16 @@ class JsonRpcBridge:
         except RpcMethodNotFound as exc:
             await websocket.send(self._error(request_id, -32601, f"unknown method: {exc.method}"))
         except Exception as exc:
-            await websocket.send(self._error(request_id, -32603, str(exc)[:500]))
+            message = "internal error" if self.guest_mode else str(exc)[:500]
+            await websocket.send(self._error(request_id, -32603, message))
+
+    def _rpc_method_allowed(self, method: str) -> bool:
+        if not self.allowed_methods:
+            return True
+        return method in self.allowed_methods or any(
+            allowed.endswith(".*") and method.startswith(allowed[:-1])
+            for allowed in self.allowed_methods
+        )
 
     def _build_rpc_router(self) -> JsonRpcRouter:
         router = JsonRpcRouter()
@@ -670,6 +702,8 @@ class JsonRpcBridge:
 
         if not owner_id:
             return {"ok": False, "error": "realtime_owner_required"}
+        if self.guest_mode and method == "voice.realtime.game.control":
+            return {"ok": False, "error": "guest_method_forbidden"}
         if method == "voice.realtime.session.start":
             allowed = {"mode", "minecraft_session_id", "disclosure_accepted"}
             if set(params) - allowed or params.get("disclosure_accepted") is not True:
@@ -678,6 +712,8 @@ class JsonRpcBridge:
             minecraft_session_id = str(params.get("minecraft_session_id") or "")
             if mode not in {"conversation", "minecraft"}:
                 return {"ok": False, "error": "realtime_mode_invalid"}
+            if self.guest_mode and mode != "conversation":
+                return {"ok": False, "error": "guest_method_forbidden"}
             if mode == "conversation" and minecraft_session_id:
                 return {"ok": False, "error": "realtime_binding_invalid"}
 
@@ -1718,6 +1754,7 @@ class JsonRpcBridge:
     def character_list_command(self) -> dict[str, Any]:
         result = self._character_command(self.app.character_packages.list)
         for character in result.get("characters") or []:
+            self._attach_character_model(character)
             self._attach_character_image(character, "avatar_path", "avatar_url", "avatar_data_url")
             self._attach_character_image(character, "portrait_path", "portrait_url", "portrait_data_url")
         return result
@@ -1726,6 +1763,7 @@ class JsonRpcBridge:
         character_id = str((params or {}).get("character_id") or "")
         result = self._character_command(lambda: self.app.character_packages.detail(character_id))
         character = result.get("character") if isinstance(result.get("character"), dict) else {}
+        self._attach_character_model(character)
         self._attach_character_image(character, "avatar_path", "avatar_url", "avatar_data_url")
         self._attach_character_image(character, "portrait_path", "portrait_url", "portrait_data_url")
         return result
@@ -1970,6 +2008,19 @@ class JsonRpcBridge:
             url = self._character_asset_url(path)
             if url:
                 row["animation_url"] = url
+        # Built after the URLs land, because a binding with neither a clip URL
+        # nor a Live2D group is not something the character can perform.
+        payload["motion_catalog"] = motion_catalog(rows)
+
+    def _attach_character_model(self, payload: dict[str, Any]) -> None:
+        """Give browsers a session-scoped model URL without leaking a local path."""
+
+        path = Path(str(payload.get("model_path") or ""))
+        url = self._character_asset_url(path)
+        if url:
+            payload["model_url"] = url
+        if self.guest_mode:
+            payload.pop("model_path", None)
 
     def _attach_character_image(
         self,
@@ -2334,6 +2385,16 @@ class JsonRpcBridge:
         thread = self.collaboration.get_thread(context["thread_id"])
         if thread and thread.title == "新对话":
             self.collaboration.update_thread(thread.id, title=text[:36])
+        # Every local-capability route below reads the message text, not the RPC
+        # name, so the method allowlist cannot reach them: `user.message` is the
+        # one method a guest must have. `CodexRuntimeSession.should_handle` in
+        # particular is not a "does this look like code" heuristic -- it reports
+        # whether Codex is the selected runtime, which is the default -- so an
+        # ungated guest sends every sentence into the local coding agent instead
+        # of into conversation. A guest Core takes the conversational path only.
+        if self.guest_mode:
+            sequence, events = self._run_serial("user.message", lambda: self.app.handle_user_text(text))
+            return {"ok": True, "submitted": True, "sequence": sequence, "events": [event.to_dict() for event in events]}
         # Before the Computer Use session starts: a Minecraft goal can contain
         # "打开" ("帮我在 Minecraft 里打开箱子") and would otherwise leave a
         # desktop-automation session behind for work that never touches the
@@ -2955,17 +3016,24 @@ class JsonRpcBridge:
         }
 
     def _realtime_voice_payload(self) -> dict[str, Any]:
-        return {
+        max_session_seconds = max(0, int(self.realtime_voice_state.max_session_seconds or 0))
+        if self.guest_limits is not None and self.guest_limits.realtime_session_seconds:
+            max_session_seconds = self.guest_limits.realtime_session_seconds
+        payload = {
             "enabled": self.realtime_voice_state.enabled,
             "configured": self.realtime_voice_state.configured,
             "provider": _safe_realtime_metadata(self.realtime_voice_state.provider),
             "model": _safe_realtime_metadata(self.realtime_voice_state.model),
             "output": "local_tts",
             "timeout_seconds": min(120, max(1, int(self.realtime_voice_state.timeout_seconds or 15))),
+            "max_session_seconds": max_session_seconds,
             "error": _safe_realtime_error(self.realtime_voice_state.error),
-            "modes": ["conversation", "minecraft"],
-            "screen_evidence": self._screen_evidence_route(),
+            "modes": ["conversation"] if self.guest_mode else ["conversation", "minecraft"],
+            "screen_evidence": "off" if self.guest_mode else self._screen_evidence_route(),
         }
+        if self.guest_limits is not None:
+            payload["remaining_total_seconds"] = self.guest_limits.realtime_remaining_seconds()
+        return payload
 
     def _screen_evidence_route(self) -> str:
         """Where a captured game frame actually goes, so consent can say so.
@@ -3092,13 +3160,14 @@ class JsonRpcBridge:
     def _ready_payload(self) -> dict[str, Any]:
         tts_status = self.tts.status_payload()
         memory_status = self.app.memory.status()
+        asset_base = getattr(self, "public_asset_base", "") or f"http://{self.host}:{self.asset_port}"
         payload: dict[str, Any] = {
             "product": JOI_CORE_PRODUCT,
             "protocol_version": JOI_CORE_PROTOCOL_VERSION,
             "instance_id": self.instance_id,
             "health": {
-                "livez": f"http://{self.host}:{self.asset_port}/livez",
-                "readyz": f"http://{self.host}:{self.asset_port}/readyz",
+                "livez": f"{asset_base}/livez",
+                "readyz": f"{asset_base}/readyz",
             },
             "workspace_label": self.workspace.name,
             "workspace_bound": True,
@@ -3154,25 +3223,28 @@ class JsonRpcBridge:
             )
             if greeting:
                 character_payload["greeting"] = greeting
-            character_payload["model_url"] = self._character_asset_url(Path(str(character_payload.get("model_path") or "")))
+            self._attach_character_model(character_payload)
             self._attach_character_animations(character_payload)
             self._attach_character_expression_images(character_payload)
             self._attach_character_image(character_payload, "avatar_path", "avatar_url", "avatar_data_url")
             self._attach_character_image(character_payload, "portrait_path", "portrait_url", "portrait_data_url")
             self._attach_character_image(character_payload, "background_path", "background_url", "background_data_url")
             character_payload["sprites"] = [
-                {
-                    "id": str(sprite.get("id") or "1"),
-                    "label": str(sprite.get("label") or "default"),
-                    "image_data_url": self._image_data_url(Path(str(sprite.get("image_path") or ""))),
-                }
+                self._public_character_sprite(sprite)
                 for sprite in character_payload.get("sprites") or []
                 if Path(str(sprite.get("image_path") or "")).is_file()
             ]
             character_payload.pop("model_path", None)
             payload["character"] = character_payload
             public_characters: list[dict[str, Any]] = []
-            for row in self.app.character_packages.list():
+            listed_characters = self.app.character_packages.list()
+            for row in listed_characters.get("characters") or []:
+                self._attach_character_model(row)
+                # Ready is broadcast to every connected view and has never
+                # needed a filesystem path. Desktop may still request that
+                # path through character.list for convertFileSrc(), while the
+                # broadcast remains a safe display projection.
+                row.pop("model_path", None)
                 self._attach_character_image(row, "avatar_path", "avatar_url", "avatar_data_url")
                 self._attach_character_image(row, "portrait_path", "portrait_url", "portrait_data_url")
                 public_characters.append(row)
@@ -3180,6 +3252,17 @@ class JsonRpcBridge:
         except Exception:
             pass
         config = load_workspace_config(self.workspace)
+        if self.guest_mode:
+            allowed_ready_fields = {
+                "product", "protocol_version", "instance_id", "health",
+                "workspace_label", "workspace_bound", "event_cursor",
+                "active_approval_ids", "asr", "realtime_voice", "tts",
+                "language", "memory", "collaboration", "character", "characters",
+            }
+            payload = {key: value for key, value in payload.items() if key in allowed_ready_fields}
+            payload["guest"] = self.guest_limits.snapshot() if self.guest_limits else {"enabled": True}
+            return payload
+
         if config is None:
             return payload
         try:
@@ -3187,6 +3270,18 @@ class JsonRpcBridge:
         except Exception:
             return payload
         return payload
+
+    def _public_character_sprite(self, sprite: dict[str, Any]) -> dict[str, str]:
+        path = Path(str(sprite.get("image_path") or ""))
+        url = self._character_asset_url(path)
+        return {
+            "id": str(sprite.get("id") or "1"),
+            "label": str(sprite.get("label") or "default"),
+            "image_url": url,
+            # Desktop/test runtimes without the asset service keep their
+            # existing inline-image fallback. A guest never receives both.
+            "image_data_url": "" if url else self._image_data_url(path),
+        }
 
     def _agent_cli_takeover_enabled(self, text: str) -> bool:
         if not bool(self.agent_cli_takeover.get("enabled")):
@@ -3222,6 +3317,8 @@ class JsonRpcBridge:
             world_memory=self.minecraft.world_memory,
             transcript_sink=self._persist_realtime_transcripts,
             caption_repair=self._realtime_caption,
+            reserve_session=self.guest_limits.reserve_realtime if self.guest_limits else None,
+            finish_session=self.guest_limits.finish_realtime if self.guest_limits else None,
         )
         self.tts.reload()
         self.watch_commentary.reload()
@@ -3235,6 +3332,7 @@ class JsonRpcBridge:
             directory=str(self.app.character_packages.packages_dir),
             health_provider=self._health_payload,
             session_token=self.session_token,
+            allowed_origins=self.allowed_origins,
         )
         try:
             server = http.server.ThreadingHTTPServer((self.host, self.asset_port), handler)
@@ -3307,10 +3405,11 @@ class JsonRpcBridge:
         except ValueError:
             return ""
         relative_url = urllib.parse.quote(relative, safe="/")
+        base = getattr(self, "public_asset_base", "") or f"http://{self.host}:{self.asset_port}"
         if self.session_token:
             token = urllib.parse.quote(self.session_token, safe="")
-            return f"http://{self.host}:{self.asset_port}/characters/{token}/{relative_url}"
-        return f"http://{self.host}:{self.asset_port}/characters/{relative_url}"
+            return f"{base}/characters/{token}/{relative_url}"
+        return f"{base}/characters/{relative_url}"
 
     @staticmethod
     def _image_data_url(path: Path) -> str:
@@ -3342,10 +3441,12 @@ class _CharacterAssetRequestHandler(http.server.SimpleHTTPRequestHandler):
         *args: Any,
         health_provider: Callable[[bool], dict[str, Any]],
         session_token: str = "",
+        allowed_origins: tuple[str, ...] = (),
         **kwargs: Any,
     ) -> None:
         self.health_provider = health_provider
         self.session_token = session_token
+        self.allowed_origins = allowed_origins
         super().__init__(*args, **kwargs)
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
@@ -3412,7 +3513,13 @@ class _CharacterAssetRequestHandler(http.server.SimpleHTTPRequestHandler):
         return None
 
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = str(self.headers.get("Origin") or "")
+        if self.allowed_origins:
+            if origin in self.allowed_origins:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
         self.send_header("Cache-Control", "private, no-store" if self.session_token else "public, max-age=300")
         super().end_headers()
@@ -3430,6 +3537,29 @@ def _websocket_session_token(websocket: Any) -> str:
         request_path = getattr(websocket, "path", "")
     parsed = urllib.parse.urlsplit(str(request_path or ""))
     return urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
+
+
+def _safe_origin(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _safe_public_http_base(value: str) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        return ""
+    if parsed.query or parsed.fragment:
+        return ""
+    return raw
 
 
 def _decode_audio_base64(audio_base64: str) -> bytes:
@@ -3822,7 +3952,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--instance-id", default=os.environ.get("JOI_CORE_INSTANCE_ID", ""))
     parser.add_argument("--ready-file", default=os.environ.get("JOI_CORE_READY_FILE", ""))
     parser.add_argument("--parent-pid", type=int, default=0)
+    parser.add_argument("--public-asset-base", default="")
+    parser.add_argument("--allowed-origins", default="", help="Comma-separated browser origins")
+    parser.add_argument("--allowed-methods", default="", help="Comma-separated JSON-RPC allowlist")
+    parser.add_argument("--guest-session-token-limit", type=int, default=0)
+    parser.add_argument("--guest-daily-token-limit", type=int, default=0)
+    parser.add_argument("--guest-realtime-session-seconds", type=int, default=0)
+    parser.add_argument("--guest-realtime-total-seconds", type=int, default=0)
+    parser.add_argument("--guest-daily-realtime-seconds", type=int, default=0)
+    parser.add_argument("--guest-ledger", default="")
+    parser.add_argument("--guest-usage-file", default="")
     args = parser.parse_args(argv)
+    guest_limits = GuestLimits(
+        session_token_limit=args.guest_session_token_limit,
+        daily_token_limit=args.guest_daily_token_limit,
+        realtime_session_seconds=args.guest_realtime_session_seconds,
+        realtime_total_seconds=args.guest_realtime_total_seconds,
+        daily_realtime_seconds=args.guest_daily_realtime_seconds,
+        ledger_path=Path(args.guest_ledger) if args.guest_ledger else None,
+        usage_path=Path(args.guest_usage_file) if args.guest_usage_file else None,
+    )
     bridge = JsonRpcBridge(
         Path(args.workspace),
         args.host,
@@ -3831,6 +3980,10 @@ def main(argv: list[str] | None = None) -> int:
         instance_id=args.instance_id,
         ready_file=Path(args.ready_file) if args.ready_file else None,
         parent_pid=args.parent_pid,
+        public_asset_base=args.public_asset_base,
+        allowed_origins=tuple(filter(None, (part.strip() for part in args.allowed_origins.split(",")))),
+        allowed_methods=tuple(filter(None, (part.strip() for part in args.allowed_methods.split(",")))),
+        guest_limits=guest_limits,
     )
     asyncio.run(bridge.serve())
     return 0

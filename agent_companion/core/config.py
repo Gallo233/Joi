@@ -65,6 +65,37 @@ def _expand_env(value: Any) -> Any:
     return value
 
 
+# An API key keeps its unexpanded reference on purpose: every `is_configured`
+# check reads the `${` prefix to tell "the operator has not set this yet" from
+# "the operator deliberately left it blank", and both of those are useful to
+# report differently. Nothing else benefits from that distinction.
+_SECRET_FIELD_NAMES = frozenset({"api_key"})
+
+
+def _drop_unresolved_references(value: Any, field: str = "") -> Any:
+    """Blank a `${VAR}` that nothing resolved, so it is never used as a value.
+
+    `_expand_env` leaves the reference in place when neither the environment
+    nor the keyring has it. For a key that is the right call. For an endpoint
+    it is not: `(config.tts.base_url or DEFAULT_BASE_URL)` treats the literal
+    string `${JOI_TTS_BASE_URL}` as a perfectly good URL, so a provider whose
+    client would have defaulted its own endpoint instead posts to a hostname
+    made of punctuation. The readiness check passes -- MiMo's asks only for a
+    key -- and the failure surfaces much later as `tts_failed`, with the actual
+    cause nowhere in the message.
+    """
+
+    if isinstance(value, str):
+        if field in _SECRET_FIELD_NAMES:
+            return value
+        return "" if _ENV_REFERENCE_RE.fullmatch(value.strip()) else value
+    if isinstance(value, list):
+        return [_drop_unresolved_references(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _drop_unresolved_references(item, str(key)) for key, item in value.items()}
+    return value
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
@@ -500,6 +531,9 @@ class RealtimeVoiceConfig:
     silence_duration_ms: int = 500
     max_history_turns: int = 8
     timeout_seconds: int = 15
+    # Zero preserves the unlimited desktop behavior. The anonymous web profile
+    # sets this to a positive value and Core owns the timer.
+    max_session_seconds: int = 0
 
     @property
     def is_configured(self) -> bool:
@@ -588,6 +622,7 @@ def load_app_config(path: Path) -> AppConfig:
         if isinstance(secrets, dict):
             raw = _deep_merge(raw, secrets)
     raw = _expand_env(raw)
+    raw = _drop_unresolved_references(raw)
     managed_llm_key = managed_secret(LLM_API_KEY_ENV)
     if managed_llm_key:
         llm_section = raw.setdefault("llm", {})
@@ -700,6 +735,7 @@ def load_app_config(path: Path) -> AppConfig:
                 1, min(50, int(realtime_voice_raw.get("max_history_turns", 8) or 8))
             ),
             timeout_seconds=min(120, max(1, int(realtime_voice_raw.get("timeout_seconds", 15) or 15))),
+            max_session_seconds=max(0, min(3600, int(realtime_voice_raw.get("max_session_seconds", 0) or 0))),
         ),
         ocr=OcrConfig(
             timeout_seconds=max(1, int(ocr_raw.get("timeout_seconds", 5) or 5)),

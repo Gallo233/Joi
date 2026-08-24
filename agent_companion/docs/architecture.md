@@ -39,3 +39,9 @@ The Tauri/Vue shell consumes `AgentEvent` objects and renders:
 - approval prompts
 
 The shell should not parse raw tool output. It receives already-separated display and voice fields from core.
+
+The anonymous website reuses this Shell through a browser platform adapter and
+two iframes connected to one isolated Core. It is a deliberately narrower
+transport profile, not another runtime: Core enforces Origin, RPC and paid-usage
+limits before the ordinary application layers. See
+`docs/WEB_EXPERIENCE_ARCHITECTURE.md` for the broker and deployment boundary.

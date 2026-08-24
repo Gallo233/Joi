@@ -32,6 +32,7 @@ MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_UNPACKED_BYTES = 512 * 1024 * 1024
 MAX_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_FILES = 2_000
+SKIP_BUILTIN_MARKER = ".skip-builtin-character"
 
 # Authored motion clips: `.vrma` for VRM, `.vmd` for MMD. Both are declarative
 # bone and morph tracks played against the model's own rig -- data, not code, so
@@ -1514,6 +1515,12 @@ class CharacterPackageManager:
         return candidate if candidate.is_file() else None
 
     def _bootstrap_builtin(self) -> None:
+        # A curated guest seed may intentionally expose only an explicit
+        # package allowlist. The marker lives inside that clean seed and is
+        # never written by the desktop app, so normal Joi workspaces retain the
+        # authored built-in character and all existing migration behaviour.
+        if (self.root / SKIP_BUILTIN_MARKER).is_file():
+            return
         target = self.packages_dir / "builtin-hikari"
         manifest_path = target / "manifest.json"
         if manifest_path.is_file():

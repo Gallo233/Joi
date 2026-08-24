@@ -25,7 +25,7 @@ import type {
 } from '../protocol'
 import { asRecord } from './safeRecord'
 
-export function useMemory(client: CoreClient, errorText: Ref<string>) {
+export function useMemory(client: CoreClient, errorText: Ref<string>, readonlyMode = false) {
   const pendingMemories = computed(() => (memoryStatus.value?.pending || []).filter((item) => item.status === 'pending'))
   const recentMemories = computed(() => memoryStatus.value?.recent || [])
   const memoryStatus = ref<MemoryStatus | null>(null)
@@ -111,6 +111,10 @@ export function useMemory(client: CoreClient, errorText: Ref<string>) {
   }
 
   async function refreshMemoryWorkspace() {
+    if (readonlyMode) {
+      await loadMemoryPage(true)
+      return
+    }
     await Promise.all([refreshMemoryStatus(), loadMemoryPage(true), browseMemoryVault()])
   }
 
@@ -175,6 +179,7 @@ export function useMemory(client: CoreClient, errorText: Ref<string>) {
   }
 
   async function saveMemoryEdit(memoryId: number) {
+    if (readonlyMode) return
     const text = editingMemoryText.value.trim()
     if (!text) return
     try {
@@ -210,6 +215,7 @@ export function useMemory(client: CoreClient, errorText: Ref<string>) {
   }
 
   async function browseMemoryVault() {
+    if (readonlyMode) return
     try {
       const result = (await client.memoryBrowseVault()) as { ok?: boolean; vault?: MemoryVault; memory?: MemoryStatus; error?: string }
       if (result.memory) memoryStatus.value = result.memory
@@ -221,6 +227,7 @@ export function useMemory(client: CoreClient, errorText: Ref<string>) {
   }
 
   async function saveMemoryCandidate(candidateId: number) {
+    if (readonlyMode) return
     try {
       const result = (await client.memorySaveCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
       if (result.memory) memoryStatus.value = result.memory
@@ -233,6 +240,7 @@ export function useMemory(client: CoreClient, errorText: Ref<string>) {
   }
 
   async function rejectMemoryCandidate(candidateId: number) {
+    if (readonlyMode) return
     try {
       const result = (await client.memoryRejectCandidate(candidateId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
       if (result.memory) memoryStatus.value = result.memory
@@ -244,6 +252,7 @@ export function useMemory(client: CoreClient, errorText: Ref<string>) {
   }
 
   async function toggleMemoryEnabled(event: Event) {
+    if (readonlyMode) return
     const enabled = Boolean((event.target as HTMLInputElement | null)?.checked)
     try {
       const result = (await client.memorySetEnabled(enabled)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
@@ -255,6 +264,7 @@ export function useMemory(client: CoreClient, errorText: Ref<string>) {
   }
 
   async function deleteMemory(memoryId: number) {
+    if (readonlyMode) return
     try {
       const result = (await client.memoryDelete(memoryId)) as { ok?: boolean; memory?: MemoryStatus; error?: string }
       if (result.memory) memoryStatus.value = result.memory
@@ -267,6 +277,7 @@ export function useMemory(client: CoreClient, errorText: Ref<string>) {
   }
 
   async function clearMemory() {
+    if (readonlyMode) return
     const count = memorySavedCount.value + memoryPendingCount.value
     if (!count) return
     if (!window.confirm(`清空 ${count} 条记忆和待确认候选？此操作不会删除手动编辑区。`)) return

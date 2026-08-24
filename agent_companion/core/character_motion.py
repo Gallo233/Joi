@@ -115,6 +115,43 @@ _ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def motion_catalog(bound: Any) -> list[dict[str, str]]:
+    """The motions a character can perform, with a phrase that asks for each.
+
+    The vocabulary and the phrases that reach it are both here, and a UI that
+    offers them needs both. Rebuilding this table in the Shell is how the two
+    drift: a motion renamed in `MOTION_SPECS` would keep a button that no
+    longer triggers anything, which is worse than no button.
+
+    `bound` is the character's own motion bindings, so the result is what *this*
+    character can actually do -- never the whole vocabulary. `idle` is omitted:
+    it is a resting state, not a thing to ask for.
+    """
+
+    if not isinstance(bound, list):
+        return []
+    triggers = {name: phrases[0] for name, phrases in _ALIASES if phrases}
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in bound:
+        if not isinstance(entry, dict):
+            continue
+        name = normalize_character_motion(entry.get("id") or entry.get("motion") or entry.get("name"))
+        if not name or name == "idle" or name in seen:
+            continue
+        # A binding that names no clip and no Live2D group cannot be performed,
+        # so offering it would produce a reply and no movement.
+        if not (entry.get("animation_url") or entry.get("motion_group")):
+            continue
+        spec = MOTION_SPECS.get(name)
+        trigger = triggers.get(name)
+        if not spec or not trigger:
+            continue
+        seen.add(name)
+        rows.append({"motion": name, "label": spec.label, "trigger": trigger})
+    return rows
+
+
 def normalize_character_motion(value: Any) -> str:
     text = re.sub(r"[\s-]+", "_", str(value or "").strip().casefold())
     return text if text in MOTION_SPECS else ""

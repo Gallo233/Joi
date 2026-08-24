@@ -12,6 +12,7 @@
     "test:vrm-pose": "node --test --experimental-strip-types tests/vrm-pose.test.mjs",
     "dev": "npm run live2d:sync -- --optional && vite --host 127.0.0.1",
     "build": "npm run live2d:sync -- --optional && vue-tsc --noEmit && vite build",
+    "build:web": "npm run build && node scripts/collect-web-embed.mjs",
     "build:release": "npm run core:bundle && npm run live2d:sync && npm run assets:verify && vue-tsc --noEmit && vite build",
     "tauri": "tauri"
   },

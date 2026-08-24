@@ -1,0 +1,6 @@
+websockets>=12.0
+PyYAML>=6.0
+openai>=1.0
+# Screenshot decoding for the visual paths. Guest sessions never capture a
+# screen, but the observer is imported at module scope on the way in.
+Pillow>=10.0.0

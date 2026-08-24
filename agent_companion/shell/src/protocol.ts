@@ -672,6 +672,8 @@ export interface CharacterSummary {
   model_type?: StageModelFormat
   /** Present when the package ships a model file; used to draw a thumbnail. */
   model_path?: string
+  /** Session-scoped browser URL for the model; preferred over a local path. */
+  model_url?: string
   avatar_path?: string
   avatar_url?: string
   avatar_data_url?: string
@@ -824,6 +826,8 @@ export interface CharacterRuntime extends CharacterSummary {
     motion_group?: string
     motion_index?: number | string
   }>
+  /** Performable motions with the phrase that triggers each, built by Core. */
+  motion_catalog?: Array<{ motion: string; label: string; trigger: string }>
   motion_mappings?: Array<{
     id?: string
     name?: string
@@ -845,6 +849,7 @@ export interface CharacterRuntime extends CharacterSummary {
   sprites?: Array<{
     id: string
     label?: string
+    image_url?: string
     image_data_url?: string
   }>
 }
@@ -891,6 +896,10 @@ export interface CoreReadyPayload {
     model?: string
     output?: 'local_tts' | string
     timeout_seconds?: number
+    /** Server-enforced ceiling for one realtime session. */
+    max_session_seconds?: number
+    /** Server-enforced allowance still available to this guest workspace. */
+    remaining_total_seconds?: number
     error?: string
     modes?: Array<'conversation' | 'minecraft' | string>
     // Where a captured game frame actually goes, so the microphone disclosure

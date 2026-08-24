@@ -1,0 +1,73 @@
+# The whole visitor-facing stack: Caddy in front, the site, and Joi.
+#
+# Paste this into 1Panel / Coolify / Dokploy, or run it on a bare box with
+# `docker compose up -d`. Either way the three services are the same three
+# things the systemd install sets up by hand.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates survive a redeploy. Losing this volume means asking
+      # Let's Encrypt for a fresh certificate on every restart, which hits a
+      # rate limit faster than you would expect.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [site, joi]
+
+  site:
+    # The site repository builds itself; `public/joi-shell` is committed, so
+    # the shell ships with it and cannot fall out of step with the page.
+    build:
+      context: ${JOI_SITE_REPO:-../joi-doorway}
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: [./site.env]
+    expose: ["3000"]
+
+  joi:
+    build:
+      # The Joi repository root, because the image copies agent_companion/.
+      context: ../../..
+      dockerfile: agent_companion/web/deploy/Dockerfile
+    restart: unless-stopped
+    env_file: [./joi-web.env]
+    expose: ["9080"]
+    volumes:
+      - ./joi-guest.yaml:/etc/joi-guest.yaml:ro
+      # Built by prepare_seed on the host. Read-only here: sessions hardlink
+      # character packages out of it and must never write back.
+      - ${JOI_SEED_DIR:-./seed}:/opt/joi-web-seed:ro
+      - joi-sessions:/var/lib/joi-web
+    command:
+      - --host=0.0.0.0
+      - --port=9080
+      - --public-base=${JOI_PUBLIC_BASE:?set JOI_PUBLIC_BASE in .env}
+      - --allowed-origins=${JOI_ALLOWED_ORIGINS:?set JOI_ALLOWED_ORIGINS in .env}
+      - --guest-config-template=/etc/joi-guest.yaml
+      - --seed-workspace=/opt/joi-web-seed
+      - --sessions-root=/var/lib/joi-web/sessions
+      - --state-root=/var/lib/joi-web/state
+      - --core-python=python
+      - --max-concurrent=60
+      - --ttl-seconds=900
+      - --ip-daily-sessions=5
+      - --session-token-limit=30000
+      - --daily-token-limit=1500000
+      - --realtime-session-seconds=180
+      - --realtime-total-seconds=600
+      - --daily-realtime-seconds=10800
+    # One Core per visitor, each a process with threads of its own.
+    pids_limit: 4096
+    mem_limit: 3g
+
+volumes:
+  caddy-data:
+  caddy-config:
+  joi-sessions:

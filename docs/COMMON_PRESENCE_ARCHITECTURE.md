@@ -2,6 +2,11 @@
 
 本文件记录 2026-07 的核心能力重塑落地状态。目标是让项目、对话、角色和能力会话成为同一个可恢复上下文，而不是把 Computer Use、陪看、Skill 和游戏做成互不相干的按钮。
 
+网站体验复用这份 presence，而不是维护 Web 专用副本：full 与 compact 两个 iframe
+连接同一单租户 Core，`agent.event` 广播让角色、对话与记忆自然一致；父页面只协调
+可见性、几何和跨 iframe 导航。其隔离与公开边界见
+[WEB_EXPERIENCE_ARCHITECTURE.md](WEB_EXPERIENCE_ARCHITECTURE.md)。
+
 ## 数据与迁移
 
 `CollaborationStore` 使用 SQLite 保存项目、对话、资源绑定、事件、能力会话、权限、动作回执、Skill 安装/运行/草稿。Tauri 启动时通过 `JOI_DATA_HOME` 指向 macOS 应用数据目录；源码运行和测试继续使用工作区数据目录。
