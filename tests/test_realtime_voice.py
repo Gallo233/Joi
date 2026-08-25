@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -853,6 +854,98 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         self.assertEqual(caption, "我们来看看今天的安排。")
         session.stop()
 
+    def _spoken_turn(self, session: QwenRealtimeSession, said: str, answer: str) -> None:
+        """One mic turn whose transcription is known, as a live turn's always is."""
+
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_started", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.speech_stopped", "item_id": "user-item"})
+        session.handle_provider_event_for_test({"type": "input_audio_buffer.committed", "item_id": "user-item"})
+        session.handle_provider_event_for_test(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "user-item",
+                "transcript": said,
+            }
+        )
+        session.handle_provider_event_for_test({"type": "response.created", "response": {"id": "split-response"}})
+        _add_output_item(session, "split-response", "split-item", "message")
+        session.handle_provider_event_for_test(
+            {"type": "response.text.done", "response_id": "split-response", "item_id": "split-item", "text": answer}
+        )
+        session.handle_provider_event_for_test(
+            {"type": "response.done", "response": {"id": "split-response", "status": "completed"}}
+        )
+
+    def test_a_following_chat_language_is_the_one_the_user_just_spoke(self) -> None:
+        """"follow" is a setting, not a language, and must not be passed on as one.
+
+        It used to reach the repair call verbatim, which asked the text model to
+        rewrite a Japanese line into a language named "follow". The model picked
+        English, so a visitor who spoke Chinese read English back.
+        """
+
+        repairs: list[tuple[str, str]] = []
+
+        def repair(spoken: str, locale: str) -> str:
+            repairs.append((spoken, locale))
+            return "我们来看看今天的安排。"
+
+        session, _socket, _connector, events = self._session(
+            voice_locale="ja", chat_locale="follow", caption_repair=repair
+        )
+        self.assertTrue(session.start()["ok"])
+        self._spoken_turn(session, "今天有什么安排？", "今日の予定を見ましょう。")
+        _wait_until(lambda: any(row.get("type") == "assistant_transcript" for row in events))
+        spoken, caption = self._channels(events)
+        self.assertEqual(spoken, "今日の予定を見ましょう。")
+        self.assertEqual(caption, "我们来看看今天的安排。")
+        self.assertEqual(repairs, [("今日の予定を見ましょう。", "zh")])
+        session.stop()
+
+    def test_speaking_the_characters_own_language_needs_no_second_line(self) -> None:
+        """The web guest's ordinary case: a Chinese character, a Chinese visitor.
+
+        There is no second language to write, so the spoken line is the caption.
+        Sending it through a rewrite would spend a model call to restate a
+        sentence in the language it is already in, and risk changing it.
+        """
+
+        repairs: list[tuple[str, str]] = []
+
+        def repair(spoken: str, locale: str) -> str:
+            repairs.append((spoken, locale))
+            return "改写过的句子"
+
+        session, _socket, _connector, events = self._session(
+            voice_locale="zh", chat_locale="follow", caption_repair=repair
+        )
+        self.assertTrue(session.start()["ok"])
+        self._spoken_turn(session, "听得见吗？", "听得见的，我在这里。")
+        spoken, caption = self._channels(events)
+        self.assertEqual(spoken, "听得见的，我在这里。")
+        self.assertEqual(caption, "听得见的，我在这里。")
+        self.assertEqual(repairs, [])
+        session.stop()
+
+    def test_a_language_that_cannot_be_named_shows_the_spoken_line(self) -> None:
+        # Latin script alone does not say which language it is, and a rewrite
+        # into a guess is worse than the line the model actually wrote.
+        repairs: list[tuple[str, str]] = []
+
+        def repair(spoken: str, locale: str) -> str:
+            repairs.append((spoken, locale))
+            return "rewritten"
+
+        session, _socket, _connector, events = self._session(
+            voice_locale="ja", chat_locale="follow", caption_repair=repair
+        )
+        self.assertTrue(session.start()["ok"])
+        self._spoken_turn(session, "¿Puedes oírme ahora?", "今日の予定を見ましょう。")
+        spoken, caption = self._channels(events)
+        self.assertEqual(caption, spoken)
+        self.assertEqual(repairs, [])
+        session.stop()
+
     def test_one_language_for_both_channels_asks_for_one_line(self) -> None:
         session, socket, _connector, events = self._session(voice_locale="ja", chat_locale="ja")
         self.assertTrue(session.start()["ok"])
@@ -1665,6 +1758,34 @@ class RealtimeSkillGateTests(unittest.TestCase):
         self.assertIn("拆不成可执行的步骤", rendered)
         self.assertNotIn("plan_compile_failed", rendered)
 
+    def test_a_caption_is_never_asked_for_in_a_language_that_is_not_one(self) -> None:
+        """Defence in depth for the setting token that reads like a locale.
+
+        The session resolves "follow" before it calls, but a caller that forgets
+        must get no caption rather than a prompt asking a model to write in
+        "follow" -- which is how a Chinese question came back answered in
+        English.
+        """
+
+        prompts: list[str] = []
+
+        def completion(_config: object, _purpose: str, **kwargs: object) -> object:
+            prompts.append(str(kwargs.get("instructions") or ""))
+            return SimpleNamespace(ok=True, value="我们来看看今天的安排。")
+
+        llm = SimpleNamespace(use_mock=False, is_configured=True)
+        with patch("agent_companion.core.server.load_app_config", return_value=SimpleNamespace(llm=llm)), \
+                patch("agent_companion.core.server.chat_completion", side_effect=completion):
+            for locale in ("follow", "auto", "latn", ""):
+                with self.subTest(locale=locale):
+                    self.assertEqual(self.bridge._realtime_caption("今日の予定を見ましょう。", locale), "")
+            self.assertEqual(prompts, [])
+            # A language it *can* name still goes through, or the guard would
+            # have silenced captions rather than fixed them.
+            self.assertEqual(self.bridge._realtime_caption("今日の予定を見ましょう。", "zh"), "我们来看看今天的安排。")
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("中文", prompts[0])
+
     def test_the_request_is_bounded_before_it_reaches_the_planner(self) -> None:
         submitted: list[str] = []
         with patch.object(JsonRpcBridge, "submit_user_text", side_effect=lambda text: submitted.append(text) or {"ok": True}):
@@ -1693,15 +1814,44 @@ class RealtimeOwnerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(owner.messages, ["private-ephemeral-event"])
         self.assertEqual(other.messages, [])
 
-    async def test_realtime_tts_drops_chunks_after_a_new_barge_epoch(self) -> None:
+    @staticmethod
+    def _bridge(tts: object, sent: list[str]) -> JsonRpcBridge:
         bridge = JsonRpcBridge.__new__(JsonRpcBridge)
         bridge._realtime_epochs = {"realtime-session": 1}
         bridge._tts_speaker_lock = asyncio.Lock()
+        bridge.realtime_voice = None
+
+        async def send(_owner: str, message: str) -> None:
+            sent.append(message)
+
+        bridge.tts = tts
+        bridge._send_to_owner = send
+        return bridge
+
+    @staticmethod
+    def _voice(source: str, chunks: int = 1, **status: object):
+        class Tts:
+            def status_payload(self) -> dict[str, object]:
+                return {"provider": source, "configured": True, "streaming": True, **status}
+
+            def synthesize_stream(self, _text: str, _emotion: str, _delivery: object):
+                for sequence in range(chunks):
+                    yield {
+                        "voice_audio_pcm16_base64": "AAA=",
+                        "voice_audio_sample_rate": 24000,
+                        "voice_audio_sequence": sequence,
+                        "voice_audio_source": source,
+                    }
+                yield {"voice_audio_final": True, "voice_audio_sequence": chunks, "voice_audio_source": source}
+
+        return Tts()
+
+    async def test_realtime_tts_drops_chunks_after_a_new_barge_epoch(self) -> None:
         sent: list[str] = []
 
         class Tts:
             def status_payload(self) -> dict[str, object]:
-                return {"provider": "gpt-sovits", "configured": True}
+                return {"provider": "gpt-sovits", "configured": True, "streaming": True}
 
             def synthesize_stream(self, _text: str, _emotion: str, _delivery: object):
                 yield {
@@ -1718,17 +1868,61 @@ class RealtimeOwnerRoutingTests(unittest.IsolatedAsyncioTestCase):
                     "voice_audio_source": "local",
                 }
 
-        async def send(_owner: str, message: str) -> None:
-            sent.append(message)
-
-        bridge.tts = Tts()
-        bridge._send_to_owner = send
+        bridge = self._bridge(Tts(), sent)
         await bridge._synthesize_realtime_text(
             "owner-a",
             {"session_id": "realtime-session", "epoch": 1, "text": "你好"},
         )
         self.assertEqual(len(sent), 1)
         self.assertIn('"voice_audio_sequence": 0', sent[0])
+
+    async def test_a_cloud_character_voice_speaks_a_realtime_turn(self) -> None:
+        """Every web visitor's Joi has a cloud voice, and used to be muted by it.
+
+        Realtime refuses the provider's audio and any system voice. It must not
+        refuse the voice this Joi already speaks every other line with, or a
+        visitor gets captions and silence for the whole session.
+        """
+
+        sent: list[str] = []
+        bridge = self._bridge(self._voice("cloud"), sent)
+        await bridge._synthesize_realtime_text(
+            "owner-a",
+            {"session_id": "realtime-session", "epoch": 1, "text": "听得见的，我在这里。"},
+        )
+        self.assertIn('"voice_audio_pcm16_base64": "AAA="', sent[0])
+        self.assertNotIn("muted", " ".join(sent))
+
+    async def test_a_voice_that_is_not_joi_own_is_still_refused(self) -> None:
+        sent: list[str] = []
+        bridge = self._bridge(self._voice("provider"), sent)
+        await bridge._synthesize_realtime_text(
+            "owner-a",
+            {"session_id": "realtime-session", "epoch": 1, "text": "你好"},
+        )
+        self.assertEqual(len(sent), 1)
+        self.assertIn('"error": "realtime_tts_unavailable"', sent[0])
+
+    async def test_a_voice_that_cannot_stream_says_so_instead_of_going_quiet(self) -> None:
+        sent: list[str] = []
+        bridge = self._bridge(self._voice("cloud", streaming=False), sent)
+        await bridge._synthesize_realtime_text(
+            "owner-a",
+            {"session_id": "realtime-session", "epoch": 1, "text": "你好"},
+        )
+        self.assertEqual(len(sent), 1)
+        self.assertIn('"error": "realtime_tts_unavailable"', sent[0])
+
+    async def test_a_turn_that_produced_no_samples_reports_muted(self) -> None:
+        # Otherwise the Shell waits in "assistant speaking" for a sound that is
+        # never coming, and the turn's timing is never closed.
+        sent: list[str] = []
+        bridge = self._bridge(self._voice("cloud", chunks=0), sent)
+        await bridge._synthesize_realtime_text(
+            "owner-a",
+            {"session_id": "realtime-session", "epoch": 1, "text": "你好"},
+        )
+        self.assertIn('"error": "realtime_tts_failed"', sent[-1])
 
 
 if __name__ == "__main__":

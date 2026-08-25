@@ -811,7 +811,7 @@ OpenHuman 的本地 Memory Tree 和 Obsidian 可读性只作为“可见记忆�
 - 迟到 ASR/TTS/provider 结果在 generation 不匹配时丢弃，但记录 redacted 诊断。
 - 仅 `SPEAKABLE_EVENTS` 可触发 TTS；`safe_voice_line` 二次清洗。
 - TTS 不可用时保留 display，不阻塞 run；麦克风拒绝时保留键盘输入。
-- 实时语音是独立、显式启停且按窗口 owner 绑定的 debug session：Shell 只发有序 16 kHz PCM16，长期 Qwen key 和 provider 事件只留在 Core，云端只回文本，本地 GPT-SoVITS 是唯一声音。两种模式都只能**提议**：动作本身由 Core 选择、编译和执行。Minecraft 模式在已确认的 persistent game session 上可提出一条 strict GameIntent 或一份计划；两种模式都可提出一个本地动作与一条「这一轮是请求」——后者不携带请求原文，Core 用本轮用户转写重新过规则 planner、policy 与审批卡片，因此云端模型能启动一个技能，但永远不能选择工具、目标或参数。全部继续经过 Core 权限、实时 scope、预算和回执门禁。VAD/插话/停止/transport loss 必须淘汰旧文本与音频；停止时取消在途游戏目标，ACK 超时强杀 Bridge 且禁止重放。
+- 实时语音是独立、显式启停且按窗口 owner 绑定的 debug session：Shell 只发有序 16 kHz PCM16，长期 Qwen key 和 provider 事件只留在 Core，云端只回文本，Joi 自己的角色声音是唯一声音——本机 GPT-SoVITS 或该角色配置的云端音色，provider 自己的音频和系统音色都不用。两种模式都只能**提议**：动作本身由 Core 选择、编译和执行。Minecraft 模式在已确认的 persistent game session 上可提出一条 strict GameIntent 或一份计划；两种模式都可提出一个本地动作与一条「这一轮是请求」——后者不携带请求原文，Core 用本轮用户转写重新过规则 planner、policy 与审批卡片，因此云端模型能启动一个技能，但永远不能选择工具、目标或参数。全部继续经过 Core 权限、实时 scope、预算和回执门禁。VAD/插话/停止/transport loss 必须淘汰旧文本与音频；停止时取消在途游戏目标，ACK 超时强杀 Bridge 且禁止重放。
 
 ### 10.4 Scene Session
 

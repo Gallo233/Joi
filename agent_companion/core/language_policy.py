@@ -16,6 +16,11 @@ from dataclasses import dataclass
 # predates the setting: every reply takes the language of the message it answers.
 CHAT_LANGUAGE_FOLLOW = "follow"
 CHAT_LANGUAGE_CHOICES = (CHAT_LANGUAGE_FOLLOW, "zh", "en", "ja", "ko")
+# The languages Joi can ask a model to write in by name. "follow" is a setting,
+# not a language, so anything resolving a locale for a prompt has to land here
+# first: a model told to answer in "follow" answers in whichever language it
+# guesses, and that guess is not the user's.
+NAMEABLE_LANGUAGES = frozenset(CHAT_LANGUAGE_CHOICES) - {CHAT_LANGUAGE_FOLLOW}
 
 
 @dataclass(frozen=True)

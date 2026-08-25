@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 
 import { RealtimeVoiceSession, parseRealtimeVoiceEvent, realtimeLatencyLabel } from '../src/realtimeVoice.ts'
+
+const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
 
 
 test('core event parsing exposes only the reviewed projection', () => {
@@ -218,4 +221,56 @@ test('a latency event with no measured end still reports what it has', () => {
   assert.equal(parsed?.kind, 'latency')
   assert.equal(parsed.totalMs, undefined)
   assert.equal(realtimeLatencyLabel(parsed), '成文 900ms')
+})
+
+
+/**
+ * Joi's voice is hers wherever it is synthesized.
+ *
+ * Realtime playback used to accept only `local`, the GPT-SoVITS source. Every
+ * web visitor's Joi speaks through a cloud voice, so her audio arrived and was
+ * dropped one line before the speaker: captions appeared, nothing was heard,
+ * and nothing said why. What must stay refused is the *provider's* voice, which
+ * is a different character speaking, not a different way of reaching hers.
+ */
+test('a realtime turn plays in the character voice, cloud or local', () => {
+  const sources = appSource.match(/const REALTIME_VOICE_SOURCES = new Set\(\[(.*?)\]\)/s)
+  assert.ok(sources, 'App.vue must name the sources realtime playback accepts')
+  assert.match(sources[1], /'local'/)
+  assert.match(sources[1], /'cloud'/)
+  assert.doesNotMatch(sources[1], /'provider'/)
+  // And the gate must actually consult that set rather than a literal.
+  assert.match(appSource, /REALTIME_VOICE_SOURCES\.has\(String\(payload\.voice_audio_source/)
+})
+
+test('a muted realtime turn names the character voice, not one implementation', () => {
+  // The Shell may not tell a web visitor that "本地 GPT-SoVITS" is not ready:
+  // their Joi never had one, and the sentence sends them looking for an install
+  // that is not part of this experience.
+  const start = appSource.indexOf('function realtimeVoiceErrorLabel')
+  assert.notEqual(start, -1, 'realtimeVoiceErrorLabel must exist')
+  const labels = appSource.slice(start, appSource.indexOf('\n}', start))
+  assert.match(labels, /realtime_tts_unavailable/)
+  assert.match(labels, /realtime_tts_failed/)
+  assert.doesNotMatch(labels, /GPT-SoVITS/)
+})
+
+/**
+ * A consent screen may not promise a voice route this Joi does not have.
+ *
+ * The conversation disclosure said "Joi 仍使用本地 GPT-SoVITS 发声" for everyone.
+ * A cloud character voice is now spoken rather than muted, and that means the
+ * answer's text is sent to a second provider -- which the screen has to say.
+ */
+test('the realtime disclosure names the voice route this machine actually has', () => {
+  const start = appSource.indexOf('function realtimeVoiceRouteDisclosure')
+  assert.notEqual(start, -1, 'realtimeVoiceRouteDisclosure must exist')
+  const route = appSource.slice(start, appSource.indexOf('\n}', start))
+  assert.match(route, /gpt-sovits/)
+  assert.match(route, /本机 GPT-SoVITS 发声/)
+  assert.match(route, /发送给已配置的云端语音服务/)
+  assert.match(route, /只有字幕、没有声音/)
+  // And no branch of the consent text may state the local route unconditionally.
+  const disclosures = appSource.slice(appSource.indexOf('realtimeVoiceDisclosuresAccepted.has(mode)'))
+  assert.doesNotMatch(disclosures.slice(0, disclosures.indexOf('requestAppConfirm')), /GPT-SoVITS/)
 })

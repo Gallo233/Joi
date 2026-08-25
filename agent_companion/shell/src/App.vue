@@ -3146,13 +3146,19 @@ async function playAudioPath(path?: string, dataUrl?: string) {
   }
 }
 
+/** The two ways Joi's own voice is synthesized. Never the provider's audio. */
+const REALTIME_VOICE_SOURCES = new Set(['local', 'cloud'])
+
 function playVoiceAudio(payload: VoiceAudioPayload) {
   const realtimeSessionId = stringValue(payload.realtime_session_id)
   const isRealtimeAudio = Boolean(realtimeSessionId)
   if (isRealtimeAudio) {
     if (realtimeSessionId !== realtimeVoiceSession?.sessionId) return
     const epoch = Math.max(0, Number(payload.realtime_epoch || 0))
-    if (epoch !== realtimePlaybackEpoch || payload.voice_audio_source !== 'local') return
+    // Joi's own voice, wherever it was synthesized. Core already refuses the
+    // provider's audio; naming both of her routes here is what lets a Joi whose
+    // character voice is a cloud voice -- every web visitor's -- be heard at all.
+    if (epoch !== realtimePlaybackEpoch || !REALTIME_VOICE_SOURCES.has(String(payload.voice_audio_source || ''))) return
     if (payload.voice_audio_sequence === 0) realtimeVoiceState.value = 'assistant_speaking'
   } else if (!isPlayableVoiceEventType(payload.event_type)) return
   rememberVoiceLatency(payload)
@@ -3320,7 +3326,7 @@ function runtimeStatusRows(): RuntimeProviderStatus[] {
       summary: realtime?.configured ? '实时对话与 Minecraft 协作' : realtime?.enabled ? '未配置' : '未启用',
       timeout_seconds: realtime?.timeout_seconds || 15,
       last_error: realtime?.error || '',
-      notes: ['text-only cloud response', 'local GPT-SoVITS output', 'scoped Minecraft tools'],
+      notes: ['text-only cloud response', 'character voice output', 'scoped Minecraft tools'],
     },
     {
       name: 'tts',
@@ -4276,6 +4282,24 @@ function stopSpokenAudio() {
   detachLipSync()
 }
 
+/**
+ * Where an answer's text goes to become sound, in the consent screen's words.
+ *
+ * Realtime brings back text only; the voice is Joi's own either way, but the
+ * two ways of reaching it are not the same disclosure. GPT-SoVITS synthesizes
+ * on this machine and nothing further leaves it. A cloud character voice --
+ * what every web visitor has, and any desktop Joi set up without a local voice
+ * service -- means her reply line is sent to that provider too, which the
+ * screen has to say rather than promise a local install the session never uses.
+ */
+function realtimeVoiceRouteDisclosure() {
+  const tts = ready.value?.tts
+  if (!tts?.configured || !tts?.streaming) return '云端只返回文本；这里没有可用的角色语音，所以这次只有字幕、没有声音。'
+  return String(tts.provider || '').trim().toLowerCase() === 'gpt-sovits'
+    ? '云端只返回文本，Joi 用本机 GPT-SoVITS 发声。'
+    : '云端只返回文本，Joi 的回答再发送给已配置的云端语音服务合成她的声音。'
+}
+
 function realtimeVoiceErrorLabel(error: string) {
   const labels: Record<string, string> = {
     realtime_unconfigured: '实时语音未配置，请先在 realtime_voice 中启用。',
@@ -4295,8 +4319,8 @@ function realtimeVoiceErrorLabel(error: string) {
     guest_time_limit: '本次实时语音已到时，麦克风已关闭。',
     guest_method_forbidden: '访客模式不提供这项本机能力。',
     minecraft_session_not_runnable: 'Minecraft 会话尚未就绪，请先连接游戏并确认范围。',
-    realtime_local_tts_unavailable: '本地 GPT-SoVITS 未就绪；字幕可用，Joi 暂时静音。',
-    realtime_local_tts_failed: '本地 GPT-SoVITS 合成失败；字幕仍可用。',
+    realtime_tts_unavailable: '角色语音未就绪；字幕可用，Joi 暂时静音。',
+    realtime_tts_failed: '角色语音合成失败；字幕仍可用。',
     realtime_unavailable: '实时语音暂时不可用。',
   }
   return labels[error] || labels.realtime_unavailable
@@ -4487,12 +4511,13 @@ async function toggleRealtimeVoice(useMinecraft = false) {
     return
   }
   if (!realtimeVoiceDisclosuresAccepted.has(mode)) {
+    const voiceDisclosure = realtimeVoiceRouteDisclosure()
     const localSkillDisclosure = '你也可以直接开口让 Joi 做动作或使用本机技能（打开应用、点击输入、上网搜索、看当前屏幕、写代码）。模型只能提出“这一轮是请求”，具体做什么由 Joi Core 用你自己说的原话重新规划；角色动作是纯本机动画，凡是会操作这台电脑的动作都仍然要你在界面上点确认。'
     const disclosure = guestMode
-      ? `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。访客会话只提供对话，不会调用你设备上的工具；Core 会强制限制单次时长和当日总量。\n\n本次最长 ${Math.ceil(realtimeVoiceMaxSessionSeconds.value / 60)} 分钟，是否开始？`
+      ? `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。${voiceDisclosure}访客会话只提供对话，不会调用你设备上的工具；Core 会强制限制单次时长和当日总量。\n\n本次最长 ${Math.ceil(realtimeVoiceMaxSessionSeconds.value / 60)} 分钟，是否开始？`
       : mode === 'minecraft'
-      ? `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。模型可以提出一条 Minecraft 操作，但只能在你已确认的服务器、世界、维度、半径、方块和预算范围内执行；Joi Core 会逐条校验并保留回执。\n\n${localSkillDisclosure}\n\n${screenEvidenceDisclosure()}是否开始？`
-      : `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。云端只返回文本，Joi 仍使用本地 GPT-SoVITS 发声；本模式不执行 Minecraft 操作。\n\n${localSkillDisclosure}\n\n是否开始？`
+      ? `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。${voiceDisclosure}模型可以提出一条 Minecraft 操作，但只能在你已确认的服务器、世界、维度、半径、方块和预算范围内执行；Joi Core 会逐条校验并保留回执。\n\n${localSkillDisclosure}\n\n${screenEvidenceDisclosure()}是否开始？`
+      : `实时语音会把会话期间的麦克风音频发送给阿里云 Qwen Audio。${voiceDisclosure}本模式不执行 Minecraft 操作。\n\n${localSkillDisclosure}\n\n是否开始？`
     const accepted = await requestAppConfirm({
       title: mode === 'minecraft' ? '启动实时语音 + Minecraft' : '启动实时语音',
       message: disclosure,

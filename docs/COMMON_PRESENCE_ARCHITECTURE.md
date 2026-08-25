@@ -2,9 +2,9 @@
 
 本文件记录 2026-07 的核心能力重塑落地状态。目标是让项目、对话、角色和能力会话成为同一个可恢复上下文，而不是把 Computer Use、陪看、Skill 和游戏做成互不相干的按钮。
 
-网站体验复用这份 presence，而不是维护 Web 专用副本：full 与 compact 两个 iframe
-连接同一单租户 Core，`agent.event` 广播让角色、对话与记忆自然一致；父页面只协调
-可见性、几何和跨 iframe 导航。其隔离与公开边界见
+网站体验复用这份 presence，而不是维护 Web 专用副本：页内完整体验与右下角桌宠
+是同一个 iframe 连接同一单租户 Core，`agent.event` 广播让角色、对话与记忆自然
+一致；父页面只协调可见性、几何和导航。其隔离与公开边界见
 [WEB_EXPERIENCE_ARCHITECTURE.md](WEB_EXPERIENCE_ARCHITECTURE.md)。
 
 ## 数据与迁移
@@ -102,7 +102,7 @@
 
 点击录音的输入路径也按代次拆开。Shell 记录 WAV 准备与 base64 编码耗时，Core 只在线程中等待 ASR provider；`voice.transcribe` 一拿到 transcript 就返回，并把普通 Joi turn 排入后台，因此 UI 的 ASR 状态不再包含 planner、LLM、工具或 TTS 时间。新输入通过 `voice.cancel` 退休旧 `generation_id`；迟到 transcript 可以完成诊断，但不能再提交。Core 只返回 decode/provider/total 的毫秒数，不返回端点、音频路径、原始错误或凭据。
 
-实时语音走 owner-bound 的 `voice.realtime.session.*` 能力边界。Shell 获取麦克风后发送有序、定长的 16 kHz PCM16 帧；Core 才能持有 Qwen Audio Realtime 凭据和 provider protocol，并只接收文本。文本通过 `safe_voice_line` 后交给本地 GPT-SoVITS，Realtime 与普通 Joi TTS 共享 speaker lock 和代次门禁；插话递增 epoch，旧 provider response、TTS PCM 和口型都不能复活。普通模式无工具；Minecraft 模式仅在已确认的 persistent game session 上开放 strict proposal（24 个动作之一，或一份编译计划），另有本地动作与「这一轮是请求」两个提议——后者不带请求原文，由 Core 用本轮转写重新规划。最终权限、实时 scope、预算、goal id、Bridge 和回执全部由 Core 持有。窗口/transport/provider 停止时取消在途目标，ACK 失败强杀 Bridge 且不重放。
+实时语音走 owner-bound 的 `voice.realtime.session.*` 能力边界。Shell 获取麦克风后发送有序、定长的 16 kHz PCM16 帧；Core 才能持有 Qwen Audio Realtime 凭据和 provider protocol，并只接收文本。文本通过 `safe_voice_line` 后交给 Joi 自己的角色声音（本机 GPT-SoVITS 或已配置的云端音色，绝不是 provider 的音频），Realtime 与普通 Joi TTS 共享 speaker lock 和代次门禁；插话递增 epoch，旧 provider response、TTS PCM 和口型都不能复活。普通模式无工具；Minecraft 模式仅在已确认的 persistent game session 上开放 strict proposal（24 个动作之一，或一份编译计划），另有本地动作与「这一轮是请求」两个提议——后者不带请求原文，由 Core 用本轮转写重新规划。最终权限、实时 scope、预算、goal id、Bridge 和回执全部由 Core 持有。窗口/transport/provider 停止时取消在途目标，ACK 失败强杀 Bridge 且不重放。
 
 `VoiceLine.delivery` 是有界的表演计划，只允许强度、节奏、能量、停顿、重音和关系语气的固定词表；模型不能把自由文本提示直接交给 TTS。角色包里的短情绪说明只补充完整导演提示，不再覆盖它。MiMo 预设音色与 GPT-SoVITS API v2 都按 PCM16 分块传给 Shell，口型只读取正在播放的真实音频；事件返回文本不会启动第二次口型。Core 记录文本模型耗时、TTS 首音和总耗时，并始终保持系统语音兜底关闭。
 

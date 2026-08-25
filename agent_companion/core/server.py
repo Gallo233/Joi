@@ -33,7 +33,13 @@ from agent_companion.core.codex_support import codex_executable
 from agent_companion.core.codex_runtime import CodexRuntimeSession
 from agent_companion.core.coercion import bool_or, float_or, optional_int
 from agent_companion.core.config import load_app_config, load_workspace_config
-from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES, CHAT_LANGUAGE_FOLLOW, chat_language_policy, voice_language_label
+from agent_companion.core.language_policy import (
+    CHAT_LANGUAGE_CHOICES,
+    CHAT_LANGUAGE_FOLLOW,
+    NAMEABLE_LANGUAGES,
+    chat_language_policy,
+    voice_language_label,
+)
 from agent_companion.core.llm_planner import looks_actionable
 from agent_companion.core.planner import build_plan, is_minecraft_task
 from agent_companion.core.runtime_config_writer import preview_runtime_config_update
@@ -1303,10 +1309,17 @@ class JsonRpcBridge:
         it was asked for. It runs off the audio path, so the character's voice
         never waits on it, and it fails to an empty string rather than delaying
         or inventing a caption.
+
+        The caller resolves the language first, so only a real one arrives here.
+        Anything else -- a settings token like "follow", a script code -- is
+        refused rather than pasted into the prompt, because a model asked to
+        rewrite a sentence into a language it cannot name answers in whichever
+        one it guesses.
         """
 
         line = str(spoken or "").strip()
-        label = voice_language_label(chat_locale)
+        locale = str(chat_locale or "").strip().replace("_", "-").casefold().split("-")[0]
+        label = voice_language_label(locale) if locale in NAMEABLE_LANGUAGES else ""
         if not line or not label or os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
             return ""
         try:
@@ -2173,11 +2186,19 @@ class JsonRpcBridge:
                 pass
 
     async def _synthesize_realtime_text(self, owner_id: str, event: dict[str, Any]) -> None:
-        """Speak safe Qwen text through the selected local GPT-SoVITS voice.
+        """Speak safe Qwen text through this Joi's own character voice.
 
-        Realtime never falls back to provider audio, a system voice, or a cloud
-        TTS voice. The Shell gets captions plus an explicit muted state when
-        the local character voice is unavailable.
+        Realtime never speaks with the provider's voice or a system voice, and
+        it never picks a voice of its own: it uses the one every other line of
+        this Joi is already spoken in, whether that voice is synthesized on the
+        machine by GPT-SoVITS or by the configured cloud voice.
+
+        Requiring GPT-SoVITS specifically was that rule read one step too
+        literally. On the desktop the two coincide, so nothing showed; on the
+        web guest, where the character voice *is* a cloud voice, it silenced
+        realtime completely -- a visitor spoke, read a caption, and heard
+        nothing, every turn. The Shell still gets captions plus an explicit
+        muted state whenever the character voice cannot be reached.
         """
 
         session_id = str(event.get("session_id") or "")
@@ -2185,9 +2206,12 @@ class JsonRpcBridge:
         self._realtime_epochs[session_id] = max(self._realtime_epochs.get(session_id, 0), epoch)
         line = safe_voice_line(str(event.get("text") or ""), fallback="")
         status = self.tts.status_payload()
-        if not line.text or str(status.get("provider") or "").strip().casefold() != "gpt-sovits" or not status.get("configured"):
+        # `streaming` rather than `configured` alone: a voice that cannot hand
+        # back PCM chunks has nothing realtime can play, and saying "muted" is
+        # the honest answer rather than an empty stream nobody reports.
+        if not line.text or not status.get("configured") or not status.get("streaming"):
             self._mark_realtime_audio(session_id, epoch, voiced=False)
-            await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_local_tts_unavailable")
+            await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_tts_unavailable")
             return
         lock = getattr(self, "_tts_speaker_lock", None)
         if lock is None:
@@ -2196,17 +2220,19 @@ class JsonRpcBridge:
         async with lock:
             if self._realtime_epochs.get(session_id, -1) != epoch:
                 return
+            spoke = False
             stream = self.tts.synthesize_stream(line.text, line.emotion, line.delivery)
             try:
                 while True:
                     audio = await asyncio.to_thread(_next_voice_audio_payload, stream)
                     if audio is None:
+                        await self._close_silent_realtime_turn(owner_id, session_id, epoch, spoke)
                         return
                     if self._realtime_epochs.get(session_id, -1) != epoch:
                         return
                     if audio.get("voice_audio_error"):
                         self._mark_realtime_audio(session_id, epoch, voiced=False)
-                        await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_local_tts_failed")
+                        await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_tts_failed")
                         return
                     payload = {
                         "realtime_session_id": session_id,
@@ -2216,25 +2242,45 @@ class JsonRpcBridge:
                         "voice_sprite": line.sprite,
                         **audio,
                     }
-                    # Refuse accidental provider fallback even if the TTS
-                    # implementation changes under this call in the future.
-                    if payload.get("voice_audio_source") not in {"local", None}:
-                        await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_local_tts_unavailable")
+                    # Joi's own two synthesis routes and nothing else. The
+                    # provider's audio has no route here today; this refuses it
+                    # anyway, in case the TTS implementation grows one later.
+                    if payload.get("voice_audio_source") not in {"local", "cloud", None}:
+                        self._mark_realtime_audio(session_id, epoch, voiced=False)
+                        await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_tts_unavailable")
                         return
                     # The moment the user hears an answer: this is what the
-                    # turn's end-to-end number is measured to.
-                    self._mark_realtime_audio(session_id, epoch, voiced=True)
+                    # turn's end-to-end number is measured to. The closing
+                    # marker carries no samples, so it is not that moment.
+                    if audio.get("voice_audio_pcm16_base64"):
+                        spoke = True
+                        self._mark_realtime_audio(session_id, epoch, voiced=True)
                     await self._send_to_owner(
                         owner_id,
                         json.dumps({"jsonrpc": "2.0", "method": "agent.voice_audio", "params": payload}, ensure_ascii=False),
                     )
                     if audio.get("voice_audio_final"):
+                        await self._close_silent_realtime_turn(owner_id, session_id, epoch, spoke)
                         return
             finally:
                 try:
                     stream.close()
                 except (RuntimeError, ValueError):
                     pass
+
+    async def _close_silent_realtime_turn(self, owner_id: str, session_id: str, epoch: int, spoke: bool) -> None:
+        """Say so when a turn ended without a single sample of speech.
+
+        A voice that answers with nothing is as silent as one that errors, and
+        used to be silent about that too: the turn closed with no audio and no
+        muted state, so the Shell stayed in "assistant speaking" waiting for a
+        sound that was never coming.
+        """
+
+        if spoke:
+            return
+        self._mark_realtime_audio(session_id, epoch, voiced=False)
+        await self._send_realtime_tts_state(owner_id, session_id, epoch, "muted", "realtime_tts_failed")
 
     def _mark_realtime_audio(self, session_id: str, epoch: int, *, voiced: bool) -> None:
         """Close a realtime turn's timing. A debug aid never gets to break the voice."""
@@ -2259,7 +2305,7 @@ class JsonRpcBridge:
             "session_id": session_id,
             "type": "tts_state",
             "state": state if state == "muted" else "muted",
-            "error": error if error in {"realtime_local_tts_unavailable", "realtime_local_tts_failed"} else "realtime_local_tts_failed",
+            "error": error if error in {"realtime_tts_unavailable", "realtime_tts_failed"} else "realtime_tts_failed",
             "epoch": epoch,
         }
         await self._send_to_owner(

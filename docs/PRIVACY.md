@@ -16,7 +16,7 @@ No product analytics or advertising telemetry is intentionally included in the M
 
 ## Realtime voice
 
-Realtime voice is a separate, explicitly started session bound to one window. The Shell captures the microphone and sends ordered 16 kHz PCM16 frames; only Core holds the provider credential, and the provider is configured to return text, never audio. Joi's voice is always the locally configured GPT-SoVITS character voice — when it is unavailable the session keeps captions and stays muted rather than substituting a system or cloud voice.
+Realtime voice is a separate, explicitly started session bound to one window. The Shell captures the microphone and sends ordered 16 kHz PCM16 frames; only Core holds the provider credential, and the provider is configured to return text, never audio. Joi's voice is always her own character voice — synthesized on the machine by GPT-SoVITS, or by the cloud voice that character is configured with, in which case her reply text is sent to that voice provider and the consent screen says so before the session starts. The realtime provider's own audio and any system voice are never used; when the character voice is unavailable the session keeps captions and stays explicitly muted.
 
 Raw audio is never written to disk. When a session ends, the sanitized text pairs — what was recognized and what Joi answered — are written to the local conversation history; the disclosure shown before the microphone opens says so.
 

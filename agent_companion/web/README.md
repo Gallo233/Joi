@@ -1,7 +1,9 @@
 # Joi Web integration
 
-This directory exposes the existing Joi Shell through two iframes connected to
-one isolated Core session. It does not reuse the older `web_widget` prototype.
+This directory exposes the existing Joi Shell through one iframe -- docked in
+the page, then floating in a corner once that section scrolls away -- connected
+to one isolated Core session. It does not reuse the older `web_widget`
+prototype.
 
 ## Build the website assets
 
