@@ -696,23 +696,30 @@ class QwenRealtimeSession:
             self._emit({"type": "assistant_text", "text": spoken, "epoch": epoch, "output": "local_tts"})
             self._emit({"type": "state", "state": "assistant_speaking", "epoch": epoch})
             caption_locale = self._turn_caption_locale(epoch)
-            # A caption written in the spoken language is the same failure as no
-            # caption at all, whether the model skipped the format or followed
-            # it with the wrong language in the second line.
-            usable = bool(caption) and not (caption_locale and spoken_language_override(caption_locale, caption))
-            if usable:
-                self._publish_caption(epoch, spoken, caption)
-            elif not caption_locale:
-                # No second language this turn, so nothing to repair into: the
-                # spoken line is already the line the user reads.
+            if caption_locale and caption_locale == _base_language(self.voice_locale):
+                # The user spoke what the character speaks, so this turn has no
+                # second language and the spoken line is what they read. The
+                # model was still asked for two lines -- the format is fixed when
+                # the session opens, before anyone has said anything -- and it
+                # answers that by translating into a language nobody chose. Once
+                # that line is not needed it must not be shown either.
                 self._publish_caption(epoch, spoken, spoken)
-            else:
+            elif caption and not (caption_locale and spoken_language_override(caption_locale, caption)):
+                # A caption written in the spoken language is the same failure as
+                # no caption at all, whether the model skipped the format or
+                # followed it with the wrong language in the second line.
+                self._publish_caption(epoch, spoken, caption)
+            elif caption_locale:
                 threading.Thread(
                     target=self._repair_and_publish_caption,
                     args=(epoch, spoken, caption_locale),
                     name=f"qwen-caption-{self.session_id[-8:]}",
                     daemon=True,
                 ).start()
+            else:
+                # Nothing to name and nothing shown: the spoken line is the only
+                # honest thing left to put on screen.
+                self._publish_caption(epoch, spoken, spoken)
         else:
             self._emit({"type": "state", "state": "listening", "epoch": epoch})
 
@@ -734,7 +741,7 @@ class QwenRealtimeSession:
         self._emit({"type": "assistant_transcript", "text": caption, "final": True, "epoch": epoch})
 
     def _turn_caption_locale(self, epoch: int) -> str:
-        """The language this turn's caption belongs in, or "" for "same as spoken".
+        """The language this turn's caption belongs in, or "" if it cannot be named.
 
         "follow" is not a language. It stands for whatever the user just spoke,
         which is only knowable once this turn's words exist -- so it has to be
@@ -743,10 +750,12 @@ class QwenRealtimeSession:
         question: the repair call was asked to rewrite the line into a language
         named "follow", and the model picked one.
 
-        "" means the caption needs no second language at all: the user spoke
-        what the character speaks, or spoke something this module cannot name
-        with confidence. Both are better served by showing the spoken line than
-        by a translation into a guess.
+        This answers one question and no other: which language, if it can be
+        said with confidence. Whether that language differs from the voice --
+        whether the turn needs a second line at all -- is the caller's to decide,
+        because "" once meant both "cannot name it" and "no second language
+        needed", and a caller reading the second sense out of the first accepted
+        whatever the model wrote in whatever language it chose.
         """
 
         if not _follows_user(self.chat_locale):
@@ -754,9 +763,7 @@ class QwenRealtimeSession:
         with self._lock:
             user_text = self._user_final_by_epoch.get(epoch, "")
         code = display_language_policy(user_text).code if user_text.strip() else ""
-        if code not in NAMEABLE_LANGUAGES:
-            return ""
-        return "" if code == _base_language(self.voice_locale) else code
+        return code if code in NAMEABLE_LANGUAGES else ""
 
     def _repair_and_publish_caption(self, epoch: int, spoken: str, caption_locale: str) -> None:
         """Write the caption in the chat language when the model gave one line.

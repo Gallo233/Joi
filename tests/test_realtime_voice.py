@@ -927,6 +927,44 @@ class QwenRealtimeSessionTests(unittest.TestCase):
         self.assertEqual(repairs, [])
         session.stop()
 
+    def test_a_translation_nobody_asked_for_is_not_shown(self) -> None:
+        """The web case, reported from the live site: right voice, wrong subtitle.
+
+        The two-line format is fixed when the session opens, before anyone has
+        spoken, so the model is asked for a caption even on the turns that turn
+        out not to need one. Asked for "the language the user spoke" when that is
+        already the language it is speaking, it translates -- and the visitor
+        heard Chinese while reading "Hello, nice to meet you."
+        """
+
+        repairs: list[tuple[str, str]] = []
+
+        def repair(spoken: str, locale: str) -> str:
+            repairs.append((spoken, locale))
+            return "改写过的句子"
+
+        session, _socket, _connector, events = self._session(
+            voice_locale="zh", chat_locale="follow", caption_repair=repair
+        )
+        self.assertTrue(session.start()["ok"])
+        self._spoken_turn(session, "你好。", "朗读：你好呀，很高兴见到你。\n字幕：Hello, nice to meet you.")
+        spoken, caption = self._channels(events)
+        self.assertEqual(spoken, "你好呀，很高兴见到你。")
+        self.assertEqual(caption, "你好呀，很高兴见到你。")
+        self.assertEqual(repairs, [])
+        session.stop()
+
+    def test_a_second_line_is_kept_when_it_is_the_language_that_was_asked_for(self) -> None:
+        # The mirror of the case above: the languages really do differ, so the
+        # model's second line is the whole point and must survive.
+        session, _socket, _connector, events = self._session(voice_locale="ja", chat_locale="follow")
+        self.assertTrue(session.start()["ok"])
+        self._spoken_turn(session, "今天有什么安排？", "朗读：今日の予定を見ましょう。\n字幕：我们来看看今天的安排。")
+        spoken, caption = self._channels(events)
+        self.assertEqual(spoken, "今日の予定を見ましょう。")
+        self.assertEqual(caption, "我们来看看今天的安排。")
+        session.stop()
+
     def test_a_language_that_cannot_be_named_shows_the_spoken_line(self) -> None:
         # Latin script alone does not say which language it is, and a rewrite
         # into a guess is worse than the line the model actually wrote.
