@@ -16,6 +16,7 @@ JOI_DIR="${JOI_DIR:-/opt/joi}"
 BRANCH="${JOI_BRANCH:-main}"
 SEED_DIR="${JOI_SEED_DIR:-/opt/joi-web-seed}"
 GUEST_CONFIG="${JOI_GUEST_CONFIG:-/etc/joi-guest.yaml}"
+BROKER_UNIT="${JOI_BROKER_UNIT:-/etc/systemd/system/joi-web.service}"
 # Which characters a visitor can meet. Every one of them is copied into the
 # seed and served from this box, so this list is also the bandwidth bill: the
 # sample VRM alone is 26MB per visitor who activates it.
@@ -25,6 +26,28 @@ cd "$JOI_DIR"
 
 echo "==> fetching $BRANCH"
 git fetch --quiet origin "$BRANCH"
+
+# `git reset --hard` is the point of no return, and BRANCH is a variable with a
+# default. A branch from before Joi Web existed resets cleanly and leaves a Core
+# that does not understand one argument the broker passes it -- the site keeps
+# rendering, and nobody finds out until a visitor cannot open a session. So the
+# target answers for itself first, while the checkout is still untouched.
+#
+# The checker is read out of the target rather than the working tree, which is
+# what lets this bootstrap onto a box running an older deploy -- and makes a
+# target too old to carry one fail at the first step, which is the same answer
+# by a shorter route.
+echo "==> checking $BRANCH can run this deployment"
+CHECKER="$(mktemp)"
+trap 'rm -f "$CHECKER"' EXIT
+if ! git show "origin/$BRANCH:agent_companion/web/deploy/verify_target.py" > "$CHECKER" 2>/dev/null; then
+  echo "!! origin/$BRANCH does not carry agent_companion/web/deploy/verify_target.py," >&2
+  echo "   which every branch that can run Joi Web has. This is almost certainly the" >&2
+  echo "   wrong branch. Nothing has been changed; set JOI_BRANCH and run again." >&2
+  exit 1
+fi
+.venv/bin/python "$CHECKER" --target "origin/$BRANCH" --repo "$JOI_DIR" --unit "$BROKER_UNIT"
+
 git reset --quiet --hard "origin/$BRANCH"
 echo "    at $(git rev-parse --short HEAD)"
 
