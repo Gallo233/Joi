@@ -8,9 +8,30 @@
 # hold their own workspace, and the broker reaps them on TTL -- so a deploy is
 # invisible to anyone mid-conversation and applies to whoever arrives next.
 #
-#     sudo -u joi-web /opt/joi/deploy-joi.sh
+# Install a copy of this file OUTSIDE the checkout and run that copy:
+#
+#     install -m 755 agent_companion/web/deploy/deploy-joi.sh /usr/local/sbin/joi-deploy
+#     joi-deploy
+#
+# Not the copy in the tree. This script resets the tree it lives in, and bash
+# reads a script incrementally by byte offset -- so rewriting the file mid-run
+# makes the shell resume at an offset that now means something else.
+#
+# What this box runs, rather than what a generic install runs, belongs in the
+# environment file below and not in an edited copy of this script. An edited
+# copy is a fork that silently stops tracking the original; the last one on this
+# box had drifted a character list, and nothing said so.
 
 set -euo pipefail
+
+# Per-box settings: which branch this box runs, which characters it serves.
+# Sourced before anything is decided, and written with `${VAR:-default}` so a
+# one-off `JOI_BRANCH=... joi-deploy` on the command line still wins.
+DEPLOY_ENV="${JOI_DEPLOY_ENV:-/etc/joi-deploy.env}"
+if [ -f "$DEPLOY_ENV" ]; then
+  # shellcheck source=/dev/null
+  . "$DEPLOY_ENV"
+fi
 
 JOI_DIR="${JOI_DIR:-/opt/joi}"
 BRANCH="${JOI_BRANCH:-main}"
@@ -21,6 +42,17 @@ BROKER_UNIT="${JOI_BROKER_UNIT:-/etc/systemd/system/joi-web.service}"
 # seed and served from this box, so this list is also the bandwidth bill: the
 # sample VRM alone is 26MB per visitor who activates it.
 CHARACTER_IDS="${JOI_CHARACTER_IDS:-momose-hiyori,test-tachie-catgirl}"
+
+# An installed copy cannot update itself -- it is the file currently executing --
+# so it says when the tree has moved past it. Silence here is the whole failure
+# mode of copying a script: it keeps working, one version behind, indefinitely.
+report_if_stale() {
+  local tracked="$JOI_DIR/agent_companion/web/deploy/deploy-joi.sh"
+  [ -f "$tracked" ] || return 0
+  cmp -s "$0" "$tracked" && return 0
+  echo "note: $0 differs from $tracked. Refresh it with:"
+  echo "      install -m 755 $tracked $0"
+}
 
 cd "$JOI_DIR"
 
@@ -82,6 +114,7 @@ for _ in $(seq 1 20); do
   # the healthiest possible answer to that probe.
   if curl -s -o /dev/null -w '%{http_code}' --max-time 2 -X POST http://127.0.0.1:9080/session | grep -q '^403$'; then
     echo "==> broker up"
+    report_if_stale
     exit 0
   fi
   sleep 1

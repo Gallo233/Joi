@@ -80,8 +80,8 @@ being out of step.
 ```bash
 git clone <your Joi remote> /opt/joi
 cd /opt/joi && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-install -m 0755 -o joi-web -g joi-web \
-  agent_companion/web/deploy/deploy-joi.sh /opt/joi/deploy-joi.sh
+install -m 0755 agent_companion/web/deploy/deploy-joi.sh /usr/local/sbin/joi-deploy
+cp agent_companion/web/deploy/joi-deploy.env.example /etc/joi-deploy.env
 cp agent_companion/web/deploy/joi-web.env.example /etc/joi-web.env
 cp agent_companion/web/deploy/config.guest.example.yaml /etc/joi-guest.yaml
 chmod 600 /etc/joi-web.env       # then fill it in, including the IP hash secret
@@ -89,9 +89,27 @@ cp agent_companion/web/deploy/joi-web.service.example \
    /etc/systemd/system/joi-web.service
 ```
 
+The deploy script is installed **outside** the checkout on purpose. It resets
+the tree it lives in, and bash reads a script incrementally by byte offset, so a
+copy inside `/opt/joi` would be rewritten underneath the shell still running it.
+
+Nothing about this box belongs in an edited copy of that script either. Which
+branch to track and which characters to serve go in `/etc/joi-deploy.env`, so
+`/usr/local/sbin/joi-deploy` stays byte-for-byte identical to the repository's
+copy and refreshing it is one `install`. An edited copy is a fork, and a fork
+stops tracking the original without ever saying so; the script reports at the
+end of a run when the tree has moved past the installed copy.
+
 Character packages are not in the repository. Copy the ones you want visitors
 to meet to `/opt/joi/character-source/data/agent_companion/characters/packages/`
-and name them in `JOI_CHARACTER_IDS`.
+and name them in `JOI_CHARACTER_IDS` in `/etc/joi-deploy.env`.
+
+A deploy refuses a branch that cannot run this deployment before it writes
+anything: `verify_target.py` compares the flags this box's unit passes the
+broker, and the flags that broker passes Core, against what the target actually
+declares. `JOI_BRANCH` pointing at a branch from before Joi Web existed is the
+ordinary way this goes wrong, and it fails with the branch named and the
+checkout untouched.
 
 **5. Let the deploy scripts restart their own service** — this is the whole
 reason a push can deploy without a human:
@@ -115,7 +133,7 @@ systemctl reload caddy
 **7. Start everything.**
 
 ```bash
-sudo -u joi-web /opt/joi/deploy-joi.sh
+joi-deploy
 sudo -u joi-site /opt/joi-site/deploy-site.sh
 systemctl enable --now joi-web joi-site
 ```
@@ -135,7 +153,7 @@ reporting success.
 Joi changes are deliberately separate and manual:
 
 ```bash
-sudo -u joi-web /opt/joi/deploy-joi.sh
+joi-deploy
 ```
 
 Conversations already in progress are untouched — each holds its own workspace
