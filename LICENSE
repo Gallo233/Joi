@@ -1,0 +1,41 @@
+Copyright (c) 2026 Joi Development. All rights reserved.
+
+This repository is published for reading. It is not open source, and no licence
+to use it is granted by its publication here.
+
+You may view this source code and quote short excerpts of it for the purposes of
+commentary, criticism, teaching, research, security reporting, and news
+reporting, to the extent those uses are permitted by applicable law without a
+licence.
+
+You may not copy, modify, merge, publish, distribute, sublicense, sell, host, or
+create derivative works from this software or any substantial part of it, or use
+it to provide a service, without prior written permission from the copyright
+holder.
+
+Contributions submitted to this repository are accepted only on the terms agreed
+in writing with the copyright holder before they are merged.
+
+THIRD-PARTY COMPONENTS
+
+This software depends on and, in its distributed form, bundles third-party
+components that are licensed separately by their own authors. Nothing in this
+notice applies to those components, and nothing in this notice grants rights in
+them. They are listed, with their licences, in docs/THIRD_PARTY_NOTICES.md,
+which is distributed with every release artifact.
+
+Some bundled components — including the Live2D Cubism Core runtime and the
+character assets shipped with a release — are proprietary to their own owners
+and carry distribution terms that are independent of this notice.
+
+NO WARRANTY
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THIS
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THIS SOFTWARE.
+
+For permission requests, contact the copyright holder through the repository's
+contact channel.

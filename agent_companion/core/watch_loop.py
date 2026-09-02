@@ -18,9 +18,11 @@ class WatchLoopOptions:
     sample_interval_ms: int = 700
     transcript_source: str = "system_audio"
     transcribe: bool = True
-    proactive_enabled: bool = True
+    proactive_enabled: bool = False
     commentary_interval_seconds: float = 30.0
     vision_interval_ticks: int = 5
+    mode: str = "quiet"
+    spoiler_level: str = "none"
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class WatchLoopTick:
     visual_summary: str = ""
     visual_status: str = ""
     error: str = ""
+    scene_observation: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -63,7 +66,7 @@ class WatchLoopSnapshot:
     rolling_transcript: list[str] = field(default_factory=list)
     transcript_window_seconds: int = 0
     source_health: dict = field(default_factory=dict)
-    proactive_enabled: bool = True
+    proactive_enabled: bool = False
     commentary_interval_seconds: float = 30.0
     vision_interval_ticks: int = 5
     last_visual_summary: str = ""
@@ -72,6 +75,10 @@ class WatchLoopSnapshot:
     last_comment_at: float = 0.0
     proactive_reason: str = ""
     last_error: str = ""
+    mode: str = "quiet"
+    spoiler_level: str = "none"
+    raw_media_retention: bool = False
+    scene_observation: dict = field(default_factory=dict)
 
     def to_agent_state(self) -> dict:
         return {
@@ -101,6 +108,10 @@ class WatchLoopSnapshot:
             "last_comment_at": self.last_comment_at,
             "proactive_reason": self.proactive_reason,
             "last_error": self.last_error,
+            "mode": self.mode,
+            "spoiler_level": self.spoiler_level,
+            "raw_media_retention": False,
+            "scene_observation": dict(self.scene_observation),
         }
 
 
@@ -137,6 +148,8 @@ class WatchLoopController:
                 proactive_enabled=options.proactive_enabled,
                 commentary_interval_seconds=options.commentary_interval_seconds,
                 vision_interval_ticks=options.vision_interval_ticks,
+                mode=options.mode,
+                spoiler_level=options.spoiler_level,
                 started_at=now,
                 updated_at=now,
             )
@@ -176,6 +189,8 @@ class WatchLoopController:
             self._snapshot.proactive_enabled = options.proactive_enabled
             self._snapshot.commentary_interval_seconds = options.commentary_interval_seconds
             self._snapshot.vision_interval_ticks = options.vision_interval_ticks
+            self._snapshot.mode = options.mode
+            self._snapshot.spoiler_level = options.spoiler_level
             self._snapshot.updated_at = time.time()
         self._emit_event("实时陪看设置已更新。", status="info")
         return self.snapshot()
@@ -221,6 +236,10 @@ class WatchLoopController:
                 last_comment_at=snap.last_comment_at,
                 proactive_reason=snap.proactive_reason,
                 last_error=snap.last_error,
+                mode=snap.mode,
+                spoiler_level=snap.spoiler_level,
+                raw_media_retention=False,
+                scene_observation=dict(snap.scene_observation),
             )
 
     def _run(self, session_id: str) -> None:
@@ -265,6 +284,7 @@ class WatchLoopController:
             self._snapshot.active_transcript_source = tick.transcript_source or self._options.transcript_source
             self._snapshot.transcript_status = tick.transcript_status
             self._snapshot.last_error = tick.error
+            self._snapshot.scene_observation = dict(tick.scene_observation)
         self._emit_event(tick.summary or "实时陪看上下文已更新。", status="success" if tick.ok else "failed")
         if tick.proactive_reply:
             self._emit_comment(tick)
@@ -356,6 +376,8 @@ def _normalize_options(options: WatchLoopOptions) -> WatchLoopOptions:
         proactive_enabled=bool(options.proactive_enabled),
         commentary_interval_seconds=max(8.0, min(180.0, float(options.commentary_interval_seconds or 30.0))),
         vision_interval_ticks=max(0, min(60, vision_interval)),
+        mode=options.mode if options.mode in {"quiet", "commentary", "translate", "analysis", "accessibility"} else "quiet",
+        spoiler_level=options.spoiler_level if options.spoiler_level in {"none", "current_scene", "full"} else "none",
     )
 
 

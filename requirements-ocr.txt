@@ -1,2 +1,5 @@
-Pillow>=10.0.0
+# Pillow moved to requirements.txt: capture needs it whether or not OCR is
+# wanted. What is left here is the OCR wrapper, which also needs the
+# `tesseract` executable on PATH -- pip cannot supply that, so OCR stays
+# opt-in and reports itself unavailable until it is installed.
 pytesseract>=0.3.10

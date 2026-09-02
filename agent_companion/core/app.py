@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 import time
@@ -19,7 +19,8 @@ from agent_companion.core.computer_use import (
 from agent_companion.core.audit_store import AuditStore
 from agent_companion.core.background_context import BackgroundContextStore
 from agent_companion.core.character import CharacterHarness, load_character
-from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
+from agent_companion.core.character_packages import CharacterPackageManager
+from agent_companion.core.config import AppConfig, LanguageConfig, ModelRouter, load_workspace_config
 from agent_companion.core.codex_events import codex_cancel_run_state
 from agent_companion.core.desktop_context import (
     DesktopContext,
@@ -31,29 +32,25 @@ from agent_companion.core.event_bus import EventBus
 from agent_companion.core.expression import ExpressionEngine
 from agent_companion.core.llm_planner import LlmPlanParser
 from agent_companion.core.memory import MemoryStore
+from agent_companion.core.memory_candidates import tool_result_memory_candidate
+from agent_companion.core.platform_factory import get_computer_backend
 from agent_companion.core.planner import build_plan
+from agent_companion.core.action_intent import ActionIntent
 from agent_companion.core.policy import PolicyGate
+from agent_companion.core.run_journal import RunJournal
+from agent_companion.core.vision.target_evidence import TargetEvidence, evidence_from_tool_state
+from agent_companion.core.voice_generation import VoiceGenerationTracker
+from agent_companion.core.runtime import build_tool_registry
 from agent_companion.core.schemas import AgentEvent, AgentPlan, DisplayCard, EventType, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.skill_manifest import annotate_agent_state_with_skill, skill_boundaries_for_plan, skill_boundary_for_tool
 from agent_companion.core.speech_input import build_asr_provider
-from agent_companion.core.tools.browser import BrowserTool
-from agent_companion.core.tools.chat import CompanionChatTool
-from agent_companion.core.tools.codex import CodexTool
-from agent_companion.core.tools.computer import ComputerActionTool
-from agent_companion.core.tools.desktop_workflow import DesktopWorkflowTool
-from agent_companion.core.tools.files import FileReadTool
-from agent_companion.core.tools.game_ok_ww import OkWwTool
-from agent_companion.core.tools.mcp import McpListTool
 from agent_companion.core.tools.registry import ToolRegistry
-from agent_companion.core.tools.runtime_config import RuntimeConfigUpdateTool
-from agent_companion.core.tools.screen_observe import ScreenObserveTool
-from agent_companion.core.tools.targeting import PendingSemanticTargetSelection, SemanticTargetSelectionStore, SemanticTargetSelectionTool, SemanticTargetTool
-from agent_companion.core.tools.watch import WatchRecallTool
+from agent_companion.core.tools.targeting import PendingSemanticTargetSelection, SemanticTargetSelectionStore
 from agent_companion.core.tool_compression import build_event_agent_state
 from agent_companion.core.vision.ocr import PytesseractOcrExtractor
 from agent_companion.core.vision.summarizer import OpenAIVisionSummarizer
 from agent_companion.core.voice import safe_voice_line
-from agent_companion.core.watch import WatchAnswerer, WatchFrame, WatchSession
+from agent_companion.core.watch import WatchFrame, WatchSession
 from agent_companion.core.watch_transcript import SystemAudioTranscriptProvider
 
 
@@ -66,6 +63,10 @@ class PendingStep:
     arguments_hash: str
     request_override: ToolRequest | None = None
     created_at: float = 0.0
+    # Set when a run journal is attached: the persisted approval this in-memory
+    # entry mirrors. The challenge is what survives a restart; this is a cache.
+    challenge_id: str = ""
+    step_id: str = ""
 
 
 class AgentCompanionApp:
@@ -74,16 +75,25 @@ class AgentCompanionApp:
     def __init__(self, workspace: Path, llm_planner: LlmPlanParser | None = None) -> None:
         self.workspace = workspace.resolve()
         self.root = self.workspace / "agent_companion"
-        self.character: CharacterHarness = load_character(self.root / "config" / "default_character.yaml")
+        self.character_packages = CharacterPackageManager(self.workspace)
+        try:
+            self.character: CharacterHarness = self.character_packages.active_harness()
+        except Exception:
+            self.character = load_character(self.root / "config" / "default_character.yaml")
         self.expression = ExpressionEngine(self.workspace, self.character)
         self.bus = EventBus(self.workspace / "data" / "agent_companion" / "events.jsonl")
         self.audit_store = AuditStore(self.workspace / "data" / "agent_companion" / "audit.jsonl")
         self.bus.subscribe(self.audit_store.record_event)
         self.background_context = BackgroundContextStore(self.workspace / "data" / "agent_companion" / "background_context.json")
-        self.memory = MemoryStore(self.workspace / "data" / "agent_companion" / "memory.sqlite3")
+        self.memory = MemoryStore(self.character_packages.memory_path())
+        if self.character_packages.memory_namespace() == "disabled":
+            self.memory.set_enabled(False)
         self._runtime_config = self._load_runtime_config()
-        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config))
-        self.tools = ToolRegistry()
+        self._session_authorizer = None
+        self._computer_driver = "native"
+        self._computer_session_id = ""
+        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config), session_authorizer=self._session_authorizer)
+        self.tools: ToolRegistry
         self.watch_session = WatchSession()
         self.semantic_selection = SemanticTargetSelectionStore()
         self.desktop_context = DesktopContext()
@@ -92,6 +102,12 @@ class AgentCompanionApp:
         self.approval_history: dict[str, PendingStep] = {}
         self.resolved_approval_ids: set[str] = set()
         self.approval_ttl_seconds = 120.0
+        # No-op until the server injects the store-backed journal; see run_journal.
+        self.run_journal: RunJournal = RunJournal()
+        self._plan_runs: dict[str, str] = {}
+        self._target_evidence: TargetEvidence | None = None
+        self._session_provider: Any = None
+        self.voice_generations = VoiceGenerationTracker()
         self._register_tools()
 
     def handle_user_text(self, text: str) -> list[AgentEvent]:
@@ -121,33 +137,69 @@ class AgentCompanionApp:
                 steps=[ToolRequest("vision.select_target", {"selection": selection}, "根据上一次候选列表选择目标，继续进入点击确认。")],
             )
         else:
-            plan = build_plan(text)
+            plan = build_plan(text, self.chat_language())
             plan = self._refine_plan_with_llm(text, plan)
             plan = self._rewrite_plan_for_desktop_context(plan)
-        self._emit(
-            AgentEvent(
-                EventType.USER_MESSAGE,
-                plan.task_id,
-                DisplayCard("用户请求", plan.user_text),
-                safe_voice_line("我收到了。", sprite="1"),
-                {"intent": plan.intent},
-            ),
-            plan.user_text,
+        return self._start_plan(
+            plan,
+            # Narrating a plan is for work the user is waiting on. Talking and
+            # moving are the character doing something itself, and announcing
+            # "识别为：角色动作" before a wave describes a person as a pipeline.
+            emit_plan=plan.intent not in {"companion_chat", "character_motion"},
+            record_memory=True,
         )
-        self._record_explicit_memory_candidate(plan)
-        if plan.intent != "companion_chat":
+
+    def handle_agent_cli_text(self, text: str, *, cli_id: str = "codex", model: str = "默认", reasoning: str = "默认") -> list[AgentEvent]:
+        user_text = " ".join((text or "").strip().split())
+        plan = AgentPlan(
+            task_id=f"task-{uuid.uuid4().hex[:10]}",
+            user_text=user_text,
+            intent="agent_cli_takeover",
+            steps=[
+                ToolRequest(
+                    "agent_cli.run",
+                    self._agent_cli_takeover_arguments(user_text, cli_id=cli_id, model=model, reasoning=reasoning),
+                    "交给本机 Agent CLI 接管这轮 Joi 请求。",
+                )
+            ],
+        )
+        return self._start_plan(
+            plan,
+            user_state={"agent_cli_takeover": True},
+            plan_voice="我把这轮请求交给本机 Agent CLI。",
+            record_memory=True,
+        )
+
+    def handle_skill_run(self, tool: str, arguments: dict[str, Any] | None = None, *, user_text: str = "Joi skill") -> list[AgentEvent]:
+        tool_name = str(tool or "").strip()
+        if not _is_mcp_exposed_joi_skill(tool_name):
+            task_id = f"skill-{uuid.uuid4().hex[:10]}"
             self._emit(
                 AgentEvent(
-                    EventType.PLAN_CREATED,
-                    plan.task_id,
-                    DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
-                    safe_voice_line("我整理了一下步骤。", sprite="3"),
-                    self._plan_agent_state(plan),
+                    EventType.TOOL_FAILED,
+                    task_id,
+                    DisplayCard("Joi 技能", "这个能力没有开放给当前运行时。", status="failed"),
+                    safe_voice_line("这个能力没有开放给当前运行时。", sprite="4"),
+                    {"tool": tool_name or "unknown", "blocked": True, "block_reason": "not_exposed_to_codex_runtime"},
                 ),
-                plan.user_text,
+                user_text,
             )
+            return self.bus.drain()
+        plan = AgentPlan(
+            task_id=f"skill-{uuid.uuid4().hex[:10]}",
+            user_text=user_text,
+            intent="joi_skill",
+            steps=[ToolRequest(tool_name, arguments if isinstance(arguments, dict) else {}, "由 Joi runtime 调用原生技能。")],
+        )
         self._run_plan(plan, 0)
         return self.bus.drain()
+
+    def should_handle_locally_before_agent_cli(self, text: str) -> bool:
+        if _parse_memory_command(text):
+            return True
+        if _parse_candidate_selection(text) is not None and self.semantic_selection.has_pending():
+            return True
+        return False
 
     def select_semantic_target(self, selection_id: str, rank: int) -> list[AgentEvent]:
         selection_id = (selection_id or "").strip()
@@ -164,28 +216,7 @@ class AgentCompanionApp:
                 )
             ],
         )
-        self._emit(
-            AgentEvent(
-                EventType.USER_MESSAGE,
-                plan.task_id,
-                DisplayCard("用户请求", plan.user_text),
-                safe_voice_line("我收到了。", sprite="1"),
-                {"intent": plan.intent},
-            ),
-            plan.user_text,
-        )
-        self._emit(
-            AgentEvent(
-                EventType.PLAN_CREATED,
-                plan.task_id,
-                DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
-                safe_voice_line("我整理了一下步骤。", sprite="3"),
-                self._plan_agent_state(plan),
-            ),
-            plan.user_text,
-        )
-        self._run_plan(plan, 0)
-        return self.bus.drain()
+        return self._start_plan(plan)
 
     def request_runtime_config_update(self, updates: dict) -> list[AgentEvent]:
         plan = AgentPlan(
@@ -200,28 +231,53 @@ class AgentCompanionApp:
                 )
             ],
         )
+        return self._start_plan(plan)
+
+    def _start_plan(
+        self,
+        plan: AgentPlan,
+        *,
+        emit_plan: bool = True,
+        record_memory: bool = False,
+        user_state: dict[str, object] | None = None,
+        plan_voice: str = "我整理了一下步骤。",
+    ) -> list[AgentEvent]:
+        # A new turn supersedes whatever the previous one was still saying.
+        self.begin_voice_generation()
+        self._emit_user_request(plan, user_state)
+        run_id = self.run_journal.begin_run(plan.task_id, plan.intent, plan.user_text)
+        if run_id:
+            self._plan_runs[plan.task_id] = run_id
+        if record_memory:
+            self._record_explicit_memory_candidate(plan)
+        if emit_plan:
+            self._emit_plan_created(plan, plan_voice)
+        self._run_plan(plan, 0)
+        return self.bus.drain()
+
+    def _emit_user_request(self, plan: AgentPlan, extra_state: dict[str, object] | None = None) -> None:
         self._emit(
             AgentEvent(
                 EventType.USER_MESSAGE,
                 plan.task_id,
                 DisplayCard("用户请求", plan.user_text),
                 safe_voice_line("我收到了。", sprite="1"),
-                {"intent": plan.intent},
+                {"intent": plan.intent, **(extra_state or {})},
             ),
             plan.user_text,
         )
+
+    def _emit_plan_created(self, plan: AgentPlan, voice_text: str) -> None:
         self._emit(
             AgentEvent(
                 EventType.PLAN_CREATED,
                 plan.task_id,
                 DisplayCard("计划", f"识别为：{self._intent_label(plan.intent)}", self._plan_body(plan)),
-                safe_voice_line("我整理了一下步骤。", sprite="3"),
+                safe_voice_line(voice_text, sprite="3"),
                 self._plan_agent_state(plan),
             ),
             plan.user_text,
         )
-        self._run_plan(plan, 0)
-        return self.bus.drain()
 
     def refresh_watch_context(
         self,
@@ -263,7 +319,68 @@ class AgentCompanionApp:
 
     def reload_runtime_policy(self) -> None:
         self._runtime_config = self._load_runtime_config()
-        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config))
+        self.policy = PolicyGate(disabled_skills=_disabled_skill_ids(self._runtime_config), session_authorizer=self._session_authorizer)
+        reload_planner = getattr(self.llm_planner, "reload", None)
+        if callable(reload_planner):
+            reload_planner()
+        self._register_tools()
+
+    def set_run_journal(self, journal: RunJournal) -> None:
+        self.run_journal = journal
+
+    def set_target_evidence(self, evidence: TargetEvidence | None) -> None:
+        """Record what the last resolved target was, and under what conditions."""
+        self._target_evidence = evidence
+
+    def current_target_evidence(self) -> TargetEvidence | None:
+        """The evidence policy may use to place a coordinate action in scope.
+
+        Returned only while it is still current: stale or superseded evidence
+        must send the step to approval rather than quietly authorize it.
+        """
+        evidence = self._target_evidence
+        if evidence is None or evidence.expired():
+            return None
+        return evidence
+
+    def set_session_authorizer(self, authorizer: Any) -> None:
+        self._session_authorizer = authorizer
+        self.policy.session_authorizer = authorizer
+
+    def set_computer_driver(self, driver: str, session_id: str = "") -> str:
+        requested = "cua" if driver == "cua" else "native"
+        if requested == self._computer_driver and (requested != "cua" or session_id == self._computer_session_id):
+            return requested
+        self._computer_driver = requested
+        self._computer_session_id = session_id if requested == "cua" else ""
+        try:
+            self._register_tools()
+        except Exception:
+            self._computer_driver = "native"
+            self._computer_session_id = ""
+            self._register_tools()
+        return self._computer_driver
+
+    def reload_character_package(self) -> None:
+        """Switch all character-aware runtime services to the active package."""
+
+        self.pending_steps.clear()
+        self.semantic_selection.clear()
+        self.character = self.character_packages.active_harness()
+        self.expression.reload(self.character)
+        self.memory = MemoryStore(self.character_packages.memory_path())
+        if self.character_packages.memory_namespace() == "disabled":
+            self.memory.set_enabled(False)
+        self.reload_runtime_policy()
+
+    def language_settings(self) -> LanguageConfig:
+        """The language Joi shows and writes in; her voice's is the package's."""
+
+        config = self._runtime_config or self._load_runtime_config()
+        return config.language if config is not None else LanguageConfig()
+
+    def chat_language(self) -> str:
+        return self.language_settings().chat
 
     def skill_settings_payload(self) -> dict[str, bool]:
         config = self._runtime_config or self._load_runtime_config()
@@ -282,227 +399,427 @@ class AgentCompanionApp:
             self._emit_duplicate_approval_audit(approval_id)
             return self.bus.drain()
         self.resolved_approval_ids.add(approval_id)
+        # Record the decision before acting on it. Approval alone still does not
+        # permit the step: it is re-verified and spent in _run_plan.
+        decided = self.run_journal.decide_challenge(pending.challenge_id, approved)
+        if pending.challenge_id and not decided.get("ok"):
+            self._emit_failed_approval(
+                pending,
+                approval_id,
+                state_flag="approval_expired" if "expired" in str(decided.get("error") or "") else "approval_mismatch",
+                title="审批已失效",
+                summary="这次确认已经不能使用，我没有继续执行。",
+                voice="这次确认已经失效，我没有继续执行。",
+                audit_status="expired",
+                audit_summary=f"Approval could not be recorded: {decided.get('error') or 'unknown'}.",
+                codex_reason="expired",
+            )
+            return self.bus.drain()
         if self._pending_step_expired(pending):
-            state = {"intent": pending.plan.intent, "approval_expired": True, "approval_id": approval_id}
-            state = annotate_agent_state_with_skill(state, pending.tool)
-            self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval expired before execution.")] if self._is_computer_pending(pending) else [])
-            if self._is_codex_permission_pending(pending):
-                state["codex_run"] = codex_cancel_run_state("expired")
-            self._emit(
-                AgentEvent(
-                    EventType.TASK_FAILED,
-                    pending.plan.task_id,
-                    DisplayCard(
-                        "Codex 权限确认已过期" if self._is_codex_permission_pending(pending) else "审批已过期",
-                        "Codex 权限确认已经过期，我没有继续执行。" if self._is_codex_permission_pending(pending) else "这次确认已经过期，我没有继续执行。",
-                        status="failed",
-                    ),
-                    safe_voice_line("这次确认已经过期，我没有继续执行。", sprite="4"),
-                    state,
-                ),
-                pending.plan.user_text,
+            self._emit_failed_approval(
+                pending,
+                approval_id,
+                state_flag="approval_expired",
+                title="审批已过期",
+                summary="这次确认已经过期，我没有继续执行。",
+                voice="这次确认已经过期，我没有继续执行。",
+                audit_status="expired",
+                audit_summary="Approval expired before execution.",
+                codex_reason="expired",
+                codex_title="Codex 权限确认已过期",
+                codex_summary="Codex 权限确认已经过期，我没有继续执行。",
             )
             return self.bus.drain()
         if not approved:
-            state = {"intent": pending.plan.intent, "cancelled": True, "approval_id": approval_id}
-            state = annotate_agent_state_with_skill(state, pending.tool)
-            self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "denied", "Approval was denied; no action ran.")] if self._is_computer_pending(pending) else [])
-            if self._is_codex_permission_pending(pending):
-                state["codex_run"] = codex_cancel_run_state("denied")
-            self._emit(
-                AgentEvent(
-                    EventType.TASK_FAILED,
-                    pending.plan.task_id,
-                    DisplayCard(
-                        "Codex 权限已拒绝" if self._is_codex_permission_pending(pending) else "任务已取消",
-                        "你拒绝了 Codex 权限请求，我没有继续执行。" if self._is_codex_permission_pending(pending) else "你拒绝了这一步，我没有继续执行。",
-                        status="failed",
-                    ),
-                    safe_voice_line("好，我先停在这里。", sprite="1"),
-                    state,
-                ),
-                pending.plan.user_text,
+            self._emit_failed_approval(
+                pending,
+                approval_id,
+                state_flag="cancelled",
+                title="任务已取消",
+                summary="你拒绝了这一步，我没有继续执行。",
+                voice="好，我先停在这里。",
+                voice_sprite="1",
+                audit_status="denied",
+                audit_summary="Approval was denied; no action ran.",
+                codex_reason="denied",
+                codex_title="Codex 权限已拒绝",
+                codex_summary="你拒绝了 Codex 权限请求，我没有继续执行。",
             )
             return self.bus.drain()
         if not self._pending_step_matches(pending):
-            state = {"intent": pending.plan.intent, "approval_id": approval_id, "approval_mismatch": True}
-            state = annotate_agent_state_with_skill(state, pending.tool)
-            self._attach_audit_state(state, [self._approval_lifecycle_audit(pending, "expired", "Approval no longer matched the pending action.")] if self._is_computer_pending(pending) else [])
-            if self._is_codex_permission_pending(pending):
-                state["codex_run"] = codex_cancel_run_state("mismatch")
-            self._emit(
-                AgentEvent(
-                    EventType.TASK_FAILED,
-                    pending.plan.task_id,
-                    DisplayCard("审批已失效", "这次确认和待执行步骤不匹配，我没有继续执行。", status="failed"),
-                    safe_voice_line("这次确认已经失效，我没有继续执行。", sprite="4"),
-                    state,
-                ),
-                pending.plan.user_text,
+            self._emit_failed_approval(
+                pending,
+                approval_id,
+                state_flag="approval_mismatch",
+                title="审批已失效",
+                summary="这次确认和待执行步骤不匹配，我没有继续执行。",
+                voice="这次确认已经失效，我没有继续执行。",
+                audit_status="expired",
+                audit_summary="Approval no longer matched the pending action.",
+                codex_reason="mismatch",
             )
             return self.bus.drain()
         self._emit_computer_audit([self._approval_lifecycle_audit(pending, "approved", "Approval was accepted; action may run.")], pending.plan.user_text)
         self._run_plan(pending.plan, pending.index, approved_step=pending)
         return self.bus.drain()
 
+    def _emit_failed_approval(
+        self,
+        pending: PendingStep,
+        approval_id: str,
+        *,
+        state_flag: str,
+        title: str,
+        summary: str,
+        voice: str,
+        audit_status: str,
+        audit_summary: str,
+        codex_reason: str,
+        voice_sprite: str = "4",
+        codex_title: str = "",
+        codex_summary: str = "",
+    ) -> None:
+        is_codex_permission = self._is_codex_permission_pending(pending)
+        state = {
+            "intent": pending.plan.intent,
+            "approval_id": approval_id,
+            state_flag: True,
+        }
+        state = annotate_agent_state_with_skill(state, pending.tool)
+        if self._is_computer_pending(pending):
+            self._attach_audit_state(
+                state,
+                [self._approval_lifecycle_audit(pending, audit_status, audit_summary)],
+            )
+        if is_codex_permission:
+            state["codex_run"] = codex_cancel_run_state(codex_reason)
+        self._emit(
+            AgentEvent(
+                EventType.TASK_FAILED,
+                pending.plan.task_id,
+                DisplayCard(
+                    codex_title if is_codex_permission and codex_title else title,
+                    codex_summary if is_codex_permission and codex_summary else summary,
+                    status="failed",
+                ),
+                safe_voice_line(voice, sprite=voice_sprite),
+                state,
+            ),
+            pending.plan.user_text,
+        )
+
     def _run_plan(self, plan: AgentPlan, start_index: int, approved_step: PendingStep | None = None) -> None:
         final_ok = True
-        pending_approval = False
+        run_id = self._plan_runs.get(plan.task_id, "")
         for index, plan_step in enumerate(plan.steps[start_index:], start=start_index):
             step = self._step_for_execution(plan, index, plan_step, approved_step)
             step = self._step_with_memory_context(step)
             is_approved_step = self._is_approved_step(plan, index, step, approved_step)
             decision = self.policy.classify(step, approved=is_approved_step)
             if not decision.allowed and not decision.requires_approval:
-                self._emit(
-                    AgentEvent(
-                        EventType.TOOL_FAILED,
-                        plan.task_id,
-                        DisplayCard("能力已关闭", f"{self._tool_label(step.name)} 当前不可用。", status="failed"),
-                        safe_voice_line("这个能力现在是关闭的。", sprite="4"),
-                        annotate_agent_state_with_skill(
-                            {
-                                "tool": step.name,
-                                "policy": self.policy.public_payload(step),
-                                "risk": decision.risk.value,
-                                "blocked": True,
-                                "block_reason": decision.reason,
-                            },
-                            step.name,
-                        ),
-                    ),
-                    plan.user_text,
-                )
+                self._emit_policy_block(plan, step, decision.risk, decision.reason)
                 final_ok = False
                 break
             if decision.requires_approval:
-                pending = self._make_pending_step(plan, index, step)
-                self._store_pending_step(pending)
-                agent_state = {
-                    "policy": self.policy.public_payload(step),
-                    "risk": decision.risk.value,
-                    "approval": {
-                        "approval_id": pending.approval_id,
-                        "task_id": plan.task_id,
-                        "step_index": index,
-                        "tool": step.name,
-                        "arguments_hash": pending.arguments_hash,
-                    },
-                }
-                agent_state = annotate_agent_state_with_skill(agent_state, step.name)
-                self._attach_audit_state(
-                    agent_state,
-                    [
-                        computer_approval_audit_event(
-                            plan.task_id,
-                            step,
-                            decision.risk,
-                            pending.approval_id,
-                            "pending",
-                            "Approval is required before this Computer Use action can run.",
-                        )
-                    ]
-                    if step.name.startswith("computer.")
-                    else [],
-                )
-                self._emit(
-                    AgentEvent(
-                        EventType.APPROVAL_REQUIRED,
-                        plan.task_id,
-                        DisplayCard("需要确认", self._approval_summary(step), step.reason, status="approval"),
-                        safe_voice_line("这一步需要你确认后我再执行。", sprite="4"),
-                        agent_state,
-                    ),
-                    plan.user_text,
-                )
+                self._request_step_approval(plan, index, step, decision.risk)
+                return
+            # Scoped to the run: a retry or resume inside this run is the same
+            # attempt and must not act twice, while the same request made again
+            # later is a new attempt the user is entitled to.
+            intent = ActionIntent.from_request(step, scope=run_id)
+            step_id = self.run_journal.record_step(run_id, index, intent)
+            # An approval is spent here, not when the user clicked: the gap
+            # between the two is exactly where a plan can be edited.
+            if is_approved_step and approved_step is not None and approved_step.challenge_id:
+                spent = self.run_journal.spend_challenge(approved_step.challenge_id, intent)
+                if not spent.get("ok"):
+                    self._emit_policy_block(plan, step, decision.risk, f"approval_{spent.get('error') or 'invalid'}")
+                    final_ok = False
+                    break
+            lease = self.run_journal.begin_effect(run_id, step_id, intent, approval_id=getattr(approved_step, "challenge_id", "") or "")
+            if not lease.get("ok"):
+                # Another attempt on this exact effect is in flight or already
+                # happened; acting again could double a real-world change.
+                self._emit_policy_block(plan, step, decision.risk, str(lease.get("error") or "effect_unavailable"))
                 final_ok = False
-                pending_approval = True
                 break
-            if step.name != "companion.chat":
-                self._emit(
-                    AgentEvent(
-                        EventType.TOOL_STARTED,
-                        plan.task_id,
-                        DisplayCard("执行中", f"正在执行：{self._tool_label(step.name)}"),
-                        safe_voice_line("我开始执行这一步。", sprite="3"),
-                        annotate_agent_state_with_skill({"tool": step.name}, step.name),
-                    ),
-                    plan.user_text,
-                )
-            try:
-                result = self.tools.run(step)
-            except Exception as exc:
-                result = ToolResult(
-                    ok=False,
-                    agent_state={"tool": step.name, "error": type(exc).__name__, "detail": str(exc)[:500]},
-                    display_card=DisplayCard("工具失败", f"{step.name} 没有跑通。", str(exc)[:1800], status="failed"),
-                    voice_line=safe_voice_line("这个工具没有跑通，细节在卡片里。", sprite="4"),
-                )
+            effect_id = str((lease.get("effect") or {}).get("id") or "")
+            self._emit_tool_started(plan, step)
+            result = self._run_tool_safely(step)
             if result.requires_approval:
                 pending_request = self._approval_request_from_result(result)
                 if pending_request is not None:
-                    pending = self._make_pending_step(plan, index, pending_request, request_override=pending_request)
-                    self._store_pending_step(pending)
-                    agent_state = {
-                        "tool": result.agent_state.get("tool"),
-                        "selection_id": result.agent_state.get("selection_id"),
-                        "policy": self.policy.public_payload(pending_request),
-                        "risk": result.risk.value,
-                        "approval": {
-                            "approval_id": pending.approval_id,
-                            "task_id": plan.task_id,
-                            "step_index": index,
-                            "tool": pending_request.name,
-                            "arguments_hash": pending.arguments_hash,
-                        },
-                        "selected_rank": result.agent_state.get("selected_rank"),
-                        "target_candidate": result.agent_state.get("target_candidate"),
-                        "target_candidates": result.agent_state.get("target_candidates"),
-                    }
-                    agent_state = annotate_agent_state_with_skill(agent_state, pending_request.name)
-                    source_tool = str(result.agent_state.get("tool") or "")
-                    if source_tool:
-                        agent_state["source_skill"] = skill_boundary_for_tool(source_tool)
-                    if "codex_run" in result.agent_state:
-                        agent_state["codex_run"] = result.agent_state["codex_run"]
-                    audit_entries = target_grounding_audit_events(plan.task_id, result, result.risk)
-                    if pending_request.name.startswith("computer."):
-                        audit_entries.append(
-                            computer_approval_audit_event(
-                                plan.task_id,
-                                pending_request,
-                                result.risk,
-                                pending.approval_id,
-                                "pending",
-                                "Approval is required before this Computer Use action can run.",
-                                result.display_card.artifacts,
-                            )
-                        )
-                    self._attach_audit_state(agent_state, audit_entries)
-                    self._emit(
-                        AgentEvent(
-                            EventType.APPROVAL_REQUIRED,
-                            plan.task_id,
-                            DisplayCard("需要确认", result.display_card.summary, result.display_card.body, status="approval", artifacts=result.display_card.artifacts),
-                            result.voice_line,
-                            agent_state,
-                        ),
-                        plan.user_text,
-                    )
-                    final_ok = False
-                    pending_approval = True
-                    break
-            self._record_semantic_selection(plan, result)
-            self._attach_result_audit(plan, step, result)
-            self._emit_result(plan.task_id, result, plan.user_text)
-            self._record_watch_context(plan, step, result)
-            self._record_desktop_context(plan, step, result)
-            self._record_result_memory_candidate(plan, step, result)
+                    # The tool asked rather than acted, so release the lease for
+                    # the follow-up attempt instead of leaving it dangling.
+                    self.run_journal.complete_effect(effect_id, ok=False)
+                    self._request_result_approval(plan, index, pending_request, result)
+                    return
+            self.run_journal.complete_effect(effect_id, ok=result.ok)
+            if step_id:
+                self.run_journal.record_step_outcome(step_id, result.ok)
+            self._process_tool_result(plan, step, result)
             final_ok = final_ok and result.ok
             if not result.ok:
                 break
+        self._finish_plan(plan, final_ok, approved_step)
+
+    # Why a step stopped, in the user's terms. These arrive through one code
+    # path but are not one situation: a capability that is switched off, an
+    # approval that no longer applies, and a safety interlock that thinks this
+    # exact action is already underway ask completely different things of the
+    # user. Reporting all three as "capability disabled" sends them to a
+    # settings screen where nothing is wrong.
+    _BLOCK_MESSAGES: dict[str, tuple[str, str, str]] = {
+        "effect_already_completed": (
+            "动作没有重复执行",
+            "{label}刚刚已经做过一次，这次没有重复执行。",
+            "这个动作刚才已经做过了。",
+        ),
+        "effect_needs_reconciliation": (
+            "上一次动作没有回执",
+            "上一次{label}没有报告结果，需要你确认屏幕上的实际情况后再继续。",
+            "上一次动作没有回执，我先停下了。",
+        ),
+        "effect_lease_held": (
+            "同一个动作正在进行",
+            "{label}正在执行中，我没有再发一次。",
+            "这个动作正在进行，我没有重复发。",
+        ),
+    }
+
+    def _block_card(self, step: ToolRequest, reason: str) -> tuple[DisplayCard, str]:
+        label = self._tool_label(step.name)
+        if reason.startswith("approval_"):
+            return (
+                DisplayCard("需要重新确认", f"这次{label}的确认已经失效，请重新发起。", status="failed"),
+                "这次确认已经失效，请再说一次。",
+            )
+        title, summary, spoken = self._BLOCK_MESSAGES.get(
+            reason, ("能力已关闭", "{label} 当前不可用。", "这个能力现在是关闭的。")
+        )
+        return DisplayCard(title, summary.format(label=label), status="failed"), spoken
+
+    def _emit_policy_block(self, plan: AgentPlan, step: ToolRequest, risk: RiskLevel, reason: str) -> None:
+        card, spoken = self._block_card(step, reason)
+        self._emit(
+            AgentEvent(
+                EventType.TOOL_FAILED,
+                plan.task_id,
+                card,
+                safe_voice_line(spoken, sprite="4"),
+                annotate_agent_state_with_skill(
+                    {
+                        "tool": step.name,
+                        "policy": self.policy.public_payload(step),
+                        "risk": risk.value,
+                        "blocked": True,
+                        "block_reason": reason,
+                    },
+                    step.name,
+                ),
+            ),
+            plan.user_text,
+        )
+
+    def _request_step_approval(self, plan: AgentPlan, index: int, step: ToolRequest, risk: RiskLevel) -> None:
+        pending = self._make_pending_step(plan, index, step)
+        self._store_pending_step(pending)
+        agent_state = annotate_agent_state_with_skill(
+            {
+                "policy": self.policy.public_payload(step),
+                "risk": risk.value,
+                "approval": self._approval_state(pending),
+            },
+            step.name,
+        )
+        if step.name.startswith("computer."):
+            self._attach_audit_state(
+                agent_state,
+                [
+                    computer_approval_audit_event(
+                        plan.task_id,
+                        step,
+                        risk,
+                        pending.approval_id,
+                        "pending",
+                        "Approval is required before this Computer Use action can run.",
+                    )
+                ],
+            )
+        self._emit(
+            AgentEvent(
+                EventType.APPROVAL_REQUIRED,
+                plan.task_id,
+                DisplayCard("需要确认", self._approval_summary(step), step.reason, status="approval"),
+                safe_voice_line("这一步需要你确认后我再执行。", sprite="4"),
+                agent_state,
+            ),
+            plan.user_text,
+        )
+
+    def _emit_tool_started(self, plan: AgentPlan, step: ToolRequest) -> None:
+        if step.name == "character.perform":
+            self._emit(
+                AgentEvent(
+                    EventType.TOOL_STARTED,
+                    plan.task_id,
+                    # Transient and unspoken, but it still renders in the
+                    # character's own bubble under her name -- so it describes
+                    # the app's state without putting words in her mouth.
+                    DisplayCard("角色动作", "正在准备动作。"),
+                    safe_voice_line("", fallback=""),
+                    annotate_agent_state_with_skill(
+                        {
+                            "tool": step.name,
+                            "ui_phase": "acting",
+                            "ui_label": "正在准备动作",
+                            "ui_transient": True,
+                        },
+                        step.name,
+                    ),
+                ),
+                plan.user_text,
+            )
+            return
+        if step.name == "companion.chat":
+            self._emit(
+                AgentEvent(
+                    EventType.TOOL_STARTED,
+                    plan.task_id,
+                    DisplayCard("思考中", f"{self.character.name} 正在想…"),
+                    safe_voice_line("", fallback=""),
+                    annotate_agent_state_with_skill(
+                        {
+                            "tool": step.name,
+                            "ui_phase": "thinking",
+                            "ui_label": f"{self.character.name} 正在想",
+                            "ui_transient": True,
+                        },
+                        step.name,
+                    ),
+                ),
+                plan.user_text,
+            )
+            return
+        self._emit(
+            AgentEvent(
+                EventType.TOOL_STARTED,
+                plan.task_id,
+                DisplayCard("执行中", f"正在执行：{self._tool_label(step.name)}"),
+                safe_voice_line("我开始执行这一步。", sprite="3"),
+                annotate_agent_state_with_skill({"tool": step.name}, step.name),
+            ),
+            plan.user_text,
+        )
+
+    def _run_tool_safely(self, step: ToolRequest) -> ToolResult:
+        try:
+            return self.tools.run(step)
+        except Exception as exc:
+            return ToolResult(
+                ok=False,
+                agent_state={"tool": step.name, "error": type(exc).__name__, "detail": str(exc)[:500]},
+                display_card=DisplayCard("工具失败", f"{step.name} 没有跑通。", str(exc)[:1800], status="failed"),
+                voice_line=safe_voice_line("这个工具没有跑通，你可以展开执行过程查看细节。", sprite="4"),
+            )
+
+    def _request_result_approval(
+        self,
+        plan: AgentPlan,
+        index: int,
+        request: ToolRequest,
+        result: ToolResult,
+    ) -> None:
+        pending = self._make_pending_step(plan, index, request, request_override=request)
+        self._store_pending_step(pending)
+        agent_state = {
+            "tool": result.agent_state.get("tool"),
+            "selection_id": result.agent_state.get("selection_id"),
+            "policy": self.policy.public_payload(request),
+            "risk": result.risk.value,
+            "approval": self._approval_state(pending),
+            "selected_rank": result.agent_state.get("selected_rank"),
+            "target_candidate": result.agent_state.get("target_candidate"),
+            "target_candidates": result.agent_state.get("target_candidates"),
+        }
+        agent_state = annotate_agent_state_with_skill(agent_state, request.name)
+        source_tool = str(result.agent_state.get("tool") or "")
+        if source_tool:
+            agent_state["source_skill"] = skill_boundary_for_tool(source_tool)
+        for key in ("codex_run", "agent_cli", "agent_cli_run", "agent_cli_takeover"):
+            if key in result.agent_state:
+                agent_state[key] = result.agent_state[key]
+        audit_entries = target_grounding_audit_events(plan.task_id, result, result.risk)
+        if request.name.startswith("computer."):
+            audit_entries.append(
+                computer_approval_audit_event(
+                    plan.task_id,
+                    request,
+                    result.risk,
+                    pending.approval_id,
+                    "pending",
+                    "Approval is required before this Computer Use action can run.",
+                    result.display_card.artifacts,
+                )
+            )
+        self._attach_audit_state(agent_state, audit_entries)
+        self._emit(
+            AgentEvent(
+                EventType.APPROVAL_REQUIRED,
+                plan.task_id,
+                DisplayCard(
+                    "需要确认",
+                    result.display_card.summary,
+                    result.display_card.body,
+                    status="approval",
+                    artifacts=result.display_card.artifacts,
+                ),
+                result.voice_line,
+                agent_state,
+            ),
+            plan.user_text,
+        )
+
+    @staticmethod
+    def _approval_state(pending: PendingStep) -> dict[str, object]:
+        return {
+            "approval_id": pending.approval_id,
+            "task_id": pending.plan.task_id,
+            "step_index": pending.index,
+            "tool": pending.tool,
+            "arguments_hash": pending.arguments_hash,
+        }
+
+    def _process_tool_result(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
+        self._record_target_evidence(result)
+        self._record_semantic_selection(plan, result)
+        self._attach_result_audit(plan, step, result)
+        self._emit_result(plan.task_id, result, plan.user_text)
+        self._record_watch_context(plan, step, result)
+        self._record_desktop_context(plan, step, result)
+        self._record_result_memory_candidate(plan, step, result)
+
+    def _record_target_evidence(self, result: ToolResult) -> None:
+        """Keep the evidence a targeting step produced, and drop it once acted on.
+
+        A resolved target authorizes the click that follows it, not every later
+        click: leaving it in place would let one confirmed target vouch for
+        whatever the plan does next.
+        """
+        state = result.agent_state if isinstance(result.agent_state, dict) else {}
+        tool = str(state.get("tool") or "")
+        evidence = evidence_from_tool_state(state)
+        if evidence is not None:
+            self.set_target_evidence(evidence)
+        elif tool.startswith("computer.") or tool.startswith("browser."):
+            self.set_target_evidence(None)
+
+    def _finish_plan(self, plan: AgentPlan, final_ok: bool, approved_step: PendingStep | None) -> None:
+        run_id = self._plan_runs.pop(plan.task_id, "")
+        if run_id:
+            self.run_journal.finish_run(run_id, "completed" if final_ok else "failed")
         if final_ok:
-            if self._should_emit_task_completion(plan.intent):
+            if self._should_emit_task_completion(plan.intent) or self._approved_computer_step_completed(approved_step):
                 self._emit(
                     AgentEvent(
                         EventType.TASK_COMPLETED,
@@ -513,12 +830,12 @@ class AgentCompanionApp:
                     ),
                     plan.user_text,
                 )
-        elif not pending_approval:
+        else:
             self._emit(
                 AgentEvent(
                     EventType.TASK_FAILED,
                     plan.task_id,
-                    DisplayCard("任务未完成", "这轮任务没有跑通，细节在任务卡里。", status="failed"),
+                    DisplayCard("任务未完成", "这轮任务没有跑通，可以展开执行过程查看细节。", status="failed"),
                     safe_voice_line(self.character.voice.get("failed", "没有跑通。"), sprite="4"),
                     self._plan_agent_state(plan, include_steps=False),
                 ),
@@ -542,8 +859,43 @@ class AgentCompanionApp:
             user_text,
         )
 
+    def begin_voice_generation(self, run_id: str = "") -> str:
+        """Open a new turn's worth of speech, retiring the previous one."""
+        return self.voice_generations.begin(
+            self._active_thread_id(),
+            character_id=self.character.id,
+            run_id=run_id,
+        ).generation_id
+
+    def _active_thread_id(self) -> str:
+        try:
+            return str((self.bus.context() or {}).get("thread_id") or "")
+        except Exception:
+            return ""
+
     def _emit(self, event: AgentEvent, user_text: str = "") -> None:
-        self.bus.emit(self.expression.express(event, user_text))
+        state = dict(event.agent_state or {})
+        state.setdefault("character_id", self.character.id)
+        # Tag the utterance with the turn it belongs to so audio that finishes
+        # after the user has moved on can be recognised and dropped.
+        generation = self.voice_generations.current_id(self._active_thread_id())
+        if generation:
+            state.setdefault("voice_generation", generation)
+        tagged = replace(event, agent_state=state)
+        # The capability session outranks the event: a paused session must not
+        # be repainted by whichever tool event happens to arrive next.
+        self.bus.emit(self.expression.express(tagged, user_text, session=self._session_snapshot()))
+
+    def set_session_provider(self, provider: Any) -> None:
+        self._session_provider = provider
+
+    def _session_snapshot(self) -> dict[str, Any]:
+        if self._session_provider is None:
+            return {}
+        try:
+            return dict(self._session_provider() or {})
+        except Exception:
+            return {}
 
     @staticmethod
     def _plan_agent_state(plan: AgentPlan, *, include_steps: bool = True) -> dict[str, object]:
@@ -567,6 +919,8 @@ class AgentCompanionApp:
     def _tool_label(name: str) -> str:
         labels = {
             "companion.chat": "角色对话",
+            "character.perform": "角色动作",
+            "agent_cli.run": "Agent CLI 接管",
             "codex.run": "写码任务",
             "game.ok_ww.run": "游戏自动化",
             "browser.search": "浏览器搜索",
@@ -576,6 +930,9 @@ class AgentCompanionApp:
             "vision.select_target": "候选选择",
             "watch.recall": "陪看追问",
             "computer.click": "电脑点击",
+            "computer.double_click": "电脑双击",
+            "computer.drag": "电脑拖拽",
+            "computer.open_app": "打开应用",
             "computer.type_text": "电脑输入",
             "computer.scroll": "电脑滚动",
             "computer.hotkey": "快捷键",
@@ -590,6 +947,8 @@ class AgentCompanionApp:
     def _intent_label(intent: str) -> str:
         labels = {
             "companion_chat": "日常对话",
+            "character_motion": "角色动作",
+            "agent_cli_takeover": "Agent CLI 接管",
             "coding": "写码",
             "game_assist": "游戏",
             "watch_together": "陪看",
@@ -605,11 +964,16 @@ class AgentCompanionApp:
 
     @staticmethod
     def _should_emit_task_completion(intent: str) -> bool:
-        return intent not in {"companion_chat", "watch_together", "watch_followup", "semantic_target", "semantic_target_selection"}
+        return intent not in {"companion_chat", "character_motion", "watch_together", "watch_followup", "semantic_target", "semantic_target_selection"}
+
+    @staticmethod
+    def _approved_computer_step_completed(pending: PendingStep | None) -> bool:
+        request = pending.request_override if pending is not None else None
+        return request is not None and request.name.startswith("computer.")
 
     @staticmethod
     def _is_ephemeral_result(plan: AgentPlan, step: ToolRequest, result: ToolResult) -> bool:
-        if plan.intent in {"watch_together", "watch_followup"}:
+        if plan.intent in {"watch_together", "watch_followup", "character_motion"}:
             return True
         if plan.intent in {"semantic_target", "semantic_target_selection"}:
             return True
@@ -627,6 +991,14 @@ class AgentCompanionApp:
 
     def _record_result_memory_candidate(self, plan: AgentPlan, step: ToolRequest, result: ToolResult) -> None:
         raw = result.agent_state.get("memory_candidate") if isinstance(result.agent_state, dict) else None
+        if raw is None:
+            raw = tool_result_memory_candidate(
+                intent=plan.intent,
+                tool=step.name,
+                user_text=plan.user_text,
+                agent_state=result.agent_state if isinstance(result.agent_state, dict) else {},
+                ok=result.ok,
+            )
         if raw is None:
             return
         if self._is_ephemeral_result(plan, step, result) or self._is_sensitive_result(plan, step, result):
@@ -690,12 +1062,35 @@ class AgentCompanionApp:
             user_text,
         )
 
+    def _agent_cli_takeover_arguments(self, user_text: str, *, cli_id: str, model: str, reasoning: str) -> dict[str, object]:
+        arguments: dict[str, object] = {
+            "goal": user_text,
+            "cli_id": cli_id or "codex",
+            "model": model or "默认",
+            "reasoning": reasoning or "默认",
+        }
+        memory_context = self.memory.context(8, query=user_text, **self._memory_scope())
+        if memory_context:
+            arguments["memory_context"] = memory_context
+        desktop_context = self._active_desktop_context()
+        if desktop_context is not None:
+            arguments["desktop_context"] = {
+                "browser": desktop_context.browser,
+                "site": desktop_context.site,
+            }
+        background = self.background_context.status()
+        if background.get("active") or background.get("recent_context"):
+            arguments["background_context"] = background
+        return arguments
+
     def _plan_body(self, plan: AgentPlan) -> str:
         return "\n".join(self._tool_label(step.name) for step in plan.steps)
 
     def _approval_summary(self, step: ToolRequest) -> str:
         if step.name == "game.ok_ww.run":
             return "启动游戏自动化前需要你确认。"
+        if step.name == "agent_cli.run":
+            return "交给本机 Agent CLI 接管前需要你确认。"
         if step.name == "codex.run":
             return "交给 Codex 执行前需要你确认。"
         if step.name == "runtime.update_config":
@@ -707,57 +1102,25 @@ class AgentCompanionApp:
     def _register_tools(self) -> None:
         app_config = self._runtime_config
         ocr = self._build_ocr_extractor(app_config)
-        post_action_settle_ms = app_config.computer_use.post_action_settle_ms if app_config else 200
-        self.tools.register(CompanionChatTool(self.workspace))
-        self.tools.register(CodexTool(self.workspace))
-        self.tools.register(BrowserTool(self.workspace, "browser.search"))
-        self.tools.register(BrowserTool(self.workspace, "browser.observe"))
-        self.tools.register(
-            ScreenObserveTool(
-                self.workspace,
-                summarizer=self._build_vision_summarizer(app_config),
-                ocr=ocr,
-                audio_transcriber=self._build_audio_transcriber(),
-            )
+        computer_backend = get_computer_backend(
+            self.workspace,
+            driver=self._computer_driver,
+            session_id=self._computer_session_id,
         )
-        self.tools.register(
-            WatchRecallTool(
-                self.workspace,
-                self.watch_session.recent_with_transcript,
-                WatchAnswerer(self.workspace, self.character.name, self.character.persona),
-            )
+        self.tools = build_tool_registry(
+            self.workspace,
+            config=app_config,
+            character=self.character,
+            watch_session=self.watch_session,
+            semantic_selection=self.semantic_selection,
+            ocr=ocr,
+            vision_summarizer=self._build_vision_summarizer(app_config),
+            audio_transcriber=self._build_audio_transcriber(),
+            computer_backend=computer_backend,
         )
-        self.tools.register(SemanticTargetTool(self.workspace, ocr=ocr))
-        self.tools.register(SemanticTargetSelectionTool(self.semantic_selection))
-        for name, action_type in (
-            ("computer.click", "click"),
-            ("computer.type_text", "type_text"),
-            ("computer.scroll", "scroll"),
-            ("computer.hotkey", "hotkey"),
-        ):
-            self.tools.register(
-                ComputerActionTool(
-                    self.workspace,
-                    name,
-                    action_type,
-                    ocr=ocr,
-                    post_action_settle_ms=post_action_settle_ms,
-                )
-            )
-        self.tools.register(DesktopWorkflowTool(self.workspace, ocr=ocr, post_action_settle_ms=max(post_action_settle_ms, 600)))
-        self.tools.register(OkWwTool(self.workspace))
-        self.tools.register(McpListTool(self.workspace))
-        self.tools.register(FileReadTool(self.workspace))
-        self.tools.register(RuntimeConfigUpdateTool(self.workspace))
 
     def _load_runtime_config(self) -> AppConfig | None:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
-            return None
-        try:
-            return load_app_config(config_path)
-        except Exception:
-            return None
+        return load_workspace_config(self.workspace)
 
     def _build_vision_summarizer(self, config: AppConfig | None = None) -> OpenAIVisionSummarizer | None:
         config = config or self._load_runtime_config()
@@ -789,14 +1152,34 @@ class AgentCompanionApp:
         return SystemAudioTranscriptProvider(asr, max_seconds=min(max(1, int(state.max_seconds or 8)), 10))
 
     def _make_pending_step(self, plan: AgentPlan, index: int, step: ToolRequest, request_override: ToolRequest | None = None) -> PendingStep:
+        """Create the approval, persisting it first when a journal is attached.
+
+        The persisted challenge id becomes the approval id handed to the shell,
+        so resolving an approval targets the durable row rather than a value
+        that only exists in this process.
+        """
+        run_id = self._plan_runs.get(plan.task_id, "")
+        # Same scope as execution, so the approval and the effect it authorises
+        # describe one attempt rather than two different keys.
+        intent = ActionIntent.from_request(request_override or step, scope=run_id)
+        step_id = self.run_journal.record_step(run_id, index, intent)
+        challenge_id = self.run_journal.open_challenge(
+            run_id,
+            step_id,
+            intent,
+            payload={"tool": step.name, "reason": step.reason},
+            ttl_seconds=self.approval_ttl_seconds,
+        )
         return PendingStep(
             plan=plan,
             index=index,
-            approval_id=f"approval-{uuid.uuid4().hex[:12]}",
+            approval_id=challenge_id or f"approval-{uuid.uuid4().hex[:12]}",
             tool=step.name,
             arguments_hash=_arguments_hash(step.arguments),
             request_override=request_override,
             created_at=time.time(),
+            challenge_id=challenge_id,
+            step_id=step_id,
         )
 
     def _store_pending_step(self, pending: PendingStep) -> None:
@@ -830,10 +1213,15 @@ class AgentCompanionApp:
             return pending.request_override
         return step
 
+    def _memory_scope(self) -> dict[str, str]:
+        """Which project/thread recall is allowed to draw from right now."""
+        context = self.bus.context()
+        return {"project_id": str(context.get("project_id") or ""), "thread_id": str(context.get("thread_id") or "")}
+
     def _step_with_memory_context(self, step: ToolRequest) -> ToolRequest:
         if step.name != "companion.chat":
             return step
-        context = self.memory.context(8, query=str(step.arguments.get("text") or ""))
+        context = self.memory.context(8, query=str(step.arguments.get("text") or ""), **self._memory_scope())
         if not context:
             return step
         arguments = dict(step.arguments)
@@ -1048,7 +1436,7 @@ class AgentCompanionApp:
     @staticmethod
     def _is_codex_permission_pending(pending: PendingStep) -> bool:
         request = pending.request_override or pending.plan.steps[pending.index]
-        return request.name == "codex.run" and "codex_permission_hash" in request.arguments
+        return request.name in {"codex.run", "agent_cli.run"} and "codex_permission_hash" in request.arguments
 
 
 def _arguments_hash(arguments: dict) -> str:
@@ -1170,3 +1558,30 @@ def _safe_rank(value: object) -> int:
     except (TypeError, ValueError):
         return 0
     return rank if rank > 0 else 0
+
+
+def _is_mcp_exposed_joi_skill(tool_name: str) -> bool:
+    if not tool_name:
+        return False
+    if tool_name in {"codex.run", "agent_cli.run", "companion.chat"}:
+        return False
+    return tool_name in {
+        "observe.screen",
+        "watch.recall",
+        "browser.search",
+        "browser.observe",
+        "vision.resolve_target",
+        "vision.select_target",
+        "computer.click",
+        "computer.double_click",
+        "computer.drag",
+        "computer.open_app",
+        "computer.type_text",
+        "computer.scroll",
+        "computer.hotkey",
+        "computer.workflow",
+        "game.ok_ww.run",
+        "runtime.update_config",
+        "files.read",
+        "mcp.list_tools",
+    }

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
 from pathlib import Path
 from typing import Any
+
+from agent_companion.core.codex_support import permission_fingerprint
 
 
 PERMISSION_FAIL_CLOSED_MESSAGE = "Codex 需要外部权限确认，Joi 暂不能继续。"
@@ -271,7 +272,7 @@ def _has_permission_marker(value: object) -> bool:
 
 
 def _permission_request(payload: dict[str, Any]) -> dict[str, Any]:
-    permission_hash = _permission_hash(payload)
+    permission_hash = permission_fingerprint(payload)
     resume_token = _safe_resume_token(_find_first(payload, ("resume_token", "continuation_token", "resume_id", "request_id", "id")), permission_hash)
     return {
         "resumable": _coerce_bool(_find_first(payload, ("resume_supported", "resumable", "can_resume", "supports_resume", "resume"))),
@@ -279,14 +280,6 @@ def _permission_request(payload: dict[str, Any]) -> dict[str, Any]:
         "permission_hash": permission_hash,
         "tool": _safe_permission_tool(_find_first(payload, ("tool", "tool_name", "action", "command", "cmd"))),
     }
-
-
-def _permission_hash(payload: dict[str, Any]) -> str:
-    try:
-        serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
-    except TypeError:
-        serialized = repr(payload)
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
 
 def _safe_resume_token(value: object, fallback_hash: str) -> str:

@@ -30,3 +30,15 @@ Use `--approve` only when you intentionally allow medium-risk tool execution.
 ## Shell
 
 `shell/` contains the Tauri/Vue desktop UI. It connects to the Python Core through the local WebSocket JSON-RPC bridge.
+
+### Local Live2D model
+
+The shell renders Joi's Cubism model when local model/runtime assets are available, and falls back to the configured static sprite otherwise. Imported model files and the redistributable Cubism runtime stay out of Git.
+
+By default, `npm run dev` and `npm run build` look for a complete asset tree at `~/Documents/All Joi/public` or `~/Documents/All Joi/public/joi-shell`. To use another location:
+
+```bash
+JOI_LIVE2D_SOURCE=/absolute/path/to/public npm run live2d:sync
+```
+
+The source directory must contain `live2d/joi/joi.model3.json` and `vendor/live2d/`.

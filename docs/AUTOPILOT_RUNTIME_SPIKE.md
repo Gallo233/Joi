@@ -3,7 +3,7 @@
 ## Snapshot
 
 - Candidate evaluated: `axeldelafosse/loop`
-- Local clone: `/Users/liujialuo/Documents/New project 2/autopilot-spike/loop`
+- Local clone: `<spike-checkout>/loop`
 - Upstream commit checked: `ecbab1f 1.0.32`
 - Date: 2026-05-20
 

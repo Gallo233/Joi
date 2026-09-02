@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Joi 仅在你主动录音或开启实时语音会话时使用麦克风；实时会话会持续到你明确结束。</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Joi 仅在你开启陪看时读取系统音频，用于字幕与场景理解。</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Joi 使用你配置的语音服务，将主动录制或实时会话中的语音转换为对话文字。</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Joi 仅在你批准 Computer Use 任务后，向所选应用发送自动化指令。</string>
+</dict>
+</plist>

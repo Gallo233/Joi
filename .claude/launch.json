@@ -1,0 +1,28 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "joi-shell",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--prefix",
+        "agent_companion/shell"
+      ],
+      "port": 5173
+    },
+    {
+      "name": "joi-site",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--prefix",
+        "/Users/liujialuo/Documents/All Joi"
+      ],
+      "port": 3000,
+      "autoPort": true
+    }
+  ]
+}

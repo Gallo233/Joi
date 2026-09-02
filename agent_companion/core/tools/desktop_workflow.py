@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+import sys
 import time
 from typing import Any
 from urllib.parse import quote_plus
@@ -13,11 +14,12 @@ from agent_companion.core.computer_use import (
     ComputerUseBackend,
     ComputerUseResult,
     PostActionVerification,
-    WindowsComputerUseBackend,
     verify_post_action,
 )
+from agent_companion.core.platform_factory import get_computer_backend
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
+from agent_companion.core.tools.foreground_guard import companion_hidden_for_target_observation
 from agent_companion.core.vision import OcrExtractor
 from agent_companion.core.vision.ocr import run_ocr_safely
 from agent_companion.core.voice import safe_voice_line
@@ -35,7 +37,7 @@ class DesktopWorkflowTool(ToolAdapter):
         sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
-        self.backend = backend or WindowsComputerUseBackend(workspace)
+        self.backend = backend or get_computer_backend(workspace)
         self.ocr = ocr
         self.post_action_settle_ms = max(0, int(post_action_settle_ms or 0))
         self._sleep = sleep_fn or time.sleep
@@ -52,34 +54,36 @@ class DesktopWorkflowTool(ToolAdapter):
                 risk=RiskLevel.MEDIUM,
             )
 
-        before_observation = self._observe_for_verification("before desktop workflow")
-        result = self._perform_workflow(actions)
-        verification = None
-        if result.ok:
-            self._settle_after_action()
-            result, verification = self._attach_after_observation(result, before_observation)
-        return self._to_tool_result(request, workflow, actions, result, verification, before_observation)
+        with companion_hidden_for_target_observation():
+            before_observation = self._observe_for_verification("before desktop workflow")
+            result = self._perform_workflow(actions)
+            verification = None
+            if result.ok:
+                self._settle_after_action()
+                result, verification = self._attach_after_observation(result, before_observation)
+            return self._to_tool_result(request, workflow, actions, result, verification, before_observation)
 
     def _actions_from_request(self, request: ToolRequest) -> list[ComputerAction]:
         args = request.arguments
         workflow = str(args.get("workflow") or "").strip()
+        mac_backend = _is_macos_backend(self.backend)
         if workflow == "open_app":
             app = str(args.get("app") or "").strip()
             if not app:
                 return []
-            return _open_app_actions(app)
+            return _open_app_actions(app, mac_backend=mac_backend)
         if workflow == "open_web_search":
-            browser = _browser_search_name(str(args.get("browser") or "edge"))
+            browser = _browser_search_name(str(args.get("browser") or "edge"), mac_backend=mac_backend)
             site = str(args.get("site") or "").strip()
             query = str(args.get("query") or "").strip()
             url = _site_url(site, query)
-            return _open_url_in_browser_actions(browser, url)
+            return _open_url_in_browser_actions(browser, url, mac_backend=mac_backend)
         if workflow == "open_url":
-            browser = _browser_search_name(str(args.get("browser") or "edge"))
+            browser = _browser_search_name(str(args.get("browser") or "edge"), mac_backend=mac_backend)
             url = str(args.get("url") or "").strip()
             if not url:
                 return []
-            return _open_url_in_browser_actions(browser, _normalize_url(url))
+            return _open_url_in_browser_actions(browser, _normalize_url(url), mac_backend=mac_backend)
         return []
 
     def _perform_workflow(self, actions: list[ComputerAction]) -> ComputerUseResult:
@@ -139,7 +143,10 @@ class DesktopWorkflowTool(ToolAdapter):
         before_observation: ComputerObservation | None,
     ) -> ToolResult:
         status = "failed" if not result.ok else "success" if verification is None or verification.status == "changed" else "info"
-        summary = verification.summary if verification else ("桌面操作已执行。" if result.ok else "桌面操作没有完成。")
+        if workflow == "open_app" and result.ok and result.summary:
+            summary = result.summary
+        else:
+            summary = verification.summary if verification else ("桌面操作已执行。" if result.ok else "桌面操作没有完成。")
         body_lines = [
             f"流程：{_workflow_label(workflow)}",
             f"步骤：{len([action for action in actions if action.action_type != 'wait'])} 个键鼠动作",
@@ -156,6 +163,8 @@ class DesktopWorkflowTool(ToolAdapter):
         computer_use["action"] = action_state
         if before_observation and before_observation.screenshot_rel:
             computer_use["before_artifact"] = before_observation.screenshot_rel
+        if before_observation and before_observation.title:
+            computer_use["before_title"] = before_observation.title
         if result.observation and result.observation.screenshot_rel:
             computer_use["after_artifact"] = result.observation.screenshot_rel
         agent_state: dict[str, Any] = {"tool": self.name, "computer_use": computer_use}
@@ -166,12 +175,24 @@ class DesktopWorkflowTool(ToolAdapter):
             ok=result.ok,
             agent_state=agent_state,
             display_card=DisplayCard("电脑操作", summary, "\n".join(body_lines), status=status, artifacts=artifacts),
-            voice_line=safe_voice_line(_workflow_voice(result.ok, verification), sprite="5" if result.ok else "4"),
+            voice_line=safe_voice_line(_workflow_voice(workflow, result, verification), sprite="5" if result.ok else "4"),
             risk=RiskLevel.MEDIUM,
         )
 
 
-def _open_app_actions(app: str) -> list[ComputerAction]:
+def _is_macos_backend(backend: ComputerUseBackend) -> bool:
+    # The CUA driver may be wrapped for safe native fallback, so look through
+    # the wrapper rather than at the outermost class name.
+    underlying = getattr(backend, "primary", backend)
+    return sys.platform == "darwin" and underlying.__class__.__name__ in {"MacComputerUseBackend", "CuaDriverBackend"}
+
+
+def _open_app_actions(app: str, *, mac_backend: bool = False) -> list[ComputerAction]:
+    if mac_backend:
+        return [
+            ComputerAction("open_app", app_name=app),
+            ComputerAction("wait", delta=1200),
+        ]
     return [
         ComputerAction("hotkey", keys=("win",)),
         ComputerAction("wait", delta=260),
@@ -182,11 +203,16 @@ def _open_app_actions(app: str) -> list[ComputerAction]:
     ]
 
 
-def _open_url_in_browser_actions(browser: str, url: str) -> list[ComputerAction]:
+def _open_url_in_browser_actions(browser: str, url: str, *, mac_backend: bool = False) -> list[ComputerAction]:
+    if mac_backend:
+        return [
+            ComputerAction("open_url", text=url, app_name=browser),
+            ComputerAction("wait", delta=2200),
+        ]
     return [
-        *_open_app_actions(browser),
+        *_open_app_actions(browser, mac_backend=mac_backend),
         ComputerAction("wait", delta=1500),
-        ComputerAction("hotkey", keys=("ctrl", "l")),
+        ComputerAction("hotkey", keys=("cmd" if mac_backend else "ctrl", "l")),
         ComputerAction("wait", delta=100),
         ComputerAction("type_text", text=url),
         ComputerAction("wait", delta=100),
@@ -195,16 +221,20 @@ def _open_url_in_browser_actions(browser: str, url: str) -> list[ComputerAction]
     ]
 
 
-def _browser_search_name(value: str) -> str:
+def _browser_search_name(value: str, *, mac_backend: bool = False) -> str:
     lowered = value.strip().casefold()
     if lowered in {"chrome", "谷歌", "google chrome"}:
         return "Google Chrome"
+    if mac_backend and lowered in {"", "edge", "microsoft edge", "默认", "default"}:
+        return "Safari"
     return "Microsoft Edge"
 
 
 def _site_url(site: str, query: str = "") -> str:
     normalized = site.strip().casefold()
     if normalized in {"bilibili", "bilbil", "b站", "bili", "哔哩哔哩"}:
+        if any(token in query.casefold() for token in ("热门", "popular", "hot", "排行")):
+            return "https://www.bilibili.com/v/popular/all"
         if query:
             return "https://search.bilibili.com/all?keyword=" + quote_plus(query)
         return "https://www.bilibili.com"
@@ -230,9 +260,11 @@ def _workflow_label(workflow: str) -> str:
     }.get(workflow, "桌面流程")
 
 
-def _workflow_voice(ok: bool, verification: PostActionVerification | None) -> str:
-    if not ok:
-        return "桌面操作没有完成，细节在卡片里。"
+def _workflow_voice(workflow: str, result: ComputerUseResult, verification: PostActionVerification | None) -> str:
+    if not result.ok:
+        return "桌面操作没有完成，可以展开执行过程查看细节。"
+    if workflow == "open_app" and result.summary:
+        return result.summary
     if verification is None:
         return "桌面操作已经执行。"
     if verification.status == "changed":

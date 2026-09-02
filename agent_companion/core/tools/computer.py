@@ -12,11 +12,12 @@ from agent_companion.core.computer_use import (
     ComputerUseBackend,
     ComputerUseResult,
     PostActionVerification,
-    WindowsComputerUseBackend,
     verify_post_action,
 )
+from agent_companion.core.platform_factory import get_computer_backend
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
+from agent_companion.core.tools.foreground_guard import companion_hidden_for_target_observation
 from agent_companion.core.vision import OcrExtractor
 from agent_companion.core.vision.ocr import run_ocr_safely
 from agent_companion.core.voice import safe_voice_line
@@ -36,7 +37,7 @@ class ComputerActionTool(ToolAdapter):
         self.workspace = workspace.resolve()
         self.name = name
         self.action_type = action_type
-        self.backend = backend or WindowsComputerUseBackend(workspace)
+        self.backend = backend or get_computer_backend(workspace)
         self.ocr = ocr
         self.post_action_settle_ms = max(0, int(post_action_settle_ms or 0))
         self._sleep = sleep_fn or time.sleep
@@ -48,17 +49,18 @@ class ComputerActionTool(ToolAdapter):
                 ok=False,
                 agent_state={"tool": self.name, "error": "invalid_arguments"},
                 display_card=DisplayCard("电脑操作", "动作参数不完整。", self._friendly_detail("参数不足"), status="failed"),
-                voice_line=safe_voice_line("这一步缺少必要参数，细节在卡片里。", sprite="4"),
+                voice_line=safe_voice_line("这一步缺少必要参数，可以展开执行过程查看细节。", sprite="4"),
                 risk=RiskLevel.MEDIUM,
             )
 
-        before_observation = self._observe_for_verification("before computer action")
-        result = self.backend.perform(action)
-        verification = None
-        if result.ok:
-            self._settle_after_action()
-            result, verification = self._attach_after_observation(result, before_observation)
-        return self._to_tool_result(result, verification, before_observation)
+        with companion_hidden_for_target_observation():
+            before_observation = self._observe_for_verification("before computer action")
+            result = self.backend.perform(action)
+            verification = None
+            if result.ok:
+                self._settle_after_action()
+                result, verification = self._attach_after_observation(result, before_observation)
+            return self._to_tool_result(result, verification, before_observation)
 
     def _action_from_request(self, request: ToolRequest) -> ComputerAction | None:
         args = request.arguments
@@ -68,6 +70,25 @@ class ComputerActionTool(ToolAdapter):
             if x is None or y is None:
                 return None
             return ComputerAction("click", x=x, y=y, button=str(args.get("button") or "left"))
+        if self.action_type == "double_click":
+            x = _maybe_int(args.get("x"))
+            y = _maybe_int(args.get("y"))
+            if x is None or y is None:
+                return None
+            return ComputerAction("double_click", x=x, y=y, button=str(args.get("button") or "left"))
+        if self.action_type == "drag":
+            x = _maybe_int(args.get("x"))
+            y = _maybe_int(args.get("y"))
+            end_x = _maybe_int(args.get("end_x"))
+            end_y = _maybe_int(args.get("end_y"))
+            if x is None or y is None or end_x is None or end_y is None:
+                return None
+            return ComputerAction("drag", x=x, y=y, end_x=end_x, end_y=end_y, button=str(args.get("button") or "left"))
+        if self.action_type == "open_app":
+            app_name = str(args.get("app_name") or "").strip()
+            if not app_name:
+                return None
+            return ComputerAction("open_app", app_name=app_name)
         if self.action_type == "type_text":
             text = str(args.get("text") or "").strip()
             if not text:
@@ -95,7 +116,10 @@ class ComputerActionTool(ToolAdapter):
     ) -> ToolResult:
         action_label = _action_label(result.action.action_type if result.action else self.action_type)
         status = _card_status(result.ok, verification)
-        summary = verification.summary if verification else result.summary if result.ok and result.summary else f"{action_label}没有完成。"
+        if self.action_type == "open_app" and result.ok and result.summary:
+            summary = result.summary
+        else:
+            summary = verification.summary if verification else result.summary if result.ok and result.summary else f"{action_label}没有完成。"
         body = self._friendly_detail(result.error if result.error else "")
         artifacts = verification.artifacts if verification else [result.observation.screenshot_rel] if result.observation else []
         if verification:
@@ -105,6 +129,8 @@ class ComputerActionTool(ToolAdapter):
         agent_state = {"tool": self.name, "computer_use": result.to_agent_state()}
         if before_observation and before_observation.screenshot_rel:
             agent_state["computer_use"]["before_artifact"] = before_observation.screenshot_rel
+        if before_observation and before_observation.title:
+            agent_state["computer_use"]["before_title"] = before_observation.title
         if result.observation and result.observation.screenshot_rel:
             agent_state["computer_use"]["after_artifact"] = result.observation.screenshot_rel
         if verification:
@@ -114,7 +140,7 @@ class ComputerActionTool(ToolAdapter):
             ok=result.ok,
             agent_state=agent_state,
             display_card=DisplayCard("电脑操作", summary, body, status=status, artifacts=artifacts),
-            voice_line=safe_voice_line(_voice_for_verification(result.ok, verification), sprite="5" if result.ok else "4"),
+            voice_line=safe_voice_line(_voice_for_verification(result.ok, verification, result.summary if self.action_type == "open_app" else ""), sprite="5" if result.ok else "4"),
             risk=RiskLevel.MEDIUM,
         )
 
@@ -182,9 +208,12 @@ def _parse_keys(value: Any) -> tuple[str, ...]:
 def _action_label(action_type: str) -> str:
     labels = {
         "click": "点击指定位置",
+        "double_click": "双击指定位置",
+        "drag": "拖拽操作",
         "type_text": "输入一段文字",
         "scroll": "滚动画面",
         "hotkey": "按下快捷键",
+        "open_app": "打开应用",
     }
     return labels.get(action_type, "电脑操作")
 
@@ -205,9 +234,11 @@ def _friendly_error(error: str) -> str:
     return "动作执行失败。"
 
 
-def _voice_for_verification(ok: bool, verification: PostActionVerification | None) -> str:
+def _voice_for_verification(ok: bool, verification: PostActionVerification | None, success_summary: str = "") -> str:
     if not ok:
-        return "电脑操作没有完成，细节在卡片里。"
+        return "电脑操作没有完成，可以展开执行过程查看细节。"
+    if success_summary:
+        return success_summary
     if verification is None:
         return "电脑操作已经执行。"
     if verification.status == "changed":

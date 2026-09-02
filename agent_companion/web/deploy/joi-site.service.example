@@ -1,0 +1,41 @@
+# The Next.js site, in Node mode.
+#
+# A static export would be lighter, but /api/joi is a real route -- the classic
+# page's Live2D assistant posts to it -- so the site needs a running server.
+# It binds loopback only; Caddy is the one thing on :443.
+
+[Unit]
+Description=Joi doorway site (Next.js)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=joi-site
+Group=joi-site
+WorkingDirectory=/opt/joi-site
+EnvironmentFile=/etc/joi-site.env
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=mixed
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Next writes its build output and cache here.
+ReadWritePaths=/opt/joi-site/.next
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

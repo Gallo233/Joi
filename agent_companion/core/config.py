@@ -5,17 +5,94 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
+
+from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES, CHAT_LANGUAGE_FOLLOW
+from agent_companion.core.secret_store import LLM_API_KEY_ENV, QWEN_REALTIME_API_KEY_ENV, managed_secret
+
+
+_ENV_REFERENCE_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$|^%([A-Za-z_][A-Za-z0-9_]*)%$")
+
+
+_QWEN_WORKSPACE_HOST = re.compile(
+    r"^[a-z0-9][a-z0-9-]{0,62}\.(?:cn-beijing|ap-southeast-1)\.maas\.aliyuncs\.com$"
+)
+QWEN_REALTIME_MODELS = frozenset(
+    {"qwen-audio-3.0-realtime-flash", "qwen-audio-3.0-realtime-plus"}
+)
+
+
+def is_safe_qwen_realtime_url(value: str) -> bool:
+    """Accept only the reviewed TLS Qwen Realtime WebSocket endpoints.
+
+    The model is appended by Core after validation. Rejecting a pre-existing
+    query prevents credentials or caller-controlled routing from hiding there.
+    """
+
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        # Accessing port validates malformed or out-of-range port text.
+        _ = parsed.port
+    except ValueError:
+        return False
+    if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return False
+    host = parsed.hostname.casefold()
+    return bool(
+        parsed.scheme.casefold() == "wss"
+        and parsed.port in {None, 443}
+        and parsed.path == "/api-ws/v1/realtime"
+        and (host == "dashscope.aliyuncs.com" or _QWEN_WORKSPACE_HOST.fullmatch(host))
+    )
 
 
 def _expand_env(value: Any) -> Any:
     if isinstance(value, str):
+        match = _ENV_REFERENCE_RE.fullmatch(value.strip())
+        if match:
+            name = match.group(1) or match.group(2) or ""
+            resolved = os.environ.get(name, "").strip()
+            if not resolved:
+                resolved = managed_secret(name)
+            return resolved or value
         return os.path.expandvars(value)
     if isinstance(value, list):
         return [_expand_env(item) for item in value]
     if isinstance(value, dict):
         return {key: _expand_env(item) for key, item in value.items()}
+    return value
+
+
+# An API key keeps its unexpanded reference on purpose: every `is_configured`
+# check reads the `${` prefix to tell "the operator has not set this yet" from
+# "the operator deliberately left it blank", and both of those are useful to
+# report differently. Nothing else benefits from that distinction.
+_SECRET_FIELD_NAMES = frozenset({"api_key"})
+
+
+def _drop_unresolved_references(value: Any, field: str = "") -> Any:
+    """Blank a `${VAR}` that nothing resolved, so it is never used as a value.
+
+    `_expand_env` leaves the reference in place when neither the environment
+    nor the keyring has it. For a key that is the right call. For an endpoint
+    it is not: `(config.tts.base_url or DEFAULT_BASE_URL)` treats the literal
+    string `${JOI_TTS_BASE_URL}` as a perfectly good URL, so a provider whose
+    client would have defaulted its own endpoint instead posts to a hostname
+    made of punctuation. The readiness check passes -- MiMo's asks only for a
+    key -- and the failure surfaces much later as `tts_failed`, with the actual
+    cause nowhere in the message.
+    """
+
+    if isinstance(value, str):
+        if field in _SECRET_FIELD_NAMES:
+            return value
+        return "" if _ENV_REFERENCE_RE.fullmatch(value.strip()) else value
+    if isinstance(value, list):
+        return [_drop_unresolved_references(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _drop_unresolved_references(item, str(key)) for key, item in value.items()}
     return value
 
 
@@ -60,6 +137,25 @@ class SpriteConfig:
 
 
 @dataclass(frozen=True)
+class VoiceEmotionConfig:
+    """How the character sounds in one mood, over its normal speaking voice.
+
+    Every field is optional and falls back to the base voice. A package that
+    supplies only a reference clip still gets its own timbre for that mood;
+    one that supplies only a pitch still gets a differently delivered line
+    from a voice that cannot change timbre at all.
+    """
+
+    refer_audio_path: str = ""
+    prompt_text: str = ""
+    speech_speed: float | None = None
+    # -1 lowest, 1 highest, relative to the voice's normal pitch.
+    pitch: float | None = None
+    # How to read the line, in words, for a hosted model that takes direction.
+    instructions: str = ""
+
+
+@dataclass(frozen=True)
 class VoiceProfileConfig:
     id: str
     label: str
@@ -71,6 +167,10 @@ class VoiceProfileConfig:
     prompt_text: str = ""
     speech_speed: float | None = None
     speech_volume: float | None = None
+    emotion_map: dict[str, VoiceEmotionConfig] = field(default_factory=dict)
+    # A sentence describing how this character sounds, for a synthesiser that
+    # builds a voice from a description rather than from a recording.
+    design: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,6 +189,38 @@ class CharacterConfig:
     active_voice_profile: str = ""
     voice_profiles: list[VoiceProfileConfig] = field(default_factory=list)
     sprites: list[SpriteConfig] = field(default_factory=list)
+    # What the character says while performing each semantic motion. Empty
+    # falls back to Joi's shared table, which is a default mascot's voice
+    # rather than this character's.
+    motion_lines: dict[str, str] = field(default_factory=dict)
+    # The same lines in every language the package wrote them in, so the reply
+    # can follow the language of the user's message. Which language she
+    # *speaks* is a separate setting and does not decide this.
+    motion_lines_by_locale: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def motion_line(self, motion: str, reply_language: str = "") -> str:
+        """Her line for a motion, in the language the user just wrote in.
+
+        Falls back to her active locale, then to any language she does have it
+        in, and finally to nothing so the caller can use the shared table. A
+        line in the wrong language is worse than a generic one in the right
+        language: the first reads as the app malfunctioning, the second merely
+        as the character being brief.
+        """
+
+        wanted = str(reply_language or "").strip().casefold().split("-")[0]
+        tables = self.motion_lines_by_locale or {}
+        if not wanted:
+            return str(self.motion_lines.get(motion) or "").strip()
+        for locale in (wanted, *[key for key in tables if key.split("-")[0] == wanted]):
+            line = str((tables.get(locale) or {}).get(motion) or "").strip()
+            if line:
+                return line
+        # No line in the user's language. Deliberately *not* falling back to
+        # the language she is voiced in -- that is precisely the coupling this
+        # exists to break, and it is what made a Chinese "跳个舞" answer in
+        # Japanese. The caller's shared table is the neutral answer.
+        return ""
 
     @property
     def active_voice(self) -> VoiceProfileConfig | None:
@@ -134,6 +266,24 @@ class CharacterConfig:
         value = profile.speech_volume if profile and profile.speech_volume is not None else self.speech_volume
         return float(value or fallback)
 
+    def voice_design(self) -> str:
+        profile = self.active_voice
+        return profile.design if profile and profile.design else ""
+
+    def voice_emotion(self, emotion: str) -> VoiceEmotionConfig | None:
+        """What this character declared for one mood, or nothing.
+
+        Nothing is the ordinary answer: a package that never wrote an
+        `emotion_map` speaks every line in its base voice, exactly as before.
+        """
+
+        from agent_companion.core.voice import normalize_emotion
+
+        profile = self.active_voice
+        if not profile or not profile.emotion_map:
+            return None
+        return profile.emotion_map.get(normalize_emotion(emotion))
+
 
 @dataclass(frozen=True)
 class ModelRouteConfig:
@@ -166,6 +316,8 @@ class LlmConfig:
     @property
     def is_configured(self) -> bool:
         key = (self.api_key or "").strip()
+        if self.provider.strip().casefold() == "ollama":
+            return bool(self.base_url.strip() and self.model.strip())
         return bool(key and not key.startswith("${") and not key.startswith("%"))
 
     @property
@@ -271,7 +423,7 @@ class ModelRouter:
         )
 
     def _endpoint(self, route: str, *, provider: str, base_url: str, model: str, api_key: str, fallback_reason: str) -> ModelEndpoint:
-        configured = bool(self._llm.use_mock or (model or "").strip() and _configured_secret(api_key))
+        configured = bool(self._llm.use_mock or _model_endpoint_configured(provider, base_url, model, api_key))
         return ModelEndpoint(
             base_url=base_url,
             model=model,
@@ -291,10 +443,51 @@ class TtsConfig:
     volume: float = 0.85
     server_url: str = "http://127.0.0.1:9880/"
     gpt_sovits_work_path: str = ""
+    # Which Python runs GPT-SoVITS. The Windows bundle ships its own and needs
+    # no answer here; a macOS or Linux install is whatever environment the user
+    # built it in, and Joi's own interpreter is not it.
+    gpt_sovits_python: str = ""
+    # Official API v2: 2 balances quality/latency; 3 is faster but rougher.
+    # Joi never selects 3 implicitly because that changes the character voice.
+    gpt_sovits_streaming_mode: int = 2
+    # Sampling is explicit so a character does not pronounce the same line
+    # differently after every restart. -1 retains GPT-SoVITS' random default.
+    gpt_sovits_seed: int = -1
+    gpt_sovits_top_k: int = 15
+    gpt_sovits_top_p: float = 1.0
+    gpt_sovits_temperature: float = 1.0
+    gpt_sovits_repetition_penalty: float = 1.35
     text_lang: str = "zh"
     prompt_lang: str = "zh"
     speed_factor: float = 1.2
+    # Deprecated compatibility field. The bridge intentionally ignores it:
+    # Joi never substitutes an operating-system announcer for a character.
     fallback_to_system: bool = False
+    # A hosted `/v1/audio/speech` endpoint, for exercising the voice path
+    # before GPT-SoVITS exists. Lines spoken this way leave the machine.
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    voice: str = ""
+    audio_format: str = "wav"
+    timeout_seconds: int = 60
+    # MiMo can rewrite a line before reading it -- punctuation and numbers,
+    # but measurably more than that. Joi decides what the character says, so
+    # this is off unless the user turns it on.
+    optimize_text: bool = False
+
+    @property
+    def is_cloud_configured(self) -> bool:
+        key = self.api_key.strip()
+        return bool(
+            self.base_url.strip()
+            and self.model.strip()
+            and key
+            # An unexpanded `${VAR}` or `%VAR%` is a placeholder the user never
+            # filled in, not a key.
+            and not key.startswith("${")
+            and not key.startswith("%")
+        )
 
 
 @dataclass(frozen=True)
@@ -321,11 +514,66 @@ class AsrConfig:
 
 
 @dataclass(frozen=True)
+class RealtimeVoiceConfig:
+    """Core-owned Qwen Audio Realtime configuration.
+
+    Qwen is fixed to text output so the selected local GPT-SoVITS character
+    remains Joi's only voice. The long-lived key never enters the WebView.
+    """
+
+    enabled: bool = False
+    provider: str = "qwen_audio"
+    url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    model: str = "qwen-audio-3.0-realtime-flash"
+    api_key: str = ""
+    turn_detection: str = "server_vad"
+    threshold: float = 0.5
+    silence_duration_ms: int = 500
+    max_history_turns: int = 8
+    timeout_seconds: int = 15
+    # Zero preserves the unlimited desktop behavior. The anonymous web profile
+    # sets this to a positive value and Core owns the timer.
+    max_session_seconds: int = 0
+
+    @property
+    def is_configured(self) -> bool:
+        key = self.api_key.strip()
+        return bool(
+            self.enabled
+            and self.provider.strip().casefold() == "qwen_audio"
+            and is_safe_qwen_realtime_url(self.url)
+            and self.model.strip() in QWEN_REALTIME_MODELS
+            and self.turn_detection.strip() in {"server_vad", "smart_turn"}
+            and key
+            and not key.startswith("${")
+            and not key.startswith("%")
+        )
+
+
+@dataclass(frozen=True)
 class OcrConfig:
     timeout_seconds: int = 5
     language: str = "chi_sim+eng"
     tesseract_cmd: str = ""
     tessdata_dir: str = ""
+
+
+@dataclass(frozen=True)
+class LanguageConfig:
+    """What Joi shows and writes -- never what she says.
+
+    The language she speaks belongs to the character package, so a Japanese
+    voice can answer a Chinese message on screen in Chinese. `interface` is the
+    shell's own language; only Chinese is localized today, so any other value
+    would promise a translation that does not exist and is read as Chinese.
+    """
+
+    interface: str = "zh"
+    chat: str = "zh"
+
+    @property
+    def chat_follows_user(self) -> bool:
+        return self.chat == CHAT_LANGUAGE_FOLLOW
 
 
 @dataclass(frozen=True)
@@ -344,8 +592,10 @@ class AppConfig:
     llm: LlmConfig
     tts: TtsConfig
     asr: AsrConfig
+    realtime_voice: RealtimeVoiceConfig
     ocr: OcrConfig
     computer_use: ComputerUseConfig
+    language: LanguageConfig
     skills: dict[str, SkillSettingConfig]
     characters: list[CharacterConfig]
 
@@ -372,15 +622,39 @@ def load_app_config(path: Path) -> AppConfig:
         if isinstance(secrets, dict):
             raw = _deep_merge(raw, secrets)
     raw = _expand_env(raw)
+    raw = _drop_unresolved_references(raw)
+    managed_llm_key = managed_secret(LLM_API_KEY_ENV)
+    if managed_llm_key:
+        llm_section = raw.setdefault("llm", {})
+        if isinstance(llm_section, dict):
+            llm_section["api_key"] = managed_llm_key
+    managed_realtime_key = managed_secret(QWEN_REALTIME_API_KEY_ENV)
+    if managed_realtime_key:
+        realtime_section = raw.setdefault("realtime_voice", {})
+        if isinstance(realtime_section, dict):
+            # The native Core's managed secret is authoritative. A stale
+            # secrets.yaml entry must never silently select another account.
+            realtime_section["api_key"] = managed_realtime_key
 
     llm_raw = raw.get("llm") or {}
     tts_raw = raw.get("tts") or {}
     asr_raw = raw.get("asr") or {}
+    realtime_voice_raw = raw.get("realtime_voice") or {}
     ocr_raw = raw.get("ocr") or {}
     computer_use_raw = raw.get("computer_use") or {}
+    language_raw = raw.get("language") or {}
     skills_raw = raw.get("skills") or {}
     character_rows = raw.get("characters") or []
     characters = [_parse_character(row) for row in character_rows if isinstance(row, dict)]
+    # Character packages are the source of truth for the active identity. Keep
+    # legacy config.yaml characters as a fallback for older workspaces.
+    try:
+        from agent_companion.core.character_packages import CharacterPackageManager
+
+        active_character = _parse_character(CharacterPackageManager(path.resolve().parent).active_character_row())
+        characters = [active_character, *[row for row in characters if row.name != active_character.name]]
+    except Exception:
+        pass
 
     return AppConfig(
         base_dir=path.resolve().parent,
@@ -408,10 +682,26 @@ def load_app_config(path: Path) -> AppConfig:
             volume=float(tts_raw.get("volume", 0.85)),
             server_url=str(tts_raw.get("server_url", "http://127.0.0.1:9880/")),
             gpt_sovits_work_path=str(tts_raw.get("gpt_sovits_work_path", "")),
+            gpt_sovits_python=str(tts_raw.get("gpt_sovits_python", "") or ""),
+            gpt_sovits_streaming_mode=max(1, min(3, int(tts_raw.get("gpt_sovits_streaming_mode", 2) or 2))),
+            gpt_sovits_seed=max(-1, min(2**32 - 1, int(tts_raw.get("gpt_sovits_seed", -1)))),
+            gpt_sovits_top_k=max(1, min(100, int(tts_raw.get("gpt_sovits_top_k", 15) or 15))),
+            gpt_sovits_top_p=max(0.05, min(1.0, float(tts_raw.get("gpt_sovits_top_p", 1.0) or 1.0))),
+            gpt_sovits_temperature=max(0.1, min(2.0, float(tts_raw.get("gpt_sovits_temperature", 1.0) or 1.0))),
+            gpt_sovits_repetition_penalty=max(
+                0.5, min(2.0, float(tts_raw.get("gpt_sovits_repetition_penalty", 1.35) or 1.35))
+            ),
             text_lang=str(tts_raw.get("text_lang", "zh") or "zh"),
             prompt_lang=str(tts_raw.get("prompt_lang", "zh") or "zh"),
             speed_factor=float(tts_raw.get("speed_factor", 1.2)),
             fallback_to_system=bool(tts_raw.get("fallback_to_system", False)),
+            base_url=str(tts_raw.get("base_url", "") or ""),
+            api_key=str(tts_raw.get("api_key", "") or ""),
+            model=str(tts_raw.get("model", "") or ""),
+            voice=str(tts_raw.get("voice", "") or ""),
+            audio_format=str(tts_raw.get("audio_format", "wav") or "wav"),
+            timeout_seconds=int(tts_raw.get("timeout_seconds", 60) or 60),
+            optimize_text=bool(tts_raw.get("optimize_text", False)),
         ),
         asr=AsrConfig(
             enabled=bool(asr_raw.get("enabled", False)),
@@ -424,6 +714,29 @@ def load_app_config(path: Path) -> AppConfig:
             max_bytes=max(1024, int(asr_raw.get("max_bytes", 12 * 1024 * 1024) or 12 * 1024 * 1024)),
             timeout_seconds=max(1, int(asr_raw.get("timeout_seconds", 30) or 30)),
         ),
+        realtime_voice=RealtimeVoiceConfig(
+            enabled=bool(realtime_voice_raw.get("enabled", False)),
+            provider=str(realtime_voice_raw.get("provider", "qwen_audio") or "qwen_audio"),
+            url=str(
+                realtime_voice_raw.get("url", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime")
+                or "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+            ),
+            model=str(
+                realtime_voice_raw.get("model", "qwen-audio-3.0-realtime-flash")
+                or "qwen-audio-3.0-realtime-flash"
+            ),
+            api_key=str(realtime_voice_raw.get("api_key", "") or ""),
+            turn_detection=str(realtime_voice_raw.get("turn_detection", "server_vad") or "server_vad"),
+            threshold=max(-1.0, min(1.0, float(realtime_voice_raw.get("threshold", 0.5) or 0.5))),
+            silence_duration_ms=max(
+                200, min(6000, int(realtime_voice_raw.get("silence_duration_ms", 500) or 500))
+            ),
+            max_history_turns=max(
+                1, min(50, int(realtime_voice_raw.get("max_history_turns", 8) or 8))
+            ),
+            timeout_seconds=min(120, max(1, int(realtime_voice_raw.get("timeout_seconds", 15) or 15))),
+            max_session_seconds=max(0, min(3600, int(realtime_voice_raw.get("max_session_seconds", 0) or 0))),
+        ),
         ocr=OcrConfig(
             timeout_seconds=max(1, int(ocr_raw.get("timeout_seconds", 5) or 5)),
             language=str(ocr_raw.get("language", "chi_sim+eng") or "chi_sim+eng"),
@@ -433,14 +746,40 @@ def load_app_config(path: Path) -> AppConfig:
         computer_use=ComputerUseConfig(
             post_action_settle_ms=max(0, int(computer_use_raw.get("post_action_settle_ms", 200) or 0)),
         ),
+        language=_parse_language(language_raw),
         skills=_parse_skill_settings(skills_raw),
         characters=characters,
     )
 
 
+def load_workspace_config(workspace: Path) -> AppConfig | None:
+    """Best-effort config loading for optional runtime consumers."""
+
+    config_path = workspace.resolve() / "config.yaml"
+    if not config_path.is_file():
+        return None
+    try:
+        return load_app_config(config_path)
+    except Exception:
+        return None
+
+
 def normalize_skill_setting_id(value: str) -> str:
     text = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
     return re.sub(r"[^a-z0-9_.]+", "", text)[:80]
+
+
+def _parse_language(raw: Any) -> LanguageConfig:
+    source = raw if isinstance(raw, dict) else {}
+    chat = str(source.get("chat", "zh") or "zh").strip().replace("_", "-").casefold().split("-")[0]
+    if chat == "auto":
+        chat = CHAT_LANGUAGE_FOLLOW
+    return LanguageConfig(
+        # The shell is written in Chinese and nothing else is translated yet, so
+        # storing another value here would promise a UI that does not exist.
+        interface="zh",
+        chat=chat if chat in CHAT_LANGUAGE_CHOICES else "zh",
+    )
 
 
 def _parse_skill_settings(raw: Any) -> dict[str, SkillSettingConfig]:
@@ -493,6 +832,32 @@ def _parse_model_routes(llm_raw: dict[str, Any]) -> dict[str, ModelRouteConfig]:
     return routes
 
 
+def _parse_emotion_map(value: Any) -> dict[str, VoiceEmotionConfig]:
+    if not isinstance(value, dict):
+        return {}
+    rows: dict[str, VoiceEmotionConfig] = {}
+    for emotion, entry in value.items():
+        if not isinstance(entry, dict):
+            continue
+        rows[str(emotion)] = VoiceEmotionConfig(
+            refer_audio_path=str(entry.get("refer_audio_path", "") or ""),
+            prompt_text=str(entry.get("prompt_text", "") or ""),
+            speech_speed=_optional_number(entry.get("speech_speed")),
+            pitch=_optional_number(entry.get("pitch")),
+            instructions=str(entry.get("instructions", "") or ""),
+        )
+    return rows
+
+
+def _optional_number(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_character(row: dict[str, Any]) -> CharacterConfig:
     voice_profiles = [
         VoiceProfileConfig(
@@ -506,6 +871,8 @@ def _parse_character(row: dict[str, Any]) -> CharacterConfig:
             prompt_text=str(profile.get("prompt_text", "") or ""),
             speech_speed=float(profile["speech_speed"]) if profile.get("speech_speed") is not None else None,
             speech_volume=float(profile["speech_volume"]) if profile.get("speech_volume") is not None else None,
+            emotion_map=_parse_emotion_map(profile.get("emotion_map")),
+            design=str(profile.get("design", "") or ""),
         )
         for index, profile in enumerate(row.get("voice_profiles") or [])
         if isinstance(profile, dict)
@@ -536,12 +903,30 @@ def _parse_character(row: dict[str, Any]) -> CharacterConfig:
         active_voice_profile=str(row.get("active_voice_profile", "") or ""),
         voice_profiles=voice_profiles,
         sprites=sprites,
+        motion_lines={
+            str(motion): str(line)
+            for motion, line in (row.get("motion_lines") or {}).items()
+            if isinstance(row.get("motion_lines"), dict) and str(line or "").strip()
+        },
+        motion_lines_by_locale={
+            str(locale): {str(motion): str(line) for motion, line in (lines or {}).items() if str(line or "").strip()}
+            for locale, lines in (row.get("motion_lines_by_locale") or {}).items()
+            if isinstance(lines, dict)
+        },
     )
 
 
 def _configured_secret(value: str) -> bool:
     key = (value or "").strip()
     return bool(key and not key.startswith("${") and not key.startswith("%"))
+
+
+def _model_endpoint_configured(provider: str, base_url: str, model: str, api_key: str) -> bool:
+    if not (model or "").strip() or not (base_url or "").strip():
+        return False
+    if (provider or "").strip().casefold() == "ollama":
+        return True
+    return _configured_secret(api_key)
 
 
 def _safe_public_identifier(value: Any) -> str:

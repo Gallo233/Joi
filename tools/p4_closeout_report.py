@@ -7,7 +7,19 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REPORT_PATH = ROOT / "data" / "local_visual_eval" / "p4_closeout_report.local.md"
+REPORT_RELATIVE = Path("data") / "local_visual_eval" / "p4_closeout_report.local.md"
+REPORT_PATH = ROOT / REPORT_RELATIVE
+
+
+def report_path(root: Path | None = None) -> Path:
+    """Where the local report lives under `root`, the checkout by default.
+
+    The path used to be fixed to the checkout, so the regression suite -- which
+    runs this tool as a subprocess -- wrote into the developer's own data tree
+    however it was invoked.
+    """
+
+    return (root or ROOT) / REPORT_RELATIVE
 
 SCENES = {
     "browser_click": "浏览器按钮",
@@ -54,10 +66,11 @@ def main() -> int:
     parser.add_argument("--status", choices=sorted(STATUSES), help="Entry status: pass, fail, or skip.")
     parser.add_argument("--category", choices=sorted(CATEGORIES), help="Abstract outcome/failure category.")
     parser.add_argument("--note", default="", help="Short sanitized note. Do not include screenshots, URLs, paths, OCR text, account data, or ids.")
+    parser.add_argument("--root", type=Path, default=None, help="Write under this directory instead of the checkout.")
     args = parser.parse_args()
 
     if args.init:
-        _write_template(overwrite=False)
+        _write_template(overwrite=False, root=args.root)
         print("p4 closeout report: initialized")
         return 0
 
@@ -71,7 +84,7 @@ def main() -> int:
             print("p4 closeout report: rejected")
             print("reason: note contains private-looking details")
             return 2
-        _append_entry(args.add, args.status, args.category, note)
+        _append_entry(args.add, args.status, args.category, note, root=args.root)
         print("p4 closeout report: recorded")
         return 0
 
@@ -79,11 +92,12 @@ def main() -> int:
     return 0
 
 
-def _write_template(overwrite: bool = False) -> None:
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if REPORT_PATH.exists() and not overwrite:
+def _write_template(overwrite: bool = False, root: Path | None = None) -> None:
+    destination = report_path(root)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and not overwrite:
         return
-    REPORT_PATH.write_text(
+    destination.write_text(
         "\n".join(
             [
                 "# Joi P4 Closeout Local Report",
@@ -99,10 +113,10 @@ def _write_template(overwrite: bool = False) -> None:
     )
 
 
-def _append_entry(scene: str, status: str, category: str, note: str) -> None:
-    _write_template(overwrite=False)
+def _append_entry(scene: str, status: str, category: str, note: str, root: Path | None = None) -> None:
+    _write_template(overwrite=False, root=root)
     line = f"| {scene} | {status} | {category} | {note or '-'} |\n"
-    with REPORT_PATH.open("a", encoding="utf-8", newline="\n") as handle:
+    with report_path(root).open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(line)
 
 

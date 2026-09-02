@@ -10,7 +10,7 @@ Joi is a character-fronted multimodal agent. The character is not a skin for cha
 - `think`: planner, character harness, memory retrieval, task decomposition.
 - `act`: Codex, browser, MCP, shell/files, game skills.
 - `policy`: risk classification, approval, audit log, denial handling.
-- `express`: display cards, voice lines, sprite/emotion, task timeline.
+- `express`: display cards, voice lines, sprite/emotion, bounded semantic character motions, task timeline.
 
 ## Result Contract
 
@@ -39,3 +39,9 @@ The Tauri/Vue shell consumes `AgentEvent` objects and renders:
 - approval prompts
 
 The shell should not parse raw tool output. It receives already-separated display and voice fields from core.
+
+The anonymous website reuses this Shell through a browser platform adapter and
+two iframes connected to one isolated Core. It is a deliberately narrower
+transport profile, not another runtime: Core enforces Origin, RPC and paid-usage
+limits before the ordinary application layers. See
+`docs/WEB_EXPERIENCE_ARCHITECTURE.md` for the broker and deployment boundary.

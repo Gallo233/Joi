@@ -7,7 +7,8 @@ import re
 import uuid
 from typing import Any
 
-from agent_companion.core.config import AppConfig, ModelRouter, load_app_config
+from agent_companion.core.config import AppConfig, load_workspace_config
+from agent_companion.core.provider_client import PLANNER_BUDGET, chat_completion
 from agent_companion.core.schemas import AgentPlan, ToolRequest
 
 
@@ -33,8 +34,14 @@ class LlmPlanParser:
         self._config = self._load_config()
         self._client: Any | None = None
 
+    def reload(self) -> None:
+        self._config = self._load_config()
+        self._client = None
+
     def should_try(self, user_text: str, rule_plan: AgentPlan) -> bool:
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
+            return False
+        if _looks_like_execution_status_question(user_text):
             return False
         if self._config is None or self._config.llm.use_mock or not self._config.llm.is_configured:
             return False
@@ -60,17 +67,13 @@ class LlmPlanParser:
         config = self._config
         if config is None:
             return None
-        try:
-            from openai import OpenAI
-        except Exception:
-            return None
-        try:
-            endpoint = ModelRouter(config.llm).resolve("reasoning")
-            if self._client is None or self._client.base_url != endpoint.base_url:
-                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url, timeout=8.0)
-            response = self._client.chat.completions.create(
-                model=endpoint.model,
-                messages=[
+        outcome = chat_completion(
+            config.llm,
+            "reasoning",
+            budget=PLANNER_BUDGET,
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            messages=[
                     {
                         "role": "system",
                         "content": (
@@ -106,29 +109,28 @@ class LlmPlanParser:
                             ensure_ascii=False,
                         ),
                     },
-                ],
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            parsed = json.loads(response.choices[0].message.content or "{}")
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            return None
-
-    def _load_config(self) -> AppConfig | None:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
+            ],
+        )
+        if not outcome.ok:
+            # Planning falls back to the rule planner; the outcome is already
+            # recorded, so this does not need to raise or log anything.
             return None
         try:
-            return load_app_config(config_path)
-        except Exception:
+            parsed = json.loads(str(outcome.value or "{}"))
+        except (TypeError, ValueError):
             return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _load_config(self) -> AppConfig | None:
+        return load_workspace_config(self.workspace)
 
 
 def plan_from_llm_payload(user_text: str, payload: dict[str, Any], task_id: str | None = None) -> AgentPlan | None:
     text = " ".join((user_text or "").strip().split())
     if not text:
         return None
+    if _looks_like_execution_status_question(text):
+        return AgentPlan(task_id or f"task-{uuid.uuid4().hex[:10]}", text, "companion_chat", [ToolRequest("companion.chat", {"text": text}, "状态追问只走对话，不启动新的桌面操作。")])
     intent = _safe_identifier(payload.get("intent")).casefold()
     if intent not in SUPPORTED_INTENTS:
         return None
@@ -324,7 +326,21 @@ def _unsafe_text(value: str) -> bool:
     return False
 
 
+def looks_actionable(text: str) -> bool:
+    """Whether a sentence is asking for work rather than talking about it.
+
+    Shared with the realtime voice gate: the same signal that lets this parser
+    re-read a "just chatting" rule plan is what lets a spoken turn reach the
+    local skills, so the two paths cannot disagree about what counts as a
+    request.
+    """
+
+    return _looks_actionable(text)
+
+
 def _looks_actionable(text: str) -> bool:
+    if _looks_like_execution_status_question(text):
+        return False
     lowered = (text or "").casefold()
     return (
         any(token in text for token in ("打开", "启动", "运行", "开启", "搜索", "搜", "查找", "点击", "点一下", "输入", "滚动", "当前页面", "当前窗口", "视频", "播放", "帮我用", "在B站", "在b站"))
@@ -334,6 +350,15 @@ def _looks_actionable(text: str) -> bool:
 
 def _has_search_word(text: str) -> bool:
     return any(token in text for token in ("搜索", "搜一下", "查找", "搜"))
+
+
+def _looks_like_execution_status_question(text: str) -> bool:
+    value = re.sub(r"\s+", "", text or "").strip("。！？!?，,")
+    if not value:
+        return False
+    if value in {"打开了吗", "打开了没", "开了吗", "开了没", "启动了吗", "启动了没", "运行了吗", "运行了没", "执行了吗", "执行了没", "好了没", "好了吗", "成功了吗", "成功了没"}:
+        return True
+    return bool(re.search(r"(?:打开|启动|运行|执行|搜索|搜).{0,8}(?:了吗|了没|成功了吗|成功了没)$", value))
 
 
 def _looks_like_video_content_question(text: str) -> bool:

@@ -1,0 +1,10 @@
+# Optional macOS display geometry for Joi Computer Use.
+#
+# Without this, Joi cannot measure how many displays there are, where they sit,
+# or what each one's backing scale is. It reports the layout as untrusted and
+# refuses to derive click coordinates rather than guessing which screen a point
+# belongs to, so Computer Use falls back to asking for confirmation.
+#
+# Install on macOS to enable trusted multi-display coordinates:
+#   .venv/bin/python -m pip install -r requirements-macos.txt
+pyobjc-framework-Quartz>=10.0

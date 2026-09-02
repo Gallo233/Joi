@@ -7,12 +7,19 @@ import shutil
 import sys
 from typing import Any
 
+from agent_companion.core.ok_ww import ok_ww_runner_path
 from agent_companion.core.speech_input import AsrRuntimeState
 
 
 SKILL_MANIFEST_VERSION = "joi.skill_manifest.v1"
+
+# What a tool resolves to when nothing claims it. A tool landing here is a
+# registration bug, not a category: its Skill's on/off switch cannot reach it.
+UNKNOWN_SKILL_ID = "joi.unknown"
+
 KNOWN_SKILL_IDS: tuple[str, ...] = (
     "joi.companion.chat",
+    "joi.agent_cli",
     "joi.codex",
     "joi.browser",
     "joi.computer_use",
@@ -82,20 +89,7 @@ def build_native_skill_manifest(
         skill_id = normalize_skill_id(key)
         if skill_id:
             normalized_skill_settings[skill_id] = bool(value)
-    skills = [
-        _companion_chat_skill(),
-        _codex_skill(),
-        _browser_skill(),
-        _computer_use_skill(),
-        _watch_skill(),
-        _memory_skill(memory_status),
-        _voice_input_skill(asr_state),
-        _voice_output_skill(tts_status),
-        _ok_ww_skill(),
-        _runtime_config_skill(),
-        _local_files_skill(),
-        _mcp_skill(),
-    ]
+    skills = _all_skill_manifests(asr_state=asr_state, tts_status=tts_status, memory_status=memory_status)
     return {
         "version": SKILL_MANIFEST_VERSION,
         "safe_for_display": True,
@@ -104,17 +98,67 @@ def build_native_skill_manifest(
     }
 
 
+def _all_skill_manifests(
+    *,
+    asr_state: AsrRuntimeState | None = None,
+    tts_status: dict[str, Any] | None = None,
+    memory_status: dict[str, Any] | None = None,
+) -> list[NativeSkillManifest]:
+    """Every native Skill, in manifest order.
+
+    Runtime state only changes availability fields, never which tools a Skill
+    declares, so callers that just need the registration shape can omit it.
+    """
+
+    return [
+        _companion_chat_skill(),
+        _agent_cli_skill(),
+        _codex_skill(),
+        _browser_skill(),
+        _computer_use_skill(),
+        _watch_skill(),
+        _memory_skill(memory_status or {}),
+        _voice_input_skill(asr_state),
+        _voice_output_skill(tts_status or {}),
+        _ok_ww_skill(),
+        _runtime_config_skill(),
+        _local_files_skill(),
+        _mcp_skill(),
+    ]
+
+
 def _companion_chat_skill() -> NativeSkillManifest:
     return NativeSkillManifest(
         id="joi.companion.chat",
         label="Companion Chat",
         category="companion",
         description="Character-safe conversation with emotion and memory context.",
-        tools=("companion.chat",),
-        input_schema=_object_schema("text", "memory_context"),
-        result_schema=_tool_result_schema("reply", "expression_sync", "model_usage"),
+        tools=("companion.chat", "character.perform"),
+        input_schema=_object_schema("text", "memory_context", "motion", "duration_ms", "loop", "intensity"),
+        result_schema=_tool_result_schema("reply", "expression_sync", "model_usage", "character_motion"),
         permission_level="low",
         state_policy="session",
+    )
+
+
+def _agent_cli_skill() -> NativeSkillManifest:
+    available = _agent_cli_available()
+    return NativeSkillManifest(
+        id="joi.agent_cli",
+        label="Agent CLI Takeover",
+        category="agent",
+        description="Local Agent CLI handoff for general Joi requests, not only coding tasks.",
+        tools=("agent_cli.run",),
+        rpc_methods=("agent_cli.list", "agent_cli.test", "agent_cli.configure", "agent_cli.status"),
+        input_schema=_object_schema("goal", "cli_id", "model", "reasoning", "memory_context", "desktop_context", "background_context"),
+        result_schema=_tool_result_schema("agent_cli_run", "codex_run"),
+        permission_level="low",
+        supports_dry_run=False,
+        local_capability="ready" if available else "unavailable",
+        configured=available,
+        state_policy="workspace_audit",
+        audit="agent_cli_run_audit",
+        notes=("permission_bridge", "workspace_bound", "joi_shell_retains_memory_and_permissions"),
     )
 
 
@@ -154,30 +198,34 @@ def _browser_skill() -> NativeSkillManifest:
 
 
 def _computer_use_skill() -> NativeSkillManifest:
-    windows = sys.platform == "win32"
+    desktop_supported = sys.platform in {"win32", "darwin"}
+    platform_note = "windows" if sys.platform == "win32" else "macos" if sys.platform == "darwin" else "unsupported_platform"
     return NativeSkillManifest(
         id="joi.computer_use",
         label="Computer Use",
         category="computer_use",
-        description="Approval-gated screen observation, target grounding, and desktop actions.",
+        description="Approval-gated screen observation, target grounding, and desktop actions on Windows and macOS.",
         tools=(
             "observe.screen",
             "vision.resolve_target",
             "vision.select_target",
             "computer.click",
+            "computer.double_click",
+            "computer.drag",
             "computer.type_text",
             "computer.scroll",
             "computer.hotkey",
+            "computer.open_app",
             "computer.workflow",
         ),
         input_schema=_computer_use_action_schema(),
         result_schema=_tool_result_schema("computer_use_audit", "artifacts"),
         permission_level="medium",
-        local_capability="ready" if windows else "unavailable",
-        configured=windows,
+        local_capability="ready" if desktop_supported else "unavailable",
+        configured=desktop_supported,
         state_policy="audited_session",
         audit="computer_use_audit",
-        notes=("llm_driven_action_schema", "approval_gated", "post_action_verification"),
+        notes=("llm_driven_action_schema", "approval_gated", "post_action_verification", platform_note),
     )
 
 
@@ -350,7 +398,7 @@ def _mcp_skill() -> NativeSkillManifest:
 
 
 def skill_id_for_tool(tool_name: str) -> str:
-    return _skill_binding(tool_name).get("skill_id", "joi.unknown")
+    return _skill_binding(tool_name).get("skill_id", UNKNOWN_SKILL_ID)
 
 
 def normalize_skill_id(value: str) -> str:
@@ -361,7 +409,7 @@ def normalize_skill_id(value: str) -> str:
 def skill_boundary_for_tool(tool_name: str) -> dict[str, Any]:
     binding = _skill_binding(tool_name)
     return {
-        "skill_id": binding.get("skill_id", "joi.unknown"),
+        "skill_id": binding.get("skill_id", UNKNOWN_SKILL_ID),
         "skill_category": binding.get("category", "unknown"),
         "skill_permission_level": binding.get("permission_level", "medium"),
         "skill_state_policy": binding.get("state_policy", "ephemeral"),
@@ -404,9 +452,14 @@ def _codex_available() -> bool:
     return bool(shutil.which("codex"))
 
 
+def _agent_cli_available() -> bool:
+    if _codex_available():
+        return True
+    return bool(shutil.which("claude") or shutil.which("claude-code") or shutil.which("gemini"))
+
+
 def _ok_ww_available() -> bool:
-    script = os.environ.get("OK_WW_RUNNER", r"C:\Users\liujialuo\.codex\skills\github_issue_solver\scripts\run_ok_ww.ps1")
-    return Path(script).is_file()
+    return ok_ww_runner_path() is not None
 
 
 def _skill_binding(tool_name: str) -> dict[str, str]:
@@ -414,8 +467,27 @@ def _skill_binding(tool_name: str) -> dict[str, str]:
     return _TOOL_SKILL_BINDINGS.get(tool, _UNKNOWN_SKILL_BINDING)
 
 
+def tool_skill_bindings() -> dict[str, dict[str, str]]:
+    """Which Skill owns each tool, for policy and audit purposes.
+
+    A tool may be surfaced by more than one Skill -- `observe.screen` appears
+    under both Watch Together and Computer Use -- but exactly one owns it.
+    """
+
+    return {name: dict(binding) for name, binding in _TOOL_SKILL_BINDINGS.items()}
+
+
+def declared_skill_tools() -> dict[str, set[str]]:
+    """The tools each native Skill declares, independent of runtime state."""
+
+    declared: dict[str, set[str]] = {}
+    for skill in _all_skill_manifests():
+        declared.setdefault(skill.id, set()).update(skill.tools)
+    return declared
+
+
 _UNKNOWN_SKILL_BINDING = {
-    "skill_id": "joi.unknown",
+    "skill_id": UNKNOWN_SKILL_ID,
     "category": "unknown",
     "permission_level": "medium",
     "state_policy": "ephemeral",
@@ -424,12 +496,26 @@ _UNKNOWN_SKILL_BINDING = {
 
 
 _TOOL_SKILL_BINDINGS: dict[str, dict[str, str]] = {
+    "character.perform": {
+        "skill_id": "joi.companion.chat",
+        "category": "companion",
+        "permission_level": "low",
+        "state_policy": "session",
+        "audit": "event_log",
+    },
     "companion.chat": {
         "skill_id": "joi.companion.chat",
         "category": "companion",
         "permission_level": "low",
         "state_policy": "session",
         "audit": "event_log",
+    },
+    "agent_cli.run": {
+        "skill_id": "joi.agent_cli",
+        "category": "agent",
+        "permission_level": "low",
+        "state_policy": "workspace_audit",
+        "audit": "agent_cli_run_audit",
     },
     "codex.run": {
         "skill_id": "joi.codex",
@@ -487,6 +573,20 @@ _TOOL_SKILL_BINDINGS: dict[str, dict[str, str]] = {
         "state_policy": "audited_session",
         "audit": "computer_use_audit",
     },
+    "computer.double_click": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.drag": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
     "computer.type_text": {
         "skill_id": "joi.computer_use",
         "category": "computer_use",
@@ -502,6 +602,13 @@ _TOOL_SKILL_BINDINGS: dict[str, dict[str, str]] = {
         "audit": "computer_use_audit",
     },
     "computer.hotkey": {
+        "skill_id": "joi.computer_use",
+        "category": "computer_use",
+        "permission_level": "medium",
+        "state_policy": "audited_session",
+        "audit": "computer_use_audit",
+    },
+    "computer.open_app": {
         "skill_id": "joi.computer_use",
         "category": "computer_use",
         "permission_level": "medium",
@@ -558,15 +665,16 @@ def _computer_use_action_schema() -> dict[str, Any]:
         "type": "object",
         "description": "LLM chooses constrained desktop actions; app/site routes are data, not new code paths.",
         "properties": {
-            "intent": {"type": "string", "enum": ["observe", "target", "click", "type_text", "scroll", "hotkey", "workflow"]},
+            "intent": {"type": "string", "enum": ["observe", "target", "click", "double_click", "drag", "type_text", "scroll", "hotkey", "open_app", "workflow"]},
             "target": {"type": "string"},
             "text": {"type": "string"},
+            "app_name": {"type": "string"},
             "workflow": {"type": "string", "enum": ["open_app", "open_web_search", "open_url"]},
             "site": {"type": "string"},
             "browser": {"type": "string"},
             "query": {"type": "string"},
         },
-        "requires_approval_for": ["click", "type_text", "scroll", "hotkey", "workflow"],
+        "requires_approval_for": ["click", "double_click", "drag", "type_text", "scroll", "hotkey", "open_app", "workflow"],
     }
 
 

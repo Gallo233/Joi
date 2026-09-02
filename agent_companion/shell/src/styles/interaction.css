@@ -1,0 +1,150 @@
+/* ==========================================================================
+   Interaction feedback
+
+   Loaded into the `interaction` cascade layer, above `legacy` (see index.css),
+   so these rules apply at their natural specificity instead of being written
+   to out-specify whatever the legacy sheet happens to say. Every rule here
+   targets a state that had no styling at all before -- :active and
+   :focus-visible -- so this file adds behaviour without overriding any
+   existing appearance. That is what makes it safe to apply globally instead of
+   migrating 267 controls one at a time.
+
+   Two defects it closes:
+
+   D1  Pressing a button produced no feedback. The stylesheet contained exactly
+       one :active rule in 7574 lines, and it only changed the cursor. A person
+       clicking "测试" had no way to tell whether the click registered, so they
+       clicked again.
+
+   D4  Focus was invisible. Not overlooked -- suppressed: `* { outline: none }`
+       sat at the top of the stylesheet and removed the browser's own ring from
+       every element in the app.
+   ========================================================================== */
+
+/* -- Press ----------------------------------------------------------------
+   `translate` rather than `transform`: several controls already carry a
+   transform for layout (`.window-title` centres itself with
+   translateX(-50%)), and `transform` would replace it and throw them across
+   the screen. `translate` composes instead of replacing, so this cannot
+   collide with anything that exists now or is added later.
+
+   Excluded: `.context-rail-backdrop` is a full-window invisible button used to
+   catch outside-clicks, and nudging it would shift the whole scrim.
+   ------------------------------------------------------------------------ */
+button,
+[role='button'],
+summary {
+  transition:
+    translate var(--ease-press),
+    box-shadow var(--ease-press),
+    background-color var(--ease-hover),
+    border-color var(--ease-hover),
+    color var(--ease-hover);
+}
+
+button:not(:disabled):not([aria-disabled='true']):not(.context-rail-backdrop):active,
+[role='button']:not([aria-disabled='true']):not(.context-rail-backdrop):active,
+summary:active {
+  translate: 0 1px;
+  box-shadow: var(--elev-inset);
+}
+
+/* Controls that render as bare text have no surface to sink into, so they
+   report the press by deepening instead. */
+button.execution-retry:active,
+button.context-new-project:active {
+  translate: 0 1px;
+  box-shadow: none;
+  filter: brightness(0.88);
+}
+
+/* -- Focus ----------------------------------------------------------------
+   `outline` rather than `box-shadow`: the shell nests controls inside many
+   `overflow: hidden` containers, which clip a shadow ring but never clip an
+   outline. `outline-offset` keeps it clear of the control's own border, and
+   modern engines follow `border-radius`, so pills stay pills.
+   ------------------------------------------------------------------------ */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Inputs sit flush inside their own wrappers, where an offset ring collides
+   with the wrapper's border. Tuck it inside instead. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline-offset: -1px;
+}
+
+/* -- Work in progress -----------------------------------------------------
+   An action that takes time must say so. The shell fires async requests from
+   32 buttons that, until now, looked exactly the same after the click as
+   before it -- which reads as "the click missed" and invites a second one.
+
+   The spinner is an inline flex item rather than an overlay: most of these
+   buttons are already `inline-flex` with a `gap`, so it takes its place beside
+   the label instead of covering it, and it cannot disturb the several buttons
+   that position themselves absolutely.
+   ------------------------------------------------------------------------ */
+[aria-busy='true'] {
+  cursor: progress;
+  /* The work is already running. A second click would queue a duplicate. */
+  pointer-events: none;
+}
+
+button[aria-busy='true']::before,
+[role='button'][aria-busy='true']::before {
+  content: '';
+  flex: none;
+  width: 0.85em;
+  height: 0.85em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: var(--radius-pill);
+  opacity: 0.75;
+  animation: joi-spin 700ms linear infinite;
+}
+
+@keyframes joi-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+/* -- Unavailable ----------------------------------------------------------
+   Disabled was signalled by `opacity: 0.5` and nothing else, which is the same
+   visual move a design makes to say "low emphasis". So a greyed-out "测试"
+   sitting next to an ordinary secondary button gave the reader no way to tell
+   which of the two would respond to a click.
+
+   A dashed edge is a difference in kind rather than degree. It needs no extra
+   markup and is inert on the icon-only round buttons, which have no border
+   width for a style to apply to.
+   ------------------------------------------------------------------------ */
+button:disabled,
+[aria-disabled='true'] {
+  cursor: not-allowed;
+}
+
+button:disabled:not([aria-busy='true']),
+[aria-disabled='true']:not([aria-busy='true']) {
+  border-style: dashed;
+}
+
+/* -- Reduced motion -------------------------------------------------------
+   The press still has to register, so the movement goes and the colour stays.
+   ------------------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  button,
+  [role='button'],
+  summary {
+    transition-duration: 1ms;
+  }
+
+  button:active,
+  [role='button']:active,
+  summary:active {
+    translate: none;
+  }
+}

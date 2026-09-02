@@ -99,6 +99,14 @@ if ($Setup) {
   exit 1
 }
 
+# Release builds own their authenticated dynamic-port Core sidecar. Launch the
+# shell directly so installed/portable users don't need Python and don't leave
+# a second legacy Core listening on 8765.
+if (Test-Path $ReleaseShellExe) {
+  Start-Process -FilePath $ReleaseShellExe -WorkingDirectory (Split-Path -Parent $ReleaseShellExe)
+  exit 0
+}
+
 if (-not (Test-Path $Python)) {
   Write-Host "Missing .venv\Scripts\python.exe. Run start_joi.bat -Doctor for the first-run checklist."
   Read-Host "Press Enter to exit"
@@ -136,11 +144,6 @@ if (-not (Test-LocalPort -PortToCheck $Port)) {
     }
     Start-Sleep -Milliseconds 200
   }
-}
-
-if (Test-Path $ReleaseShellExe) {
-  Start-Process -FilePath $ReleaseShellExe -WorkingDirectory (Split-Path -Parent $ReleaseShellExe)
-  exit 0
 }
 
 if (Test-Path $Npm) {

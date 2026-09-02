@@ -15,6 +15,12 @@ class RiskLevel(str, Enum):
 class EventType(str, Enum):
     USER_MESSAGE = "user_message"
     PLAN_CREATED = "plan_created"
+    RUNTIME_STARTED = "runtime_started"
+    RUNTIME_DELTA = "runtime_delta"
+    RUNTIME_FINAL = "runtime_final"
+    RUNTIME_ERROR = "runtime_error"
+    SKILL_STARTED = "skill_started"
+    SKILL_COMPLETED = "skill_completed"
     APPROVAL_REQUIRED = "approval_required"
     AUDIT_EVENT = "audit_event"
     TOOL_STARTED = "tool_started"
@@ -38,6 +44,11 @@ class VoiceLine:
     text: str
     emotion: str = "neutral"
     sprite: str = "1"
+    # A bounded performance plan for TTS.  This is deliberately separate from
+    # display text and contains no free-form model prompt: providers receive a
+    # deterministic projection of these values plus the character package's
+    # authored direction.
+    delivery: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -65,6 +76,15 @@ class AgentEvent:
     voice_line: VoiceLine
     agent_state: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    event_id: str = ""
+    sequence: int = 0
+    project_id: str = ""
+    thread_id: str = ""
+    session_id: str = ""
+    character_id: str = ""
+    # What the shared presence is doing when this event is published -- see
+    # PUBLIC_PHASES in event_bus.  Filled in by the bus on emit.
+    public_phase: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

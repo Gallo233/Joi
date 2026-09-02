@@ -1,35 +1,338 @@
 from __future__ import annotations
 
+from collections import deque
+from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 from queue import Queue
-from typing import Callable
+from threading import Lock
+from typing import Callable, Any, Iterable
+import uuid
 
-from agent_companion.core.schemas import AgentEvent
+from agent_companion.core.schemas import AgentEvent, EventType
+
+
+# The legacy JSONL log is an append-only compatibility stream: CollaborationStore
+# imports it once, then every new event reaches SQLite through this bus. Nothing
+# reads further back than the tail, so an unbounded file is pure cost -- it grew
+# past 90MB on a development machine while only its last few hundred lines were
+# ever read. Retention keeps a tail far larger than any reader asks for.
+_READ_WINDOW = 400
+EVENT_LOG_MAX_RECORDS = 4000
+_EVENT_LOG_TRIM_BYTES = 8_000_000
+# `forget()` can remove the newest rows along with a deleted conversation. The
+# sequence counter is restored from this file on the next start, so a marker
+# keeps the high-water mark from moving backwards and handing a fresh event a
+# number a surviving one already used.
+_WATERMARK_KEY = "__sequence_watermark__"
+
+
+_UI_PHASES: dict[EventType, tuple[str, str, bool]] = {
+    EventType.USER_MESSAGE: ("received", "已收到", False),
+    EventType.PLAN_CREATED: ("understanding", "正在理解", True),
+    EventType.RUNTIME_STARTED: ("thinking", "正在思考", True),
+    EventType.RUNTIME_DELTA: ("acting", "正在处理", True),
+    EventType.SKILL_STARTED: ("acting", "正在使用能力", True),
+    EventType.TOOL_STARTED: ("acting", "正在处理", True),
+    EventType.APPROVAL_REQUIRED: ("waiting", "等待确认", False),
+    EventType.RUNTIME_FINAL: ("done", "已完成", False),
+    EventType.SKILL_COMPLETED: ("done", "已完成", False),
+    EventType.TOOL_COMPLETED: ("done", "已完成", False),
+    EventType.TASK_COMPLETED: ("done", "已完成", False),
+    EventType.RUNTIME_ERROR: ("failed", "遇到问题", False),
+    EventType.TOOL_FAILED: ("failed", "遇到问题", False),
+    EventType.TASK_FAILED: ("failed", "没有完成", False),
+}
+
+# The coarse phase every public event carries, so any surface reading the event
+# stream -- chat, capability card, audit -- agrees on what Joi was doing without
+# replaying the whole thread.
+PUBLIC_PHASES = ("idle", "received", "understanding", "thinking", "acting", "waiting", "paused", "done", "failed")
+
+# While a capability session is held, its state outranks the per-event phase: a
+# paused session must not keep publishing "acting" just because a late tool
+# event arrived.
+_SESSION_PHASE_OVERRIDES = {"paused": "paused", "waiting_approval": "waiting"}
+# "done" is overridable too. A suspended session has not finished, so a late
+# completion event must not tell the user the work is over while the session is
+# still waiting on them. "failed" is left alone -- a failure stays visible.
+_OVERRIDABLE_PHASES = {"understanding", "thinking", "acting", "done"}
+
+
+def derive_public_phase(event: AgentEvent, session_state: str = "") -> str:
+    """The phase an event will publish, computed before it is emitted.
+
+    Expression runs ahead of `emit()`, so it cannot read the field the bus is
+    about to write. Deriving it here keeps both on one definition instead of a
+    second copy that can drift.
+    """
+    phase, _label, _transient = _UI_PHASES.get(event.type, ("idle", "", False))
+    return _public_phase(event, phase, session_state)
+
+
+def _public_phase(event: AgentEvent, ui_phase: str, session_state: str) -> str:
+    if event.public_phase in PUBLIC_PHASES:
+        return event.public_phase
+    override = _SESSION_PHASE_OVERRIDES.get(session_state, "")
+    if override and ui_phase in _OVERRIDABLE_PHASES:
+        return override
+    return ui_phase if ui_phase in PUBLIC_PHASES else "idle"
 
 
 class EventBus:
-    def __init__(self, event_path: Path) -> None:
+    def __init__(self, event_path: Path, *, max_records: int = EVENT_LOG_MAX_RECORDS) -> None:
         self.event_path = event_path
+        self.max_records = max(_READ_WINDOW, int(max_records or EVENT_LOG_MAX_RECORDS))
         self._queue: Queue[AgentEvent] = Queue()
         self._subscribers: list[Callable[[AgentEvent], None]] = []
+        self._lock = Lock()
+        self._sequence = self._load_latest_sequence()
+        self._trim_floor = 0
+        self._context_provider: Callable[[], dict[str, Any]] | None = None
 
     def subscribe(self, callback: Callable[[AgentEvent], None]) -> None:
         self._subscribers.append(callback)
 
-    def emit(self, event: AgentEvent) -> None:
-        self._queue.put(event)
-        self.event_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.event_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+    def set_context_provider(self, provider: Callable[[], dict[str, Any]] | None) -> None:
+        self._context_provider = provider
+
+    def context(self) -> dict[str, Any]:
+        """Current project/thread/session identity, or empty if unavailable."""
+        if self._context_provider is None:
+            return {}
+        try:
+            return dict(self._context_provider() or {})
+        except Exception:
+            return {}
+
+    @property
+    def latest_sequence(self) -> int:
+        with self._lock:
+            return self._sequence
+
+    def emit(self, event: AgentEvent) -> AgentEvent:
+        with self._lock:
+            self._sequence += 1
+            state = dict(event.agent_state or {})
+            context: dict[str, Any] = {}
+            if self._context_provider is not None:
+                try:
+                    context = dict(self._context_provider() or {})
+                except Exception:
+                    context = {}
+            phase, label, transient = _UI_PHASES.get(event.type, ("idle", "状态已更新", False))
+            state.setdefault("ui_phase", phase)
+            state.setdefault("ui_label", label)
+            state.setdefault("ui_transient", transient)
+            public_phase = _public_phase(event, phase, str(context.get("session_state") or ""))
+            state.setdefault("public_phase", public_phase)
+            for key in ("project_id", "thread_id", "session_id", "character_id"):
+                value = getattr(event, key, "") or context.get(key) or state.get(key) or ""
+                if value:
+                    state.setdefault(key, str(value))
+            enriched = replace(
+                event,
+                agent_state=state,
+                event_id=event.event_id or f"evt-{uuid.uuid4().hex}",
+                sequence=self._sequence,
+                project_id=event.project_id or str(context.get("project_id") or state.get("project_id") or ""),
+                thread_id=event.thread_id or str(context.get("thread_id") or state.get("thread_id") or ""),
+                session_id=event.session_id or str(context.get("session_id") or state.get("session_id") or ""),
+                character_id=event.character_id or str(context.get("character_id") or state.get("character_id") or ""),
+                public_phase=public_phase,
+            )
+            self.event_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.event_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(enriched.to_dict(), ensure_ascii=False) + "\n")
+            self._trim_if_large()
+        self._queue.put(enriched)
         for callback in list(self._subscribers):
             try:
-                callback(event)
+                callback(enriched)
             except Exception:
                 continue
+        return enriched
+
+    def recent(self, limit: int = 160, after_sequence: int = 0) -> list[dict]:
+        safe_limit = max(1, min(int(limit), 400))
+        if not self.event_path.is_file():
+            return []
+        try:
+            with self.event_path.open("r", encoding="utf-8") as handle:
+                lines = deque(handle, maxlen=safe_limit if after_sequence <= 0 else 400)
+        except OSError:
+            return []
+        rows: list[dict] = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(row, dict) or row.get(_WATERMARK_KEY):
+                continue
+            sequence = _safe_int(row.get("sequence"))
+            if after_sequence > 0 and sequence <= after_sequence:
+                continue
+            row["sequence"] = sequence
+            row["event_id"] = str(row.get("event_id") or _legacy_event_id(row))
+            rows.append(row)
+        return rows[-safe_limit:]
 
     def drain(self) -> list[AgentEvent]:
         rows: list[AgentEvent] = []
         while not self._queue.empty():
             rows.append(self._queue.get())
         return rows
+
+    def forget(self, *, thread_ids: Iterable[str] = (), project_ids: Iterable[str] = ()) -> int:
+        """Drop a deleted conversation's events from the compatibility log.
+
+        Deleting a thread removed it from SQLite and from the window, while this
+        log kept every card and voice line it ever carried. A deletion the user
+        confirmed has to reach the copy too, or "deleted" only means "hidden".
+        """
+        threads = {str(value) for value in thread_ids if str(value or "")}
+        projects = {str(value) for value in project_ids if str(value or "")}
+        if not threads and not projects:
+            return 0
+        with self._lock:
+            removed = self._forget_from(self.event_path, threads, projects, watermark=self._sequence)
+            # The one-time copy taken before the SQLite migration is the same
+            # stream in another file. A deletion that reaches the log and stops
+            # there leaves the same conversation readable beside it.
+            removed += self._forget_from(self._migration_backup_path(), threads, projects)
+            return removed
+
+    def _migration_backup_path(self) -> Path:
+        return self.event_path.with_suffix(".jsonl.pre-sqlite-backup")
+
+    def _forget_from(self, path: Path, threads: set[str], projects: set[str], *, watermark: int = 0) -> int:
+        rows = self._read_rows(path)
+        if rows is None:
+            return 0
+        kept = [row for row in rows if not _belongs_to(row, threads, projects)]
+        removed = len(rows) - len(kept)
+        if not removed:
+            return 0
+        self._write_rows(kept, watermark=watermark, path=path)
+        return removed
+
+    def _read_rows(self, path: Path | None = None) -> list[dict[str, Any]] | None:
+        target = path or self.event_path
+        if not target.is_file():
+            return None
+        rows: list[dict[str, Any]] = []
+        try:
+            with target.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        except OSError:
+            return None
+        return rows
+
+    def _write_rows(self, rows: list[dict[str, Any]], *, watermark: int = 0, path: Path | None = None) -> None:
+        target = path or self.event_path
+        highest = max((_safe_int(row.get("sequence")) for row in rows), default=0)
+        try:
+            with target.open("w", encoding="utf-8") as handle:
+                for row in rows:
+                    if row.get(_WATERMARK_KEY):
+                        continue
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                if watermark > highest:
+                    handle.write(json.dumps({_WATERMARK_KEY: True, "sequence": watermark}) + "\n")
+        except OSError:
+            return
+
+    def _trim_if_large(self) -> None:
+        """Keep a tail far longer than any reader asks for, not the whole history."""
+        try:
+            if self.event_path.stat().st_size < max(_EVENT_LOG_TRIM_BYTES, self._trim_floor):
+                return
+        except OSError:
+            return
+        rows = self._read_rows()
+        if rows is None:
+            return
+        # The tail carries the highest sequence, so trimming never lowers it.
+        self._write_rows(_tail_within_budget(rows[-self.max_records :]))
+        # Rows a reader needs can outweigh the trigger on their own -- a handful
+        # of tool results carrying screen evidence will do it. Rewriting the log
+        # on every event after that costs more than the space it fails to save,
+        # so back off until it has grown well past what the last trim left.
+        try:
+            settled = self.event_path.stat().st_size
+        except OSError:
+            return
+        self._trim_floor = settled * 2 if settled >= _EVENT_LOG_TRIM_BYTES else 0
+
+    def _load_latest_sequence(self) -> int:
+        if not self.event_path.is_file():
+            return 0
+        try:
+            with self.event_path.open("r", encoding="utf-8") as handle:
+                lines = deque(handle, maxlen=400)
+        except OSError:
+            return 0
+        latest = 0
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(row, dict):
+                latest = max(latest, _safe_int(row.get("sequence")))
+        return latest
+
+
+def _tail_within_budget(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The newest rows that fit the byte ceiling, never fewer than readers need.
+
+    A record cap alone does not bound a file whose rows vary from a chat line to
+    a tool result: at the cap the log would sit above the trigger and rewrite
+    itself on every single event. Counting backwards from the newest row bounds
+    the bytes as well, so a trim lands under the trigger and stays there.
+    """
+    budget = _EVENT_LOG_TRIM_BYTES
+    kept = 0
+    spent = 0
+    for row in reversed(rows):
+        spent += len(json.dumps(row, ensure_ascii=False).encode("utf-8")) + 1
+        if spent > budget and kept >= _READ_WINDOW:
+            break
+        kept += 1
+    return rows[-kept:] if kept else rows[-_READ_WINDOW:]
+
+
+def _belongs_to(row: dict[str, Any], threads: set[str], projects: set[str]) -> bool:
+    """Whether a logged row belongs to one of the deleted conversations.
+
+    An event carries its identity twice -- as a top-level field and inside
+    `agent_state` -- and older rows predate the top-level one, so both are read.
+    A watermark row belongs to no conversation and always survives.
+    """
+    if row.get(_WATERMARK_KEY):
+        return False
+    state = row.get("agent_state") if isinstance(row.get("agent_state"), dict) else {}
+    thread_id = str(row.get("thread_id") or state.get("thread_id") or "")
+    project_id = str(row.get("project_id") or state.get("project_id") or "")
+    return (bool(thread_id) and thread_id in threads) or (bool(project_id) and project_id in projects)
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _legacy_event_id(row: dict) -> str:
+    canonical = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+    return f"legacy-{digest}"

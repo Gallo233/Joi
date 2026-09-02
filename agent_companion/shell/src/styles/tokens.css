@@ -1,0 +1,151 @@
+/* ==========================================================================
+   Joi design tokens
+
+   Sampled from what the shell already renders, not invented. The stylesheet
+   had accumulated three different neutral ramps (Tailwind gray, zinc and
+   slate) for the same job, 407 distinct hardcoded colours, and 24 font sizes
+   including six half-pixel values. The look is not the problem; the absence of
+   a single place to state it is.
+
+   Every colour below is checked against the surface it is used on. Four of the
+   sampled values failed WCAG AA and were darkened to the nearest passing tone,
+   which is the only place these tokens deliberately differ from what shipped:
+
+     accent   #2f73f6 -> #2a6ae6   4.28:1 -> 4.88:1
+     hint     #8a97aa -> #66738a   2.96:1 -> 4.79:1
+     success  #10b981 -> #18804b   2.20:1 -> 4.97:1   (the approval button)
+     dot      #4ab875 -> #18804b   2.50:1 -> 4.97:1   (needs 3:1 as a graphic)
+
+   Ratios in the comments are against --surface-2 (white), which is the worst
+   case: it is what the chat panel, cards and menus paint on.
+
+   Some tokens below are not read yet. That is the migration showing through,
+   not neglect: the legacy sheet still names ~380 colours literally, and each
+   one converted reaches for a token that has to already exist. The families
+   are kept whole on purpose -- a ramp with holes in it invites the next person
+   to invent a new value for the missing step, which is how the shell ended up
+   with three neutral ramps in the first place. Tokens encoding a decision that
+   was *not* kept have been removed rather than left to mislead.
+   ========================================================================== */
+
+:root {
+  /* -- Neutral ramp ------------------------------------------------------ */
+  /* One ramp, cool-tinted, matching the character stage's blue-grey light. */
+  --ink-900: #1f2b3d; /* 14.27:1  headings, primary text                    */
+  --ink-800: #243248; /* 12.92:1  message body                              */
+  --ink-700: #334155; /*  9.79:1  dense panels                              */
+  --ink-600: #506079; /*  6.38:1  secondary text                            */
+  --ink-500: #5f6f86; /*  5.12:1  labels, metadata                          */
+  --ink-400: #66738a; /*  4.79:1  the lightest tone still legible as text   */
+  --ink-300: #8a97aa; /*  2.96:1  NOT for text -- dividers and inactive     */
+                      /*          glyphs only, never a label                */
+  --ink-200: #c2ccd9; /*          hairlines on fills                        */
+  --ink-100: #dde5ee; /*          hairlines on white                        */
+  --ink-050: #eaf1fb; /*          selected row fill                         */
+
+  /* -- Surfaces ---------------------------------------------------------- */
+  --surface-0: #f2f5fa; /* window behind everything                         */
+  --surface-1: #f7f9fc; /* cards, inset wells                               */
+  --surface-2: #ffffff; /* panels, menus, the chat column                   */
+  --surface-raised: rgba(255, 255, 255, 0.96); /* floating over the stage   */
+  --surface-sunken: rgba(20, 30, 60, 0.04);    /* pressed / inset           */
+
+  /* -- Text -------------------------------------------------------------- */
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-600);
+  --text-muted: var(--ink-400);
+  --text-on-solid: #ffffff;
+  /* Disabled is exempt from WCAG 1.4.3 and must read as unavailable. It is
+     paired with a dashed border so it never relies on lightness alone --
+     that ambiguity is what made "重新扫描" look like it could not be clicked. */
+  --text-disabled: #a3aec0;
+
+  /* -- Roles ------------------------------------------------------------- */
+  /* Contrast is symmetric, so one token per role serves both the text tone
+     and the solid fill it sits on. */
+  --accent: #2a6ae6;          /* 4.88:1 both directions                     */
+  --accent-hover: #1f5fd0;    /* 5.82:1                                     */
+  --accent-fill: #eaf1fb;     /* tinted background for selected/active      */
+  --accent-line: #b9d0f5;
+
+  --success: #18804b;         /* 4.97:1 both directions                     */
+  --success-fill: #e8f4ed;
+  --success-line: #b7dcc7;
+
+  --danger: #b04b4b;          /* 5.31:1 both directions                     */
+  --danger-hover: #a83f3f;    /* 6.09:1                                     */
+  --danger-fill: #fcf3f2;
+  --danger-line: #eec9c5;
+
+  --warning: #8a5a12;         /* 5.47:1 both directions                     */
+  --warning-fill: #fdf4e5;
+  --warning-line: #e8cfa2;
+
+  /* -- Borders ----------------------------------------------------------- */
+  --border: rgba(17, 24, 39, 0.08);
+  --border-strong: rgba(17, 24, 39, 0.14);
+  --border-accent: var(--accent-line);
+
+  /* -- Type scale -------------------------------------------------------- */
+  /* Eight steps, replacing 24. Nothing below 11px: the stylesheet had text at
+     8px and 9px, which is not small, it is unreadable. */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-3xl: 28px;
+
+  /* -- Spacing ----------------------------------------------------------- */
+  /* 4pt grid, replacing 115 distinct padding values. The half step exists for
+     the few places that need a hairline of breathing room -- badge insets,
+     icon nudges -- where 4px is visibly too much. */
+  --sp-05: 2px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+
+  /* -- Radii ------------------------------------------------------------- */
+  /* Six steps, replacing 27. The extra step at 20px exists because the shell
+     genuinely uses two large radii -- speech bubbles and the compact dock are
+     rounder than cards -- and collapsing them into 16px would square off the
+     shapes that read as "character" rather than "chrome". */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+
+  /* -- Elevation --------------------------------------------------------- */
+  /* Four steps, replacing the 27 neutral lifts among 82 box-shadow values.
+     The opacities are sampled, not chosen: this design's shadows run between
+     0.015 and 0.04, and the conventional 0.05-0.14 ramp would land three times
+     heavier than anything the shell has ever drawn, turning a light, airy
+     surface into a stack of cards.
+
+     Only neutral lifts collapsed into these. Pink glows, status rings and
+     inset wells were left where they were -- they encode meaning, not height. */
+  --elev-1: 0 1px 2px rgba(20, 30, 60, 0.03);
+  --elev-2: 0 2px 6px rgba(20, 30, 60, 0.03);
+  --elev-3: 0 10px 28px rgba(20, 30, 60, 0.04);
+  --elev-4: 0 16px 44px rgba(20, 30, 60, 0.05);
+  /* The press is meant to be felt, so it is the one shadow with real weight. */
+  --elev-inset: inset 0 1px 2px rgba(20, 30, 60, 0.12);
+
+  /* -- Motion ------------------------------------------------------------ */
+  /* Press must land within one frame budget or it stops reading as a press. */
+  --ease-press: 60ms cubic-bezier(0.2, 0, 0.38, 0.9);
+  --ease-hover: 120ms cubic-bezier(0.2, 0, 0.38, 0.9);
+
+  /* Focus is drawn with `outline`, not a token: see styles/interaction.css.
+     An outline survives the many `overflow: hidden` containers in this shell,
+     which clip a box-shadow ring, and it follows border-radius on its own. */
+}

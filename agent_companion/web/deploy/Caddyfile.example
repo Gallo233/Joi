@@ -1,0 +1,50 @@
+# One origin serves the site and Joi.
+#
+# Splitting them across two hostnames works, and costs a CORS preflight on
+# every session call plus a cross-origin iframe for the shell. Same origin
+# removes both: the browser sends `Origin` on the POST and on the WebSocket
+# handshake, which is all the broker checks, and the shell iframe stops being
+# cross-origin at all.
+#
+# Install as /etc/caddy/Caddyfile and replace example.com throughout. Caddy
+# obtains and renews the certificate on its own; nothing else here touches TLS.
+
+example.com, www.example.com {
+  encode zstd gzip
+
+  # Joi's own routes. Listed before the site so the site never sees them.
+  #
+  # `/ws/*` is a WebSocket upgrade and must not be buffered or timed out:
+  # a visitor sitting in a conversation sends nothing for minutes at a time,
+  # and a proxy read timeout would close the session under them.
+  @joi path /session /session/* /ws/* /assets/*
+  reverse_proxy @joi 127.0.0.1:9080 {
+    flush_interval -1
+  }
+
+  # The shell bundle is content-hashed by Vite, so it may be cached forever.
+  # index.html must not be, or a rebuild leaves visitors on a page pointing at
+  # assets that no longer exist.
+  @shell_immutable path /joi-shell/assets/* /joi-shell/live2d/* /joi-shell/vendor/*
+  header @shell_immutable Cache-Control "public, max-age=31536000, immutable"
+  @shell_entry path /joi-shell/index.html /joi-shell/joi-embed.js /joi-shell/joi-embed.css
+  header @shell_entry Cache-Control "public, max-age=0, must-revalidate"
+
+  # Everything else is the Next.js server. It runs in Node rather than as a
+  # static export because /api/joi is a real route -- the classic page's
+  # assistant calls it.
+  reverse_proxy 127.0.0.1:3000
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    # The shell is framed by the site itself and by nobody else.
+    Content-Security-Policy "frame-ancestors 'self'"
+    -Server
+  }
+}
+
+# Redirect the bare apex to www, or the other way round -- pick one and keep
+# it, because the broker's allowed-origins list has to name the one visitors
+# actually land on.

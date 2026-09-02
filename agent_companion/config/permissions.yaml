@@ -6,6 +6,7 @@ defaults:
     - high
 rules:
   low:
+    - agent_cli.run
     - observe.screen
     - browser.search
     - browser.observe
@@ -23,4 +24,3 @@ rules:
     - package.install
     - git.push
     - external.launch_admin
-

@@ -15,6 +15,11 @@ class CaptureRect:
     capture_scale: float = 1.0
     scale_x: float = 1.0
     scale_y: float = 1.0
+    # Which display this capture came from, and whether we actually measured
+    # the arrangement. Untrusted geometry must not yield a click coordinate.
+    display_id: str = ""
+    display_layout_digest: str = ""
+    geometry_trusted: bool = True
 
     def to_agent_state(self) -> dict[str, Any]:
         return {
@@ -25,6 +30,9 @@ class CaptureRect:
             "capture_scale": round(float(self.capture_scale), 4),
             "scale_x": round(float(self.scale_x), 4),
             "scale_y": round(float(self.scale_y), 4),
+            "display_id": self.display_id,
+            "display_layout_digest": self.display_layout_digest,
+            "geometry_trusted": self.geometry_trusted,
         }
 
 

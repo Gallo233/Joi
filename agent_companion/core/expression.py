@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from agent_companion.core.character import CharacterHarness
+from agent_companion.core.config import load_workspace_config
+from agent_companion.core.event_bus import derive_public_phase
+from agent_companion.core.expression_map import ExpressionIntent, expression_state_from_event, resolve_expression
+from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.schemas import AgentEvent, EventType, VoiceLine
 from agent_companion.core.voice import safe_voice_line
 
@@ -20,24 +24,37 @@ class ExpressionEngine:
         self._config = self._load_config()
         self._client: Any | None = None
 
-    def express(self, event: AgentEvent, user_text: str = "") -> AgentEvent:
+    def express(self, event: AgentEvent, user_text: str = "", session: dict[str, Any] | None = None) -> AgentEvent:
         if event.type == EventType.USER_MESSAGE:
             return event
         fallback = event.voice_line
+        # The real state decides the expression; the model only writes words and
+        # may vary the tone inside what that state permits.
+        inputs = expression_state_from_event(event.agent_state, session)
+        if not inputs["public_phase"]:
+            # Expression runs before the bus stamps the phase, so derive it.
+            inputs["public_phase"] = derive_public_phase(event, inputs["session_state"])
+        intent = resolve_expression(**inputs)
         payload = self._llm_expression(event, user_text)
         if payload is None:
-            voice_line = safe_voice_line(fallback.text, emotion=fallback.emotion, sprite=fallback.sprite)
+            voice_line = safe_voice_line(fallback.text, emotion=intent.clamp(fallback.emotion), sprite=fallback.sprite)
             return replace(
                 event,
                 voice_line=voice_line,
-                agent_state=_with_expression_sync(event.agent_state, voice_line),
+                agent_state=_with_expression_sync(event.agent_state, voice_line, intent),
             )
 
         voice_text = str(payload.get("voice_text") or fallback.text).strip()
-        emotion = str(payload.get("emotion") or fallback.emotion or "neutral")
+        emotion = intent.clamp(payload.get("emotion") or fallback.emotion)
         sprite = str(payload.get("sprite") or fallback.sprite or "1")
         voice_line = safe_voice_line(voice_text, emotion=emotion, sprite=sprite)
-        return replace(event, voice_line=voice_line, agent_state=_with_expression_sync(event.agent_state, voice_line))
+        return replace(event, voice_line=voice_line, agent_state=_with_expression_sync(event.agent_state, voice_line, intent))
+
+    def reload(self, character: CharacterHarness | None = None) -> None:
+        if character is not None:
+            self.character = character
+        self._config = self._load_config()
+        self._client = None
 
     def _llm_expression(self, event: AgentEvent, user_text: str) -> dict[str, Any] | None:
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
@@ -58,17 +75,6 @@ class ExpressionEngine:
             return None
 
         try:
-            from openai import OpenAI
-        except Exception:
-            return None
-
-        try:
-            from agent_companion.core.config import ModelRouter
-
-            router = ModelRouter(config.llm)
-            endpoint = router.resolve("voice_style")
-            if self._client is None or self._client.base_url != endpoint.base_url:
-                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             character = config.primary_character if config.characters else None
             character_name = character.name if character else self.character.name
             persona = character.setting if character else self.character.persona
@@ -82,8 +88,11 @@ class ExpressionEngine:
                 "voice_lang": voice_lang,
                 "fallback_voice": event.voice_line.text,
             }
-            response = self._client.chat.completions.create(
-                model=endpoint.model,
+            outcome = chat_completion(
+                config.llm,
+                "voice_style",
+                temperature=min(max(config.llm.temperature, 0.2), 0.9),
+                response_format={"type": "json_object"},
                 messages=[
                     {
                         "role": "system",
@@ -99,32 +108,29 @@ class ExpressionEngine:
                     },
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
-                temperature=min(max(config.llm.temperature, 0.2), 0.9),
-                response_format={"type": "json_object"},
             )
-            content = response.choices[0].message.content or ""
-            parsed = json.loads(content)
+            if not outcome.ok:
+                # Expression degrades to the deterministic voice line; the
+                # attempt is already recorded in the ledger.
+                return None
+            parsed = json.loads(str(outcome.value or ""))
             return parsed if isinstance(parsed, dict) else None
         except Exception:
             return None
 
     def _load_config(self) -> Any | None:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
-            return None
-        try:
-            from agent_companion.core.config import load_app_config
-
-            return load_app_config(config_path)
-        except Exception:
-            return None
+        return load_workspace_config(self.workspace)
 
 
-def _with_expression_sync(state: dict[str, Any], voice_line: VoiceLine) -> dict[str, Any]:
+def _with_expression_sync(state: dict[str, Any], voice_line: VoiceLine, intent: ExpressionIntent | None = None) -> dict[str, Any]:
     next_state = dict(state or {})
     next_state["expression_sync"] = {
         "emotion": voice_line.emotion or "neutral",
         "sprite": voice_line.sprite or "1",
         "voice_style": voice_line.emotion or "neutral",
     }
+    if intent is not None:
+        # Carried so the shell can honour the same precedence when animating,
+        # instead of inferring "busy" from whichever event arrived last.
+        next_state["expression_intent"] = intent.payload()
     return next_state

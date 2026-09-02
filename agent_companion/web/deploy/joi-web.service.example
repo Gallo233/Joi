@@ -1,0 +1,55 @@
+[Unit]
+Description=Joi anonymous web session broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=joi-web
+Group=joi-web
+WorkingDirectory=/opt/joi
+EnvironmentFile=/etc/joi-web.env
+StateDirectory=joi-web
+# One origin: Caddy serves the site and Joi from the same hostname, so
+# `--public-base` and `--allowed-origins` name that one host. Every cost
+# ceiling is here rather than in the config file, because these are the
+# numbers you change when the bill surprises you.
+ExecStart=/opt/joi/.venv/bin/python -m agent_companion.web.broker \
+  --public-base https://example.com \
+  --allowed-origins https://example.com,https://www.example.com \
+  --guest-config-template /etc/joi-guest.yaml \
+  --seed-workspace /opt/joi-web-seed \
+  --sessions-root /var/lib/joi-web/sessions \
+  --state-root /var/lib/joi-web/state \
+  --core-python /opt/joi/.venv/bin/python \
+  --max-concurrent 60 \
+  --ttl-seconds 900 \
+  --ip-daily-sessions 5 \
+  --session-token-limit 30000 \
+  --daily-token-limit 1500000 \
+  --realtime-session-seconds 180 \
+  --realtime-total-seconds 600 \
+  --daily-realtime-seconds 10800
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=mixed
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/joi-web
+TasksMax=1200
+MemoryMax=3G
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,62 @@
+{
+  "files": {
+    "globalCssLines": 7575,
+    "scopedCssLines": 235,
+    "largest": [
+      {
+        "file": "styles.css",
+        "lines": 7575
+      },
+      {
+        "file": "App.vue",
+        "lines": 6141
+      },
+      {
+        "file": "components/CharacterLibrary.vue",
+        "lines": 1110
+      },
+      {
+        "file": "protocol.ts",
+        "lines": 940
+      },
+      {
+        "file": "character3d/runtime.ts",
+        "lines": 676
+      }
+    ]
+  },
+  "rules": {
+    "total": 1210,
+    "scoped": 156,
+    "escalating": 123,
+    "important": 24
+  },
+  "interaction": {
+    "interactiveElements": 267,
+    "activeRules": 1,
+    "activeRulesWithVisualChange": 0,
+    "focusVisibleRules": 4
+  },
+  "deadCode": {
+    "declaredClasses": 456,
+    "deadClasses": 54,
+    "unusedTokens": 8
+  },
+  "tokens": {
+    "declared": 29,
+    "hardcodedColorLiterals": 773,
+    "distinctHardcodedColors": 407
+  },
+  "scales": {
+    "fontSize": 24,
+    "fontSizesBelowMin": 5,
+    "borderRadius": 27,
+    "padding": 118,
+    "gap": 23,
+    "boxShadow": 82
+  },
+  "scatter": {
+    "targetsOverThreeBlocks": 117,
+    "worstSpread": 7160
+  }
+}

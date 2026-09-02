@@ -68,7 +68,7 @@ npm run build
 npm run tauri -- build --debug
 ```
 
-If a release shell exists, `start_joi.bat` opens it directly. If no built shell exists but npm/Rust are available, the launcher falls back to Tauri dev mode.
+If a release shell exists, `start_joi.bat` opens it and its bundled Core sidecar directly; Python is not required and no legacy fixed-port Core is started. If no built shell exists but npm/Rust are available, the launcher falls back to source/Tauri development mode.
 
 Packaging metadata smoke:
 

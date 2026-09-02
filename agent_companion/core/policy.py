@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from agent_companion.core.schemas import RiskLevel, ToolRequest
 from agent_companion.core.skill_manifest import skill_id_for_tool
 
 
 LOW_RISK = {
+    "agent_cli.run",
+    "character.perform",
     "companion.chat",
     "observe.screen",
     "watch.recall",
@@ -23,9 +25,12 @@ MEDIUM_RISK = {
     "browser.click",
     "browser.type",
     "computer.click",
+    "computer.double_click",
+    "computer.drag",
     "computer.type_text",
     "computer.scroll",
     "computer.hotkey",
+    "computer.open_app",
     "computer.workflow",
     "game.ok_ww.run",
     "files.write_workspace",
@@ -43,8 +48,13 @@ class PolicyDecision:
 
 
 class PolicyGate:
-    def __init__(self, disabled_skills: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        disabled_skills: set[str] | None = None,
+        session_authorizer: Callable[[ToolRequest, RiskLevel], PolicyDecision | None] | None = None,
+    ) -> None:
         self.disabled_skills = set(disabled_skills or set())
+        self.session_authorizer = session_authorizer
 
     def classify(self, request: ToolRequest, approved: bool = False) -> PolicyDecision:
         name = request.name
@@ -65,6 +75,10 @@ class PolicyGate:
             return PolicyDecision(risk, True, False, "低风险动作可直接执行。")
         if approved:
             return PolicyDecision(risk, True, False, "用户已确认。")
+        if self.session_authorizer is not None:
+            session_decision = self.session_authorizer(request, risk)
+            if session_decision is not None:
+                return session_decision
         return PolicyDecision(risk, False, True, f"{risk.value} 风险动作需要确认。")
 
     @staticmethod
@@ -72,6 +86,8 @@ class PolicyGate:
         preview = {key: str(value)[:160] for key, value in request.arguments.items()}
         if request.name.startswith("computer."):
             preview = _computer_preview(request.arguments)
+        elif request.name == "agent_cli.run":
+            preview = _agent_cli_preview(request.arguments)
         elif request.name == "codex.run":
             preview = _codex_preview(request.arguments)
         elif request.name == "runtime.update_config":
@@ -95,6 +111,8 @@ def _computer_preview(arguments: dict[str, Any]) -> dict[str, str]:
         preview["keys"] = " + ".join(str(key) for key in arguments.get("keys") or [])
     if "workflow" in arguments:
         preview["workflow"] = str(arguments.get("workflow") or "desktop_sequence")
+    if "app_name" in arguments:
+        preview["app"] = "app_name_hidden"
     return preview
 
 
@@ -107,6 +125,20 @@ def _codex_preview(arguments: dict[str, Any]) -> dict[str, str]:
     if arguments.get("codex_permission_decision"):
         preview["decision"] = "approval_required_to_continue"
     return preview or {"request": "coding_task"}
+
+
+def _agent_cli_preview(arguments: dict[str, Any]) -> dict[str, str]:
+    preview: dict[str, str] = {"mode": "agent_cli_takeover"}
+    cli_id = str(arguments.get("cli_id") or "").strip()
+    if cli_id:
+        preview["cli"] = cli_id[:40]
+    if arguments.get("goal"):
+        preview["goal"] = "takeover_request"
+    if arguments.get("codex_permission_hash"):
+        preview["permission"] = "one_time_agent_cli_permission"
+    if arguments.get("codex_permission_decision"):
+        preview["decision"] = "approval_required_to_continue"
+    return preview
 
 
 def _runtime_config_preview(arguments: dict[str, Any]) -> dict[str, str]:

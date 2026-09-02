@@ -9,6 +9,8 @@ import time
 from typing import Any
 
 from agent_companion.core.character import CharacterHarness
+from agent_companion.core.config import load_workspace_config
+from agent_companion.core.provider_client import chat_completion
 from agent_companion.core.voice import normalize_emotion, safe_voice_line, sprite_for_emotion
 
 
@@ -39,19 +41,30 @@ class WatchCommentaryPlanner:
         self._config = self._load_config()
         self._client = None
 
-    def maybe_comment(self, transcript_state: dict[str, Any], *, now: float | None = None, min_interval_seconds: float | None = None) -> WatchComment | None:
+    def maybe_comment(
+        self,
+        transcript_state: dict[str, Any],
+        *,
+        now: float | None = None,
+        min_interval_seconds: float | None = None,
+        mode: str = "commentary",
+        spoiler_level: str = "none",
+        visual_summary: str = "",
+    ) -> WatchComment | None:
         now = now if now is not None else time.time()
         interval = max(5.0, float(min_interval_seconds or self.min_interval_seconds))
         if now - self._last_comment_at < interval:
             return None
         rows = _recent_rows(transcript_state)
+        if not rows and mode == "accessibility" and visual_summary.strip():
+            rows = [visual_summary.strip()[:180]]
         if not rows:
             return None
         key = _transcript_key(rows[-8:])
         if not key or key == self._last_transcript_key:
             return None
         summary = str(transcript_state.get("summary") or "")
-        comment = self._llm_comment(rows, summary) or self._fallback_comment(rows, summary)
+        comment = self._llm_comment(rows, summary, mode, spoiler_level, visual_summary) or self._fallback_comment(rows, summary, mode, visual_summary)
         voice_line = safe_voice_line(
             comment.voice_text or comment.reply,
             fallback="这一段我记下来了。",
@@ -70,11 +83,17 @@ class WatchCommentaryPlanner:
             reason=comment.reason or "rolling_transcript",
         )
 
-    def _fallback_comment(self, rows: list[str], summary: str) -> WatchComment:
+    def _fallback_comment(self, rows: list[str], summary: str, mode: str, visual_summary: str) -> WatchComment:
         latest = rows[-1]
         hint = _trim_sentence(latest, 48)
         emotion = _comment_emotion(latest)
-        if any(token in latest for token in ("为什么", "怎么", "吗", "？", "?")):
+        if mode == "translate":
+            reply = f"这句可以理解为：{hint}"
+        elif mode == "analysis":
+            reply = f"这一段的关键信息是：{_trim_sentence(summary or latest, 64)}"
+        elif mode == "accessibility":
+            reply = _trim_sentence(visual_summary or summary or latest, 72)
+        elif any(token in latest for token in ("为什么", "怎么", "吗", "？", "?")):
             reply = f"这一段像是在抛问题：{hint}"
         elif any(token in latest for token in ("喜欢", "可爱", "开心", "成功", "完成", "厉害")):
             reply = f"这段气氛挺轻快的，我先记住重点：{hint}"
@@ -86,21 +105,13 @@ class WatchCommentaryPlanner:
             reply = f"这一段的重点我记下来了：{hint}"
         return WatchComment(reply=reply, voice_text=reply, emotion=emotion, sprite=sprite_for_emotion(emotion), reason="fallback")
 
-    def _llm_comment(self, rows: list[str], summary: str) -> WatchComment | None:
+    def _llm_comment(self, rows: list[str], summary: str, mode: str, spoiler_level: str, visual_summary: str) -> WatchComment | None:
         if os.environ.get("AGENT_COMPANION_DISABLE_LLM") == "1":
             return None
         config = self._config
         if config is None or config.llm.use_mock or not (config.llm.is_expression_configured or config.llm.is_configured):
             return None
         try:
-            from openai import OpenAI
-
-            from agent_companion.core.config import ModelRouter
-
-            router = ModelRouter(config.llm)
-            endpoint = router.resolve("voice_style")
-            if self._client is None or self._client.base_url != endpoint.base_url:
-                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             character = config.primary_character if config.characters else None
             character_name = character.name if character else self.character.name
             persona = character.setting if character else self.character.persona
@@ -108,17 +119,25 @@ class WatchCommentaryPlanner:
             payload = {
                 "rolling_summary": summary[:500],
                 "new_transcript": rows[-8:],
+                "visual_summary": visual_summary[:500],
+                "mode": mode,
+                "spoiler_level": spoiler_level,
                 "voice_lang": voice_lang,
             }
-            response = self._client.chat.completions.create(
-                model=endpoint.model,
+            outcome = chat_completion(
+                config.llm,
+                "voice_style",
+                temperature=min(max(config.llm.temperature, 0.2), 0.85),
+                response_format={"type": "json_object"},
                 messages=[
                     {
                         "role": "system",
                         "content": (
                             f"你是{character_name}，正在陪用户看视频。\n"
                             f"角色设定：{persona[:1600]}\n"
-                            "根据最近新增转写，生成一句自然、短、不过度打扰的陪看评论。"
+                            f"当前陪看模式是 {mode}，剧透级别是 {spoiler_level}。根据新增转写和视觉摘要生成一句自然、短、不过度打扰的回应。"
+                            "quiet 不应调用到这里；translate 只翻译当前新增内容；analysis 解释当前片段；accessibility 客观描述当前画面。"
+                            "不得推测超出当前剧透级别的后续剧情。"
                             "只输出 JSON：{\"reply\":\"屏幕气泡文字\",\"voice_text\":\"<emo: happy>适合朗读的一句话\",\"emotion\":\"neutral|happy|thinking|alert|worried|serious\",\"sprite\":\"1\"}。"
                             "不要复述太长，不要说自己读取了工具/转写/OCR，不要包含路径、命令、日志、token、JSON 外文本。"
                             "如果内容不足以评论，输出空 reply。"
@@ -126,10 +145,11 @@ class WatchCommentaryPlanner:
                     },
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
-                temperature=min(max(config.llm.temperature, 0.2), 0.85),
-                response_format={"type": "json_object"},
             )
-            parsed = json.loads(response.choices[0].message.content or "{}")
+            if not outcome.ok:
+                # Commentary is optional; staying quiet is the right degradation.
+                return None
+            parsed = json.loads(str(outcome.value or "{}"))
             if not isinstance(parsed, dict):
                 return None
             reply = str(parsed.get("reply") or "").strip()
@@ -143,15 +163,7 @@ class WatchCommentaryPlanner:
             return None
 
     def _load_config(self) -> Any | None:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
-            return None
-        try:
-            from agent_companion.core.config import load_app_config
-
-            return load_app_config(config_path)
-        except Exception:
-            return None
+        return load_workspace_config(self.workspace)
 
 
 def _recent_rows(transcript_state: dict[str, Any]) -> list[str]:

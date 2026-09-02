@@ -8,6 +8,9 @@ import threading
 import time
 from typing import Any
 
+from agent_companion.core.config import load_workspace_config
+from agent_companion.core.provider_client import chat_completion
+
 
 @dataclass(frozen=True)
 class WatchFrame:
@@ -226,14 +229,6 @@ class WatchAnswerer:
         if config is None or config.llm.use_mock or not (config.llm.is_expression_configured or config.llm.is_configured):
             return fallback, status
         try:
-            from openai import OpenAI
-
-            from agent_companion.core.config import ModelRouter
-
-            router = ModelRouter(config.llm)
-            endpoint = router.resolve("summarize")
-            if self._client is None or self._client.base_url != endpoint.base_url:
-                self._client = OpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             character = config.primary_character if config.characters else None
             character_name = character.name if character else self.character_name
             persona = character.setting if character else self.character_persona
@@ -257,8 +252,15 @@ class WatchAnswerer:
                 for frame in frames[:3]
             ]
             started = time.perf_counter()
-            response = self._client.chat.completions.create(
-                model=endpoint.model,
+            # Frames are summarised into text before this point, so the manifest
+            # declares the screen captures they came from rather than pretending
+            # only text is leaving.
+            outcome = chat_completion(
+                config.llm,
+                "summarize",
+                temperature=min(max(config.llm.temperature, 0.2), 0.9),
+                response_format={"type": "json_object"},
+                screenshots=len(context),
                 messages=[
                     {
                         "role": "system",
@@ -276,30 +278,26 @@ class WatchAnswerer:
                         "content": json.dumps({"question": question, "recent_frames": context}, ensure_ascii=False),
                     },
                 ],
-                temperature=min(max(config.llm.temperature, 0.2), 0.9),
-                response_format={"type": "json_object"},
             )
+            if not outcome.ok:
+                return fallback, status
             latency_ms = (time.perf_counter() - started) * 1000
-            payload = json.loads(response.choices[0].message.content or "{}")
+            payload = json.loads(str(outcome.value or "{}"))
             answer = str(payload.get("answer") or "").strip()
             if not answer:
                 return fallback, status
             self.last_used_model = True
-            self.last_model_usage = endpoint.to_agent_state(latency_ms=latency_ms)
+            self.last_model_usage = (
+                outcome.endpoint.to_agent_state(latency_ms=latency_ms)
+                if outcome.endpoint is not None
+                else {"latency_ms": max(0, int(latency_ms))}
+            )
             return answer[:900], "llm_answer"
         except Exception:
             return fallback, status
 
     def _load_config(self) -> Any | None:
-        config_path = self.workspace / "config.yaml"
-        if not config_path.is_file():
-            return None
-        try:
-            from agent_companion.core.config import load_app_config
-
-            return load_app_config(config_path)
-        except Exception:
-            return None
+        return load_workspace_config(self.workspace)
 
 
 def _ocr_line(frame: WatchFrame) -> str:

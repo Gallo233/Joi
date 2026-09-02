@@ -6,10 +6,15 @@ import time
 from typing import Any
 import uuid
 
-from agent_companion.core.computer_use import ComputerUseBackend, WindowsComputerUseBackend
+from agent_companion.core.computer_use import ComputerUseBackend
 from agent_companion.core.computer_use.schemas import ComputerObservation
 from agent_companion.core.schemas import DisplayCard, RiskLevel, ToolRequest, ToolResult
 from agent_companion.core.tools.base import ToolAdapter
+from agent_companion.core.platform_factory import (
+    get_computer_backend,
+    get_screen_observer,
+    get_accessibility_observer,
+)
 from agent_companion.core.vision import (
     AccessibilityObserver,
     AccessibilitySnapshot,
@@ -19,12 +24,11 @@ from agent_companion.core.vision import (
     VisionObserver,
     VisualDetectionResult,
     VisualDetector,
-    WindowsAccessibilityObserver,
-    WindowsScreenObserver,
 )
 from agent_companion.core.vision.ocr import run_ocr_safely
 from agent_companion.core.vision.regions import group_ocr_regions, regions_to_agent_state, summarize_ocr_regions
 from agent_companion.core.vision.targeting import TargetCandidate, resolve_target_candidates
+from agent_companion.core.tools.foreground_guard import companion_hidden_for_target_observation
 from agent_companion.core.voice import safe_voice_line
 
 
@@ -114,14 +118,18 @@ class SemanticTargetTool(ToolAdapter):
         visual_detector: VisualDetector | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
-        self.observer = observer or WindowsScreenObserver(workspace)
-        self.computer_backend = computer_backend or WindowsComputerUseBackend(workspace, self.observer)
+        self.observer = observer or get_screen_observer(workspace)
+        self.computer_backend = computer_backend or get_computer_backend(workspace, self.observer)
         self.ocr = ocr or PytesseractOcrExtractor()
-        self.accessibility = accessibility or WindowsAccessibilityObserver()
+        self.accessibility = accessibility or get_accessibility_observer()
         self.visual_detector = visual_detector or HeuristicVisualDetector()
 
     def run(self, request: ToolRequest) -> ToolResult:
         query = str(request.arguments.get("query") or request.arguments.get("target") or "").strip()
+        with companion_hidden_for_target_observation():
+            return self._run_with_visible_target(query)
+
+    def _run_with_visible_target(self, query: str) -> ToolResult:
         try:
             observation = self.computer_backend.observe(target="active_window", query=query)
         except Exception:
@@ -442,6 +450,10 @@ def _screen_center_from_values(
     screen_origin_x = _int_value(rect.get("screen_x"))
     screen_origin_y = _int_value(rect.get("screen_y"))
     if observation_width <= 0 or observation_height <= 0 or rect_width is None or rect_height is None or screen_origin_x is None or screen_origin_y is None:
+        return None
+    if rect.get("geometry_trusted") is False:
+        # The capture could not be tied to a measured display, so any point
+        # derived from it would be a guess about which screen it lands on.
         return None
     scale_x = _positive_float(rect.get("scale_x")) or observation_width / rect_width
     scale_y = _positive_float(rect.get("scale_y")) or observation_height / rect_height

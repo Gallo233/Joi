@@ -83,6 +83,9 @@ class ComputerAction:
     delta: int = 0
     keys: tuple[str, ...] = ()
     button: str = "left"
+    end_x: int | None = None
+    end_y: int | None = None
+    app_name: str = ""
 
     def to_agent_state(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -92,12 +95,17 @@ class ComputerAction:
         if self.x is not None and self.y is not None:
             payload["x"] = self.x
             payload["y"] = self.y
+        if self.end_x is not None and self.end_y is not None:
+            payload["end_x"] = self.end_x
+            payload["end_y"] = self.end_y
         if self.text:
             payload["text_length"] = len(self.text)
         if self.delta:
             payload["delta"] = self.delta
         if self.keys:
             payload["keys"] = list(self.keys)
+        if self.app_name:
+            payload["app_name"] = self.app_name
         return payload
 
 

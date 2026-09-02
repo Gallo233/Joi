@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import importlib
+from functools import lru_cache
 import importlib.util
 from pathlib import Path
 import platform
@@ -10,7 +11,8 @@ import shutil
 import sys
 from typing import Any
 
-from agent_companion.core.config import MODEL_ROUTE_LABELS, AppConfig, ModelRouter, load_app_config
+from agent_companion.core.config import MODEL_ROUTE_LABELS, AppConfig, ModelRouter, load_workspace_config
+from agent_companion.core.realtime_voice import RealtimeVoiceRuntimeState
 from agent_companion.core.speech_input import AsrRuntimeState
 
 
@@ -33,13 +35,21 @@ class RuntimeProviderStatus:
         return asdict(self)
 
 
-def build_runtime_status(workspace: Path, asr_state: AsrRuntimeState, tts_status: dict[str, Any]) -> dict[str, Any]:
+def build_runtime_status(
+    workspace: Path,
+    asr_state: AsrRuntimeState,
+    tts_status: dict[str, Any],
+    realtime_voice_state: RealtimeVoiceRuntimeState | None = None,
+    *,
+    live_probe: bool = True,
+) -> dict[str, Any]:
     workspace = workspace.resolve()
     config = _load_config(workspace)
     providers = [
         _asr_status(asr_state),
+        *([_realtime_voice_status(realtime_voice_state)] if realtime_voice_state is not None else []),
         _tts_status(tts_status),
-        _ocr_status(config),
+        _ocr_status(config, live_probe=live_probe),
         *[_model_status(config, route) for route in ModelRouter.stable_routes()],
         _computer_use_status(config),
         _audit_verification_status(),
@@ -52,13 +62,7 @@ def build_runtime_status(workspace: Path, asr_state: AsrRuntimeState, tts_status
 
 
 def _load_config(workspace: Path) -> AppConfig | None:
-    config_path = workspace / "config.yaml"
-    if not config_path.is_file():
-        return None
-    try:
-        return load_app_config(config_path)
-    except Exception:
-        return None
+    return load_workspace_config(workspace)
 
 
 def _asr_status(state: AsrRuntimeState) -> RuntimeProviderStatus:
@@ -84,6 +88,11 @@ def _tts_status(payload: dict[str, Any]) -> RuntimeProviderStatus:
     enabled = bool(payload.get("enabled"))
     configured = bool(payload.get("configured"))
     status = "ready" if configured else "off" if not enabled else "error"
+    notes = ["streaming" if payload.get("streaming") else "whole-line", "system fallback disabled"]
+    if payload.get("last_ttfb_ms") is not None:
+        notes.append(f"first audio {max(0, int(payload['last_ttfb_ms']))}ms")
+    if payload.get("last_total_ms") is not None:
+        notes.append(f"total {max(0, int(payload['last_total_ms']))}ms")
     return RuntimeProviderStatus(
         "tts",
         "TTS",
@@ -91,26 +100,54 @@ def _tts_status(payload: dict[str, Any]) -> RuntimeProviderStatus:
         enabled=enabled,
         configured=configured,
         provider=_safe_identifier(payload.get("provider")),
+        model=_safe_model(payload.get("model")),
         summary="已配置" if configured else "未启用" if not enabled else "未配置",
+        timeout_seconds=max(1, int(payload.get("timeout_seconds") or 1)),
         last_error=_safe_error(payload.get("last_error")),
+        notes=notes,
     )
 
 
-def _ocr_status(config: AppConfig | None) -> RuntimeProviderStatus:
+def _realtime_voice_status(state: RealtimeVoiceRuntimeState) -> RuntimeProviderStatus:
+    configured = bool(state.configured)
+    enabled = bool(state.enabled)
+    status = "ready" if configured else "off" if not enabled else "error"
+    return RuntimeProviderStatus(
+        "realtime_voice",
+        "Realtime Voice (Debug)",
+        status,
+        enabled=enabled,
+        configured=configured,
+        provider=_safe_identifier(state.provider) if configured else "none",
+        model=_safe_model(state.model if configured else ""),
+        summary="实时对话与 Minecraft 协作" if configured else "未启用" if not enabled else "未配置",
+        timeout_seconds=max(1, int(state.timeout_seconds or 1)),
+        last_error=_safe_error(state.error),
+        notes=["text-only cloud response", "local GPT-SoVITS output", "scoped Minecraft tools"],
+    )
+
+
+def _ocr_status(config: AppConfig | None, *, live_probe: bool = False) -> RuntimeProviderStatus:
     has_pillow = importlib.util.find_spec("PIL") is not None
     has_pytesseract = importlib.util.find_spec("pytesseract") is not None
     tesseract_cmd = _resolve_tesseract_cmd(config)
     has_tesseract_executable = bool(tesseract_cmd)
+    tessdata_dir_for_probe = _resolve_tessdata_dir(config)
     version_ok = False
     if has_pillow and has_pytesseract and has_tesseract_executable:
-        try:
-            version_ok = _probe_tesseract_version(tesseract_cmd)
-        except Exception:
-            version_ok = False
-    configured = has_pillow and has_pytesseract and has_tesseract_executable and version_ok
+        version_ok, _langs = _ocr_probe(tesseract_cmd, tessdata_dir_for_probe, live=live_probe)
     timeout = config.ocr.timeout_seconds if config else 5
     language = config.ocr.language if config else "chi_sim+eng"
     tessdata_dir = _resolve_tessdata_dir(config)
+    # Tesseract complains about a language it cannot load and then carries on
+    # with the ones it can, exiting 0. Through pytesseract that reads as a
+    # success with fewer words in it: a user who configured Chinese gets English
+    # recognition and nothing says so. Readiness therefore has to mean the
+    # configured languages are installed, not merely that the binary runs.
+    absent_languages: list[str] = []
+    if has_pillow and has_pytesseract and has_tesseract_executable and version_ok:
+        absent_languages = _absent_ocr_languages(language, tesseract_cmd, tessdata_dir, live=live_probe)
+    configured = has_pillow and has_pytesseract and has_tesseract_executable and version_ok and not absent_languages
     missing = []
     if not has_pillow:
         missing.append("pillow_missing")
@@ -120,6 +157,8 @@ def _ocr_status(config: AppConfig | None) -> RuntimeProviderStatus:
         missing.append("tesseract_missing")
     if has_pillow and has_pytesseract and has_tesseract_executable and not version_ok:
         missing.append("tesseract_unavailable")
+    if absent_languages:
+        missing.append("ocr_language_missing")
     return RuntimeProviderStatus(
         "ocr",
         "OCR",
@@ -127,7 +166,7 @@ def _ocr_status(config: AppConfig | None) -> RuntimeProviderStatus:
         enabled=True,
         configured=configured,
         provider="pytesseract" if has_pytesseract else "none",
-        summary="可用" if configured else "依赖或本地运行时不可用",
+        summary="可用" if configured else "缺少配置的识别语言" if absent_languages else "依赖或本地运行时不可用",
         timeout_seconds=max(1, int(timeout or 5)),
         last_error=_safe_error(";".join(missing)),
         notes=[f"lang {language}", "version probe ok", "custom tessdata"] if configured and tessdata_dir else [f"lang {language}", "version probe ok"] if configured else [f"lang {language}"],
@@ -147,6 +186,68 @@ def _resolve_tessdata_dir(config: AppConfig | None) -> str:
     if configured and Path(os.path.expandvars(configured)).is_dir():
         return str(Path(os.path.expandvars(configured)))
     return ""
+
+
+# Both OCR probes shell out to `tesseract`. The ready payload is rebuilt on
+# every status refresh and is contractually not allowed to run external tools --
+# a contract that held only while tesseract was absent and the probes were
+# skipped. They are answered from this cache unless a caller explicitly asks for
+# a live probe, which is what the preflight tool does.
+_OCR_PROBE_CACHE: dict[tuple[str, str], tuple[bool, tuple[str, ...]]] = {}
+
+
+def _installed_ocr_languages(tesseract_cmd: str = "", tessdata_dir: str = "") -> tuple[str, ...]:
+    try:
+        pytesseract = importlib.import_module("pytesseract")
+        if tesseract_cmd:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+        probe = getattr(pytesseract, "get_languages", None)
+        if not callable(probe):
+            return ()
+        return tuple(str(name).strip() for name in probe(config=f"--tessdata-dir {tessdata_dir}" if tessdata_dir else ""))
+    except Exception:
+        return ()
+
+
+def _ocr_probe(tesseract_cmd: str, tessdata_dir: str, *, live: bool) -> tuple[bool, tuple[str, ...]]:
+    """The cached (version-ok, installed-languages) pair for this Tesseract.
+
+    Without `live` a cold cache answers "the binary is there, languages unknown"
+    rather than shelling out: `shutil.which` already established the executable
+    exists, and claiming it broken because nobody has probed it yet would be a
+    worse error than the missing detail.
+    """
+
+    key = (tesseract_cmd, tessdata_dir)
+    cached = _OCR_PROBE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if not live:
+        return True, ()
+    try:
+        version_ok = _probe_tesseract_version(tesseract_cmd)
+    except Exception:
+        version_ok = False
+    languages = _installed_ocr_languages(tesseract_cmd, tessdata_dir) if version_ok else ()
+    _OCR_PROBE_CACHE[key] = (version_ok, languages)
+    return version_ok, languages
+
+
+def _absent_ocr_languages(language: str, tesseract_cmd: str = "", tessdata_dir: str = "", *, live: bool = True) -> list[str]:
+    """Configured languages the local Tesseract cannot load.
+
+    Returns nothing when the installed set cannot be read: an unreadable list is
+    not evidence that a language is missing, and reporting OCR unavailable on
+    that basis would be worse than the silent degradation it exists to catch.
+    """
+
+    wanted = [part for part in str(language or "").replace("+", " ").split() if part]
+    if not wanted:
+        return []
+    installed = set(_ocr_probe(tesseract_cmd, tessdata_dir, live=live)[1])
+    if not installed:
+        return []
+    return [name for name in wanted if name not in installed]
 
 
 def _probe_tesseract_version(tesseract_cmd: str = "") -> bool:
@@ -207,18 +308,20 @@ def _model_status(config: AppConfig | None, use: str) -> RuntimeProviderStatus:
 
 
 def _computer_use_status(config: AppConfig | None) -> RuntimeProviderStatus:
-    windows = sys.platform == "win32"
+    supported = sys.platform in {"win32", "darwin"}
     settle_ms = config.computer_use.post_action_settle_ms if config else 200
+    provider_name = "windows" if sys.platform == "win32" else "mac" if sys.platform == "darwin" else platform.system().lower() or "unknown"
+    summary_msg = "已配置可执行" if supported else "动作执行当前仅支持 Windows/macOS"
     return RuntimeProviderStatus(
         "computer_use",
         "Computer Use",
-        "ready" if windows else "unavailable",
+        "ready" if supported else "unavailable",
         enabled=True,
-        configured=windows,
-        provider="windows" if windows else _safe_identifier(platform.system().lower() or "unknown"),
-        summary="Windows 可用" if windows else "动作执行当前仅支持 Windows",
+        configured=supported,
+        provider=_safe_identifier(provider_name),
+        summary=summary_msg,
         limit=f"settle {max(0, int(settle_ms or 0))}ms",
-        last_error="" if windows else "computer_use_windows_only",
+        last_error="" if supported else "computer_use_desktop_only",
         notes=["approval gated", "semi-automatic"],
     )
 
@@ -280,6 +383,9 @@ def _safe_error(value: Any) -> str:
         "tts_config_error",
         "tts_failed",
         "ocr_dependency_missing",
+        # Same shape as the line above: a fixed code naming a capability gap, with
+        # no path, language data location or user text in it.
+        "ocr_language_missing",
         "pillow_missing",
         "pytesseract_missing",
         "tesseract_missing",

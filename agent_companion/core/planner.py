@@ -1,18 +1,43 @@
 from __future__ import annotations
 
 import re
+import sys
 import uuid
 
+from agent_companion.core.character_motion import character_motion_from_text
+from agent_companion.core.language_policy import chat_language_policy
 from agent_companion.core.schemas import AgentPlan, ToolRequest
 
 SEARCH_VERB_RE = r"(?:搜索|搜一下|查找|搜(?!集))"
 
 
-def build_plan(user_text: str) -> AgentPlan:
+def build_plan(user_text: str, chat_language: str = "") -> AgentPlan:
     text = " ".join((user_text or "").strip().split())
     task_id = f"task-{uuid.uuid4().hex[:10]}"
     lowered = text.casefold()
 
+    character_motion = character_motion_from_text(text)
+    if character_motion:
+        return AgentPlan(
+            task_id=task_id,
+            user_text=text,
+            intent="character_motion",
+            steps=[
+                ToolRequest(
+                    "character.perform",
+                    {
+                        "motion": character_motion,
+                        # The chat language the user set, or what they wrote in
+                        # when it follows them -- never the voice she is
+                        # configured to speak. A Chinese "跳个舞" answered in
+                        # Japanese is the same violation the chat replies
+                        # already avoid.
+                        "reply_language": chat_language_policy(chat_language, text).code,
+                    },
+                    "播放本地角色动作，不操作外部应用。",
+                )
+            ],
+        )
     if _is_game_task(text):
         return AgentPlan(
             task_id=task_id,
@@ -56,6 +81,13 @@ def build_plan(user_text: str) -> AgentPlan:
             intent="watch_followup",
             steps=[ToolRequest("watch.recall", {"query": text}, "优先使用最近的陪看视觉上下文回答，不重复截图。")],
         )
+    if _is_execution_status_question(text):
+        return AgentPlan(
+            task_id=task_id,
+            user_text=text,
+            intent="companion_chat",
+            steps=[ToolRequest("companion.chat", {"text": text}, "状态追问只走对话，不启动新的桌面操作。")],
+        )
     desktop_workflow = _build_desktop_workflow(text, lowered)
     if desktop_workflow is not None:
         return AgentPlan(
@@ -71,6 +103,18 @@ def build_plan(user_text: str) -> AgentPlan:
             intent="watch_together",
             steps=[ToolRequest("observe.screen", {"query": text}, "观察当前窗口或屏幕内容并生成陪看摘要。")],
         )
+    if _looks_like_open_app(text, lowered):
+        app_name = _parse_app_name(text)
+        if app_name:
+            # Use open_app action which handles Spotlight + open -a fallback internally
+            return AgentPlan(
+                task_id=task_id,
+                user_text=text,
+                intent="computer_use",
+                steps=[
+                    ToolRequest("computer.open_app", {"app_name": app_name}, f"打开应用 {app_name}。"),
+                ],
+            )
     computer_action = _build_computer_action(text, lowered)
     if computer_action is not None:
         intent = "semantic_target" if computer_action.name == "vision.resolve_target" else "computer_use"
@@ -115,7 +159,54 @@ def build_plan(user_text: str) -> AgentPlan:
 
 
 def _is_game_task(text: str) -> bool:
-    return any(token in text for token in ("鸣潮", "ok-ww", "OK-WW", "刷副本", "清体力", "梦魇", "游戏日常", "Minecraft", "我的世界"))
+    """Whether this is an OK-WW request. Not "a game is mentioned".
+
+    OK-WW automates Wuthering Waves. Minecraft used to be listed here too, so
+    "帮我在 Minecraft 里挖点石头" launched an entirely different game's skill.
+    Minecraft has its own bridge, scope and receipts, and is routed before the
+    planner is reached -- see ``JsonRpcBridge.minecraft_text_goal_command``.
+    """
+
+    return any(token in text for token in ("鸣潮", "ok-ww", "OK-WW", "刷副本", "清体力", "梦魇", "游戏日常"))
+
+
+_MINECRAFT_WORLD = ("minecraft", "我的世界", "mc 里", "mc里")
+
+# Phrases that make a message *about* Minecraft rather than a request inside it.
+# "我的世界" is also ordinary Chinese, so this guard is what keeps "我的世界里
+# 只有你" and "Minecraft 是什么游戏" out of the game bridge.
+_MINECRAFT_DISCUSSION = (
+    "是什么", "什么意思", "什么游戏", "好玩吗", "好玩不", "怎么样", "为什么", "值得吗",
+    "聊聊", "聊一下", "讨论", "话题", "介绍一下", "解释", "教程", "历史", "推荐",
+    "talk about", "what is", "explain",
+)
+
+# What asking Joi to do something in the world sounds like: an imperative frame,
+# or one of the primitives the bridge can actually carry out.
+_MINECRAFT_REQUEST = (
+    "帮我", "帮忙", "给我", "替我", "能不能", "可以帮", "麻烦", "请你", "去", "来", "让你", "咱们", "我们",
+    "挖", "采", "收集", "捡", "合成", "做个", "做一", "建", "造", "搭", "放", "存", "吃", "装备",
+    "跟着", "跟上", "过来", "过去", "找", "看看", "观察", "巡", "守", "躲", "逃", "跑", "打怪", "攻击",
+    "help me", "let's", "come", "follow", "mine", "collect", "craft", "build", "place", "eat", "guard",
+)
+
+
+def is_minecraft_task(text: str) -> bool:
+    """Whether this turn asks Joi to do something in the Minecraft world.
+
+    The world has to be named, exactly as the OK-WW route requires its own game
+    to be named: a verb alone is not enough, because "挖点石头" is also just how
+    you talk about mining. And naming it is not enough either -- acting on a
+    question about the game is the same failure as dancing when asked to discuss
+    dancing.
+    """
+
+    value = " ".join(str(text or "").strip().split()).casefold()
+    if not value or not any(token in value for token in _MINECRAFT_WORLD):
+        return False
+    if any(marker in value for marker in _MINECRAFT_DISCUSSION):
+        return False
+    return any(marker in value for marker in _MINECRAFT_REQUEST)
 
 
 def _is_watch_task(text: str) -> bool:
@@ -143,6 +234,15 @@ def _is_watch_task(text: str) -> bool:
 
 def _is_watch_followup(text: str) -> bool:
     return any(token in text for token in ("刚刚发生了什么", "你看到了什么", "你刚才看到了什么", "这个页面讲什么", "刚才的画面", "刚才看到的"))
+
+
+def _is_execution_status_question(text: str) -> bool:
+    value = re.sub(r"\s+", "", text or "").strip("。！？!?，,")
+    if not value:
+        return False
+    if value in {"打开了吗", "打开了没", "开了吗", "开了没", "启动了吗", "启动了没", "运行了吗", "运行了没", "执行了吗", "执行了没", "好了没", "好了吗", "成功了吗", "成功了没"}:
+        return True
+    return bool(re.search(r"(?:打开|启动|运行|执行|搜索|搜).{0,8}(?:了吗|了没|成功了吗|成功了没)$", value))
 
 
 def _is_current_video_question(text: str) -> bool:
@@ -233,7 +333,7 @@ def _requested_app(text: str, lowered: str) -> str:
     if not match:
         return ""
     candidate = match.group(1).strip()
-    if candidate in {"网页", "浏览器", "网站", "页面"}:
+    if candidate in {"网页", "浏览器", "网站", "页面", "了吗", "了没", "吗", "没"}:
         return ""
     return candidate[:80]
 
@@ -273,9 +373,21 @@ def _build_computer_action(text: str, lowered: str) -> ToolRequest | None:
     if _looks_like_scroll(text, lowered):
         direction = "up" if any(token in text for token in ("向上", "往上", "上滚", "上滑")) else "down"
         return ToolRequest("computer.scroll", {"direction": direction, "amount": 3}, "滚动当前前台应用，需要确认。")
-    if _looks_like_click(text, lowered):
+    if _looks_like_double_click(text, lowered):
         x, y = _parse_coordinates(text)
         args: dict[str, int | str] = {}
+        if x is not None and y is not None:
+            args.update({"x": x, "y": y})
+            return ToolRequest("computer.double_click", args, "双击当前屏幕会影响前台应用，需要确认。")
+        return ToolRequest("vision.resolve_target", {"query": text, "action": "double_click"}, "先从当前画面中寻找候选区域。")
+    if _looks_like_drag(text, lowered):
+        coords = _parse_drag_coordinates(text)
+        if coords:
+            x1, y1, x2, y2 = coords
+            return ToolRequest("computer.drag", {"x": x1, "y": y1, "end_x": x2, "end_y": y2}, "拖拽操作会影响前台应用，需要确认。")
+    if _looks_like_click(text, lowered):
+        x, y = _parse_coordinates(text)
+        args = {}
         if x is not None and y is not None:
             args.update({"x": x, "y": y})
             return ToolRequest("computer.click", args, "点击当前屏幕会影响前台应用，需要确认。")
@@ -286,6 +398,14 @@ def _build_computer_action(text: str, lowered: str) -> ToolRequest | None:
 def _looks_like_click(text: str, lowered: str) -> bool:
     contextual_click = "点" in text and any(token in text for token in ("按钮", "那个", "这个", "右上", "左上", "右下", "左下", "开始", "登录", "任务"))
     return any(token in text for token in ("点击", "点一下", "鼠标点", "单击")) or contextual_click or "click" in lowered
+
+
+def _looks_like_double_click(text: str, lowered: str) -> bool:
+    return any(token in text for token in ("双击", "双点", "连点", "连击")) or "double" in lowered or "dblclick" in lowered
+
+
+def _looks_like_drag(text: str, lowered: str) -> bool:
+    return any(token in text for token in ("拖拽", "拖动", "拉动", "滑动到", "拖到")) or "drag" in lowered
 
 
 def _looks_like_type_text(text: str, lowered: str) -> bool:
@@ -307,6 +427,14 @@ def _parse_coordinates(text: str) -> tuple[int | None, int | None]:
     return int(match.group(1)), int(match.group(2))
 
 
+def _parse_drag_coordinates(text: str) -> tuple[int, int, int, int] | None:
+    """Parse drag coordinates like '100,200 到 300,400' or '100,200 -> 300,400'."""
+    match = re.search(r"(\d{1,5})\s*[,，]\s*(\d{1,5})\s*(?:到|->|→|拖到|拖至)\s*(\d{1,5})\s*[,，]\s*(\d{1,5})", text)
+    if match:
+        return int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
+    return None
+
+
 def _parse_text_payload(text: str) -> str:
     match = re.search(r"[\"“'「](.+?)[\"”'」]", text)
     if match:
@@ -321,3 +449,17 @@ def _parse_hotkey(text: str) -> list[str]:
         raw = match.group(1)
         return [part for part in re.split(r"[+\s,，-]+", raw) if part]
     return []
+
+
+def _looks_like_open_app(text: str, lowered: str) -> bool:
+    if _is_execution_status_question(text):
+        return False
+    return any(token in text for token in ("打开", "启动", "运行")) or lowered.startswith("open ")
+
+
+def _parse_app_name(text: str) -> str:
+    cleaned = text
+    for prefix in ("帮我", "请", "一键", "打开", "启动", "运行", "open"):
+        cleaned = cleaned.replace(prefix, "")
+    cleaned = re.sub(r"[。！!?？，\s]", "", cleaned)
+    return cleaned.strip()

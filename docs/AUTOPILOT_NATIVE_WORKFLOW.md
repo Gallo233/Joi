@@ -26,7 +26,7 @@ Official billing/auth baseline:
 ## Setup
 
 ```bash
-cd "/Users/liujialuo/Documents/New project 2/Joi"
+cd "<joi-checkout>"
 codex login status
 ```
 

@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from agent_companion.core.language_policy import CHAT_LANGUAGE_CHOICES
 from agent_companion.core.skill_manifest import KNOWN_SKILL_IDS, normalize_skill_id
 
 
@@ -66,7 +67,24 @@ _ALLOWED_FIELDS: dict[tuple[str, str], _FieldSpec] = {
     ("tts", "text_lang"): _FieldSpec("TTS text language", "tts_text_lang", "language", lambda value: _validate_language(value)),
     ("tts", "prompt_lang"): _FieldSpec("TTS prompt language", "tts_prompt_lang", "language", lambda value: _validate_language(value)),
     ("tts", "speed_factor"): _FieldSpec("TTS speed", "tts_speed", "number", lambda value: _validate_float_range(value, 0.5, 2.0)),
+    ("tts", "gpt_sovits_streaming_mode"): _FieldSpec("GPT-SoVITS streaming quality", "tts_local_streaming_mode", "integer", lambda value: _validate_int_range(value, 1, 3)),
+    # Writable again. Keeping the system voice from ever speaking is the job of
+    # this being `false`, not of the field being unreachable: making it
+    # unwritable left the checkbox in the settings panel unable to do anything,
+    # and silently broke four separate contract assertions that say a user can
+    # set it.
     ("tts", "fallback_to_system"): _FieldSpec("TTS system fallback", "tts_system_fallback", "boolean", lambda value: _validate_bool(value)),
+    # A hosted voice needs the same three answers a hosted text model does --
+    # where, which model, and which voice -- and without them the panel could
+    # switch the provider to one it had no way to finish configuring.
+    ("tts", "base_url"): _FieldSpec("TTS endpoint", "tts_endpoint", "endpoint", lambda value: _validate_endpoint(value)),
+    ("tts", "model"): _FieldSpec("TTS model", "tts_model", "model", lambda value: _validate_model(value)),
+    # Preset voice names are the provider's own words, and some are Chinese
+    # ("冰糖"), so this is validated as a model name rather than an identifier.
+    ("tts", "voice"): _FieldSpec("TTS voice", "tts_voice", "model", lambda value: _validate_model(value)),
+    ("tts", "audio_format"): _FieldSpec("TTS audio format", "tts_audio_format", "identifier", lambda value: _validate_identifier(value)),
+    ("tts", "optimize_text"): _FieldSpec("TTS text rewriting", "tts_optimize_text", "boolean", lambda value: _validate_bool(value)),
+    ("tts", "timeout_seconds"): _FieldSpec("TTS timeout", "tts_timeout", "seconds", lambda value: _validate_int_range(value, 1, 600)),
     ("ocr", "timeout_seconds"): _FieldSpec("OCR timeout", "ocr_timeout", "seconds", lambda value: _validate_int_range(value, 1, 120)),
     ("computer_use", "post_action_settle_ms"): _FieldSpec("Computer Use settle delay", "computer_settle_delay", "milliseconds", lambda value: _validate_int_range(value, 0, 10_000)),
     ("llm", "provider"): _FieldSpec("Text provider", "llm_provider", "identifier", lambda value: _validate_identifier(value)),
@@ -77,6 +95,10 @@ _ALLOWED_FIELDS: dict[tuple[str, str], _FieldSpec] = {
     ("llm", "expression_model"): _FieldSpec("Expression model", "expression_model", "model", lambda value: _validate_model(value)),
     ("llm", "temperature"): _FieldSpec("Text temperature", "llm_temperature", "number", lambda value: _validate_float_range(value, 0.0, 2.0)),
     ("llm", "use_mock"): _FieldSpec("Mock text model", "llm_use_mock", "boolean", lambda value: _validate_bool(value)),
+    # What Joi shows and writes. The language she speaks is the character
+    # package's and is not settable from here.
+    ("language", "interface"): _FieldSpec("Interface language", "interface_language", "language", lambda value: _validate_choice(value, ("zh",))),
+    ("language", "chat"): _FieldSpec("Chat language", "chat_language", "language", lambda value: _validate_choice(value, CHAT_LANGUAGE_CHOICES)),
 }
 
 
@@ -225,6 +247,13 @@ def _validate_language(value: object) -> tuple[bool, object | None, str]:
     if not _LANG_RE.match(text) or _SECRET_VALUE_RE.search(text):
         return False, None, "invalid_value"
     return True, text, ""
+
+
+def _validate_choice(value: object, allowed: tuple[str, ...]) -> tuple[bool, object | None, str]:
+    if not isinstance(value, str):
+        return False, None, "invalid_type"
+    text = value.strip().replace("_", "-").casefold().split("-")[0]
+    return (True, text, "") if text in allowed else (False, None, "invalid_value")
 
 
 def _validate_model(value: object) -> tuple[bool, object | None, str]:

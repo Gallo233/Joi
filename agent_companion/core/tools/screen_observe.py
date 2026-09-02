@@ -4,10 +4,11 @@ from pathlib import Path
 import time
 from typing import Any
 
-from agent_companion.core.computer_use import ComputerUseBackend, WindowsComputerUseBackend
+from agent_companion.core.computer_use import ComputerUseBackend
 from agent_companion.core.schemas import DisplayCard, ToolRequest, ToolResult, VoiceLine
 from agent_companion.core.tools.base import ToolAdapter
-from agent_companion.core.vision import OcrExtractor, PytesseractOcrExtractor, VisionObserver, VisionSummarizer, WindowsScreenObserver
+from agent_companion.core.platform_factory import get_computer_backend, get_screen_observer
+from agent_companion.core.vision import OcrExtractor, PytesseractOcrExtractor, VisionObserver, VisionSummarizer
 from agent_companion.core.vision.ocr import OcrResult, run_ocr_safely
 from agent_companion.core.vision.regions import group_ocr_regions, regions_to_agent_state, summarize_ocr_regions
 from agent_companion.core.vision.schemas import VisionObservation
@@ -28,8 +29,8 @@ class ScreenObserveTool(ToolAdapter):
         audio_transcriber: AudioTranscriptProvider | None = None,
     ) -> None:
         self.workspace = workspace
-        self.observer = observer or WindowsScreenObserver(workspace)
-        self.computer_backend = computer_backend or WindowsComputerUseBackend(workspace, self.observer)
+        self.observer = observer or get_screen_observer(workspace)
+        self.computer_backend = computer_backend or get_computer_backend(workspace, self.observer)
         self.summarizer = summarizer
         self.ocr = ocr or PytesseractOcrExtractor()
         self.audio_transcriber = audio_transcriber
@@ -47,7 +48,7 @@ class ScreenObserveTool(ToolAdapter):
                 ok=False,
                 agent_state={"tool": self.name, "target": target, "error": type(exc).__name__, "detail": str(exc)[:500]},
                 display_card=DisplayCard("画面观察", "当前画面没有截取成功。", str(exc)[:1800], status="failed"),
-                voice_line=safe_voice_line("我没能截到当前画面，细节在卡片里。", sprite="4"),
+                voice_line=safe_voice_line("我没能截到当前画面，可以展开执行过程查看细节。", sprite="4"),
             )
 
         first_record = records[0]
@@ -258,7 +259,7 @@ class ScreenObserveTool(ToolAdapter):
     @staticmethod
     def _voice_for(observation: VisionObservation, summary_text: str, summary_error: str = "") -> VoiceLine:
         if summary_text:
-            return safe_voice_line("我看到了主要内容，摘要已经放进卡片里。", sprite="5")
+            return safe_voice_line("我看到了主要内容，摘要已经显示出来。", sprite="5")
         if summary_error:
             return safe_voice_line("我截到画面了，摘要暂时没生成出来。", sprite="4")
         return safe_voice_line("我截到画面了，需要配置视觉模型才能总结内容。", sprite="4")
