@@ -19,6 +19,9 @@ logs/
 --output-last-message
 agent_companion/shell/node_modules
 agent_companion/shell/dist/
+# Copied from LICENSE and docs/ by scripts/sync-legal-notices.mjs so a build
+# can display them; the sources at the repository root are the originals.
+agent_companion/shell/src/generated/
 # Licensed character artwork and the Live2D Cubism runtime. Neither may be
 # committed to a public repository: the model is Live2D's own sample data and
 # the runtime is proprietary. Ignore the whole directories, not one model's

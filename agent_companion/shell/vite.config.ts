@@ -71,10 +71,24 @@ function layoutDigest(): Plugin {
   }
 }
 
+/**
+ * The version and identifier the About panel shows come from the same file the
+ * packaged app is built from, so the two cannot drift: `packaging_smoke`
+ * already fails when tauri.conf.json, both package.json files and Cargo.toml
+ * disagree, and reading any other copy here would put a fifth one in play.
+ */
+const tauriConfig = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, 'src-tauri/tauri.conf.json'), 'utf8'),
+) as { version: string; identifier: string }
+
 export default defineConfig({
   // Tauri needs relative assets; the website build is intentionally mounted
   // at one stable path and opts in through `npm run build:web`.
   base: process.env.JOI_SHELL_BASE || './',
+  define: {
+    __JOI_VERSION__: JSON.stringify(tauriConfig.version),
+    __JOI_BUNDLE_ID__: JSON.stringify(tauriConfig.identifier),
+  },
   plugins: [vue(), vrmLabAssets(), layoutDigest()],
   server: {
     host: '127.0.0.1',

@@ -22,6 +22,7 @@ import {
   Gamepad2,
   Hand,
   Image as ImageIcon,
+  Info,
   KeyRound,
   LoaderCircle,
   Maximize2,
@@ -69,6 +70,10 @@ import { assistantDisplayText, isAssistantPresentationEvent } from './conversati
 import type { Live2DEmotion, Live2DRuntimeMapping } from './live2d/runtime'
 import type { ActionReceipt, AgentCliListResult, AgentCliModelOption, AgentCliProfile, AgentCliRuntimeStatus, AgentCliTestResult, AgentEvent, AgentSkillDraft, AgentSkillInspection, AgentSkillInstallation, ArtifactReadResult, BackgroundContextEntry, BackgroundContextScope, BackgroundContextStatus, ByokConnectResult, ByokPreset, ByokStatus, ByokTestResult, CapabilitySession, CharacterSummary, CodexRuntimeStatus, CollaborationSnapshot, ComputerUseAuditArtifact, ComputerUseAuditEvent, CoreReadyPayload, GameAdapterManifest, JoiMcpStatus, JoiProject, JoiThread, LanguageSettings, MemoryCandidate, MemoryCandidatePage, MemoryPage, MemoryRecord, MemoryStatus, MemoryVault, NativeSkill, NativeSkillManifest, PermissionProfile, ResourceBinding, RuntimeConfigMutationResult, RuntimeProviderStatus, VoiceAudioPayload, WatchLoopStatus } from './protocol'
 import { settingsSubtitle, settingsTabs, settingsTitle, type SettingsTabId } from './settings'
+// Copied out of the repository root by scripts/sync-legal-notices.mjs, which
+// every build runs: a notice that ships only in the source ships nowhere.
+import joiLicence from './generated/LICENSE.txt?raw'
+import thirdPartyNotices from './generated/THIRD_PARTY_NOTICES.md?raw'
 import { asRecord, stringValue } from './composables/safeRecord'
 import { errorLabel, sourceLabel } from './composables/watchLabels'
 import { useByok } from './composables/useByok'
@@ -210,6 +215,16 @@ const stageZoom = usePersistentRef('stageZoom', 1)
 const stageCollapsed = usePersistentRef('stageCollapsed', false)
 const artifactDialog = ref<HTMLDialogElement | null>(null)
 const activeSettingsTab = ref<SettingsTabId>('execution')
+// The notices are 30KB of table; the About panel opens one document at a time
+// rather than rendering both into the panel's scroll.
+const aboutDocument = ref<'licence' | 'notices' | null>(null)
+const appVersion = __JOI_VERSION__
+const appBundleId = __JOI_BUNDLE_ID__
+// Where Tauri puts app data on macOS. Shown rather than fetched: the path is a
+// function of the identifier the panel already has, and the promise the privacy
+// notice makes is that a user can find and erase this directory -- which needs
+// the name, not a live handle. `JOI_DATA_HOME` overrides it for development.
+const appDataLocation = `~/Library/Application Support/${__JOI_BUNDLE_ID__}`
 const settingsSearch = ref('')
 const fallbackLive2DModelUrl = import.meta.env.VITE_JOI_LIVE2D_MODEL_URL || `${import.meta.env.BASE_URL}live2d/joi/joi.model3.json`
 const skillManifest = ref<NativeSkillManifest | null>(null)
@@ -347,12 +362,14 @@ const settingsIconMap: Record<SettingsTabId, Component> = {
   language: Globe2,
   appearance: Palette,
   developer: Code2,
+  about: Info,
 }
 
 const settingsGroupDefinitions: Array<{ label: string; tabs: SettingsTabId[] }> = [
   { label: 'Joi', tabs: ['execution', 'runtime', 'memory', 'skills'] },
   { label: '体验', tabs: ['language', 'appearance'] },
   { label: '高级', tabs: ['developer'] },
+  { label: '关于', tabs: ['about'] },
 ]
 
 const filteredSettingsGroups = computed(() => {
@@ -6180,6 +6197,46 @@ provide(ProjectsContextKey, {
                 </div>
               </div>
             </template>
+
+            <div class="runtime-settings about-settings" v-else-if="activeSettingsTab === 'about'">
+              <div class="runtime-settings-head">
+                <strong>Joi</strong>
+                <span>版本 {{ appVersion }} · {{ appBundleId }}</span>
+              </div>
+
+              <p class="about-line">
+                本机优先的角色化多模态智能体。对话、记忆与角色数据留在这台机器上；发给模型供应商的只有那次请求需要的内容。
+              </p>
+
+              <div class="runtime-settings-head">
+                <strong>角色形象</strong>
+                <span>版权归其权利人</span>
+              </div>
+              <p class="about-line">
+                默认角色的 Live2D 形象是 Live2D 官方示例模型「桃瀬ひより / Hiyori Momose」，<strong>版权归 Live2D Inc.</strong>，按其示例数据条款使用：保留版权声明、不改动角色设计、不作为本应用的原创角色呈现。Joi 是这个助手的人格，Hiyori 是她此刻穿的模型。
+              </p>
+              <p class="about-line">
+                Live2D Cubism Core 是 Live2D Inc. 的专有软件，不受本仓库许可证覆盖，其再分发由 Live2D 自己的 SDK 许可证管辖。
+              </p>
+
+              <div class="runtime-settings-head" v-if="isDesktopRuntime">
+                <strong>你的数据</strong>
+                <span>全部在这一个目录里</span>
+              </div>
+              <p class="about-line" v-if="isDesktopRuntime">
+                对话、记忆、角色、设置与日志都写在 <code>{{ appDataLocation }}</code>。删掉这个目录，就删掉了 Joi 在这台机器上的全部数据；API key 存在系统钥匙串里，需要另外撤销。
+              </p>
+
+              <div class="runtime-settings-head">
+                <strong>许可证与第三方权利</strong>
+                <span>随应用分发</span>
+              </div>
+              <div class="about-documents">
+                <button type="button" class="memory-link-button" :aria-pressed="aboutDocument === 'licence'" @click="aboutDocument = aboutDocument === 'licence' ? null : 'licence'">软件许可证</button>
+                <button type="button" class="memory-link-button" :aria-pressed="aboutDocument === 'notices'" @click="aboutDocument = aboutDocument === 'notices' ? null : 'notices'">第三方权利通知</button>
+              </div>
+              <pre v-if="aboutDocument" class="about-document-body">{{ aboutDocument === 'licence' ? joiLicence : thirdPartyNotices }}</pre>
+            </div>
 
             <!--
               No "coming soon" fallback. The chain above now covers every tab

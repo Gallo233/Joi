@@ -7177,6 +7177,48 @@ dialog.artifact-modal {
 }
 
 /* ==========================================
+   About: the notices the app ships under
+   ========================================== */
+
+.about-settings {
+  gap: var(--sp-3);
+}
+
+.about-line {
+  margin: 0;
+  color: #687281;
+  font-size: var(--text-sm);
+  line-height: 1.7;
+}
+
+.about-line strong {
+  color: #1f2937;
+}
+
+.about-documents {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* A licence is read, not skimmed: the notices run to hundreds of entries, so
+   the opened document scrolls inside the panel instead of pushing it. */
+.about-document-body {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #f9fafb;
+  color: #3f4756;
+  font-size: var(--text-xs);
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ==========================================
    Motion showcase
 
    The trigger phrases Core matches from ordinary chat, surfaced so a visitor

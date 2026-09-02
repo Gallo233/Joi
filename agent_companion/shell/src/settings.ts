@@ -6,6 +6,7 @@ export type SettingsTabId =
   | 'language'
   | 'appearance'
   | 'developer'
+  | 'about'
 
 interface SettingsTab {
   id: SettingsTabId
@@ -26,7 +27,10 @@ interface SettingsTab {
  * shipped feature. Removing them is not a reduction in scope: it makes the
  * list say what the product does.
  *
- * `language` is back because it now routes to a panel that changes behaviour.
+ * `language` is back because it now routes to a panel that changes behaviour,
+ * and `about` is back because the app has to show the notices it ships under:
+ * the Live2D sample-data terms require the copyright notice to travel with
+ * the product, and a repository file travels with the source instead.
  */
 export const settingsTabs: SettingsTab[] = [
   { id: 'execution', label: '基础设置', icon: 'settings', subtitle: '选择本机 Agent CLI、模型和执行方式。' },
@@ -36,6 +40,7 @@ export const settingsTabs: SettingsTab[] = [
   { id: 'language', label: '语言', icon: 'globe', subtitle: '选择界面语言和 Joi 回复的语言；说话的语言来自角色。' },
   { id: 'appearance', label: '外观', icon: 'palette', subtitle: '调整 Joi 外观和微缩模式装扮。' },
   { id: 'developer', label: '开发者', icon: 'code', subtitle: '查看审计、背景上下文和事件流。' },
+  { id: 'about', label: '关于', icon: 'info', subtitle: '版本、许可证与第三方权利声明。' },
 ]
 
 const settingsById = new Map(settingsTabs.map((tab) => [tab.id, tab]))

@@ -7,13 +7,14 @@
   "scripts": {
     "core:bundle": "node scripts/build-core-sidecar.mjs",
     "live2d:sync": "node scripts/sync-live2d-assets.mjs",
+    "legal:sync": "node scripts/sync-legal-notices.mjs",
     "assets:verify": "node scripts/verify-release-assets.mjs",
     "test:shell": "node --test --experimental-strip-types tests/*.test.mjs",
     "test:vrm-pose": "node --test --experimental-strip-types tests/vrm-pose.test.mjs",
-    "dev": "npm run live2d:sync -- --optional && vite --host 127.0.0.1",
-    "build": "npm run live2d:sync -- --optional && vue-tsc --noEmit && vite build",
+    "dev": "npm run legal:sync && npm run live2d:sync -- --optional && vite --host 127.0.0.1",
+    "build": "npm run legal:sync && npm run live2d:sync -- --optional && vue-tsc --noEmit && vite build",
     "build:web": "npm run build && node scripts/collect-web-embed.mjs",
-    "build:release": "npm run core:bundle && npm run live2d:sync && npm run assets:verify && vue-tsc --noEmit && vite build",
+    "build:release": "npm run core:bundle && npm run legal:sync && npm run live2d:sync && npm run assets:verify && vue-tsc --noEmit && vite build",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -105,6 +105,7 @@ def build_packaging_smoke_report(workspace: Path | str | None = None) -> dict[st
     if start_bat_path.is_file() and start_ps1_path.is_file():
         _check_launcher(start_bat_path, start_ps1_path, add)
     _check_release_privacy_policy(add)
+    _check_shipped_notices(root, add)
     _check_game_adapter_bundle(root, add)
     _check_capability_dependencies(root, add)
 
@@ -310,6 +311,46 @@ def _check_capability_dependencies(root: Path, add: Any) -> None:
         )
         return
     add("ok", "capability_bundle", "The built sidecar carries the capture and display geometry packages.")
+
+
+def _check_shipped_notices(root: Path, add: Any) -> None:
+    """The notices have to reach the product, not only the repository.
+
+    Joi ships without a Live2D Expandable Application agreement, so the
+    obligation that remains is the copyright notice -- and a notice that lives
+    only in `docs/` reaches people who cloned the source, not people who
+    downloaded the DMG. Read the build scripts and the panel itself: a check
+    that only asked whether the notices file exists passed the whole time it
+    was unreachable.
+    """
+
+    package_path = root / "agent_companion" / "shell" / "package.json"
+    app_path = root / "agent_companion" / "shell" / "src" / "App.vue"
+    scripts: dict[str, Any] = {}
+    if package_path.is_file():
+        loaded = json.loads(package_path.read_text(encoding="utf-8")).get("scripts")
+        scripts = loaded if isinstance(loaded, dict) else {}
+    synced = all("legal:sync" in str(scripts.get(name) or "") for name in ("build", "build:release"))
+    _expect(
+        synced,
+        add,
+        "legal_notice_sync",
+        "Every shell build copies the licence and third-party notices into the bundle.",
+        "Keep npm run legal:sync in both build and build:release.",
+    )
+    app_source = app_path.read_text(encoding="utf-8") if app_path.is_file() else ""
+    shown = (
+        "activeSettingsTab === 'about'" in app_source
+        and "Live2D Inc." in app_source
+        and "generated/THIRD_PARTY_NOTICES.md?raw" in app_source
+    )
+    _expect(
+        shown,
+        add,
+        "about_panel_notices",
+        "The About panel names the default character's copyright holder and carries the notices.",
+        "Restore the About settings panel, its Live2D attribution, and the bundled notices.",
+    )
 
 
 def _check_release_privacy_policy(add: Any) -> None:
