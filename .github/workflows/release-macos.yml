@@ -20,7 +20,12 @@ jobs:
       PYTHONIOENCODING: "utf-8"
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      # Joi ships from GitHub, not the App Store, so a Developer ID is optional.
+      # What is not optional is signing *something*: given no identity at all,
+      # Tauri leaves the linker's signature on the main binary and seals no
+      # resources, and macOS reports that bundle as damaged rather than as
+      # unverified. Ad-hoc is the floor, a real certificate wins when present.
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -41,16 +46,27 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      - name: Require signing, notarization, and licensed asset secrets
+      - name: Require the licensed asset secrets, and report the signing route
         shell: bash
         run: |
-          required=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID JOI_RELEASE_ASSETS_URL JOI_RELEASE_ASSETS_SHA256)
+          required=(JOI_RELEASE_ASSETS_URL JOI_RELEASE_ASSETS_SHA256)
           for name in "${required[@]}"; do
             if [[ -z "${!name}" ]]; then
               echo "Missing required GitHub Actions secret: $name" >&2
               exit 1
             fi
           done
+          # The Apple secrets are optional by decision, not by oversight. Say
+          # which route this run is taking, so an unsigned artifact is never a
+          # surprise found later by whoever downloads it.
+          if [[ -n "$APPLE_CERTIFICATE" && "$APPLE_SIGNING_IDENTITY" != "-" ]]; then
+            echo "Signing with a Developer ID certificate."
+            if [[ -z "$APPLE_ID" || -z "$APPLE_PASSWORD" || -z "$APPLE_TEAM_ID" ]]; then
+              echo "::warning::Signing without notarization: APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID are what notarize the result."
+            fi
+          else
+            echo "::warning::Building ad-hoc signed and unnotarized. Gatekeeper will refuse the first open; the release must point at docs/INSTALL_MACOS.md."
+          fi
 
       - name: Provision pinned release assets
         shell: bash
@@ -101,7 +117,11 @@ jobs:
           projectPath: agent_companion/shell
           tagName: v__VERSION__
           releaseName: Joi v__VERSION__
-          releaseBody: Apple Silicon MVP candidate. Install only after the clean-machine checklist has passed.
+          releaseBody: |
+            Apple Silicon MVP candidate. Install only after the clean-machine checklist has passed.
+
+            This build is not notarized by Apple, so macOS blocks the first open.
+            See docs/INSTALL_MACOS.md for the two-click way past it.
           releaseDraft: true
           prerelease: true
           args: --target aarch64-apple-darwin
