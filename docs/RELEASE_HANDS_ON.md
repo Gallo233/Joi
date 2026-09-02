@@ -98,13 +98,11 @@ gh release upload v0.1.0 "agent_companion/shell/src-tauri/target/aarch64-apple-d
 
 ## 不阻塞发布，记在这里
 
-### 合回 main
+### 分支状态（2026-09-02 已合并）
 
-`minecraft-slice` 领先 `origin/main` 122 个 commit，CI 只在 push 到 `main` 和 PR 时运行 —— 这批代码在 GitHub 上一次都没跑过。本地出包不经过 CI，所以它不挡发布；合并后 CI 会在干净 checkout 上再验一遍，能发现「只有你机器上有」的依赖。
+`main` 就是发布线。`minecraft-slice` 的 90 个 commit 已经合进来 —— 合并前 `main` 还停在 PR #1 的 Windows 并线上，而整个当前产品都写在那条分支上。合并本身不改动任何文件：main 那一侧早已包含在分支里，结果就是分支自己的树。
 
-```bash
-gh pr create --base main --head minecraft-slice --title "Joi 0.1.0" --body "See docs/CHANGELOG.md 0.1.0."
-```
+其余分支（两个 backup、`codex/mac-catchup-win`、`debug/shell-refactor`、`minecraft-slice-dev`、`win-desktop-fixes`、`mac-desktop`、`win-local-handoff-20260602`）已全部删除，本地与远端都只剩 `main`。
 
 ### CI 出包（可选）
 

@@ -49,6 +49,8 @@ Info.plist 实测：`com.gallo233.joi` / `0.1.0` / 最低 macOS 12.0 / 三条中
 
 **门禁复跑**：单测 844 通过、Shell 测试 132 通过、`packaging_smoke` 50 项全 OK、第三方通知 619 条 up to date、sidecar 冒烟 OK。
 
+**收尾**：`minecraft-slice` 已合进 `main`（合并不改动任何文件，main 那一侧早已包含在分支里），draft release 的 target 改指 `main`，其余八条分支本地与远端一并删除。仓库现在只有 `main`。
+
 **这一轮做对的一件小事**：第三方通知现在随包分发，所以它里面那句「见 `docs/RELEASE_HANDS_ON.md`」和「需要与 Live2D 单独签约」被改掉了 —— 前者对下载者毫无意义，后者是把内部待办印在了用户看的文件上。通知只说权利事实；决定与残留风险留在 `KNOWN_ISSUES`。
 
 ---
