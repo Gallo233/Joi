@@ -46,6 +46,23 @@
 
 These are the designed behaviour, recorded so they are not rediscovered as bugs.
 
+- Joi is distributed from GitHub without Apple notarization. macOS blocks the
+  first open and the user allows it in System Settings; `docs/INSTALL_MACOS.md`
+  is the path they follow. The build is still signed -- ad-hoc when no Developer
+  ID is present -- because an unsigned bundle seals no resources and macOS calls
+  that damaged rather than unverified, which reads as a broken download.
+  `tools/build_macos_release.py` reads the signature back off the product and
+  fails when the seal is missing.
+- Joi lets users import their own Live2D models, which Live2D's terms class as
+  an Expandable Application requiring a separate agreement. Shipping without
+  that agreement is a deliberate decision, taken alongside how comparable
+  projects distribute. The obligations that stand either way are met: the
+  Cubism runtime is not covered by this repository's licence, the default model
+  is credited as Live2D's own sample character Hiyori Momose, her design is
+  unmodified, and she is not presented as an original character. What is not yet
+  met is that those notices only exist in the repository -- the shipped app has
+  no screen that displays them.
+
 - macOS Accessibility and Screen Recording permissions are required for
   observation and Computer Use, and missing ones fail clearly rather than
   degrading silently.
@@ -88,10 +105,10 @@ These are the designed behaviour, recorded so they are not rediscovered as bugs.
   checkout.
 - Plugin discovery is no longer a limitation: the loader that executed arbitrary
   Python inside Core was removed, along with the directory it scanned.
-- (v0.2.0) Retina display coordinate mapping now uses screencapture pixel dimensions / logical screen dimensions.
-- (v0.2.0) macOS clipboard no longer uses PySide6 (thread-safe pbcopy/pbpaste).
-- (v0.2.0) Tool result compression removes heavy fields (screenshots, paths, raw logs) before LLM context.
-- (v0.2.0) Memory FTS5 index auto-syncs on schema migration.
-- (v0.2.0) Settings panel redesigned with sidebar navigation.
-- (v0.2.0) Mascot mood state machine with 6 automatic states.
-- (v0.2.0) Open app fallback: Spotlight → open -a.
+- Retina display coordinate mapping now uses screencapture pixel dimensions / logical screen dimensions.
+- macOS clipboard no longer uses PySide6 (thread-safe pbcopy/pbpaste).
+- Tool result compression removes heavy fields (screenshots, paths, raw logs) before LLM context.
+- Memory FTS5 index auto-syncs on schema migration.
+- Settings panel redesigned with sidebar navigation.
+- Mascot mood state machine with 6 automatic states.
+- Open app fallback: Spotlight → open -a.

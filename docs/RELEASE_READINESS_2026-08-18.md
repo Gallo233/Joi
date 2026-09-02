@@ -4,6 +4,79 @@
 > 判据：`docs/JOI_PRD.md` §5.2 首发 Hero Journey 与 §18 验收标准、`docs/JOI_TDD.md` §17 Phase 5 退出条件、`docs/ROADMAP.md` 发布阻塞项。
 > 边界提醒：PRD §5.2 明确 **Watch/Scene、第三方 Skill 安装、游戏适配器、完整角色 CRUD、Coding Agent takeover 不阻塞首发**。B1 轨道（Minecraft + 实时语音）做得再厚也不会让 1.0 更近一步。
 
+## 2026-09-02 更新：构建路径已验证，发布路径未验证
+
+在 `minecraft-slice@4f107f7` 上把所有能在本机跑的门禁跑了一遍，并**第一次产出了完整的 release 包**。结论一句话：能构建，不能发布。
+
+### 本机实测（2026-09-02，Apple Silicon / Xcode 26.6 / Node 22.22.3 / Rust 1.95）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 单元/契约/迁移/恢复测试 | `.venv/bin/python -m unittest discover -s tests -p 'test_*.py'` | **844 通过**（8-18 是 734；含签名验证的 6 项） |
+| Core 回归套件 | `.venv/bin/python run_agent_companion_tests.py` | 通过 |
+| Shell 测试 | `npm run test:shell` | **128 通过**（8-18 是 94） |
+| 打包元数据与隐私扫描 | `.venv/bin/python tools/packaging_smoke.py` | 48 项全 OK，0 warn 0 fail |
+| 固定资产校验 | `npm run assets:verify` | 7 项 pinned 资产通过 |
+| 第三方通知 | `tools/generate_third_party_notices.py --check` | up to date（619 条） |
+| **macOS release 构建** | `npm run tauri -- build --target aarch64-apple-darwin` | **通过**，产出 `Joi.app`（600MB）与 `Joi_0.1.0_aarch64.dmg`（89.9MB） |
+| 独立 Core sidecar 冒烟 | `.venv/bin/python tools/smoke_core_sidecar.py` | OK，冷启 23.1s / 热启 0.5–0.6s |
+
+Info.plist 实测：`com.gallo233.joi` / `0.1.0` / 最低 macOS 12.0 / 三条中文权限说明在位。Minecraft 桥接的 `dist/` 也确实进了 sidecar。
+
+### 这次构建暴露的两件事
+
+**签名状态比"缺 secrets"更具体。** 本机 0 个签名身份，Tauri 于是跳过签名，留下链接器的 ad-hoc 签名：`Signature=adhoc`、`Sealed Resources=none`、`Identifier=joi_shell-1ac5d3d068a30b18`（连 bundle id 都不是 `com.gallo233.joi`），`spctl -a` 直接拒绝。也就是说本机产物只能在本机跑。`gh secret list` 为空 —— 8 个 secret 一个都没配，release workflow 会在第一步 fail-closed 退出。
+
+**冷启动是一个真实的性能风险。** TDD §13 要求「冷启动到可交互 p95 ≤ 10s（含 sidecar ready）」。sidecar 首次执行 23.1s，之后 0.5–0.6s —— 差别是 600MB onedir 的页缓存。开发机上第二次之后永远看不到这个数，而**用户的第一次启动正是冷缓存**。这条只能在干净机上量，已写进 `docs/RELEASE_HANDS_ON.md` 步骤 5.1。
+
+### 一处修好的绊脚石
+
+`sync-live2d-assets.mjs` 的默认候选路径 `~/Documents/All Joi/public` 早已不含 hiyori（资产随站点布局搬到了 `public/joi-shell/`），所以 `docs/MACOS_RELEASE.md` 里那条本地构建命令在这台机器上必然 fail-closed 报错，除非手动带 `JOI_LIVE2D_SOURCE`。候选列表补上了 `joi-shell/` 子目录，现在不带环境变量也能解析。
+
+### 清单收口：只剩干净机走查（当天最后一轮）
+
+分发模型定下之后，清单上除干净机验收以外的每一项都做完了。
+
+| 原阻塞项 | 结果 |
+|---|---|
+| 出包与签名 | `tools/build_macos_release.py` 跑通，ad-hoc 签名封装完整，`codesign --verify --deep --strict` 通过 |
+| 第一个 GitHub Release | draft 已建，DMG 已上传，说明用 `docs/INSTALL_MACOS.md`，停在 draft 等走查 |
+| 版本号与 tag | `v0.1.0`；CHANGELOG 的 `Unreleased` 收成 `0.1.0 — 2026-09-02`；`KNOWN_ISSUES` 里那批 `(v0.2.0)` 标签是历史遗留，已去掉 |
+| 隐私声明 | 去掉 Draft。原文是一份规格（发布前**必须**做到什么），读起来却像对一个没人验过的构建的承诺；改写成这个构建**做什么**，并写明它够不到的两件事：供应商收到之后留了什么，以及 Time Machine 备份里的副本。无遥测/无崩溃上报是实测结论，不是意图 |
+| 安全报告渠道 | 新增 `SECURITY.md` |
+| 应用内版权声明 | 设置新增「关于」页；`packaging_smoke` 加 `legal_notice_sync` 与 `about_panel_notices` 两道门禁，Shell 测试加 4 项 |
+| 字体与声音分发权 | **审计后确认不存在这个问题**：`.app` 里没有任何字体文件（界面用系统字体栈），也没有任何音频文件（GPT-SoVITS 参考音频由用户提供，本机 `data/` 下的是运行时缓存） |
+
+**门禁复跑**：单测 844 通过、Shell 测试 132 通过、`packaging_smoke` 50 项全 OK、第三方通知 619 条 up to date、sidecar 冒烟 OK。
+
+**这一轮做对的一件小事**：第三方通知现在随包分发，所以它里面那句「见 `docs/RELEASE_HANDS_ON.md`」和「需要与 Live2D 单独签约」被改掉了 —— 前者对下载者毫无意义，后者是把内部待办印在了用户看的文件上。通知只说权利事实；决定与残留风险留在 `KNOWN_ISSUES`。
+
+---
+
+### 分发模型已定（当天晚些时候）
+
+**从 GitHub Releases 分发，不上 App Store，不做 Apple 公证；Live2D Expandable Application 不申请，按同类项目的做法照常发布。** 这是发布方的决定，两条最长的外部等待因此从清单上消失：Apple Developer Program 的审核与年费，以及 Live2D 的单独签约周期。
+
+决定之后补的工程改动，只有一处，但它是必须的：**构建现在显式签名**。给不出身份时 Tauri 会跳过签名，留下链接器打在主二进制上的那个 ad-hoc 签名 —— 没有封装资源，代码标识是 `joi_shell-1ac5d3d068a30b18` 而不是 `com.gallo233.joi`。macOS 把这种包报成「已损坏」，用户看到的是下载坏了，而不是一个可以放行的安装步骤。带上 `APPLE_SIGNING_IDENTITY=-` 重建后：
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 代码标识 | `joi_shell-1ac5d3d068a30b18` | `com.gallo233.joi` |
+| 封装资源 | `Sealed Resources=none` | `version=2 rules=13 files=1379` |
+| Hardened runtime | 无 | `flags=0x10002(adhoc,runtime)` |
+| `codesign --verify --deep --strict` | 未通过 | valid on disk, satisfies its Designated Requirement |
+| `spctl -a` | 拒绝 | 拒绝（未公证，按设计如此） |
+
+`tools/build_macos_release.py` 把这条路固定下来：挑可用的最强身份（有 Developer ID 就用，没有就 ad-hoc）、跑门禁、构建，然后把签名读回产物验证，封装缺失就失败。`tests/test_macos_release_build.py` 6 项覆盖身份选择与签名判读。release workflow 不再强制 6 个 Apple secrets，缺了就 ad-hoc 并在日志里 warning。
+
+**这个决定新暴露的一项**：不申请 Expandable Application 之后，Live2D 示例数据条款要求的版权声明反而更要紧，而它现在**只存在于仓库**——应用里没有任何界面显示「桃瀬ひより © Live2D Inc.」。已记入 `docs/KNOWN_ISSUES.md` 与 `docs/RELEASE_HANDS_ON.md` 步骤 5。
+
+### 阻塞项状态变化
+
+8-18 清单里的四项已消：许可证、第三方通知、图标、资产哈希固定。**剩下的全部需要你**：Apple Developer 账号与证书、8 个 secrets、授权资产托管、第一个签名公证产物、干净机走查、隐私声明定稿、资产权利与 Live2D 审批、版本号决定。逐项教程见 `docs/RELEASE_HANDS_ON.md`。
+
+---
+
 ## 2026-08-20 更新
 
 这份审计写于 8-18，之后有三项落地、一项判错。

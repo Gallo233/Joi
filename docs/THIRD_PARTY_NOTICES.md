@@ -18,7 +18,7 @@ Joi 自身的代码按仓库根目录的 `LICENSE` 授权（保留所有权利�
 
 ## 需要单独注意的三项
 
-1. **Live2D Cubism Core** 是专有软件，不是开源件。仓库的 LICENSE 完全不适用于它，它的再分发由 Live2D 自己的 SDK 许可证管辖；而**允许用户导入自己的 Live2D 模型的应用属于 Expandable Application**，需要与 Live2D 单独签约。见 `docs/RELEASE_HANDS_ON.md`。
+1. **Live2D Cubism Core** 是专有软件，不是开源件。仓库的 LICENSE 完全不适用于它，它的再分发由 Live2D 自己的 SDK 许可证管辖。Joi 支持导入你自己的 Live2D 模型：本应用不为任何导入的模型授予权利，你导入的模型按其权利人的条款使用。
 2. **默认角色的 Live2D 形象是 Live2D 官方示例模型「桃瀬ひより / Hiyori Momose」，版权归 Live2D Inc.**。示例数据条款允许 General User 与小规模企业免费用于商业与非商业用途，但要求**保留版权声明**、**不得改动角色设计**，且**不得作为发布者的原创角色呈现**。
 3. **PySide6 / Qt 不在发布物里。** 它出现在 `requirements.txt`，但 sidecar 构建用 `--exclude-module PySide6` 明确排除，因此 LGPL/GPL 的 Qt 绑定**不随包分发**。本文件的 Python 段按构建实际排除项过滤，而不是按环境里装了什么。
 4. **PyInstaller** 是 GPL-2.0-or-later，**但带 bootloader exception**——用它冻结出来的应用可以按任意许可证分发，包括闭源。这条例外是 Joi 能以非开源形式发布的前提之一。
@@ -677,6 +677,6 @@ Joi 自身的代码按仓库根目录的 `LICENSE` 授权（保留所有权利�
 | Node.js runtime | 22.x (staged from the build machine) | MIT, plus the runtime's own bundled third-party notices<br>Copied into the Minecraft bridge bundle so a release can run the adapter without a system Node. Its own notice file ships with the runtime. |
 | minecraft-data | 3.113.1 | MIT<br>Vendored into the bridge bundle rather than resolved at runtime; the staging step refuses any version other than the reviewed one. |
 | thinking-orbs | 0.2.0 | MIT<br>Vendored, not installed: published as a React component while this Shell is Vue, so agent_companion/shell/src/vendor/thinkingOrbs.js carries its canvas painters with the React wrapper removed and nothing else changed. Copyright (c) 2026 Jakub Antalik, https://orbs.jakubantalik.com — the copyright notice is retained in the file. |
-| Live2D Cubism Core for Web | as shipped in the licensed asset archive | Proprietary — Live2D Inc.<br>Not open source and not covered by this repository's LICENSE. Redistribution is governed by Live2D's own SDK licence, and an application that loads user-supplied Live2D models is an 'Expandable Application' under those terms. See docs/RELEASE_HANDS_ON.md. |
+| Live2D Cubism Core for Web | as shipped in the licensed asset archive | Proprietary — Live2D Inc.<br>Not open source and not covered by this repository's LICENSE. Redistribution is governed by Live2D's own SDK licence. Models you import yourself are used under their own rights holders' terms; this application grants no rights in them. |
 | Live2D Cubism sample model — Hiyori Momose (桃瀬ひより) | sample data | Live2D Cubism Sample Data Terms of Use / Free Material License Agreement — © Live2D Inc.<br>The default character's Live2D artwork is Live2D's own sample model, owned and copyrighted by Live2D Inc. Its terms permit free commercial and non-commercial use by General Users and Small-Scale Enterprises, but require the copyright notice, forbid changes to the character's design, and do not allow it to be presented as the publisher's original character. |
 | pixi.js (as bundled in the Live2D runtime archive) | as shipped in the licensed asset archive | MIT<br>Distributed inside the same licensed asset archive as the Cubism runtime. |
