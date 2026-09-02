@@ -2275,10 +2275,11 @@ characters:
                     "private": True,
                     "version": "0.1.0",
                     "scripts": {
-                        "dev": "npm run live2d:sync -- --optional && vite --host 127.0.0.1",
-                        "build": "vue-tsc --noEmit && vite build",
-                        "build:release": "npm run core:bundle && npm run assets:verify && vite build",
+                        "dev": "npm run legal:sync && npm run live2d:sync -- --optional && vite --host 127.0.0.1",
+                        "build": "npm run legal:sync && vue-tsc --noEmit && vite build",
+                        "build:release": "npm run core:bundle && npm run legal:sync && npm run assets:verify && vite build",
                         "core:bundle": "node scripts/build-core-sidecar.mjs",
+                        "legal:sync": "node scripts/sync-legal-notices.mjs",
                         "tauri": "tauri",
                     },
                 }
@@ -2339,6 +2340,15 @@ edition = "2021"
         (packaging_root / "docs" / "PRIVACY.md").write_text("Privacy draft", encoding="utf-8")
         (packaging_root / "docs" / "THIRD_PARTY_NOTICES.md").write_text("Notices draft", encoding="utf-8")
         (shell_dir / "release-assets.json").write_text('{"version":1,"files":[]}', encoding="utf-8")
+        (shell_dir / "src").mkdir(parents=True, exist_ok=True)
+        (shell_dir / "src" / "App.vue").write_text(
+            # Enough of the About panel for the gate to read: the notices are
+            # bundled, and the panel names the rights holder of the model that
+            # ships with the app.
+            "import thirdPartyNotices from './generated/THIRD_PARTY_NOTICES.md?raw'\n"
+            "<div v-else-if=\"activeSettingsTab === 'about'\">Live2D Inc.</div>\n",
+            encoding="utf-8",
+        )
         (shell_dir / "scripts").mkdir(parents=True, exist_ok=True)
         (shell_dir / "scripts" / "verify-release-assets.mjs").write_text("", encoding="utf-8")
         (tauri_dir / "Info.plist").write_text(
@@ -2421,10 +2431,11 @@ edition = "2021"
                             "private": True,
                             "version": "0.1.0",
                             "scripts": {
-                                "dev": "npm run live2d:sync -- --optional && vite --host 127.0.0.1",
-                                "build": "vue-tsc --noEmit && vite build",
-                                "build:release": "npm run core:bundle && npm run assets:verify && vite build",
+                                "dev": "npm run legal:sync && npm run live2d:sync -- --optional && vite --host 127.0.0.1",
+                                "build": "npm run legal:sync && vue-tsc --noEmit && vite build",
+                                "build:release": "npm run core:bundle && npm run legal:sync && npm run assets:verify && vite build",
                                 "core:bundle": "node scripts/build-core-sidecar.mjs",
+                                "legal:sync": "node scripts/sync-legal-notices.mjs",
                                 "tauri": "tauri",
                             },
                         }
@@ -2498,6 +2509,15 @@ edition = "2021"
                             ],
                         }
                     ),
+                    encoding="utf-8",
+                )
+            elif relative.endswith("src/App.vue"):
+                # The About panel is release metadata: packaging_smoke reads it
+                # to confirm the notices reach the app rather than only the
+                # repository.
+                target.write_text(
+                    "import thirdPartyNotices from './generated/THIRD_PARTY_NOTICES.md?raw'\n"
+                    "<div v-else-if=\"activeSettingsTab === 'about'\">Live2D Inc.</div>\n",
                     encoding="utf-8",
                 )
             else:
