@@ -9,6 +9,10 @@ const optional = process.argv.includes('--optional')
 const sourceCandidates = [
   process.env.JOI_LIVE2D_SOURCE,
   join(homedir(), 'Documents', 'All Joi', 'public'),
+  // The shell's own assets sit under the site's `joi-shell/` prefix, which is
+  // where the deployed layout keeps them; a tree that never held them at the
+  // root above would otherwise look like a machine with no assets at all.
+  join(homedir(), 'Documents', 'All Joi', 'public', 'joi-shell'),
 ].filter(Boolean)
 
 const requiredFiles = [
